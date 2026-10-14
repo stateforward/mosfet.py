@@ -1,11 +1,13 @@
 """Direct contract tests for cognition-owned model-facing event projections."""
 
+import mosfet
 from mosfet import media
-from mosfet.abilities import cognition, processing
+from mosfet.abilities import cognition, learning, memory
 from mosfet.abilities.language import text
 from mosfet.environment import SoundData, SoundEvent
 
 import base64
+import datetime
 import pathlib
 import typing
 
@@ -275,20 +277,28 @@ def test_budgeted_recalled_items_are_trimmed_not_raised(
     tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     episodes = tuple(
-        cognition.episodes.CognitiveEpisode(stimulus_name=f"episode-{index}-" + "x" * 60_000, output=())
+        memory.Episode(
+            node_id=f"node-{index}",
+            stimulus="environment.sound",
+            text=f"episode-{index}-" + "x" * 60_000,
+            outcome=memory.Outcome.COMPLETED,
+            turn_id=f"turn-{index}",
+            created_at=datetime.datetime(2026, 10, 14, 12, index, tzinfo=datetime.UTC),
+        )
         for index in range(6)
     )
-    directives = tuple(cognition.directives.Directive(text=f"directive-{index}") for index in range(3))
-    reasoning_input = cognition.reasoning.ProcessorInput(
-        host_input=processing.InputData(input="incoming speech"),
-        prior_episodes=episodes,
-        standing_directives=directives,
+    select = learning.SelectInput(
+        turn=learning.InputData(content="incoming speech"),
+        decoded=learning.DecodedData(text="incoming speech"),
+        prior_turns=episodes,
+        operation_id="op",
+        generation="gen",
     )
 
     with metric_reader.recording(tmp_path, monkeypatch) as metrics:
-        before = _recalled_omitted(metrics, "prior_episodes")
-        parts = cognition.event.model_facing_content(reasoning_input, capacity=_TEXT_ONLY)
-        omitted = _recalled_omitted(metrics, "prior_episodes") - before
+        before = _recalled_omitted(metrics, "prior_turns")
+        parts = cognition.event.model_facing_content(select, capacity=_TEXT_ONLY)
+        omitted = _recalled_omitted(metrics, "prior_turns") - before
 
     rendered = _text(parts)
     assert len(rendered.encode("utf-8")) <= _PROJECTION_BYTES
@@ -297,10 +307,8 @@ def test_budgeted_recalled_items_are_trimmed_not_raised(
     # Recalled oldest first: trimming keeps the newest episodes.
     assert kept == list(range(6 - len(kept), 6))
     assert 0 < len(kept) < 6
-    assert f'<prior_episodes count="{len(kept)}" omitted="{6 - len(kept)}">' in rendered
+    assert f'<prior_turns count="{len(kept)}" omitted="{6 - len(kept)}">' in rendered
     assert omitted == 6 - len(kept)
-    for index in range(3):
-        assert f"directive-{index}" in rendered
 
 
 def test_budgeted_head_field_keeps_the_leading_items() -> None:
@@ -385,3 +393,85 @@ def test_malformed_budgeted_fields_marker_is_rejected() -> None:
 
     with pytest.raises(TypeError, match="head"):
         _ = cognition.event.model_facing_content(_Misdeclared(items=("a",)), capacity=_TEXT_ONLY)
+
+
+class _Turn(pydantic.BaseModel):
+    """A causal turn: what memory keeps of an emission that re-sends history."""
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(frozen=True)
+
+    said: str
+
+
+class _Emission(pydantic.BaseModel):
+    """An emission whose producer stamps its cause and re-sends a long history."""
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(frozen=True)
+    __memory_fields__: typing.ClassVar[frozenset[str]] = frozenset({"parent"})
+
+    parent: mosfet.StimulusData[_Turn] | None = None
+    history: tuple[str, ...] = ()
+
+
+def test_memory_content_keeps_only_memory_fields_including_the_causal_parent() -> None:
+    emission = _Emission(
+        parent=mosfet.StimulusData(event="test.turn", data=_Turn(said="call me at noon"), id="turn-1"),
+        history=("an older line",),
+    )
+
+    kept = _text(cognition.event.memory_content(emission, capacity=_TEXT_ONLY))
+    prompt = _text(cognition.event.model_facing_content(emission, capacity=_TEXT_ONLY))
+
+    assert "call me at noon" in kept
+    assert "an older line" not in kept
+    # The prompt projection skips typed causal parents and keeps the rest.
+    assert "call me at noon" not in prompt
+    assert "an older line" in prompt
+
+
+def test_memory_content_without_the_marker_matches_the_prompt_projection() -> None:
+    stimulus = SoundEvent.with_data(SoundData(audio=b"ring", kind="phone.ringing"))
+
+    assert cognition.event.memory_content(stimulus, capacity=_TEXT_ONLY) == cognition.event.model_facing_content(
+        stimulus, capacity=_TEXT_ONLY
+    )
+
+
+def test_memory_content_keeps_the_images_its_capacity_admits() -> None:
+    photo = _Photo(caption="the gate", image=media.Image(content=_PNG, media_type="image/png"))
+
+    parts = cognition.event.memory_content(photo, capacity=_capacity(1))
+
+    assert [type(part) for part in parts] == [text.TextPart, text.ImagePart, text.TextPart]
+
+
+@pytest.mark.parametrize(
+    ("value", "omitted"),
+    [
+        (_Ranked(items=()).model_copy(update={"items": ("x" * 70_000,)}), "size"),
+        (_Chronicle(entries=(), stimulus="s" * 70_000), "size"),
+    ],
+)
+def test_memory_content_never_raises_for_size(value: pydantic.BaseModel, omitted: str) -> None:
+    parts = cognition.event.memory_content(value, capacity=_TEXT_ONLY, budget_bytes=1_000)
+
+    rendered = _text(parts)
+    assert len(parts) == 1
+    assert len(rendered.encode("utf-8")) <= 1_000
+    assert f'omitted="{omitted}"' in rendered or 'omitted="1"' in rendered
+
+
+def test_memory_content_never_raises_for_an_unrenderable_payload() -> None:
+    class _Malformed(pydantic.BaseModel):
+        model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(frozen=True)
+        __model_facing_budgeted_fields__: typing.ClassVar[dict[str, str]] = {"items": "middle"}
+
+        items: tuple[str, ...] = ("kept nowhere",)
+
+    with pytest.raises(TypeError):
+        _ = cognition.event.model_facing_content(_Malformed(), capacity=_TEXT_ONLY)
+    parts = cognition.event.memory_content(_Malformed(), capacity=_TEXT_ONLY)
+
+    assert len(parts) == 1
+    assert 'omitted="content"' in _text(parts)
+    assert "kept nowhere" not in _text(parts)

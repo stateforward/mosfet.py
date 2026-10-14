@@ -50,8 +50,10 @@ def build(config: runtime.Config) -> runtime.Assembly:
     bot = MinimalBot(
         cognition=cognition.Cognition(
             intuition=cognition.Intuition(processor=processor),
-            reasoning=cognition.Reasoning(processor=processor, memory=store),
+            reasoning=cognition.Reasoning(processor=processor),
             reflection=cognition.Reflection(processor=processor, memory=store),
+            memory=store,
+            associative=memory.Associative(memory=store),
         ),
     )
     return runtime.Assembly(bots={"minimal": bot})

@@ -5,19 +5,12 @@ relational statement transactions (behavior inventory and identity build SQLAlch
 against ``memory_table`` and friends, compile them with ``compile_statement(s)``, and send them
 with ``transact``), and it keeps every cognition turn as an episode node of a graph, linked to the
 persons it involves, with a canonical vector per node in its embedder's space (``Index`` /
-``ExactIndex`` search it). ``StmMemory`` is the short-term register of admitted stimuli.
+``ExactIndex`` search it). ``Associative`` surfaces what memory associates with a turn, scored and
+fit to a token budget. ``StmMemory`` is the short-term register of admitted stimuli.
 """
 
-from . import classification, graph, index, memory, payload, schema, stm, store
-from .classification import (
-    EncodedMemory,
-    GeneratedMemory,
-    MemoryClassification,
-    MemoryClassificationKind,
-    MemoryClassificationRetention,
-    MemoryClassificationSensitivity,
-    MemoryClassifier,
-)
+from . import associative, graph, index, memory, payload, schema, stm, store
+from .associative import AssociateEvent, AssociatedEvent, Associative
 from .index import ExactIndex, Index, Neighbor
 from .memory import (
     REQUESTS,
@@ -41,14 +34,18 @@ from .memory import (
     SearchEvent,
 )
 from .payload import (
+    MAX_ASSOCIATIONS,
     MAX_EPISODE_PARTS,
     MAX_EPISODE_TEXT_BYTES,
     Act,
+    Association,
+    AssociationsData,
     BackfillData,
     BackfilledData,
     Candidate,
     ConsolidateData,
     ConsolidatedData,
+    CueData,
     Episode,
     EpisodeData,
     EpisodesData,
@@ -72,6 +69,8 @@ from .payload import (
     SearchData,
     UnitData,
     UnitNode,
+    Weights,
+    approximate_tokens,
 )
 from .schema import STM_MEMORY_TABLE, memory_table, metadata, stm_memory_table
 from .stm import ObservedEvent, RecordData, StmMemory
@@ -93,6 +92,7 @@ from .store import (
 )
 
 __all__ = [
+    "MAX_ASSOCIATIONS",
     "MAX_EPISODE_PARTS",
     "MAX_EPISODE_TEXT_BYTES",
     "MEMORY_TABLE",
@@ -100,6 +100,11 @@ __all__ = [
     "REQUESTS",
     "STM_MEMORY_TABLE",
     "Act",
+    "AssociateEvent",
+    "AssociatedEvent",
+    "Association",
+    "AssociationsData",
+    "Associative",
     "BackfillData",
     "BackfillEvent",
     "BackfilledData",
@@ -109,7 +114,7 @@ __all__ = [
     "ConsolidateEvent",
     "ConsolidatedData",
     "ConsolidatedEvent",
-    "EncodedMemory",
+    "CueData",
     "Episode",
     "EpisodeData",
     "EpisodesData",
@@ -123,7 +128,6 @@ __all__ = [
     "FetchedEvent",
     "FoundData",
     "FoundEvent",
-    "GeneratedMemory",
     "Index",
     "InputData",
     "Lane",
@@ -133,11 +137,6 @@ __all__ = [
     "LeasedEvent",
     "LinkData",
     "Memory",
-    "MemoryClassification",
-    "MemoryClassificationKind",
-    "MemoryClassificationRetention",
-    "MemoryClassificationSensitivity",
-    "MemoryClassifier",
     "MemoryStore",
     "MergeData",
     "Neighbor",
@@ -167,7 +166,9 @@ __all__ = [
     "StmMemory",
     "UnitData",
     "UnitNode",
-    "classification",
+    "Weights",
+    "approximate_tokens",
+    "associative",
     "compile_statement",
     "compile_statements",
     "graph",

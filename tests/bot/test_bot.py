@@ -403,10 +403,13 @@ class CapturingCognition(cognition.Cognition):
     def __init__(self, processor: processing.Processor, *, swallow_cancel: bool = False) -> None:
         self.input_events = []
         self.swallow_cancel = swallow_cancel
+        store = memory.Memory()
         super().__init__(
             intuition=cognition.Intuition(processor=processor),
             reasoning=cognition.Reasoning(processor=_NoopReasoningProcessor()),
-            reflection=_reflection_for_test(),
+            reflection=_reflection_for_test(store),
+            # Cognition attaches the bot's one memory; Reflection is its peer.
+            memory=store,
         )
 
     @typing.override
@@ -428,8 +431,8 @@ class _NoopReasoningProcessor(processing.Processor):
         return ()
 
 
-def _reflection_for_test() -> cognition.Reflection:
-    return cognition.Reflection(processor=_NoopReasoningProcessor(), memory=memory.Memory())
+def _reflection_for_test(store: memory.Memory) -> cognition.Reflection:
+    return cognition.Reflection(processor=_NoopReasoningProcessor(), memory=store)
 
 
 class InputRecordingCognition(Cognition):
@@ -437,10 +440,13 @@ class InputRecordingCognition(Cognition):
 
     def __init__(self, processing_ability: processing.Processing) -> None:
         self.inputs = []
+        store = memory.Memory()
         super().__init__(
             intuition=cognition.Intuition(processor=processing_ability.processor),
             reasoning=cognition.Reasoning(processor=_NoopReasoningProcessor()),
-            reflection=_reflection_for_test(),
+            reflection=_reflection_for_test(store),
+            # Cognition attaches the bot's one memory; Reflection is its peer.
+            memory=store,
         )
 
     @typing.override
@@ -463,10 +469,12 @@ def as_cognition(
         processor = value.processor
     else:
         raise TypeError("as_cognition expects Cognition, Processing, or Processor")
+    store = memory.Memory()
     return cognition.Cognition(
         intuition=cognition.Intuition(processor=processor),
         reasoning=cognition.Reasoning(processor=_NoopReasoningProcessor()),
-        reflection=_reflection_for_test(),
+        reflection=_reflection_for_test(store),
+        memory=store,
     )
 
 

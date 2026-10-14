@@ -11,15 +11,14 @@ from __future__ import annotations
 from ... import ability
 from ... import encoding as encoding_module
 from ... import language
-from ... import memory as memory_ability
 from ...identity import value
-from . import memory as conversation_memory
 from . import turn_detector
 
 import asyncio
 import collections.abc
 import dataclasses
 import datetime
+import json
 import typing
 import uuid
 
@@ -37,7 +36,7 @@ from mosfet.abilities.listening import interpretation
 from mosfet import telemetry
 from mosfet.telemetry import span
 
-Stage: typing.TypeAlias = typing.Literal["memory", "turn_detector", "voice_routing"]
+Stage: typing.TypeAlias = typing.Literal["turn_detector", "voice_routing"]
 Content: typing.TypeAlias = object
 type MessageContent = str | int | float | bool | None | list[MessageContent] | dict[str, MessageContent]
 IdentitySet: typing.TypeAlias = value.IdentitySet
@@ -356,7 +355,8 @@ class Message(pydantic.BaseModel):
 class Messages(pydantic.BaseModel):
     """Cumulative immutable conversation history emitted after each commit."""
 
-    __model_facing_excluded_fields__: typing.ClassVar[frozenset[str]] = frozenset({"memories"})
+    # Memory keeps the inbound turn that caused an emission, not the history it re-sends.
+    __memory_fields__: typing.ClassVar[frozenset[str]] = frozenset({"parent"})
 
     model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
         frozen=True,
@@ -392,11 +392,6 @@ class Messages(pydantic.BaseModel):
     messages: tuple[Message, ...] = pydantic.Field(
         default=(),
         description="All committed inbound and outbound messages in causal order.",
-    )
-    memories: SkipJsonSchema[tuple[conversation_memory.Memory, ...]] = pydantic.Field(
-        default=(),
-        exclude=True,
-        description="Host-only recalled context for the latest inbound turn; never model-projected.",
     )
 
 
@@ -460,7 +455,6 @@ class ParticipatedTurn(pydantic.BaseModel):
     participation: turn_detector.ParticipantContribution
     participations: tuple[turn_detector.ParticipantContribution, ...] = ()
     session_ref: str = pydantic.Field(min_length=1)
-    memories: tuple[conversation_memory.Memory, ...] = ()
     messages: tuple[Message, ...] = ()
 
 
@@ -524,7 +518,6 @@ def participated_turn_from_messages(
         participation=contributions[0],
         participations=contributions,
         session_ref=session_ref,
-        memories=messages.memories,
         messages=messages.messages,
     )
 
@@ -628,7 +621,6 @@ class _TurnOperationCompletedData(pydantic.BaseModel):
     operation_id: str = pydantic.Field(min_length=1)
     provenance: _TurnOperationProvenance
     turns: tuple[turn_detector.TurnCompleteData, ...] = pydantic.Field(min_length=1)
-    memories: tuple[conversation_memory.Memory, ...] = ()
 
 
 class _TurnFailedData(pydantic.BaseModel):
@@ -641,7 +633,6 @@ class _TurnFailedData(pydantic.BaseModel):
     operation_id: str = pydantic.Field(min_length=1)
     provenance: _TurnOperationProvenance
     failure: FailureData
-    memories: tuple[conversation_memory.Memory, ...] = ()
 
 
 _InputWorkEvent = hsm.Event[_InputWorkData](
@@ -707,10 +698,26 @@ def _stable_identity_basis(
 
 
 def _stable_context_ref(data: TurnData) -> str:
-    return conversation_memory.relationship_context_ref(
-        source_ids=_stable_identity_basis(data.source_ids),
-        target_ids=_stable_identity_basis(data.target_ids),
+    """A stable canonical JSON reference for the relationship between the turn's identity sets.
+
+    Order-independent and direction-agnostic; vector identities are normalized so a scaled vector
+    names the same relationship.
+    """
+
+    def normalized(identities: collections.abc.Collection[IdentityValue], *, field_name: str) -> IdentitySet:
+        checked = value.normalize_identity_set(
+            identities, field_name=field_name, allow_empty=field_name == "target_ids"
+        )
+        return frozenset(
+            identity if isinstance(identity, str) else value.normalize_embedding(identity) for identity in checked
+        )
+
+    groups = value.identity_groups(
+        normalized(_stable_identity_basis(data.source_ids), field_name="source_ids"),
+        normalized(_stable_identity_basis(data.target_ids), field_name="target_ids"),
     )
+    basis = {"identity_groups": [value.identities_json(group) for group in groups]}
+    return json.dumps(basis, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
 
 
 def _identity_collection_score(
@@ -945,38 +952,6 @@ def _content_for_detector(
     )
 
 
-async def _run_memory_operation(
-    ctx: hsm.Context,
-    *,
-    memory: ability.Ability[typing.Any, typing.Any],
-    operation_id: str,
-    operation: typing.Literal["recall", "remember"],
-    memory_input: memory_ability.InputData,
-    metadata: collections.abc.Mapping[str, object],
-    timeout: float,
-) -> memory_ability.OutputData:
-    request_id = f"{operation_id}:memory:{operation}"
-    try:
-        terminal = await ability.run_terminal_operation(
-            ctx,
-            child=memory,
-            request=dataclasses.replace(
-                memory.input_event.with_data_and_id(memory_input, request_id),
-                metadata=dict(metadata),
-            ),
-            terminals=(memory.output_event, memory.failed_event),
-            timeout=datetime.timedelta(seconds=timeout),
-        )
-    except TimeoutError as error:
-        raise RuntimeError(f"Conversation memory {operation} timed out.") from error
-
-    if isinstance(terminal.data, ability.FailureData):
-        raise RuntimeError(terminal.data.message)
-    if not isinstance(terminal.data, memory_ability.OutputData):
-        raise TypeError(f"Conversation memory {operation} produced an invalid output.")
-    return terminal.data
-
-
 def _messages_from_contribution_terminal(terminal: hsm.Event[typing.Any]) -> Messages:
     """Extract cumulative history from a Conversation contribution terminal."""
 
@@ -1112,7 +1087,6 @@ class Conversation(ability.Ability[TurnData, Messages]):
     _similarity_margin: float
     _typing: language.TextGeneration | None
     _encoding: encoding_module.Encoding[typing.Any, str | bytes] | None
-    _memory: ability.Ability[typing.Any, typing.Any] | None
     _history: list[Message]
     _history_parent: mosfet.StimulusData[TurnData] | None
     _image_retention: media.ImageRetention
@@ -1125,7 +1099,6 @@ class Conversation(ability.Ability[TurnData, Messages]):
         typing: language.TextGeneration | None = None,
         encoding: encoding_module.Encoding[typing.Any, str | bytes] | None = None,
         encoder: encoding_module.Encoder[typing.Any, str | bytes] | None = None,
-        memory: ability.Ability[typing.Any, typing.Any] | None = None,
         similarity_threshold: float = 0.85,
         similarity_margin: float = 0.05,
         image_retention: media.ImageRetention = _DEFAULT_IMAGE_RETENTION,
@@ -1149,7 +1122,6 @@ class Conversation(ability.Ability[TurnData, Messages]):
             self._turn_detector_factory = _default_turn_detector
         self._encoding = encoding_module.Encoding(encoder=encoder) if encoder is not None else encoding
         self._typing = typing
-        self._memory = memory
         super().__init__()
         self._detectors = {}
         self._relationships = []
@@ -1166,10 +1138,6 @@ class Conversation(ability.Ability[TurnData, Messages]):
     @property
     def encoding(self) -> encoding_module.Encoding[typing.Any, str | bytes] | None:
         return self._encoding
-
-    @property
-    def memory(self) -> ability.Ability[typing.Any, typing.Any] | None:
-        return self._memory
 
     @property
     def detector_refs(self) -> tuple[tuple[str, IdentityValue], ...]:
@@ -1543,28 +1511,10 @@ class Conversation(ability.Ability[TurnData, Messages]):
             source_ids=data.source_ids,
             turn_refs=frozenset(turn_refs.values()),
         )
-        memories: tuple[conversation_memory.Memory, ...] = ()
-        stage: Stage = "memory"
+        stage: Stage = "turn_detector"
         processing_track_ref: TrackRef | None = None
         committed = False
         try:
-            if instance._memory is not None:
-                memory_output = await _run_memory_operation(
-                    ctx,
-                    memory=instance._memory,
-                    operation_id=operation_id,
-                    operation="recall",
-                    memory_input=conversation_memory.conversation_memory_recall_input(
-                        source_ids=data.source_ids,
-                        target_ids=data.target_ids,
-                        context_ref=relationship.context_ref,
-                    ),
-                    metadata=event.metadata,
-                    timeout=_TURN_TIMEOUT_SECONDS,
-                )
-                memories = conversation_memory.conversation_memories_from_output(memory_output)
-
-            stage = "turn_detector"
             detectors: list[tuple[IdentityValue, _ParticipantProfile]] = []
             used_tracks: frozenset[TrackRef] = frozenset()
             for source_id in value.sorted_identities(data.source_ids):
@@ -1732,31 +1682,6 @@ class Conversation(ability.Ability[TurnData, Messages]):
                 (participant, instance._profile_update(participant, source_id)) for source_id, participant in detectors
             )
 
-            stage = "memory"
-            if instance._memory is not None:
-                remembered = conversation_memory.Memory(
-                    source_ids=data.source_ids,
-                    target_ids=data.target_ids,
-                    content=data.content,
-                    content_type=data.content_type,
-                )
-                memory_scope = getattr(type(instance._memory), "default_scope", "short_term")
-                if not isinstance(memory_scope, str) or not memory_scope.strip():
-                    memory_scope = "short_term"
-                _ = await _run_memory_operation(
-                    ctx,
-                    memory=instance._memory,
-                    operation_id=operation_id,
-                    operation="remember",
-                    memory_input=conversation_memory.conversation_memory_insert_input(
-                        remembered,
-                        scope=memory_scope.strip(),
-                        context_ref=relationship.context_ref,
-                    ),
-                    metadata=event.metadata,
-                    timeout=_TURN_TIMEOUT_SECONDS,
-                )
-
             for participant, (source_id, centroid, vector_sum, count) in staged_profiles:
                 participant.source_id = source_id
                 participant.centroid = centroid
@@ -1775,7 +1700,6 @@ class Conversation(ability.Ability[TurnData, Messages]):
                             operation_id=operation_id,
                             provenance=provenance,
                             turns=tuple(terminals),
-                            memories=memories,
                         )
                     ),
                     id=operation_id,
@@ -1833,7 +1757,6 @@ class Conversation(ability.Ability[TurnData, Messages]):
                                         else str(error)
                                     ),
                                 ),
-                                memories=memories,
                             )
                         ),
                         event,
@@ -1948,8 +1871,6 @@ class Conversation(ability.Ability[TurnData, Messages]):
         )
         if not correlated:
             return False
-        if data.failure.stage == "memory":
-            return True
         return (
             data.failure.stage == "turn_detector"
             and detector_ids_match_cache
@@ -1998,7 +1919,7 @@ class Conversation(ability.Ability[TurnData, Messages]):
             ctx,
             instance,
             event,
-            Messages(parent=parent, messages=tuple(instance._history), memories=data.memories),
+            Messages(parent=parent, messages=tuple(instance._history)),
             turn=input_data,
             reply_target=(
                 parent.source if parent is not None and parent.target == hsm.id(instance) and parent.source else None

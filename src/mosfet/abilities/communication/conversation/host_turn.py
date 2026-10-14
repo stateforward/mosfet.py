@@ -166,9 +166,6 @@ async def run_host_voice_respond_turn(
 
     participated = await contribute_conversation_turn(conversation, message, ctx=context)
     product_text = _product_text(participated)
-    memory_context = tuple(
-        content for item in participated.memories if isinstance(content := item.content, str) and content.strip()
-    )
     cognition_input = _cognition_input_for_participated(
         participated,
         cognition=cognition,
@@ -190,7 +187,6 @@ async def run_host_voice_respond_turn(
             text=product_text,
             participation=participated.participation,
             result=brain_output,
-            memory_context=memory_context,
         ),
         ctx=context,
         accept=lambda item: isinstance(item, (str, bytes)),
@@ -230,9 +226,6 @@ async def run_host_text_respond_turn(
 
     participated = await contribute_conversation_turn(conversation, message, ctx=context)
     product_text = _product_text(participated)
-    memory_context = tuple(
-        content for item in participated.memories if isinstance(content := item.content, str) and content.strip()
-    )
     cognition_input = _cognition_input_for_participated(
         participated,
         cognition=cognition,
@@ -247,8 +240,6 @@ async def run_host_text_respond_turn(
     assert is_output(brain_output)
 
     system_parts = ["You are a concise conversational assistant."]
-    if memory_context:
-        system_parts.append("Relevant memory:\n" + "\n".join(memory_context))
     generation_input = text.generation.InputData(
         messages=(
             text.generation.TextMessage(

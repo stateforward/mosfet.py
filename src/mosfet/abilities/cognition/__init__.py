@@ -10,7 +10,7 @@ import importlib
 import typing
 
 from . import cognition
-from . import autonomy, directives, episodes, event, input, intuition, reasoning, reflection, routines, types
+from . import autonomy, event, input, intuition, reasoning, reflection, routines, types
 
 if typing.TYPE_CHECKING:
     from .autonomy import Autonomy
@@ -25,8 +25,6 @@ if typing.TYPE_CHECKING:
         OutputData,
         OutputEvent,
     )
-    from .directives import Directive
-    from .episodes import CognitiveEpisode
     from .input import is_input, stimulus_name
     from .intuition import Intuition
     from .reasoning import Reasoning
@@ -51,8 +49,6 @@ _LAZY_EXPORT_MODULES = {
     "Reasoning": ".reasoning",
     "Reflection": ".reflection",
     "Routines": ".routines",
-    "CognitiveEpisode": ".episodes",
-    "Directive": ".directives",
     "EventData": ".types",
     "IgnoreData": ".types",
     "IgnoreEvent": ".types",
@@ -77,8 +73,6 @@ __all__ = [
     "Reasoning",
     "Reflection",
     "Routines",
-    "CognitiveEpisode",
-    "Directive",
     "EventData",
     "IgnoreData",
     "IgnoreEvent",
@@ -86,8 +80,6 @@ __all__ = [
     "is_output",
     "autonomy",
     "cognition",
-    "directives",
-    "episodes",
     "event",
     "input",
     "intuition",

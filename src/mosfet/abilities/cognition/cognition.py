@@ -1,9 +1,11 @@
 from .. import ability
 from ..ability import Effort
+from .. import memory
 from .. import processing
 
 import dataclasses
 import datetime
+import logging
 import typing
 import uuid
 
@@ -14,7 +16,8 @@ from mosfet.define import define
 from mosfet.protocols import attachment
 import pydantic
 
-from mosfet import telemetry
+from mosfet import media, telemetry
+from mosfet.event import event_json_value
 from mosfet.telemetry import span
 
 from mosfet import behavior
@@ -22,6 +25,9 @@ from mosfet import behavior
 from .input import InputData, is_input
 from . import autonomy
 from . import input
+
+# ``event`` names every callback's event parameter here, so the projection module goes by its role.
+from . import event as projection
 from . import intuition
 from . import reasoning
 from . import reflection
@@ -32,11 +38,24 @@ from .types import OUTPUT_SCHEMA_CONTRACT, EventData, OutputData, is_output
 # Private event-chain key: carries this turn's cognition input with child requests.
 # Not a metric/span attribute; not stored on the cognition instance (HSM-COMPLETION-001).
 _AUTONOMY_ID_SUFFIX = ":autonomy"
+_ASSOCIATE_ID_SUFFIX = ":associate"
 _INTUITION_ID_SUFFIX = ":intuition"
 _REASONING_ID_SUFFIX = ":reasoning"
 _REFLECTION_ID_SUFFIX = ":reflection"
+_REMEMBER_ID_SUFFIX = ":remember"
 _CHILD_OPERATION_TIMEOUT = datetime.timedelta(seconds=30)
 _CANCEL_TEARDOWN_TIMEOUT = datetime.timedelta(seconds=5)
+# What memory keeps of a stimulus's images: at most one turn's worth, of every accepted media type.
+_MEMORY_IMAGES: typing.Final = media.ImageCapacity(
+    max_images=media.MAX_TURN_IMAGES,
+    max_total_bytes=media.MAX_TURN_IMAGES * media.MAX_IMAGE_BYTES,
+    media_types=frozenset(typing.get_args(media.ImageMediaType)),
+)
+# Bounds of what one remembered act keeps (memory.Act's own limits).
+_MAX_ACTS: typing.Final = 32
+_MAX_ACT_REASON: typing.Final = 4000
+
+_LOG = logging.getLogger(__name__)
 
 
 class CancelData(pydantic.BaseModel):
@@ -121,6 +140,42 @@ _ChildHopTimedOutEvent = hsm.Event[object](
 )
 
 
+class _AssociatedData(pydantic.BaseModel):
+    """Private completion: what memory surfaced for the turn now rides it into intuition."""
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(arbitrary_types_allowed=True, frozen=True)
+
+    turn: types.TurnData
+
+
+_AssociatedEvent = hsm.Event[_AssociatedData](
+    name="bot.ability.cognition.associated",
+    kind=hsm.CompletionEventKind,
+    schema=_AssociatedData,
+)
+
+
+class _TurnOpenedData(pydantic.BaseModel):
+    """Private: the input of the turn Cognition just took up, sent to itself under the turn's id.
+
+    ``processing`` defers it for the whole turn, so it reaches whichever state the turn ends in:
+    ``cancelling`` remembers the turn as cancelled and ``rebooting`` as failed, each with what was
+    said and who took part. A turn that completes or fails is remembered from its own terminal,
+    which carries the turn, so ``ready`` lets this event fall through.
+    """
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(arbitrary_types_allowed=True, frozen=True)
+
+    input: InputData
+
+
+_TurnOpenedEvent = hsm.Event[_TurnOpenedData](
+    name="bot.ability.cognition.turn.opened",
+    kind=hsm.CompletionEventKind,
+    schema=_TurnOpenedData,
+)
+
+
 def _failure(operation_id: str | None, message: str) -> _UseFailedEventData:
     return _UseFailedEventData(
         failure=ability.FailureData(message=message),
@@ -164,6 +219,20 @@ def _coerce_output(output: object) -> OutputData:
     raise TypeError("Cognition processing produced output that does not match its output schema.")
 
 
+def _act(selection: EventData) -> memory.Act:
+    """One selection as memory keeps it: event, target, JSON data, and the reason (bounded)."""
+
+    data = event_json_value(selection.data) if selection.data is not None else {}
+    return memory.Act(
+        event=selection.event,
+        target=selection.target,
+        data=typing.cast(dict[str, pydantic.JsonValue], data)
+        if isinstance(data, dict)
+        else {"value": typing.cast(pydantic.JsonValue, data)},
+        reason=None if selection.reason is None else selection.reason[:_MAX_ACT_REASON],
+    )
+
+
 def _public_metadata(metadata: dict[str, object]) -> dict[str, object]:
     """Metadata safe to forward on host apply / terminals (no turn payload)."""
 
@@ -174,7 +243,7 @@ def _parent_operation_id(event: hsm.Event[typing.Any]) -> str | None:
     child_id = event.id if event.id else None
     if child_id is None:
         return None
-    for suffix in (_AUTONOMY_ID_SUFFIX, _INTUITION_ID_SUFFIX, _REASONING_ID_SUFFIX):
+    for suffix in (_AUTONOMY_ID_SUFFIX, _ASSOCIATE_ID_SUFFIX, _INTUITION_ID_SUFFIX, _REASONING_ID_SUFFIX):
         if child_id.endswith(suffix):
             parent = child_id[: -len(suffix)]
             return parent or None
@@ -182,10 +251,17 @@ def _parent_operation_id(event: hsm.Event[typing.Any]) -> str | None:
 
 
 class Cognition(ability.Ability[InputData, OutputData]):
-    """Cognitive ability: autonomy → intuition → reasoning, then reflection.
+    """Cognitive ability: autonomy → associating → intuition → reasoning, then reflection.
 
     Chart states are lifecycle phases only. The active turn rides the child request
     and terminal event chain, not instance fields (HSM-COMPLETION-001).
+
+    With ``memory`` composed, Cognition attaches it and remembers every turn it settles —
+    completed, failed, or cancelled — as one ``memory.RememberEvent`` it does not wait on. With
+    ``associative`` composed too, a turn autonomy leaves unhandled first asks it what memory
+    associates with the stimulus; the associations ride the turn to intuition and reasoning (as
+    their frames' ``recalled`` context) and to reflection. An association that fails or times out
+    leaves the turn without associations; it never fails the turn.
 
     With ``routines`` composed, Reflection settling a turn sends Routines a reconcile (its
     inventory writes may have created, changed, or broken a persistent routine), and every
@@ -206,6 +282,8 @@ class Cognition(ability.Ability[InputData, OutputData]):
     _reasoning: reasoning.Reasoning
     _reflection: reflection.Reflection
     _routines: routines.Routines | None
+    _memory: memory.Memory | None
+    _associative: memory.Associative | None
     # Injected operation bounds (None = live module default, so tests may still tune
     # the module constants around construction). Never hardcode per-caller durations.
     _child_operation_timeout: datetime.timedelta | None
@@ -260,14 +338,18 @@ class Cognition(ability.Ability[InputData, OutputData]):
         cognition_input: InputData,
         *,
         max_effort: Effort | None = None,
+        recalled: memory.AssociationsData | None = None,
     ) -> processing.InputData:
-        return input.build_processing_input(cognition_input, authority=instance, max_effort=max_effort)
+        frame = input.build_processing_input(cognition_input, authority=instance, max_effort=max_effort)
+        return frame if recalled is None else frame.model_copy(update={"recalled": recalled})
 
     @staticmethod
     def _turn(
         instance: "Cognition",
         cognition_input: InputData,
         operation_id: str,
+        *,
+        associations: memory.AssociationsData | None = None,
     ) -> types.TurnData:
         operation = processing.active_operation(instance, operation_id)
         assert operation is not None
@@ -275,6 +357,55 @@ class Cognition(ability.Ability[InputData, OutputData]):
             input=cognition_input,
             operation_id=operation_id,
             generation=hsm.id(operation),
+            associations=associations,
+        )
+
+    @staticmethod
+    def _remember(
+        ctx: hsm.Context,
+        instance: "Cognition",
+        *,
+        operation_id: str,
+        outcome: memory.Outcome,
+        metadata: dict[str, object],
+        cognition_input: InputData,
+        output: OutputData = (),
+    ) -> None:
+        """Send memory the turn just settled, stamped here, where the turn is owned; never waited on.
+
+        Every outcome carries the turn's input: a completed or failed turn from its terminal, a
+        cancelled or rebooted one from its ``_TurnOpenedEvent``. Memory's reply is not awaited:
+        Memory counts its own outcome, and no transition here consumes it.
+        """
+
+        store = instance._memory
+        if store is None:
+            return
+        try:
+            episode = memory.EpisodeData(
+                turn_id=operation_id,
+                stimulus=input.stimulus_name(cognition_input.stimulus),
+                parts=projection.memory_content(
+                    cognition_input.stimulus, capacity=_MEMORY_IMAGES, budget_bytes=memory.MAX_EPISODE_TEXT_BYTES
+                ),
+                participants=cognition_input.participants,
+                focus=cognition_input.focus,
+                focus_candidates=cognition_input.focus_candidates[:_MAX_ACTS],
+                acts=tuple(_act(selection) for selection in output[:_MAX_ACTS]),
+                outcome=outcome,
+            )
+        except pydantic.ValidationError as error:
+            _LOG.warning("cognition did not remember a turn: invalid episode (%d errors)", error.error_count())
+            return
+        _ = hsm.dispatch(
+            ctx,
+            store,
+            dataclasses.replace(
+                memory.RememberEvent.with_data_and_id(episode, f"{operation_id}{_REMEMBER_ID_SUFFIX}"),
+                source=hsm.id(instance),
+                target=hsm.id(store),
+                metadata=_public_metadata(metadata),
+            ),
         )
 
     @staticmethod
@@ -373,38 +504,55 @@ class Cognition(ability.Ability[InputData, OutputData]):
             )
 
     @staticmethod
-    async def _start_intuition_from_input(
+    async def _hop_intuition(
         ctx: hsm.Context,
         instance: "Cognition",
         event: hsm.Event[typing.Any],
+        *,
+        cognition_input: InputData,
+        operation_id: str | None,
+        associations: memory.AssociationsData | None,
     ) -> None:
-        data = event.data
-        assert is_input(data)
-        operation_id = event.id if event.id else None
+        """Build intuition's frame (with what memory surfaced as ``recalled``) and hop to it."""
+
+        public_metadata = _public_metadata(dict(event.metadata))
+        base = operation_id or uuid.uuid4().hex
         try:
-            input = Cognition._build_processing_input(instance, data, max_effort=instance._intuition.effort_ceiling())
+            input = Cognition._build_processing_input(
+                instance,
+                cognition_input,
+                max_effort=instance._intuition.effort_ceiling(),
+                recalled=associations,
+            )
         except Exception as error:
+            Cognition._remember(
+                ctx,
+                instance,
+                operation_id=base,
+                outcome=memory.Outcome.FAILED,
+                metadata=public_metadata,
+                cognition_input=cognition_input,
+            )
             _ = hsm.dispatch(
                 ctx,
                 instance,
                 dataclasses.replace(
                     _ApplyFailedEvent.with_data(_failure(operation_id, str(error))),
                     id=operation_id,
-                    metadata=_public_metadata(dict(event.metadata)),
+                    metadata=public_metadata,
                 ),
             )
             return
-        operation_id = event.id or uuid.uuid4().hex
-        if processing.active_operation(instance, operation_id) is None:
-            _ = await processing.start_operation(instance, operation_id)
-        turn = Cognition._turn(instance, data, operation_id)
-        hop_id = f"{operation_id}{_INTUITION_ID_SUFFIX}"
+        if processing.active_operation(instance, base) is None:
+            _ = await processing.start_operation(instance, base)
+        turn = Cognition._turn(instance, cognition_input, base, associations=associations)
+        hop_id = f"{base}{_INTUITION_ID_SUFFIX}"
         input_event = dataclasses.replace(
             instance._intuition.input_event.with_data_and_id(
                 intuition.InputData(turn=turn, processing_input=input),
                 hop_id,
             ),
-            metadata=dict(event.metadata),
+            metadata=public_metadata,
         )
         # Route the intuition child through the settled one-shot terminal operation so the
         # child's reply_to echoes its correlated terminal back to the operation actor.
@@ -491,6 +639,14 @@ class Cognition(ability.Ability[InputData, OutputData]):
         try:
             output = _coerce_output(data.output)
         except Exception as error:
+            Cognition._remember(
+                ctx,
+                instance,
+                operation_id=operation_id,
+                outcome=memory.Outcome.FAILED,
+                metadata=public_metadata,
+                cognition_input=cognition_input,
+            )
             _ = hsm.dispatch(
                 ctx,
                 instance,
@@ -501,6 +657,15 @@ class Cognition(ability.Ability[InputData, OutputData]):
                 ),
             )
             return
+        Cognition._remember(
+            ctx,
+            instance,
+            operation_id=operation_id,
+            outcome=memory.Outcome.COMPLETED,
+            metadata=public_metadata,
+            cognition_input=cognition_input,
+            output=output,
+        )
         terminal = dataclasses.replace(
             instance.output_event.with_data(output),
             id=operation_id,
@@ -512,7 +677,9 @@ class Cognition(ability.Ability[InputData, OutputData]):
         # is still queued, so Bot stays in processing until reflection yields.
         ability.Ability._forward_terminal_event(ctx, instance, ability.TerminalOutputEvent.with_data(terminal))
         reflection_ability = instance._reflection
-        turn = reflection.InputData(cognition_input=cognition_input, cognition_output=output)
+        turn = reflection.InputData(
+            cognition_input=cognition_input, cognition_output=output, associations=data.turn.associations
+        )
         reflection_event = dataclasses.replace(
             reflection_ability.input_event.with_data_and_id(
                 turn,
@@ -523,73 +690,6 @@ class Cognition(ability.Ability[InputData, OutputData]):
             metadata=public_metadata,
         )
         _ = hsm.dispatch(ctx, reflection_ability, reflection_event)
-
-    @staticmethod
-    async def _start_intuition(
-        ctx: hsm.Context,
-        instance: "Cognition",
-        event: hsm.Event[typing.Any],
-    ) -> None:
-        """Start intuition from the typed autonomy completion payload."""
-
-        completion = event.data
-        cognition_input = completion.turn.input if isinstance(completion, types.CompletionData) else None
-        operation_id = completion.turn.operation_id if isinstance(completion, types.CompletionData) else None
-        public_metadata = _public_metadata(dict(event.metadata))
-        if cognition_input is None:
-            # Idle path still passes the input event body.
-            if is_input(event.data):
-                await Cognition._start_intuition_from_input(ctx, instance, event)
-                return
-            _ = hsm.dispatch(
-                ctx,
-                instance,
-                dataclasses.replace(
-                    _ApplyFailedEvent.with_data(
-                        _failure(operation_id, "Cognition intuition start is missing turn correlation.")
-                    ),
-                    id=operation_id,
-                    metadata=public_metadata,
-                ),
-            )
-            return
-        try:
-            input = Cognition._build_processing_input(
-                instance,
-                cognition_input,
-                max_effort=instance._intuition.effort_ceiling(),
-            )
-        except Exception as error:
-            _ = hsm.dispatch(
-                ctx,
-                instance,
-                dataclasses.replace(
-                    _ApplyFailedEvent.with_data(_failure(operation_id, str(error))),
-                    id=operation_id,
-                    metadata=public_metadata,
-                ),
-            )
-            return
-        base = operation_id if operation_id else uuid.uuid4().hex
-        turn = Cognition._turn(instance, cognition_input, base)
-        hop_id = f"{base}{_INTUITION_ID_SUFFIX}"
-        input_event = dataclasses.replace(
-            instance._intuition.input_event.with_data_and_id(
-                intuition.InputData(turn=turn, processing_input=input),
-                hop_id,
-            ),
-            metadata=public_metadata,
-        )
-        # Route the intuition child through the settled one-shot terminal operation so the
-        # child's reply_to echoes its correlated terminal back to the operation actor.
-        await Cognition._await_child_hop(
-            ctx,
-            instance,
-            event,
-            child=instance._intuition,
-            request=input_event,
-            hop_id=hop_id,
-        )
 
     @staticmethod
     async def _start_intuition_activity(
@@ -604,15 +704,156 @@ class Cognition(ability.Ability[InputData, OutputData]):
             stage="intuition",
             context=telemetry.event_context(event),
         ) as active:
+            data = event.data
+            if Cognition._matches_associated(ctx, instance, event):
+                assert isinstance(data, _AssociatedData)
+                active.set_attribute("bot.cognition.entered_from", "associating")
+                await Cognition._hop_intuition(
+                    ctx,
+                    instance,
+                    event,
+                    cognition_input=data.turn.input,
+                    operation_id=data.turn.operation_id,
+                    associations=data.turn.associations,
+                )
+                return
             # Prefer full unhandled-autonomy match (envelope id, generation, live op, suffix).
             # Suffix is still set when this activity starts from the autonomy→intuition transition.
             if Cognition._autonomy_is_unhandled(ctx, instance, event):
-                # Entered from an unhandled autonomy turn rather than straight from input.
+                assert isinstance(data, types.CompletionData)
                 active.set_attribute("bot.cognition.entered_from", "autonomy")
-                await Cognition._start_intuition(ctx, instance, event)
+                await Cognition._hop_intuition(
+                    ctx,
+                    instance,
+                    event,
+                    cognition_input=data.turn.input,
+                    operation_id=data.turn.operation_id,
+                    associations=None,
+                )
                 return
             active.set_attribute("bot.cognition.entered_from", "input")
-            await Cognition._start_intuition_from_input(ctx, instance, event)
+            assert is_input(data)
+            await Cognition._hop_intuition(
+                ctx, instance, event, cognition_input=data, operation_id=event.id or None, associations=None
+            )
+
+    @staticmethod
+    async def _start_associating(
+        ctx: hsm.Context,
+        instance: "Cognition",
+        event: hsm.Event[typing.Any],
+    ) -> None:
+        """Ask Associative, by message, what memory associates with the stimulus; never fails the turn."""
+
+        with span.operation(
+            "bot.cognition.stage",
+            scope="bot.abilities.cognition",
+            component="cognition",
+            stage="associating",
+            context=telemetry.event_context(event),
+        ) as active:
+            data = event.data
+            if isinstance(data, types.CompletionData):
+                cognition_input = data.turn.input
+                operation_id = data.turn.operation_id
+            else:
+                assert is_input(data)
+                cognition_input = data
+                operation_id = event.id or uuid.uuid4().hex
+            associative = instance._associative
+            assert associative is not None
+            if processing.active_operation(instance, operation_id) is None:
+                _ = await processing.start_operation(instance, operation_id)
+            associations: memory.AssociationsData | None = None
+            child_timeout = instance._child_operation_timeout
+            try:
+                terminal = await ability.run_terminal_operation(
+                    ctx,
+                    child=associative,
+                    request=dataclasses.replace(
+                        memory.AssociateEvent.with_data_and_id(
+                            memory.CueData(
+                                cue=projection.memory_content(
+                                    cognition_input.stimulus,
+                                    capacity=_MEMORY_IMAGES,
+                                    budget_bytes=memory.MAX_EPISODE_TEXT_BYTES,
+                                ),
+                                participants=cognition_input.participants,
+                            ),
+                            f"{operation_id}{_ASSOCIATE_ID_SUFFIX}",
+                        ),
+                        metadata=_public_metadata(dict(event.metadata)),
+                    ),
+                    terminals=(memory.AssociatedEvent, ability.FailedEvent),
+                    timeout=child_timeout if child_timeout is not None else _CHILD_OPERATION_TIMEOUT,
+                )
+            except (TimeoutError, RuntimeError):
+                terminal = None
+            if terminal is not None and isinstance(terminal.data, memory.AssociationsData):
+                associations = terminal.data
+            active.set_attribute("bot.cognition.associated", associations is not None)
+            turn = Cognition._turn(instance, cognition_input, operation_id, associations=associations)
+            _ = hsm.dispatch(
+                ctx,
+                instance,
+                dataclasses.replace(
+                    _AssociatedEvent.with_data(_AssociatedData(turn=turn)),
+                    id=operation_id,
+                    source=hsm.id(instance),
+                    target=hsm.id(instance),
+                    metadata=_public_metadata(dict(event.metadata)),
+                ),
+            )
+
+    @staticmethod
+    def _matches_associated(
+        ctx: hsm.Context,
+        instance: "Cognition",
+        event: hsm.Event[typing.Any],
+    ) -> bool:
+        del ctx
+        data = event.data
+        if not isinstance(data, _AssociatedData):
+            return False
+        operation = processing.active_operation(instance, data.turn.operation_id)
+        return (
+            event.source == hsm.id(instance)
+            and event.target == hsm.id(instance)
+            and event.id == data.turn.operation_id
+            and operation is not None
+            and data.turn.generation == hsm.id(operation)
+        )
+
+    @staticmethod
+    def _has_associative(
+        ctx: hsm.Context,
+        instance: "Cognition",
+        event: hsm.Event[typing.Any],
+    ) -> bool:
+        del ctx, event
+        return instance._associative is not None
+
+    @staticmethod
+    def _acknowledge_associating_cancel(
+        ctx: hsm.Context,
+        instance: "Cognition",
+        event: hsm.Event[typing.Any],
+    ) -> None:
+        """Associative has no cancel event and settles by its own timeout: acknowledge at once."""
+
+        data = event.data
+        assert isinstance(data, CancelData)
+        _ = hsm.dispatch(
+            ctx,
+            instance,
+            dataclasses.replace(
+                _CancelPendingEvent.with_data(data),
+                id=data.operation_id,
+                source=event.source,
+                target=hsm.id(instance),
+                metadata=dict(event.metadata),
+            ),
+        )
 
     @staticmethod
     def _matches_intuition_output(
@@ -689,6 +930,7 @@ class Cognition(ability.Ability[InputData, OutputData]):
             operation_id = completion.turn.operation_id if isinstance(completion, types.CompletionData) else None
             public_metadata = _public_metadata(dict(event.metadata))
             if cognition_input is None:
+                # No turn reached this stage, so there is nothing to remember.
                 _ = hsm.dispatch(
                     ctx,
                     instance,
@@ -701,13 +943,24 @@ class Cognition(ability.Ability[InputData, OutputData]):
                     ),
                 )
                 return
+            associations = completion.turn.associations if isinstance(completion, types.CompletionData) else None
+            base = operation_id if operation_id else uuid.uuid4().hex
             try:
                 input = Cognition._build_processing_input(
                     instance,
                     cognition_input,
                     max_effort=instance._reasoning.effort_ceiling(),
+                    recalled=associations,
                 )
             except Exception as error:
+                Cognition._remember(
+                    ctx,
+                    instance,
+                    operation_id=base,
+                    outcome=memory.Outcome.FAILED,
+                    metadata=public_metadata,
+                    cognition_input=cognition_input,
+                )
                 _ = hsm.dispatch(
                     ctx,
                     instance,
@@ -718,14 +971,11 @@ class Cognition(ability.Ability[InputData, OutputData]):
                     ),
                 )
                 return
-            from . import reasoning as reasoning_ability
-
-            base = operation_id if operation_id else uuid.uuid4().hex
-            turn = Cognition._turn(instance, cognition_input, base)
+            turn = Cognition._turn(instance, cognition_input, base, associations=associations)
             hop_id = f"{base}{_REASONING_ID_SUFFIX}"
             input_event = dataclasses.replace(
                 instance._reasoning.input_event.with_data_and_id(
-                    reasoning_ability.InputData(turn=turn, processing_input=input),
+                    reasoning.InputData(turn=turn, processing_input=input),
                     hop_id,
                 ),
                 metadata=public_metadata,
@@ -785,6 +1035,15 @@ class Cognition(ability.Ability[InputData, OutputData]):
             if isinstance(event.data, ability.FailureData)
             else ability.FailureData(message="Cognition ability failed.")
         )
+        if operation_id is not None and isinstance(event.data, types.FailureData):
+            Cognition._remember(
+                ctx,
+                instance,
+                operation_id=operation_id,
+                outcome=memory.Outcome.FAILED,
+                metadata=dict(event.metadata),
+                cognition_input=event.data.turn.input,
+            )
         _ = hsm.dispatch(
             ctx,
             instance,
@@ -796,6 +1055,62 @@ class Cognition(ability.Ability[InputData, OutputData]):
                 metadata=_public_metadata(dict(event.metadata)),
             ),
         )
+
+    @staticmethod
+    def _open_turn(ctx: hsm.Context, instance: "Cognition", event: hsm.Event[typing.Any]) -> None:
+        """Send this turn's input to Cognition itself; ``processing`` holds it until the turn ends."""
+
+        data = event.data
+        assert is_input(data)
+        _ = hsm.dispatch(
+            ctx,
+            instance,
+            dataclasses.replace(
+                _TurnOpenedEvent.with_data_and_id(_TurnOpenedData(input=data), event.id),
+                source=hsm.id(instance),
+                target=hsm.id(instance),
+                metadata=_public_metadata(dict(event.metadata)),
+            ),
+        )
+
+    @staticmethod
+    def _is_opened_turn(ctx: hsm.Context, instance: "Cognition", event: hsm.Event[typing.Any]) -> bool:
+        """The turn Cognition opened for itself; a turn without an id cannot be kept by id."""
+
+        del ctx
+        return (
+            isinstance(event.data, _TurnOpenedData)
+            and bool(event.id)
+            and event.source == hsm.id(instance)
+            and event.target == hsm.id(instance)
+        )
+
+    @staticmethod
+    def _remember_opened_turn(
+        ctx: hsm.Context, instance: "Cognition", event: hsm.Event[typing.Any], outcome: memory.Outcome
+    ) -> None:
+        data = event.data
+        assert isinstance(data, _TurnOpenedData)
+        Cognition._remember(
+            ctx,
+            instance,
+            operation_id=event.id,
+            outcome=outcome,
+            metadata=dict(event.metadata),
+            cognition_input=data.input,
+        )
+
+    @staticmethod
+    def _remember_cancelled(ctx: hsm.Context, instance: "Cognition", event: hsm.Event[typing.Any]) -> None:
+        """An accepted cancel ended the turn, whether its teardown then settles or reboots."""
+
+        Cognition._remember_opened_turn(ctx, instance, event, memory.Outcome.CANCELLED)
+
+    @staticmethod
+    def _remember_abandoned(ctx: hsm.Context, instance: "Cognition", event: hsm.Event[typing.Any]) -> None:
+        """A reboot (a child hop that never answered, or reflection's) ended the turn: it failed."""
+
+        Cognition._remember_opened_turn(ctx, instance, event, memory.Outcome.FAILED)
 
     @staticmethod
     def _request_reboot(
@@ -1250,11 +1565,20 @@ class Cognition(ability.Ability[InputData, OutputData]):
                 hsm.on(input_event),
                 hsm.guard(_has_input),
                 hsm.guard(_has_autonomy),
+                hsm.effect(_open_turn),
                 hsm.target("/Cognition/processing/autonomy"),
             ),
             hsm.transition(
                 hsm.on(input_event),
                 hsm.guard(_has_input),
+                hsm.guard(_has_associative),
+                hsm.effect(_open_turn),
+                hsm.target("/Cognition/processing/associating"),
+            ),
+            hsm.transition(
+                hsm.on(input_event),
+                hsm.guard(_has_input),
+                hsm.effect(_open_turn),
                 hsm.target("/Cognition/processing/intuition"),
             ),
             hsm.transition(
@@ -1266,7 +1590,8 @@ class Cognition(ability.Ability[InputData, OutputData]):
         hsm.state(
             "processing",
             hsm.initial(hsm.target("/Cognition/processing/intuition")),
-            hsm.defer(input_event),
+            # The turn's own input waits here until the state the turn ends in takes it up.
+            hsm.defer(input_event, _TurnOpenedEvent),
             # Enabled while a child stage runs so ignore stays snapshot-offered mid-turn.
             hsm.transition(
                 hsm.on(types.IgnoreEvent),
@@ -1308,6 +1633,12 @@ class Cognition(ability.Ability[InputData, OutputData]):
                 hsm.transition(
                     hsm.on(autonomy.OutputEvent),
                     hsm.guard(_autonomy_is_unhandled),
+                    hsm.guard(_has_associative),
+                    hsm.target("/Cognition/processing/associating"),
+                ),
+                hsm.transition(
+                    hsm.on(autonomy.OutputEvent),
+                    hsm.guard(_autonomy_is_unhandled),
                     hsm.target("/Cognition/processing/intuition"),
                 ),
                 hsm.transition(
@@ -1329,6 +1660,22 @@ class Cognition(ability.Ability[InputData, OutputData]):
                     hsm.guard(_is_child_hop_timeout),
                     hsm.effect(_request_reboot),
                     hsm.target("/Cognition/rebooting"),
+                ),
+            ),
+            hsm.state(
+                "associating",
+                hsm.activity(_start_associating),
+                hsm.transition(
+                    hsm.on(CancelEvent),
+                    hsm.guard(_is_cancel_request),
+                    hsm.target("/Cognition/processing/cancelling/associating"),
+                ),
+                # No reboot path: an association that fails or times out leaves the turn without
+                # associations, and the turn goes on.
+                hsm.transition(
+                    hsm.on(_AssociatedEvent),
+                    hsm.guard(_matches_associated),
+                    hsm.target("/Cognition/processing/intuition"),
                 ),
             ),
             hsm.state(
@@ -1399,6 +1746,7 @@ class Cognition(ability.Ability[InputData, OutputData]):
                 # Cancellation remains pending until the child has terminated.
                 hsm.defer(_CancelPendingEvent),
                 hsm.initial(hsm.target("intuition")),
+                hsm.transition(hsm.on(_TurnOpenedEvent), hsm.guard(_is_opened_turn), hsm.effect(_remember_cancelled)),
                 hsm.transition(
                     hsm.on(processing.CancelledEvent),
                     hsm.guard(_matches_child_cancelled),
@@ -1435,6 +1783,9 @@ class Cognition(ability.Ability[InputData, OutputData]):
                     hsm.target("/Cognition/rebooting"),
                 ),
                 hsm.state("autonomy", hsm.activity(_cancel_autonomy)),
+                # Associative has no cancel event: it settles by its own timeout, so this stage
+                # acknowledges through _CancelPendingEvent exactly like autonomy.
+                hsm.state("associating", hsm.entry(_acknowledge_associating_cancel)),
                 hsm.state("intuition", hsm.activity(_cancel_intuition)),
                 hsm.state("reasoning", hsm.activity(_cancel_reasoning)),
                 hsm.state(
@@ -1453,6 +1804,7 @@ class Cognition(ability.Ability[InputData, OutputData]):
             "rebooting",
             hsm.entry(_finish_operations),
             hsm.defer(input_event),
+            hsm.transition(hsm.on(_TurnOpenedEvent), hsm.guard(_is_opened_turn), hsm.effect(_remember_abandoned)),
         ),
         hsm.state(
             "detaching",
@@ -1484,6 +1836,8 @@ class Cognition(ability.Ability[InputData, OutputData]):
         reflection: reflection.Reflection,
         autonomy: autonomy.Autonomy | None = None,
         routines: routines.Routines | None = None,
+        memory: memory.Memory | None = None,
+        associative: memory.Associative | None = None,
         child_operation_timeout: datetime.timedelta | None = None,
         cancel_teardown_timeout: datetime.timedelta | None = None,
     ) -> None:
@@ -1492,11 +1846,15 @@ class Cognition(ability.Ability[InputData, OutputData]):
             raise ValueError("child_operation_timeout must be positive.")
         if cancel_teardown_timeout is not None and cancel_teardown_timeout <= datetime.timedelta():
             raise ValueError("cancel_teardown_timeout must be positive.")
+        if associative is not None and memory is None:
+            raise ValueError("associative requires memory: Cognition attaches the memory it associates from.")
         self._autonomy = autonomy
         self._intuition = intuition
         self._reasoning = reasoning
         self._reflection = reflection
         self._routines = routines
+        self._memory = memory
+        self._associative = associative
         self._child_operation_timeout = child_operation_timeout
         self._cancel_teardown_timeout = cancel_teardown_timeout
         children: list[hsm.Instance] = []
@@ -1504,6 +1862,10 @@ class Cognition(ability.Ability[InputData, OutputData]):
             children.append(autonomy)
         children.extend((intuition, reasoning))
         children.append(reflection)
+        if memory is not None:
+            children.append(memory)
+        if associative is not None:
+            children.append(associative)
         if routines is not None:
             children.append(routines)
         self._attachment_group = attachment.Group(*children)

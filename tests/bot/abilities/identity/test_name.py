@@ -2,13 +2,19 @@
 
 from __future__ import annotations
 
+import asyncio
 import datetime
 import sqlite3
+import typing
 
+import hsm
+import mosfet
 from sqlalchemy.engine import Engine
 
+from mosfet import abilities, environment
 from mosfet.abilities import identity
 from mosfet.abilities import memory
+from mosfet.protocols import attachment
 
 from tests.bot.abilities.memory.memory_fixtures import execute_on
 
@@ -109,25 +115,47 @@ def test_the_most_recently_adopted_name_is_the_one_the_bot_answers_to() -> None:
     assert adopted is not None and adopted.text == "Ada"
 
 
-def test_a_name_is_not_recalled_as_a_standing_directive() -> None:
-    """The two live on the same table and must never be read as each other.
+def test_a_name_is_never_remembered_as_an_episode() -> None:
+    """A name row and remembered episodes share the database and are never read as each other.
 
-    A bot that reads its own name as an instruction would treat being called Bob as something
-    to carry out.
+    A bot that recalled its own name as something that happened to it would surface it as an
+    association on every turn.
     """
 
-    from mosfet.abilities.cognition import directives
-
-    store, connection = open_store()
-    try:
-        _ = execute_on(store, identity.name_insert_input(identity.Name(text="Bob")))
-        recalled_directives = execute_on(store, directives.directive_select_input())
-        recalled_names = execute_on(store, identity.name_select_input())
-    finally:
+    async def run() -> tuple[tuple[memory.Episode, ...], identity.Name | None]:
+        connection = sqlite3.connect(":memory:", check_same_thread=False)
+        engine = memory.store.open_sqlite_engine(connection=connection)
+        _ = execute_on(engine, identity.name_insert_input(identity.Name(text="Bob")))
+        store = memory.Memory(engine=engine)
+        ctx = environment.Environment()
+        owner = _Owner()
+        _ = await mosfet.started(ctx, owner, _Owner.model)
+        _ = await store.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)))
+        reply = await abilities.run_terminal_operation(
+            ctx,
+            child=store,
+            request=memory.RecentEvent.with_data_and_id(memory.RecentData(limit=8), "recent"),
+            terminals=(memory.RecentOutputEvent, memory.FailedEvent),
+            timeout=datetime.timedelta(seconds=3),
+        )
+        assert isinstance(reply.data, memory.EpisodesData), reply.data
+        named = identity.adopted_name(execute_on(engine, identity.name_select_input()))
+        await hsm.stop(store, hsm.Context())
         connection.close()
+        return reply.data.episodes, named
 
-    assert directives.directives_from_output(recalled_directives) == ()
-    assert identity.adopted_name(recalled_names) == identity.Name(text="Bob")
+    episodes, named = asyncio.run(run())
+
+    assert episodes == ()
+    assert named == identity.Name(text="Bob")
+
+
+class _Owner(hsm.Instance):
+    """Attaches the memory the test reads from; records nothing."""
+
+    model: typing.ClassVar[hsm.Model] = mosfet.define(
+        "NameTestMemoryOwner", hsm.initial(hsm.target("ready")), hsm.state("ready")
+    )
 
 
 def test_a_bot_renamed_more_often_than_the_recall_window_answers_to_its_latest_name() -> None:

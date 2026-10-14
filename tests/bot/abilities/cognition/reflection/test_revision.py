@@ -1,5 +1,6 @@
 import asyncio
 import dataclasses
+import datetime
 import hashlib
 import json
 
@@ -128,7 +129,7 @@ def test_change_write_input_preserves_public_constructor_and_model_schema() -> N
     canonical_schema = json.dumps(schema, sort_keys=True, separators=(",", ":")).encode()
     assert (
         hashlib.sha256(canonical_schema).hexdigest()
-        == "adc4a2474b578cef1db69822a982f404a72650377b4f3e95990b588bbed43bce"
+        == "e069a3b698bc36f06bd9cd90a55bbd7e158554ab3781598be74c6178cd6bcc8d"
     )
 
 
@@ -350,7 +351,6 @@ def test_grounded_triggers_replace_model_invented_names_with_evidence() -> None:
     name, and never invents a name when evidence is absent.
     """
 
-    from mosfet.abilities.cognition import episodes as episodes_module
     from mosfet.abilities.cognition import input as cognition_input
     from mosfet.abilities.cognition.reflection.revision import ChangeWriteInput, _grounded_triggers
     from mosfet.environment import SoundData, SoundEvent
@@ -368,11 +368,13 @@ def test_grounded_triggers_replace_model_invented_names_with_evidence() -> None:
         ),
         cognition_output=(),
         prior_episodes=(
-            episodes_module.CognitiveEpisode(
-                focus=None,
-                focus_candidates=(),
-                stimulus_name="environment.sound",
-                output=(),
+            memory.Episode(
+                node_id="5d0c3f7e9a1b4c2d8e6f0a1b2c3d4e5f",
+                stimulus="environment.sound",
+                text="",
+                outcome=memory.Outcome.COMPLETED,
+                turn_id="turn-1",
+                created_at=datetime.datetime(2026, 10, 14, 12, 0, tzinfo=datetime.UTC),
             ),
         ),
         intent=_change_intent(),

@@ -1646,6 +1646,86 @@ def test_model_facing_content_trims_budgeted_fields_after_instructions_and_tools
     assert f'omitted="{40 - len(kept)}"' in rendered
 
 
+def _associations(count: int, *, size: int = 5_000) -> abilities.memory.AssociationsData:
+    return abilities.memory.AssociationsData(
+        items=tuple(
+            abilities.memory.Association(
+                ref=f"node-{index}",
+                kind=abilities.memory.NodeKind.EPISODE,
+                text=f"association-{index}-" + "a" * size,
+                at=datetime.datetime(2026, 10, 14, 12, 0, tzinfo=datetime.UTC),
+                lanes=(abilities.memory.Lane.SIMILAR,),
+            )
+            for index in range(count)
+        )
+    )
+
+
+def test_recalled_context_is_trimmed_after_instructions_and_tools() -> None:
+    """Recalled memory renders after the stimulus into what instructions, tools and stimulus leave."""
+
+    offered = hsm.Event[object](
+        name="tests.bot.speak",
+        kind=processing.EventKind,
+        schema=pydantic.TypeAdapter(object),
+    )
+    input = processing.InputData(
+        input="incoming speech",
+        schemas=(offered,),
+        instructions="i" * 60_000,
+        recalled=_associations(40),
+    )
+
+    parts = input.model_facing_content(media.ImageCapacity())
+
+    rendered = "".join(part.text for part in parts if isinstance(part, text.TextPart))
+    tool = json.dumps(
+        processing.dispatch_tool(input.schemas), allow_nan=False, ensure_ascii=False, separators=(",", ":")
+    )
+    assert sum(len(value.encode("utf-8")) for value in ("i" * 60_000, rendered, tool)) <= 262_144
+    assert rendered.index("incoming speech") < rendered.index("association-0-")
+    kept = [index for index in range(40) if f"association-{index}-" in rendered]
+    # Associations are ranked best first: trimming keeps the head.
+    assert kept == list(range(len(kept)))
+    assert 0 < len(kept) < 40
+    assert f'omitted="{40 - len(kept)}"' in rendered
+
+
+def test_recalled_context_that_cannot_fit_is_left_out_never_a_failure() -> None:
+    """A stimulus that fits renders even when nothing recalled fits beside it."""
+
+    turn = conversation.TurnData(
+        source_ids=frozenset({"caller"}),
+        target_ids=frozenset(),
+        content={"chunks": [f"chunk-{index}-" + "x" * 1_000 for index in range(170)]},
+        content_type="application/json",
+    )
+    input = processing.InputData(
+        input=communication.InputEvent.with_data(turn),
+        instructions="i" * 60_000,
+        recalled=_associations(1, size=40_000),
+    )
+
+    parts = input.model_facing_content(media.ImageCapacity())
+
+    rendered = "".join(part.text for part in parts if isinstance(part, text.TextPart))
+    assert "chunk-169-" in rendered
+    assert "association-0-" not in rendered
+
+
+def test_a_stimulus_that_alone_overflows_still_fails_with_recalled_context() -> None:
+    turn = conversation.TurnData(
+        source_ids=frozenset({"caller"}),
+        target_ids=frozenset(),
+        content={"chunks": ["x" * 1_024 for _ in range(300)]},
+        content_type="application/json",
+    )
+    input = processing.InputData(input=communication.InputEvent.with_data(turn), recalled=_associations(1, size=10))
+
+    with pytest.raises(ValueError, match="prompt projection .* budget"):
+        _ = input.model_facing_content(media.ImageCapacity())
+
+
 class _StampedData(pydantic.BaseModel):
     """A payload whose producer stamps ``attachments``; a model may never author them."""
 

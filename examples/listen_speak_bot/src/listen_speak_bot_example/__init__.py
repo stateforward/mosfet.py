@@ -493,6 +493,8 @@ def _listen_speak_cognition(config: CognitionConfig) -> cognition.Cognition:
         ),
         # Persistent routines the bot authors keep running here; their schedules read UTC wall time.
         routines=cognition.Routines(memory=store, clock=functools.partial(datetime.datetime.now, datetime.UTC)),
+        memory=store,
+        associative=memory.Associative(memory=store),
     )
 
 

@@ -563,8 +563,10 @@ def test_phone_cognition_preserves_shared_memory_collaboration() -> None:
 
     assert "seeded_behaviors=(communication_ability.speech_heard_seed(),)" in source
     assert "memory=store" in source
-    assert "reasoning=cognition.Reasoning(processor=deliberate, memory=store)" in source
+    assert "reasoning=cognition.Reasoning(processor=deliberate)" in source
     assert "reflection=cognition.Reflection(processor=reflection_processor, memory=store)" in source
+    # Cognition attaches the one memory and associates every turn from it.
+    assert "associative=memory.Associative(memory=store)" in source
 
 
 def test_phone_bot_example_loads_local_provider_env_without_secret_output(tmp_path: pathlib.Path) -> None:

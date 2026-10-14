@@ -125,6 +125,16 @@ it in one transaction; `ReleaseEvent` gives a unit back. Every request gets exac
 `FailedEvent` with `FailureKind` (`invalid_input`, `unavailable`, `store_failed`, `stale_lease`,
 `timeout`); a detached Memory answers `unavailable`.
 
+Cognition owns the bot's memory: it attaches `memory.Memory` and remembers every turn it settles
+(completed, failed, or cancelled) with one `RememberEvent` it does not wait on, rendering the
+stimulus through `cognition.event.memory_content` (a payload's `__memory_fields__` choose what is
+kept; `conversation.Messages` keeps its causal turn). With `memory.Associative` composed, a turn
+autonomy leaves unhandled first asks it what memory associates with the stimulus: candidates from
+every search lane, scored by injected `memory.Weights` and fit to a token budget. The associations
+ride the turn to intuition and reasoning (their frame's `processing.InputData.recalled`, rendered
+after the stimulus and trimmed, never a failure) and to reflection; a failed association leaves
+the turn without them. Reasoning, Reflection, and Conversation never read or write episodes.
+
 All SQL runs on one database worker thread per Memory, for the object's lifetime. Without an
 embedder (`embedder=None`) nothing is indexed and the nearest lane is skipped. A node the
 embedder cannot take (too long, unsupported, invalid) is kept unindexed and recorded in

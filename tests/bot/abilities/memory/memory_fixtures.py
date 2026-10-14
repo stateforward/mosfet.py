@@ -1,4 +1,4 @@
-"""Shared fixtures for memory tests: classification doubles, ability trees, and register helpers."""
+"""Shared fixtures for memory tests: ability trees and register helpers."""
 
 from mosfet import abilities
 from mosfet.abilities import memory
@@ -17,50 +17,6 @@ from sqlalchemy.engine import Engine
 from tests.hsm_instance_state import ability_terminal_owner, remember_ability_terminal_owner
 
 _TResult = typing.TypeVar("_TResult")
-
-
-class RetainPreferenceClassifier(memory.MemoryClassifier):
-    @typing.override
-    async def classify(self, input: memory.classification.InputData) -> memory.classification.OutputData:
-        del input
-        return memory.classification.OutputData(
-            retention=memory.MemoryClassificationRetention.RETAIN,
-            kind=memory.MemoryClassificationKind.PREFERENCE,
-            sensitivity=memory.MemoryClassificationSensitivity.STANDARD,
-            confidence=0.93,
-        )
-
-
-class WrongMemoryClassifier(memory.MemoryClassifier):
-    @typing.override
-    async def classify(self, input: memory.classification.InputData) -> memory.classification.OutputData:
-        del input
-        raise RuntimeError("classifier failed")
-
-
-class RecordingMemoryClassification(memory.MemoryClassification):
-    outputs: list[memory.classification.OutputData]
-    failures: list[object]
-
-    def __init__(self, **kwargs: typing.Any) -> None:
-        super().__init__(**kwargs)
-        self.outputs = []
-        self.failures = []
-
-
-def classification_output(
-    retention: memory.MemoryClassificationRetention = memory.MemoryClassificationRetention.RETAIN,
-    *,
-    kind: memory.MemoryClassificationKind = memory.MemoryClassificationKind.PREFERENCE,
-    sensitivity: memory.MemoryClassificationSensitivity = memory.MemoryClassificationSensitivity.STANDARD,
-    confidence: float = 0.93,
-) -> memory.classification.OutputData:
-    return memory.classification.OutputData(
-        retention=retention,
-        kind=kind,
-        sensitivity=sensitivity,
-        confidence=confidence,
-    )
 
 
 def _record_memory_fixture_terminal_mirror_event(

@@ -8,11 +8,11 @@ from mosfet.environment import SoundData, SoundEvent
 import asyncio
 import dataclasses
 import datetime
+import inspect
 import typing
 
 import hsm
 
-from tests.bot.abilities.memory.memory_fixtures import execute_on
 from tests.bot.abilities.support import dispatch_ability_for_test, shared_hsm_context, start_abilities_for_test
 from tests.bot.abilities.cognition.metadata_contract import assert_metadata_is_not_coordination
 
@@ -89,33 +89,29 @@ def reasoning_input(
     )
 
 
-def test_reasoning_retains_environment_event_stimulus_without_stranding() -> None:
-    """The retain stage sends memory an insert request; it never calls into the memory machine."""
+def test_reasoning_applies_from_idle_and_takes_no_memory() -> None:
+    """Reasoning neither recalls nor retains: initializing → idle → applying → idle, no memory input."""
 
-    async def run() -> tuple[processing.CompletionData, tuple[cognition.episodes.CognitiveEpisode, ...], str]:
-        store = memory.Memory()
-        reasoning = cognition.Reasoning(processor=EmptyProcessor(), memory=store)
+    async def run() -> tuple[processing.CompletionData, str]:
+        reasoning = cognition.Reasoning(processor=EmptyProcessor())
         ctx = shared_hsm_context()
-        await start_abilities_for_test(ctx, store, reasoning)
+        await start_abilities_for_test(ctx, reasoning)
 
         stimulus = SoundEvent.with_data(SoundData(audio=b"ring", kind="phone.ringing"))
-        output = await dispatch_ability_for_test(
-            reasoning,
-            ctx,
-            reasoning_input(stimulus),
-            timeout=0.2,
-        )
-        retained = cognition.episodes.episodes_from_output(
-            await memory.transact(ctx, store, cognition.episodes.episode_select_input())
-        )
-        return output, retained, reasoning.state()
+        output = await dispatch_ability_for_test(reasoning, ctx, reasoning_input(stimulus), timeout=0.2)
+        return output, reasoning.state()
 
-    output, retained, state = asyncio.run(run())
+    output, state = asyncio.run(run())
 
     assert output.output == ()
-    assert len(retained) == 1
-    assert retained[0].stimulus_name == SoundEvent.name
     assert state == "/ReasoningLifecycle/attached/behavior/idle"
+    assert "memory" not in inspect.signature(cognition.Reasoning).parameters
+    assert set(reasoning_module.ProcessorInput.model_fields) == {"host_input"}
+    members = reasoning_module.Reasoning.model.members if reasoning_module.Reasoning.model is not None else {}
+    behavior = "/ReasoningLifecycle/attached/behavior"
+    assert f"{behavior}/applying" in members
+    assert f"{behavior}/recalling" not in members
+    assert f"{behavior}/retaining" not in members
 
 
 def test_reasoning_ignores_forged_public_terminals_for_unknown_operations() -> None:
@@ -192,106 +188,37 @@ class CapturingProcessor(processing.Processor):
         return ()
 
 
-def _reasoning_frame(processor: CapturingProcessor) -> reasoning_module.ProcessorInput:
-    assert len(processor.inputs) == 1
-    frame = processor.inputs[0].input
-    assert isinstance(frame, reasoning_module.ProcessorInput)
-    return frame
+def test_reasoning_passes_what_memory_surfaced_to_its_processor() -> None:
+    """The host frame's recalled associations reach the processor input unchanged."""
 
-
-def test_reasoning_recalls_standing_directives_alongside_prior_episodes() -> None:
-    """One request, one transaction, two statements: the turn never sees half a memory.
-
-    The recall stage reaches memory by message (the store refuses a direct call).
-    """
-
-    async def run() -> reasoning_module.ProcessorInput:
-        store = memory.Memory()
-        ctx = shared_hsm_context()
-        await start_abilities_for_test(ctx, store)
-        _ = await memory.transact(
-            ctx,
-            store,
-            cognition.episodes.episode_insert_input(
-                cognition.episodes.CognitiveEpisode(stimulus_name="bot.input", output=()),
-                context_ref=None,
+    surfaced = memory.AssociationsData(
+        items=(
+            memory.Association(
+                ref="5d0c3f7e9a1b4c2d8e6f0a1b2c3d4e5f",
+                kind=memory.NodeKind.EPISODE,
+                text="Ada asked to be called back at noon.",
+                at=datetime.datetime(2026, 10, 14, 12, 0, tzinfo=datetime.UTC),
+                lanes=(memory.Lane.RECENT,),
             ),
         )
-        _ = await memory.transact(
-            ctx,
-            store,
-            cognition.directives.directive_insert_input(
-                cognition.directives.Directive(text="Call Bob when you get a chance."),
-                context_ref=None,
-            ),
-        )
-        processor = CapturingProcessor()
-        reasoning = cognition.Reasoning(processor=processor, memory=store)
-        await start_abilities_for_test(ctx, reasoning)
+    )
 
-        stimulus = SoundEvent.with_data(SoundData(audio=b"ring", kind="phone.ringing"))
-        _ = await dispatch_ability_for_test(reasoning, ctx, reasoning_input(stimulus), timeout=0.2)
-        return _reasoning_frame(processor)
-
-    frame = asyncio.run(run())
-
-    assert [directive.text for directive in frame.standing_directives] == ["Call Bob when you get a chance."]
-    assert [episode.stimulus_name for episode in frame.prior_episodes] == ["bot.input"]
-
-
-def test_reasoning_without_memory_recalls_no_standing_directives() -> None:
-    async def run() -> reasoning_module.ProcessorInput:
+    async def run() -> processing.InputData:
         processor = CapturingProcessor()
         reasoning = cognition.Reasoning(processor=processor)
         ctx = shared_hsm_context()
         await start_abilities_for_test(ctx, reasoning)
 
         stimulus = SoundEvent.with_data(SoundData(audio=b"ring", kind="phone.ringing"))
-        _ = await dispatch_ability_for_test(reasoning, ctx, reasoning_input(stimulus), timeout=0.2)
-        return _reasoning_frame(processor)
+        request = reasoning_input(stimulus)
+        request = request.model_copy(
+            update={"processing_input": request.processing_input.model_copy(update={"recalled": surfaced})}
+        )
+        _ = await dispatch_ability_for_test(reasoning, ctx, request, timeout=0.2)
+        assert len(processor.inputs) == 1
+        return processor.inputs[0]
 
-    frame = asyncio.run(run())
+    processed = asyncio.run(run())
 
-    assert frame.standing_directives == ()
-    assert frame.prior_episodes == ()
-
-
-def test_reasoning_recall_decodes_both_statements_from_one_transaction() -> None:
-    """The two SELECTs are positional inside a single committed transaction."""
-
-    store = memory.store.open_sqlite_engine()
-    _ = execute_on(
-        store,
-        cognition.episodes.episode_insert_input(
-            cognition.episodes.CognitiveEpisode(stimulus_name="bot.input", output=()),
-            context_ref=None,
-        ),
-    )
-    _ = execute_on(
-        store,
-        cognition.directives.directive_insert_input(
-            cognition.directives.Directive(text="Water the plants."),
-            context_ref=None,
-        ),
-    )
-
-    recalled = execute_on(
-        store,
-        memory.InputData(
-            statements=(
-                *cognition.episodes.episode_select_input().statements,
-                *cognition.directives.directive_select_input().statements,
-            )
-        ),
-    )
-
-    assert len(recalled.results) == 2
-    assert [
-        episode.stimulus_name for episode in cognition.episodes.episodes_from_output(recalled, statement_index=0)
-    ] == ["bot.input"]
-    assert [
-        directive.text for directive in cognition.directives.directives_from_output(recalled, statement_index=1)
-    ] == ["Water the plants."]
-    # Each statement decodes only its own rows: episodes are not directives and never leak across.
-    assert cognition.episodes.episodes_from_output(recalled, statement_index=1) == ()
-    assert cognition.directives.directives_from_output(recalled, statement_index=0) == ()
+    assert processed.recalled == surfaced
+    assert isinstance(processed.input, reasoning_module.ProcessorInput)

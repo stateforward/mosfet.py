@@ -1,5 +1,6 @@
 from .. import processing
 from .. import ability
+from .. import memory
 from . import input as cognition_input
 
 import collections.abc
@@ -170,6 +171,12 @@ class TurnData(pydantic.BaseModel):
         min_length=1,
         description="Live operation-actor identifier that proves this turn is still current.",
         examples=["operation:turn-1"],
+    )
+    associations: memory.AssociationsData | None = pydantic.Field(
+        default=None,
+        description=(
+            "What memory surfaced for this turn; None when the bot has no associative memory or association failed."
+        ),
     )
 
 

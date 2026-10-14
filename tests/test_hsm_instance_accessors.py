@@ -15,7 +15,6 @@ _ALLOWED_NON_HSM_PROPERTIES = {
     "src/mosfet/abilities/communication/conversation/conversation.py:Conversation.detector_count",
     "src/mosfet/abilities/communication/conversation/conversation.py:Conversation.detector_refs",
     "src/mosfet/abilities/communication/conversation/conversation.py:Conversation.encoding",
-    "src/mosfet/abilities/communication/conversation/conversation.py:Conversation.memory",
     "src/mosfet/abilities/communication/conversation/conversation.py:Conversation.session_refs",
     "src/mosfet/abilities/communication/conversation/conversation.py:Conversation.typing",
     "src/mosfet/abilities/communication/conversation/turn_detector/turn_detector.py:TurnDetector.decoder",

@@ -5,6 +5,7 @@ from mosfet.abilities import cognition
 from mosfet.abilities import memory
 from mosfet.abilities import processing
 from mosfet.abilities.cognition import cognition as cognition_module
+from mosfet.abilities.language import text
 from mosfet.abilities.cognition import reflection as reflection_module
 from mosfet.behavior import instance as behavior_instance
 from mosfet.protocols import attachment
@@ -650,6 +651,8 @@ class RecordingCognition(cognition.Cognition):
         intuition_processor: processing.Processor | None = None,
         reasoning_processor: processing.Processor | None = None,
         reflection: cognition.Reflection | None = None,
+        store: memory.Memory | None = None,
+        associative: memory.Associative | None = None,
     ) -> None:
         if intuition is None or reasoning is None:
             default_i, default_r = cognition_abilities(
@@ -660,13 +663,15 @@ class RecordingCognition(cognition.Cognition):
             reasoning = reasoning or default_r
         reflection = reflection or cognition.Reflection(
             processor=FixedProcessor(no_output("reflection")),
-            memory=memory.Memory(),
+            memory=store if store is not None else memory.Memory(),
         )
         super().__init__(
             intuition=intuition,
             reasoning=reasoning,
             autonomy=autonomy,
             reflection=reflection,
+            memory=store,
+            associative=associative,
         )
         self.outputs = []
         self.failures = []
@@ -1864,7 +1869,7 @@ def test_cognition_dispatches_reflection_after_processing_completes() -> None:
     assert processor_input.cognition_input.focus is None
     # Default intuition handles with deliberate ignore; reflection still sees that result.
     assert processor_input.cognition_output == ignore_output("fast")
-    assert processor_input.prior_episodes == ()
+    assert processor_input.associations is None
     assert {event.name for event in calls[0].schemas} == {
         behavior_events.CreateEvent.name,
         behavior_events.ChangeEvent.name,
@@ -1942,18 +1947,6 @@ def test_reflection_failure_does_not_block_the_next_cognition_turn() -> None:
     assert output_count == 2
     assert state.endswith("/idle")
     assert reflection_calls >= 1
-
-
-def test_reflection_episode_from_turn_captures_stimulus_and_output() -> None:
-    turn = cognition.reflection.InputData(
-        cognition_input=cognition_input(),
-        cognition_output=focus_output("phone", "deliberate"),
-    )
-    episode = cognition.reflection.episode_from_turn(turn)
-
-    assert episode.focus is None
-    assert episode.stimulus_name == mosfet.InputEvent.name
-    assert episode.output == focus_output("phone", "deliberate")
 
 
 def test_cognitive_outputs_reject_defer_until_resume_is_modeled() -> None:
@@ -2097,7 +2090,7 @@ def test_cognitive_ability_events_use_concrete_pydantic_schemas() -> None:
     reflection_output_schema = object_dict(cognition.Reflection.output_event.schema)
     # Reflection has no host-facing product (null completion); bare type(None) schema.
     assert reflection_output_schema.get("type") == "null" or "null" in str(reflection_output_schema)
-    assert "CognitiveEpisode" in cognition.reflection.ProcessorInput.model_json_schema().get("$defs", {})
+    assert "AssociationsData" in cognition.reflection.ProcessorInput.model_json_schema().get("$defs", {})
     assert cognition.Reflection.instructions == cognition.reflection.INSTRUCTIONS
     assert len(cognition.reflection.behavior_events()) == 3
 
@@ -2682,67 +2675,6 @@ def test_reasoning_defers_repeated_input_while_applying() -> None:
     assert len(calls) == 2
 
 
-def test_reasoning_recalls_prior_episodes_and_retains_behavior_episode() -> None:
-    """Reasoning SELECTs prior episodes then INSERTs the new episode via SQL transactions."""
-
-    prior = cognition.episodes.CognitiveEpisode(
-        focus="phone",
-        stimulus_name="environment.sound",
-        output=focus_output("phone", "prior answer"),
-        behavior=behavior_events.CreateData(
-            name="AnswerIncomingRing",
-            triggers=("environment.sound",),
-            reason="seed",
-        ),
-    )
-
-    async def run() -> tuple[
-        processing.CompletionData,
-        list[processing.InputData],
-        tuple[cognition.episodes.CognitiveEpisode, ...],
-    ]:
-        engine = memory.store.open_sqlite_engine()
-        store = memory.Memory(engine=engine)
-        seed = cognition.episodes.episode_insert_input(prior, context_ref="phone")
-        _ = execute_on(engine, seed)
-
-        processor = RecordingReasoningProcessor(
-            cognition.reasoning.OutputData(
-                result=focus_output("phone", "deliberate with memory"),
-                create=behavior_events.CreateData(
-                    name="AnswerIncomingRing",
-                    triggers=("environment.sound",),
-                    reason="matches prior episode",
-                ),
-            )
-        )
-        reasoning = cognition.Reasoning(processor=processor, memory=store)
-        ctx = await start_cognition_ability_for_test(reasoning)
-        # The owner that attaches the bot's memory; Reasoning is only its peer.
-        await start_abilities_for_test(ctx, store)
-        result = await dispatch_ability_for_test(reasoning, ctx, reasoning_input())
-
-        select = cognition.episodes.episode_select_input(context_ref="phone")
-        recalled = await memory.transact(ctx, store, select)
-        stored = cognition.episodes.episodes_from_output(recalled)
-        return result, processor.calls, stored
-
-    result, calls, stored = asyncio.run(run())
-
-    assert result.output == focus_output("phone", "deliberate with memory")
-    assert len(calls) == 1
-    reasoning_processor_input = calls[0].input
-    assert isinstance(reasoning_processor_input, cognition.reasoning.ProcessorInput)
-    assert reasoning_processor_input.prior_episodes == (prior,)
-    assert len(stored) >= 2
-    assert prior in stored
-    latest = next(
-        episode for episode in reversed(stored) if episode.output == focus_output("phone", "deliberate with memory")
-    )
-    # Behavior inventory create/change/break is Reflection's job; Reasoning retains the episode product.
-    assert latest.focus == "phone"
-
-
 def test_reflection_creates_validates_and_stores_behavior() -> None:
     """Select create → seed broken empty stub → write → store executable behavior + episode."""
 
@@ -2772,7 +2704,6 @@ def test_reflection_creates_validates_and_stores_behavior() -> None:
 
     async def run() -> tuple[
         processing.CompletionData | None,
-        tuple[cognition.episodes.CognitiveEpisode, ...],
         tuple[str, ...],
         list[str],
         list[processing.InputData],
@@ -2781,6 +2712,8 @@ def test_reflection_creates_validates_and_stores_behavior() -> None:
         processor = FixedProcessor(selection, write=written)
         reflection = cognition.Reflection(processor=processor, memory=store)
         ctx = await start_cognition_ability_for_test(reflection)
+        # Cognition attaches the bot's memory in production; Reflection is only its peer.
+        await start_abilities_for_test(ctx, store)
         input = cognition.reflection.InputData(
             cognition_input=cognition_input(),
             cognition_output=focus_output("phone", "answered"),
@@ -2789,10 +2722,6 @@ def test_reflection_creates_validates_and_stores_behavior() -> None:
             reflection, ctx, input, timeout=_revision_host_timeout(validation_passes=1)
         )
 
-        select = cognition.episodes.episode_select_input(context_ref=None)
-        recalled = await memory.transact(ctx, store, select)
-        episodes = cognition.episodes.episodes_from_output(recalled)
-
         from mosfet.behavior import storage as behavior_storage
 
         behavior_select = memory.InputData(
@@ -2800,9 +2729,9 @@ def test_reflection_creates_validates_and_stores_behavior() -> None:
         )
         behavior_out = await memory.transact(ctx, store, behavior_select)
         behavior_sources = _behavior_sources_from_output(behavior_out)
-        return result, episodes, behavior_sources, processor.builds, processor.write_step.calls
+        return result, behavior_sources, processor.builds, processor.write_step.calls
 
-    result, episodes, behavior_sources, builds, write_calls = asyncio.run(run())
+    result, behavior_sources, builds, write_calls = asyncio.run(run())
 
     assert result is None
     assert builds == [
@@ -2816,19 +2745,12 @@ def test_reflection_creates_validates_and_stores_behavior() -> None:
     assert write_input.existing_behavior.source == ""
     assert write_input.existing_behavior.status == "DRAFT"
     assert write_input.intent.name == intent.name
-    assert len(episodes) == 1
-    applied = episodes[0].behavior
-    assert isinstance(applied, behavior_events.CreateData)
-    assert applied.name == "AnswerIncomingRing"
-    assert applied.source is not None
-    assert "hsm.define" in applied.source
-    assert "AnswerIncomingRing" in applied.source
     assert len(behavior_sources) == 1
     assert "AnswerIncomingRing" in behavior_sources[0]
     assert "hsm.define" in behavior_sources[0]
     assert "written" in behavior_sources[0]
     # Stored inventory must compile into executable behavior.
-    behavior = behavior_events.start(applied.source)
+    behavior = behavior_events.start(behavior_sources[0])
     compiled = behavior_events.build(behavior.source)
     assert compiled.input_event.name == "bot.behavior.answer_incoming_ring.input"
 
@@ -2872,6 +2794,8 @@ behavior = hsm.define(
         processor = FixedProcessor(selection, write=[bad, bad])
         reflection = cognition.Reflection(processor=processor, memory=store)
         ctx = await start_cognition_ability_for_test(reflection)
+        # Cognition attaches the bot's memory in production; Reflection is only its peer.
+        await start_abilities_for_test(ctx, store)
         with pytest.raises(RuntimeError, match="same diagnostic message after fix") as error:
             _ = await dispatch_ability_for_test(
                 reflection,
@@ -2953,6 +2877,8 @@ def test_reflection_change_retries_while_diagnostics_change_without_fixed_budget
         )
         reflection = cognition.Reflection(processor=processor, memory=store)
         ctx = await start_cognition_ability_for_test(reflection)
+        # Cognition attaches the bot's memory in production; Reflection is only its peer.
+        await start_abilities_for_test(ctx, store)
         _ = await dispatch_ability_for_test(
             reflection,
             ctx,
@@ -3029,6 +2955,8 @@ behavior = hsm.define(
         processor = FixedProcessor(selection, write=[bad, good])
         reflection = cognition.Reflection(processor=processor, memory=store)
         ctx = await start_cognition_ability_for_test(reflection)
+        # Cognition attaches the bot's memory in production; Reflection is only its peer.
+        await start_abilities_for_test(ctx, store)
         result = await dispatch_ability_for_test(
             reflection,
             ctx,
@@ -3163,7 +3091,6 @@ def test_reflection_change_loads_existing_and_writes_update() -> None:
         processing.CompletionData | None,
         tuple[str, ...],
         list[processing.InputData],
-        behavior_events.CreateData | behavior_events.ChangeData | behavior_events.BreakData | None,
     ]:
         engine = memory.store.open_sqlite_engine()
         store = memory.Memory(engine=engine)
@@ -3176,6 +3103,8 @@ def test_reflection_change_loads_existing_and_writes_update() -> None:
         processor = FixedProcessor(selection, change_write=written)
         reflection = cognition.Reflection(processor=processor, memory=store)
         ctx = await start_cognition_ability_for_test(reflection)
+        # Cognition attaches the bot's memory in production; Reflection is only its peer.
+        await start_abilities_for_test(ctx, store)
         result = await dispatch_ability_for_test(
             reflection,
             ctx,
@@ -3192,12 +3121,9 @@ def test_reflection_change_loads_existing_and_writes_update() -> None:
         )
         behavior_out = await memory.transact(ctx, store, behavior_select)
         sources = _behavior_sources_from_output(behavior_out)
-        select = cognition.episodes.episode_select_input(context_ref=None)
-        episodes = cognition.episodes.episodes_from_output(await memory.transact(ctx, store, select))
-        latest_behavior = episodes[-1].behavior if episodes else None
-        return result, sources, processor.change_step.calls, latest_behavior
+        return result, sources, processor.change_step.calls
 
-    result, sources, change_calls, latest_behavior = asyncio.run(run())
+    result, sources, change_calls = asyncio.run(run())
 
     assert result is None
     assert len(change_calls) == 1
@@ -3207,13 +3133,8 @@ def test_reflection_change_loads_existing_and_writes_update() -> None:
     assert change_input.existing_behavior.description == "Original description."
     assert change_input.existing_behavior.source
     assert change_input.intent == change_intent
-    assert isinstance(latest_behavior, behavior_events.ChangeData)
-    assert latest_behavior.name == written.name
-    assert latest_behavior.triggers == written.triggers
-    assert latest_behavior.description == written.description
-    assert latest_behavior.source is not None
-    assert f'triggers = ["{observed_trigger}"]' in latest_behavior.source
     assert len(sources) == 1
+    assert f'triggers = ["{observed_trigger}"]' in sources[0]
     assert "clear focus" in sources[0]
     assert "hsm.define" in sources[0]
 
@@ -3235,7 +3156,6 @@ def test_reflection_break_marks_behavior_broken_without_write_step() -> None:
         tuple[str, ...],
         behavior_instance.Status,
         list[str],
-        behavior_events.CreateData | behavior_events.ChangeData | behavior_events.BreakData | None,
         int,
     ]:
         # Break reads and rewrites the inventory row by message: the store refuses direct calls.
@@ -3243,7 +3163,8 @@ def test_reflection_break_marks_behavior_broken_without_write_step() -> None:
         processor = FixedProcessor(selection)
         reflection = cognition.Reflection(processor=processor, memory=store)
         ctx = await start_cognition_ability_for_test(reflection)
-        # Reflection attaches the memory; it answers once that attach completes.
+        # Cognition attaches the bot's memory in production; Reflection is only its peer.
+        await start_abilities_for_test(ctx, store)
         await wait_until(lambda: reflection.state().endswith("/idle"))
         await _seed_behavior_record(
             store,
@@ -3282,18 +3203,15 @@ def test_reflection_break_marks_behavior_broken_without_write_step() -> None:
             tuple(row.as_mapping() for row in active_out.results[0].rows),
             tuple(row.as_mapping() for row in active_out.results[1].rows),
         )
-        select = cognition.episodes.episode_select_input(context_ref=None)
-        episodes = cognition.episodes.episodes_from_output(await memory.transact(ctx, store, select))
         return (
             result,
             sources,
             behaviors[0].status if behaviors else "ACTIVE",
             processor.builds,
-            episodes[-1].behavior,
             len(active),
         )
 
-    result, sources, status, builds, latest_behavior, active_count = asyncio.run(run())
+    result, sources, status, builds, active_count = asyncio.run(run())
 
     assert result is None
     assert len(sources) == 1
@@ -3302,30 +3220,36 @@ def test_reflection_break_marks_behavior_broken_without_write_step() -> None:
     assert active_count == 0
     # Break is applied after select; change-phase Processing is not used.
     assert builds == [cognition.Reflection.select_instructions]
-    assert latest_behavior == break_data
 
 
-def test_reflection_no_selection_still_stores_episode() -> None:
-    async def run() -> tuple[processing.CompletionData | None, tuple[cognition.episodes.CognitiveEpisode, ...]]:
+def test_reflection_no_selection_completes_without_writing_an_episode() -> None:
+    """Cognition remembers every turn; Reflection never writes one of its own."""
+
+    async def run() -> tuple[processing.CompletionData | None, memory.EpisodesData]:
         store = memory.Memory()
         processor = FixedProcessor(empty_output())
         reflection = cognition.Reflection(processor=processor, memory=store)
         ctx = await start_cognition_ability_for_test(reflection)
+        await start_abilities_for_test(ctx, store)
         input = cognition.reflection.InputData(
             cognition_input=cognition_input(),
             cognition_output=ignore_output("nothing to learn"),
         )
         result = await dispatch_ability_for_test(reflection, ctx, input)
-        select = cognition.episodes.episode_select_input(context_ref=None)
-        recalled = await memory.transact(ctx, store, select)
-        episodes = cognition.episodes.episodes_from_output(recalled)
-        return result, episodes
+        recent = await abilities.run_terminal_operation(
+            ctx,
+            child=store,
+            request=memory.RecentEvent.with_data_and_id(memory.RecentData(limit=8), "recent"),
+            terminals=(memory.RecentOutputEvent, memory.FailedEvent),
+            timeout=datetime.timedelta(seconds=3),
+        )
+        assert isinstance(recent.data, memory.EpisodesData)
+        return result, recent.data
 
-    result, episodes = asyncio.run(run())
+    result, recent = asyncio.run(run())
 
     assert result is None
-    assert len(episodes) == 1
-    assert episodes[0].behavior is None
+    assert recent.episodes == ()
 
 
 _FOCUS_RING_BEHAVIOR_SOURCE = """
@@ -3406,8 +3330,9 @@ def test_autonomy_handles_matching_behavior_without_intuition_processor() -> Non
             autonomy=autonomy,
             intuition_processor=intuition_processor,
             reasoning_processor=reasoning_processor,
-            # One memory per bot: Reflection attaches it, Autonomy reaches it by message.
+            # One memory per bot: Cognition attaches it, Autonomy and Reflection reach it by message.
             reflection=cognition.Reflection(processor=reflection_processor, memory=store),
+            store=store,
         )
         ctx = await start_cognition_ability_for_test(ability)
         turn = cognition.InputData(
@@ -3464,6 +3389,7 @@ def test_autonomy_unhandled_falls_through_to_intuition() -> None:
             autonomy=autonomy,
             intuition_processor=intuition_processor,
             reasoning_processor=FailingReasoningProcessor(),
+            store=store,
         )
         ctx = await start_cognition_ability_for_test(ability)
         # bot.input stimulus does not match environment.sound trigger.
@@ -3657,6 +3583,7 @@ def test_cognition_reconciles_routines_after_reflection_settles() -> None:
             reasoning=reasoning,
             reflection=cognition.Reflection(processor=FixedProcessor(empty_output()), memory=store),
             routines=cognition.Routines(memory=store, clock=lambda: _ROUTINE_START, timers=timers),
+            memory=store,
         )
         ctx = await start_cognition_ability_for_test(ability)
         try:
@@ -3721,6 +3648,7 @@ def test_cognition_hands_routine_ticks_to_the_body_as_observed_input(tmp_path: p
             reasoning=reasoning,
             reflection=cognition.Reflection(processor=FixedProcessor(empty_output()), memory=store),
             routines=cognition.Routines(memory=store, clock=lambda: _ROUTINE_START, timers=timers),
+            memory=store,
         )
         body = _RoutineTickBody()
         ctx = shared_hsm_context()
@@ -3748,3 +3676,476 @@ def test_cognition_hands_routine_ticks_to_the_body_as_observed_input(tmp_path: p
     assert isinstance(tick, behavior_events.TickData)
     assert tick.name == "MorningBriefing"
     assert tick.output[0]["event"] == "bot.speaking.say"
+
+
+# --- remembering every turn and associating it --------------------------------------------------
+
+_ADA = mosfet.Participant(ref="+15555550100", role=mosfet.ParticipantRole.SOURCE)
+
+
+async def _remember_by_message(ctx: hsm.Context, store: memory.Memory, episode: memory.EpisodeData) -> None:
+    reply = await abilities.run_terminal_operation(
+        ctx,
+        child=store,
+        request=memory.RememberEvent.with_data_and_id(episode, f"seed-{episode.turn_id}"),
+        terminals=(memory.RememberedEvent, memory.FailedEvent),
+        timeout=datetime.timedelta(seconds=3),
+    )
+    assert isinstance(reply.data, memory.RememberedData), reply.data
+
+
+def _assert_keeps_what_was_said(kept: memory.Episode) -> None:
+    """A turn that did not complete is still kept with its stimulus and who took part."""
+
+    assert kept.stimulus == mosfet.InputEvent.name
+    assert kept.text
+    assert kept.participants == (_ADA,)
+    assert kept.focus_candidates == ("phone",)
+    assert kept.acts == ()
+
+
+async def _remembered(ctx: hsm.Context, store: memory.Memory) -> tuple[memory.Episode, ...]:
+    reply = await abilities.run_terminal_operation(
+        ctx,
+        child=store,
+        request=memory.RecentEvent.with_data_and_id(memory.RecentData(limit=16), "recent"),
+        terminals=(memory.RecentOutputEvent, memory.FailedEvent),
+        timeout=datetime.timedelta(seconds=3),
+    )
+    assert isinstance(reply.data, memory.EpisodesData), reply.data
+    return reply.data.episodes
+
+
+def test_cognition_requires_memory_for_associative() -> None:
+    intuition, reasoning = cognition_abilities()
+    reflection = cognition.Reflection(processor=FixedProcessor(no_output("unused")), memory=memory.Memory())
+    with pytest.raises(ValueError, match="associative requires memory"):
+        _ = cognition.Cognition(
+            intuition=intuition,
+            reasoning=reasoning,
+            reflection=reflection,
+            associative=memory.Associative(memory=memory.Memory()),
+        )
+    members = require_model(cognition.Cognition.model).members
+    assert "/CognitionLifecycle/attached/behavior/processing/associating" in members
+    assert "/CognitionLifecycle/attached/behavior/processing/cancelling/associating" in members
+
+
+def test_cognition_associates_before_intuition_and_remembers_the_completed_turn() -> None:
+    """What memory surfaced reaches intuition, reasoning (as recalled) and reflection; the turn is kept."""
+
+    async def run() -> tuple[
+        cognition.types.OutputData,
+        list[processing.InputData],
+        list[processing.InputData],
+        list[processing.InputData],
+        tuple[memory.Episode, ...],
+    ]:
+        store = memory.Memory()
+        intuition_processor = RecordingIntuitionProcessor(cognition.intuition.OutputData(reason="think it over"))
+        reasoning_processor = RecordingReasoningProcessor(focus_output("phone", "reasoned focus"))
+        reflection_processor = FixedProcessor(no_output("observed"))
+        ability = RecordingCognition(
+            intuition_processor=intuition_processor,
+            reasoning_processor=reasoning_processor,
+            reflection=cognition.Reflection(processor=reflection_processor, memory=store),
+            store=store,
+            associative=memory.Associative(memory=store),
+        )
+        ctx = await start_cognition_ability_for_test(ability)
+        await wait_until(lambda: ability.state().endswith("/idle"))
+        await _remember_by_message(
+            ctx,
+            store,
+            memory.EpisodeData(
+                turn_id="earlier",
+                parts=(text.TextPart(text="Ada asked for a call at noon."),),
+                participants=(_ADA,),
+                outcome=memory.Outcome.COMPLETED,
+            ),
+        )
+        turn = (await started_cognition_input(ctx)).model_copy(update={"participants": (_ADA,)})
+        result = await dispatch_ability_for_test(ability, ctx, turn)
+        await wait_until(lambda: bool(reflection_processor.step.calls))
+        episodes = await _remembered(ctx, store)
+        return (
+            result,
+            intuition_processor.calls,
+            reasoning_processor.calls,
+            reflection_processor.step.calls,
+            episodes,
+        )
+
+    result, intuition_calls, reasoning_calls, reflection_calls, episodes = asyncio.run(run())
+
+    assert result == focus_output("phone", "reasoned focus")
+    (intuition_frame,) = intuition_calls
+    surfaced = intuition_frame.recalled
+    assert isinstance(surfaced, memory.AssociationsData)
+    assert [item.text for item in surfaced.items] == ["Ada asked for a call at noon."]
+    assert surfaced.items[0].involves == (_ADA.ref,)
+    (reasoning_frame,) = reasoning_calls
+    assert reasoning_frame.recalled == surfaced
+    select = reflection_calls[0].input
+    assert isinstance(select, cognition.reflection.ProcessorInput)
+    assert select.associations == surfaced
+    # The turn itself is remembered once, stamped where Cognition owns it.
+    assert [episode.turn_id for episode in episodes][0] == "earlier"
+    (kept,) = episodes[1:]
+    assert kept.outcome is memory.Outcome.COMPLETED
+    assert kept.stimulus == mosfet.InputEvent.name
+    assert kept.participants == (_ADA,)
+    assert kept.focus_candidates == ("phone",)
+    assert [act.event for act in kept.acts] == [mosfet.FocusDeviceEvent.name]
+    assert kept.acts[0].reason == "reasoned focus"
+    assert kept.text
+
+
+def test_an_association_that_fails_leaves_the_turn_without_associations_not_failed() -> None:
+    async def run() -> tuple[cognition.types.OutputData, list[processing.InputData], str]:
+        store = memory.Memory()
+        intuition_processor = RecordingIntuitionProcessor(focus_output("phone", "fast focus"))
+        ability = RecordingCognition(
+            intuition_processor=intuition_processor,
+            reflection=cognition.Reflection(processor=FixedProcessor(no_output("observed")), memory=store),
+            store=store,
+            # Its memory is never attached or started: every association fails, typed.
+            associative=memory.Associative(memory=memory.Memory()),
+        )
+        ctx = await start_cognition_ability_for_test(ability)
+        result = await dispatch_ability_for_test(ability, ctx, await started_cognition_input(ctx))
+        await wait_until(lambda: ability.state().endswith("/idle"))
+        return result, intuition_processor.calls, ability.state()
+
+    result, intuition_calls, state = asyncio.run(run())
+
+    assert result == focus_output("phone", "fast focus")
+    assert len(intuition_calls) == 1
+    assert intuition_calls[0].recalled is None
+    assert state.endswith("/idle")
+
+
+def test_cognition_remembers_a_failed_turn_with_its_stimulus_and_no_acts() -> None:
+    async def run() -> tuple[list[abilities.FailureData], tuple[memory.Episode, ...]]:
+        store = memory.Memory()
+        ability = RecordingCognition(
+            intuition_processor=RecordingIntuitionProcessor(cognition.intuition.OutputData(reason="escalate")),
+            reasoning_processor=FailingReasoningProcessor(),
+            store=store,
+        )
+        ctx = await start_cognition_ability_for_test(ability)
+        _ = await hsm.dispatch(
+            ctx, ability, ability.input_event.with_data_and_id(await started_cognition_input(ctx), "failing-turn")
+        )
+        await wait_until(lambda: bool(ability.failures))
+        await wait_until(lambda: ability.state().endswith("/idle"))
+        return ability.failures, await _remembered(ctx, store)
+
+    failures, episodes = asyncio.run(run())
+
+    # The recorder sees the child's failure arrive and Cognition's own failed terminal.
+    assert {failure.message for failure in failures} == {"reasoning failed"}
+    (kept,) = episodes
+    assert kept.turn_id == "failing-turn"
+    assert kept.outcome is memory.Outcome.FAILED
+    assert kept.stimulus == mosfet.InputEvent.name
+    assert kept.acts == ()
+
+
+class _UnreadableActor(hsm.Instance):
+    """A live actor whose state cannot be read, so no frame that offers it can be built."""
+
+    effort: typing.ClassVar[abilities.ability.Effort] = abilities.ability.Effort.XS
+    model: typing.ClassVar[hsm.Model | None] = mosfet.define(
+        "UnreadableActor",
+        hsm.initial(hsm.target("/UnreadableActor/active")),
+        hsm.state("active"),
+    )
+
+    @typing.override
+    def take_snapshot(self) -> hsm.Snapshot:
+        raise RuntimeError("actor state unavailable")
+
+
+class _DeliberateUnreadableActor(_UnreadableActor):
+    """Offered only to reasoning: its effort is above intuition's ceiling."""
+
+    effort: typing.ClassVar[abilities.ability.Effort] = abilities.ability.Effort.XL
+
+
+async def _remembered_after_unframed_turn(
+    ability: RecordingCognition, store: memory.Memory, actor: _UnreadableActor
+) -> tuple[list[abilities.FailureData], tuple[memory.Episode, ...]]:
+    """Run one turn whose frame offers ``actor``; return the failures and what memory kept."""
+
+    ctx = await start_cognition_ability_for_test(ability)
+    assert actor.model is not None
+    _ = await mosfet.started(ctx, actor, actor.model)
+    turn = await started_cognition_input(ctx)
+    turn = turn.model_copy(update={"actors": {**turn.actors, "broken": actor}})
+    _ = await hsm.dispatch(ctx, ability, ability.input_event.with_data_and_id(turn, "unframed-turn"))
+    await wait_until(lambda: bool(ability.failures))
+    await wait_until(lambda: ability.state().endswith("/idle"))
+    return ability.failures, await _remembered(ctx, store)
+
+
+def test_cognition_remembers_a_failed_turn_whose_intuition_frame_cannot_be_built() -> None:
+    async def run() -> tuple[list[abilities.FailureData], tuple[memory.Episode, ...]]:
+        store = memory.Memory()
+        ability = RecordingCognition(store=store)
+        return await _remembered_after_unframed_turn(ability, store, _UnreadableActor())
+
+    failures, episodes = asyncio.run(run())
+
+    assert [failure.message for failure in failures] == ["actor state unavailable"]
+    (kept,) = episodes
+    assert kept.turn_id == "unframed-turn"
+    assert kept.outcome is memory.Outcome.FAILED
+    assert kept.stimulus == mosfet.InputEvent.name
+
+
+def test_cognition_remembers_a_failed_turn_whose_reasoning_frame_cannot_be_built() -> None:
+    async def run() -> tuple[list[abilities.FailureData], tuple[memory.Episode, ...]]:
+        store = memory.Memory()
+        ability = RecordingCognition(
+            intuition_processor=RecordingIntuitionProcessor(cognition.intuition.OutputData(reason="escalate")),
+            store=store,
+        )
+        return await _remembered_after_unframed_turn(ability, store, _DeliberateUnreadableActor())
+
+    failures, episodes = asyncio.run(run())
+
+    assert [failure.message for failure in failures] == ["actor state unavailable"]
+    (kept,) = episodes
+    assert kept.turn_id == "unframed-turn"
+    assert kept.outcome is memory.Outcome.FAILED
+    assert kept.stimulus == mosfet.InputEvent.name
+
+
+class _HoldingIntuition(cognition.Intuition):
+    """Intuition that takes a turn and never answers or acknowledges a cancel."""
+
+    @staticmethod
+    async def _hold(ctx: hsm.Context, instance: "_HoldingIntuition", event: hsm.Event[typing.Any]) -> None:
+        del ctx
+        operation_id = event.id if event.id else hsm.id(instance)
+        if processing.active_operation(instance, operation_id) is None:
+            _ = await processing.start_operation(instance, operation_id)
+        await asyncio.Event().wait()
+
+    submodel = mosfet.define(
+        "HoldingIntuition",
+        hsm.initial(hsm.target("/HoldingIntuition/waiting")),
+        hsm.state(
+            "waiting",
+            hsm.transition(hsm.on(cognition.Intuition.input_event), hsm.target("/HoldingIntuition/holding")),
+        ),
+        hsm.state("holding", hsm.activity(_hold.__get__(None, object))),
+    )
+
+
+async def _rebooted_turn(
+    *,
+    cancel: bool,
+    child_operation_timeout: datetime.timedelta | None = None,
+    cancel_teardown_timeout: datetime.timedelta | None = None,
+) -> tuple[list[hsm.Event[typing.Any]], tuple[memory.Episode, ...]]:
+    store = memory.Memory()
+    _, reasoning = cognition_abilities()
+    ability = cognition.Cognition(
+        intuition=_HoldingIntuition(processor=RecordingIntuitionProcessor(no_output("unused"))),
+        reasoning=reasoning,
+        reflection=cognition.Reflection(processor=FixedProcessor(no_output("reflection")), memory=store),
+        memory=store,
+        child_operation_timeout=child_operation_timeout,
+        cancel_teardown_timeout=cancel_teardown_timeout,
+    )
+    ctx = shared_hsm_context()
+    owner = CognitionAttachmentOwner()
+    _ = await mosfet.started(ctx, owner, owner.model)
+    await ability.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)))
+    await wait_until(lambda: ability.state().endswith("/idle"))
+    owner.lifecycle.clear()
+    turn = (await started_cognition_input(ctx)).model_copy(update={"participants": (_ADA,)})
+    _ = await hsm.dispatch(ctx, ability, ability.input_event.with_data_and_id(turn, "rebooted-turn"))
+    await wait_until(lambda: ability.state().endswith("/intuition"))
+    if cancel:
+        _ = await hsm.dispatch(
+            ctx,
+            ability,
+            dataclasses.replace(
+                cognition.CancelEvent.with_data(cognition.CancelData(operation_id="rebooted-turn", token="token")),
+                id="rebooted-turn",
+                source=hsm.id(owner),
+                target=hsm.id(ability),
+            ),
+        )
+    async with asyncio.timeout(5):
+        while not any(event.name == mosfet.RebootEvent.name for event in owner.lifecycle):
+            await asyncio.sleep(0.01)
+    return list(owner.lifecycle), await _remembered(ctx, store)
+
+
+def test_cognition_remembers_a_turn_a_child_timeout_reboots_away_as_failed() -> None:
+    lifecycle, episodes = asyncio.run(
+        _rebooted_turn(cancel=False, child_operation_timeout=datetime.timedelta(milliseconds=50))
+    )
+
+    assert [event.data for event in lifecycle if event.name == mosfet.RebootEvent.name] == [
+        mosfet.RebootEventData(reason="cognition_child_teardown_failed")
+    ]
+    (kept,) = episodes
+    assert kept.turn_id == "rebooted-turn"
+    assert kept.outcome is memory.Outcome.FAILED
+    _assert_keeps_what_was_said(kept)
+
+
+def test_cognition_remembers_a_cancelled_turn_whose_teardown_reboots_as_cancelled() -> None:
+    lifecycle, episodes = asyncio.run(
+        _rebooted_turn(cancel=True, cancel_teardown_timeout=datetime.timedelta(milliseconds=50))
+    )
+
+    assert [event.data for event in lifecycle if event.name == mosfet.RebootEvent.name] == [
+        mosfet.RebootEventData(reason="cognition_cancel_teardown_failed")
+    ]
+    (kept,) = episodes
+    assert kept.turn_id == "rebooted-turn"
+    assert kept.outcome is memory.Outcome.CANCELLED
+    _assert_keeps_what_was_said(kept)
+
+
+def test_cancelling_an_association_acknowledges_at_once_and_remembers_the_cancelled_turn() -> None:
+    """Associative has no cancel event: the cancelled association is acknowledged like autonomy's."""
+
+    class GatedEmbedder(abilities.embedding.Embedder):
+        def __init__(self, gate: asyncio.Event) -> None:
+            space = abilities.embedding.Space(model="test/embedder", dimensions=2)
+            self.capacity = abilities.embedding.Capacity(space=space, max_items=8, max_input_tokens=2048)
+            self.attachments = ()
+            self.gate = gate
+
+        async def embed(
+            self, input: abilities.embedding.InputData, *, ctx: hsm.Context
+        ) -> abilities.embedding.OutputData:
+            del ctx
+            _ = await self.gate.wait()
+            return abilities.embedding.OutputData(
+                space=self.capacity.space,
+                role=input.role,
+                vectors=tuple(abilities.embedding.Vector(values=(1.0, 0.0)) for _ in input.items),
+            )
+
+    async def run() -> tuple[list[hsm.Event[typing.Any]], str, tuple[memory.Episode, ...]]:
+        gate = asyncio.Event()
+        store = memory.Memory(
+            embedder=GatedEmbedder(gate),
+            embed_timeout=datetime.timedelta(seconds=5),
+            operation_timeout=datetime.timedelta(seconds=10),
+        )
+        intuition, reasoning = cognition_abilities()
+        ability = cognition.Cognition(
+            intuition=intuition,
+            reasoning=reasoning,
+            reflection=cognition.Reflection(processor=FixedProcessor(no_output("reflection")), memory=store),
+            memory=store,
+            associative=memory.Associative(memory=store),
+        )
+        ctx = shared_hsm_context()
+        owner = CognitionAttachmentOwner()
+        _ = await mosfet.started(ctx, owner, owner.model)
+        await ability.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)))
+        await wait_until(lambda: ability.state().endswith("/idle"))
+        owner.lifecycle.clear()
+        turn = (await started_cognition_input(ctx)).model_copy(update={"participants": (_ADA,)})
+        _ = await hsm.dispatch(ctx, ability, ability.input_event.with_data_and_id(turn, "held-turn"))
+        await wait_until(lambda: ability.state().endswith("/associating"))
+        _ = await hsm.dispatch(
+            ctx,
+            ability,
+            dataclasses.replace(
+                cognition.CancelEvent.with_data(cognition.CancelData(operation_id="held-turn", token="token")),
+                id="held-turn",
+                source=hsm.id(owner),
+                target=hsm.id(ability),
+            ),
+        )
+        await wait_until(lambda: any(event.name == cognition.CancelledEvent.name for event in owner.lifecycle))
+        state = ability.state()
+        gate.set()
+        episodes = await _remembered(ctx, store)
+        return list(owner.lifecycle), state, episodes
+
+    lifecycle, state, episodes = asyncio.run(run())
+
+    assert [event.name for event in lifecycle] == [cognition.CancelledEvent.name]
+    assert state.endswith("/idle")
+    (kept,) = episodes
+    assert kept.turn_id == "held-turn"
+    assert kept.outcome is memory.Outcome.CANCELLED
+    _assert_keeps_what_was_said(kept)
+
+
+def test_a_hung_embedder_does_not_reboot_the_next_turn() -> None:
+    """A remembered turn waits on its embed outside Memory's busy state, so the next turn's reads
+    (autonomy's inventory refresh, reflection) are answered in their own SQL time and no hop times out."""
+
+    class HungEmbedder(abilities.embedding.Embedder):
+        capacity: abilities.embedding.Capacity
+        attachments: tuple[hsm.Instance, ...]
+        calls: list[abilities.embedding.InputData]
+
+        def __init__(self) -> None:
+            space = abilities.embedding.Space(model="test/embedder", dimensions=2)
+            self.capacity = abilities.embedding.Capacity(space=space, max_items=8, max_input_tokens=2048)
+            self.attachments = ()
+            self.calls = []
+
+        @typing.override
+        async def embed(
+            self, input: abilities.embedding.InputData, *, ctx: hsm.Context
+        ) -> abilities.embedding.OutputData:
+            del ctx
+            self.calls.append(input)
+            _ = await asyncio.Event().wait()
+            raise AssertionError("a hung embedder never answers")
+
+    async def run() -> tuple[list[hsm.Event[typing.Any]], str, list[str]]:
+        embedder = HungEmbedder()
+        store = memory.Memory(
+            embedder=embedder,
+            embed_timeout=datetime.timedelta(seconds=5),
+            operation_timeout=datetime.timedelta(seconds=10),
+        )
+        intuition, reasoning = cognition_abilities()
+        ability = cognition.Cognition(
+            intuition=intuition,
+            reasoning=reasoning,
+            autonomy=cognition.Autonomy(memory=store),
+            reflection=cognition.Reflection(processor=FixedProcessor(no_output("reflection")), memory=store),
+            memory=store,
+            child_operation_timeout=datetime.timedelta(milliseconds=500),
+        )
+        ctx = shared_hsm_context()
+        owner = CognitionAttachmentOwner()
+        _ = await mosfet.started(ctx, owner, owner.model)
+        await ability.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)))
+        await wait_until(lambda: ability.state().endswith("/idle"))
+        owner.lifecycle.clear()
+        _ = await hsm.dispatch(
+            ctx, ability, ability.input_event.with_data_and_id(await started_cognition_input(ctx), "first")
+        )
+        async with asyncio.timeout(3):
+            while not embedder.calls:
+                await asyncio.sleep(0.01)
+        _ = await hsm.dispatch(
+            ctx, ability, ability.input_event.with_data_and_id(await started_cognition_input(ctx), "next")
+        )
+        await asyncio.sleep(1.5)
+        lifecycle, state = list(owner.lifecycle), ability.state()
+        return lifecycle, state, [episode.turn_id for episode in await _remembered(ctx, store)]
+
+    lifecycle, state, remembered = asyncio.run(run())
+
+    assert [event.name for event in lifecycle] == []
+    assert state.endswith("/idle")
+    assert remembered == ["first", "next"]

@@ -3,7 +3,6 @@ from mosfet import event, media
 from mosfet.abilities.cognition import event as cognition_event
 from mosfet.abilities import cognition, listening, processing
 from mosfet.abilities.communication import communication, conversation
-from mosfet.abilities.communication.conversation import memory as conversation_memory
 from mosfet.devices import audio
 from mosfet.devices.phone import events as phone_events
 from mosfet.environment import SoundData, SoundEvent
@@ -88,23 +87,11 @@ def test_bot_degraded_is_an_error_terminal_with_a_closed_stage_and_never_a_tool(
         _ = mosfet.DegradedEventData.model_validate({"stage": "unknown"})
 
 
-def test_messages_memories_are_excluded_from_model_facing_content() -> None:
-    memory = conversation_memory.Memory(
-        source_ids=frozenset({"caller"}),
-        target_ids=frozenset(),
-        content="private host context",
-        content_type="text/plain",
-    )
-    history = conversation.Messages(memories=(memory,))
+def test_messages_carry_no_recalled_memories() -> None:
+    """Hard cutover: history never carried host-only memories; memory keeps only the causal turn."""
 
-    xml = _xml(
-        processing.InputData(input=conversation.OutputEvent.with_data(history)).model_facing_content(
-            media.ImageCapacity()
-        )
-    )
-
-    assert "memories" not in xml
-    assert "private host context" not in xml
+    assert "memories" not in conversation.Messages.model_fields
+    assert conversation.Messages.__memory_fields__ == frozenset({"parent"})
 
 
 def test_observed_bot_event_keeps_binary_python_dump_but_canonical_omits_media() -> None:

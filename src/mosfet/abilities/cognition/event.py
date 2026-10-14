@@ -9,7 +9,13 @@ A payload may declare recalled context it carries as budgeted sequence fields
 (``__model_facing_budgeted_fields__``). Those render last, trimmed item by item to the bytes the
 rest of the stimulus leaves, so recalled context never makes a prompt fail.
 
-Metrics (scope ``bot.abilities.processing``):
+``memory_content`` renders what memory keeps of a stimulus through the same projection. A payload
+that declares ``__memory_fields__`` contributes only those fields, typed causal parents included
+(the prompt projection skips them); memory never fails a turn, so an unrenderable or oversized
+stimulus is kept as its bare element marked ``omitted``.
+
+Metrics (scope ``bot.abilities.processing``; the image metrics count model prompts only, never
+``memory_content``):
 
 - ``bot.processing.prompt.image.count`` with ``outcome`` (``attached``, ``omitted_capacity``,
   ``omitted_media_type``) and ``media_type`` (the three ``media.ImageMediaType`` values), once per
@@ -111,6 +117,8 @@ class _ProjectionBudget:
     # Items of a budgeted field render whole: a budgeted field inside one is not deferred again.
     deferred: list[_BudgetedField] = dataclasses.field(default_factory=list[_BudgetedField])
     defer: bool = True
+    # Rendering what memory keeps: ``__memory_fields__`` select fields, causal parents included.
+    memory: bool = False
 
     def mark(self) -> _Mark:
         return _Mark(self.encoded_bytes, self.nodes, self.collection_items, len(self.images))
@@ -212,13 +220,19 @@ def _serialized_bytes(element: ElementTree.Element, *, level: int) -> int:
     return len(ElementTree.tostring(element, encoding="unicode").encode("utf-8"))
 
 
+def _field_names(level: object, marker: str) -> frozenset[str] | None:
+    """Read a model-level field-name marker as a bounded string set; None when it is not declared."""
+
+    raw = getattr(level, marker, None)
+    if not isinstance(raw, collections.abc.Collection) or isinstance(raw, str):
+        return None
+    return frozenset(name for name in typing.cast(collections.abc.Collection[object], raw) if isinstance(name, str))
+
+
 def _excluded_field_names(level: object) -> frozenset[str]:
     """Read a model-level exclusion marker as a bounded string set."""
 
-    raw = getattr(level, "__model_facing_excluded_fields__", ())
-    if not isinstance(raw, collections.abc.Collection):
-        return frozenset()
-    return frozenset(name for name in typing.cast(collections.abc.Collection[object], raw) if isinstance(name, str))
+    return _field_names(level, "__model_facing_excluded_fields__") or frozenset()
 
 
 def _snake_case(name: str) -> str:
@@ -330,6 +344,7 @@ def _model_element(
     excluded_fields = frozenset(
         name for level in _payload_ancestry(type(model)) for name in _excluded_field_names(level)
     )
+    kept = _field_names(type(model), "__memory_fields__") if budget.memory else None
     budgeted = typing.cast(
         collections.abc.Mapping[object, object], getattr(type(model), "__model_facing_budgeted_fields__", {})
     )
@@ -349,10 +364,13 @@ def _model_element(
         for name in fields:
             if name in rendered or name not in declared or name in excluded_fields or name not in serialized_model:
                 continue
+            if kept is not None and name not in kept:
+                continue
             rendered.add(name)
             value = getattr(model, name, None)
             if (
-                name == "parent"
+                kept is None
+                and name == "parent"
                 and isinstance(value, pydantic.BaseModel)
                 and getattr(type(value), "__model_facing_event_data__", False)
             ):
@@ -541,11 +559,13 @@ def _attach_images(
         if omission is None:
             admitted.append(image)
             _set_image_attributes(placeholder, image, budget, ref=f"image-{len(admitted)}")
-            _IMAGE_COUNT.add(1, attributes={"outcome": "attached", "media_type": image.media_type})
-            _IMAGE_SIZE.record(len(image.content), attributes={"media_type": image.media_type})
+            if not budget.memory:
+                _IMAGE_COUNT.add(1, attributes={"outcome": "attached", "media_type": image.media_type})
+                _IMAGE_SIZE.record(len(image.content), attributes={"media_type": image.media_type})
         else:
             _set_image_attributes(placeholder, image, budget, omitted=omission)
-            _IMAGE_COUNT.add(1, attributes={"outcome": f"omitted_{omission}", "media_type": image.media_type})
+            if not budget.memory:
+                _IMAGE_COUNT.add(1, attributes={"outcome": f"omitted_{omission}", "media_type": image.media_type})
     return admitted
 
 
@@ -581,7 +601,44 @@ def model_facing_content(
     budgeted items exceeds the projection budgets.
     """
 
-    budget = _ProjectionBudget(limit_bytes=min(budget_bytes, _MAX_PROMPT_PROJECTION_BYTES))
+    return _project(value, capacity=capacity, budget_bytes=budget_bytes, memory=False)
+
+
+def memory_content(
+    value: object, *, capacity: media.ImageCapacity, budget_bytes: int = _MAX_PROMPT_PROJECTION_BYTES
+) -> tuple[text.ContentPart, ...]:
+    """Render what memory keeps of a stimulus: pseudo-XML text with the images ``capacity`` admits.
+
+    The same projection as ``model_facing_content``, with two differences. A payload class may
+    declare ``__memory_fields__``, a set of field names: only those fields render, and a typed
+    causal parent among them renders too (the prompt projection always skips it), so memory keeps
+    what caused an emission rather than what it re-sends. And it never raises: a stimulus that
+    exceeds ``budget_bytes`` or any projection budget, or that cannot be rendered, is kept as its
+    bare element with its envelope attributes and ``omitted="size"`` or ``omitted="content"``.
+    """
+
+    try:
+        return _project(value, capacity=capacity, budget_bytes=budget_bytes, memory=True)
+    except ValueError:
+        omitted = "size"
+    except TypeError:
+        omitted = "content"
+    if isinstance(value, pydantic.BaseModel) and getattr(type(value), "__model_facing_input__", False):
+        value = getattr(value, "stimulus", None)
+    envelope: hsm.Event[object] | None = value if isinstance(value, hsm.Event) else None
+    payload: object = envelope.data if envelope is not None else value
+    budget = _ProjectionBudget()
+    root = _element(_payload_tag(type(payload)), budget)
+    if envelope is not None:
+        _set_event_attributes(root, envelope, budget)
+    root.set("omitted", omitted)
+    return (text.TextPart(text=ElementTree.tostring(root, encoding="unicode")),)
+
+
+def _project(
+    value: object, *, capacity: media.ImageCapacity, budget_bytes: int, memory: bool
+) -> tuple[text.ContentPart, ...]:
+    budget = _ProjectionBudget(limit_bytes=min(budget_bytes, _MAX_PROMPT_PROJECTION_BYTES), memory=memory)
     if isinstance(value, pydantic.BaseModel) and getattr(type(value), "__model_facing_input__", False):
         value = getattr(value, "stimulus", None)
     envelope: hsm.Event[object] | None = value if isinstance(value, hsm.Event) else None
@@ -618,4 +675,4 @@ def model_facing_content(
     return tuple(parts)
 
 
-__all__ = ["model_facing_content"]
+__all__ = ["memory_content", "model_facing_content"]

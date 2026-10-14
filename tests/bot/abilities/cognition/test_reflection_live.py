@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import collections.abc
 import dataclasses
+import datetime
 import os
 import typing
 from pathlib import Path
@@ -186,19 +187,25 @@ def _cognition_input(*, focus: str | None = "phone") -> cognition.InputData:
     )
 
 
-async def _seed_ring_answer_episodes(engine: Engine, *, count: int = 3) -> None:
-    """Store repeated ring→answer cognition episodes so reflection has a clear pattern."""
+def _ring_answer_associations(*, count: int = 3) -> memory.AssociationsData:
+    """What memory surfaces for a repeated ring→answer pattern, so reflection has a clear one."""
 
-    for index in range(count):
-        episode = cognition.episodes.CognitiveEpisode(
-            focus="phone",
-            focus_candidates=("phone",),
-            stimulus_name="environment.sound",
-            output=_answer_call_output(f"call-{index}", f"answered incoming ring episode {index}"),
-            behavior=None,
+    at = datetime.datetime(2026, 10, 14, 12, 0, tzinfo=datetime.UTC)
+    return memory.AssociationsData(
+        items=tuple(
+            memory.Association(
+                ref=f"episode-{index}",
+                kind=memory.NodeKind.EPISODE,
+                text=(
+                    f'<environment:sound stimulus:event="environment.sound" kind="phone.ringing"/> '
+                    f"→ phone.answer_call call-{index}: answered incoming ring episode {index}"
+                ),
+                at=at - datetime.timedelta(minutes=index),
+                lanes=(memory.Lane.SIMILAR, memory.Lane.RECENT),
+            )
+            for index in range(count)
         )
-        insert = cognition.episodes.episode_insert_input(episode, context_ref="phone")
-        _ = execute_on(engine, insert)
+    )
 
 
 async def _behavior_contents(engine: Engine) -> tuple[str, ...]:
@@ -216,49 +223,41 @@ async def _behavior_contents(engine: Engine) -> tuple[str, ...]:
     return tuple(sources)
 
 
-async def _episodes(engine: Engine) -> tuple[cognition.episodes.CognitiveEpisode, ...]:
-    select = cognition.episodes.episode_select_input(context_ref="phone")
-    out = execute_on(engine, select)
-    return cognition.episodes.episodes_from_output(out)
-
-
-async def _start_reflection(reflection: cognition.Reflection) -> hsm.Context:
+async def _start_reflection(reflection: cognition.Reflection, store: memory.Memory) -> hsm.Context:
     ctx = shared_hsm_context()
-    await start_abilities_for_test(ctx, reflection)
+    # Cognition attaches the bot's memory in production; Reflection is only its peer.
+    await start_abilities_for_test(ctx, store, reflection)
     return ctx
 
 
 @requires_openai
 @pytest.mark.live
 def test_live_reflection_writes_behavior_from_repeated_ring_pattern() -> None:
-    """Real OpenAI Terra: repeated ring→answer episodes → Reflection creates executable Starlark behavior."""
+    """Real OpenAI Terra: repeated ring→answer associations → Reflection creates executable Starlark behavior."""
 
     api_key = _openai_api_key()
     assert api_key is not None
     print(f"\nReflection model={_openai_model()!r} base_url={_openai_base_url()!r}")
 
-    async def run() -> tuple[None, tuple[str, ...], tuple[cognition.episodes.CognitiveEpisode, ...]]:
+    async def run() -> tuple[None, tuple[str, ...]]:
         engine = memory.store.open_sqlite_engine()
         store = memory.Memory(engine=engine)
-        await _seed_ring_answer_episodes(engine, count=3)
         reflection = cognition.Reflection(processor=_openai_reflection_processor(), memory=store)
-        ctx = await _start_reflection(reflection)
+        ctx = await _start_reflection(reflection, store)
         input = cognition.reflection.InputData(
             cognition_input=_cognition_input(focus="phone"),
             cognition_output=_answer_call_output("call-live", "answered another incoming ring"),
+            associations=_ring_answer_associations(count=3),
         )
         result = await asyncio.wait_for(
             dispatch_ability_for_test(reflection, ctx, input, timeout=_LIVE_TIMEOUT_S),
             timeout=_LIVE_TIMEOUT_S + 5.0,
         )
         assert result is None
-        return result, await _behavior_contents(engine), await _episodes(engine)
+        return result, await _behavior_contents(engine)
 
-    _result, stored_behaviors, episodes = asyncio.run(run())
+    _result, stored_behaviors = asyncio.run(run())
 
-    assert len(episodes) >= 1, "Reflection should store this turn as a cognitive episode"
-    latest = episodes[-1]
-    assert latest.focus == "phone"
     # Behavior create is the point of this e2e: inventory must gain an executable behavior row.
     assert len(stored_behaviors) >= 1, f"expected behavior inventory row(s), got {stored_behaviors!r}"
     joined = "\n".join(stored_behaviors)
@@ -266,17 +265,12 @@ def test_live_reflection_writes_behavior_from_repeated_ring_pattern() -> None:
         key in joined.lower()
         for key in ("answer", "ring", "phone", "sound", "call", "triggers", "description", "hsm.define", "behavior")
     ), f"behavior contents look empty or malformed: {stored_behaviors!r}"
-    # Episode should carry the behavior payload when create succeeded.
-    assert latest.behavior is not None, f"latest episode missing behavior payload: {latest!r}"
-    assert isinstance(latest.behavior, behavior_events.CreateData)
-    assert latest.behavior.name
-    assert latest.behavior.event == behavior_events.CreateEvent.name
-    assert latest.behavior.source, f"create must install starlark source, got {latest.behavior!r}"
     # Source must parse/compile as real executable behavior.
-    behavior = behavior_events.start(latest.behavior.source, name=latest.behavior.name)
+    source = stored_behaviors[0]
+    behavior = behavior_events.start(source)
     compiled = behavior_events.build(behavior.source)
     assert compiled.input_event.name
-    assert "hsm.define" in latest.behavior.source or "behavior_program" in latest.behavior.source
+    assert "hsm.define" in source or "behavior_program" in source
 
 
 @requires_openai
@@ -288,12 +282,12 @@ def test_live_reflection_empty_when_no_repeated_pattern() -> None:
     assert api_key is not None
     print(f"\nReflection model={_openai_model()!r} base_url={_openai_base_url()!r}")
 
-    async def run() -> tuple[tuple[str, ...], tuple[cognition.episodes.CognitiveEpisode, ...]]:
+    async def run() -> tuple[str, ...]:
         engine = memory.store.open_sqlite_engine()
         store = memory.Memory(engine=engine)
-        # No prior episodes seeded.
+        # Nothing surfaced from memory: no associations.
         reflection = cognition.Reflection(processor=_openai_reflection_processor(), memory=store)
-        ctx = await _start_reflection(reflection)
+        ctx = await _start_reflection(reflection, store)
         input = cognition.reflection.InputData(
             cognition_input=_cognition_input(focus="phone"),
             cognition_output=_focus_output("phone", "one-off focus, no pattern"),
@@ -302,14 +296,12 @@ def test_live_reflection_empty_when_no_repeated_pattern() -> None:
             dispatch_ability_for_test(reflection, ctx, input, timeout=_LIVE_TIMEOUT_S),
             timeout=_LIVE_TIMEOUT_S + 5.0,
         )
-        return await _behavior_contents(engine), await _episodes(engine)
+        return await _behavior_contents(engine)
 
-    behaviors, episodes = asyncio.run(run())
+    behaviors = asyncio.run(run())
 
-    assert len(episodes) == 1
     # Prefer empty behavior inventory; if the model still creates one, fail loudly so we can tighten prompts.
     assert behaviors == (), f"expected no behavior for one-off turn, got {behaviors!r}"
-    assert episodes[0].behavior is None
 
 
 def _live_behavior_answers_phone_call(
@@ -344,15 +336,15 @@ def _live_behavior_answers_phone_call(
         for attempt in range(3):
             engine = memory.store.open_sqlite_engine()
             store = memory.Memory(engine=engine)
-            await _seed_ring_answer_episodes(engine, count=3)
             reflection = cognition.Reflection(processor=reflection_processor, memory=store)
-            ctx = await _start_reflection(reflection)
+            ctx = await _start_reflection(reflection, store)
             input = cognition.reflection.InputData(
                 cognition_input=reflection_turn_input,
                 cognition_output=_answer_call_output(
                     "call-live",
                     "answered another incoming ring",
                 ),
+                associations=_ring_answer_associations(count=3),
             )
             try:
                 _ = await asyncio.wait_for(
@@ -366,21 +358,8 @@ def _live_behavior_answers_phone_call(
             if not behaviors:
                 errors.append(f"attempt {attempt + 1}: no behavior inventory row")
                 continue
-            episodes = await _episodes(engine)
-            latest = episodes[-1]
-            if latest.behavior is None or not isinstance(latest.behavior, behavior_events.CreateData):
-                errors.append(f"attempt {attempt + 1}: episode missing create payload")
-                continue
-            if not latest.behavior.source:
-                errors.append(f"attempt {attempt + 1}: create missing source")
-                continue
             try:
-                return behavior_events.start(
-                    latest.behavior.source,
-                    name=latest.behavior.name,
-                    triggers=latest.behavior.triggers or None,
-                    description=latest.behavior.description,
-                )
+                return behavior_events.start(behaviors[0])
             except Exception as error:  # noqa: BLE001
                 errors.append(f"attempt {attempt + 1}: start failed: {error}")
                 continue
@@ -485,7 +464,7 @@ def _live_behavior_answers_phone_call(
 @requires_openai
 @pytest.mark.live
 def test_live_openai_terra_behavior_answers_phone_call() -> None:
-    """Real OpenAI Terra: generate behavior from episodes, Autonomy answers phone."""
+    """Real OpenAI Terra: generate behavior from associations, Autonomy answers phone."""
 
     api_key = _openai_api_key()
     assert api_key is not None
@@ -565,8 +544,10 @@ def test_live_behavior_forms_after_n_natural_calls_without_preload() -> None:
         ability = cognition.Cognition(
             autonomy=cognition.Autonomy(memory=store),
             intuition=cognition.Intuition(processor=_EscalateIntuition()),
-            reasoning=cognition.Reasoning(processor=reasoning, memory=store),
+            reasoning=cognition.Reasoning(processor=reasoning),
             reflection=reflection,
+            memory=store,
+            associative=memory.Associative(memory=store),
         )
         environment = Environment()
         shared = shared_hsm_context(environment)
@@ -624,8 +605,7 @@ def test_live_behavior_forms_after_n_natural_calls_without_preload() -> None:
             await wait_idle(ability, timeout=30.0)
 
             behaviors = await _behavior_contents(engine)
-            episodes = await _episodes(engine)
-            print(f"after call {n}: behaviors={len(behaviors)} episodes={len(episodes)}")
+            print(f"after call {n}: behaviors={len(behaviors)}")
             if behaviors and formed_at is None:
                 formed_at = n
                 print(f"\n*** behavior formed after {n} natural call(s) ***\n{behaviors[0][:800]}\n")

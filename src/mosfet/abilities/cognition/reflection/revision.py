@@ -28,7 +28,6 @@ from mosfet.protocols import attachment
 from mosfet import telemetry
 from mosfet.telemetry import span
 
-from .. import episodes
 from .. import inventory
 from .. import input
 from .. import types
@@ -45,7 +44,7 @@ CHANGE_INSTRUCTIONS = (
     "If source is non-empty, rewrite or patch it so it better fits this turn and prior_episodes. "
     "Keep the model name stable unless the intent clearly renames the behavior.\n"
     "Behavior terminal output must be a cognition event selection object (keys: event, target?, data?, reason?) "
-    "or a list of such objects, matching the shape of prior episode / this-turn outputs. "
+    "or a list of such objects, matching the shape of prior episode acts / this-turn outputs. "
     "output_event JSON schema root must be type object. "
     "Derive input fields, guards, and selection field names from the observed pattern. "
     "At runtime, fill selection data from the live event data — "
@@ -119,6 +118,11 @@ class InputData(pydantic.BaseModel):
         },
     )
 
+    # Remembered episodes are evidence, oldest first: a prompt that cannot hold them all keeps the newest.
+    __model_facing_budgeted_fields__: typing.ClassVar[dict[str, typing.Literal["head", "tail"]]] = {
+        "prior_episodes": "tail"
+    }
+
     cognition_input: SkipJsonSchema[input.InputData] = pydantic.Field(
         description="Original cognition input whose handled turn triggered reflection."
     )
@@ -129,8 +133,8 @@ class InputData(pydantic.BaseModel):
         default=None,
         description="Instruction material behind this request when it was taught rather than observed.",
     )
-    prior_episodes: tuple[episodes.CognitiveEpisode, ...] = pydantic.Field(
-        default=(), description="Prior similar episodes available as authoring evidence."
+    prior_episodes: tuple[memory.Episode, ...] = pydantic.Field(
+        default=(), description="Prior remembered episodes available as authoring evidence, oldest first."
     )
     intent: CreateData | ChangeData = pydantic.Field(
         description="Selected create or change intent that Revision must author and validate."
@@ -195,6 +199,11 @@ class ChangeWriteInput(pydantic.BaseModel):
         },
     )
 
+    # Remembered episodes are evidence, oldest first: a prompt that cannot hold them all keeps the newest.
+    __model_facing_budgeted_fields__: typing.ClassVar[dict[str, typing.Literal["head", "tail"]]] = {
+        "prior_episodes": "tail"
+    }
+
     cognition_input: SkipJsonSchema[input.InputData] = pydantic.Field(
         description="Original input payload given to cognition for this turn.",
     )
@@ -208,9 +217,9 @@ class ChangeWriteInput(pydantic.BaseModel):
             "Author the behavior to satisfy it; it is evidence, not a stimulus or a selection."
         ),
     )
-    prior_episodes: tuple[episodes.CognitiveEpisode, ...] = pydantic.Field(
+    prior_episodes: tuple[memory.Episode, ...] = pydantic.Field(
         default=(),
-        description="Prior cognition episodes recalled for this reflection.",
+        description="Prior remembered episodes available as authoring evidence, oldest first.",
     )
     intent: ChangeData = pydantic.Field(
         description="Change payload naming the behavior to author or revise.",
@@ -423,8 +432,8 @@ def _evidence_trigger_names(write: ChangeWriteInput) -> tuple[str, ...]:
     if turn_stimulus:
         names.append(turn_stimulus)
     for episode in write.prior_episodes:
-        if episode.stimulus_name:
-            names.append(episode.stimulus_name)
+        if episode.stimulus:
+            names.append(episode.stimulus)
     # An already-installed behavior's own triggers are evidence the bot has *seen* those
     # stimuli fire: a revision that only edits the program must not silently strip them.
     for trigger in write.existing_behavior.triggers:

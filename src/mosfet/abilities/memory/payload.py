@@ -755,16 +755,143 @@ class ReleasedData(pydantic.BaseModel):
     unit: str = pydantic.Field(description="The released unit.")
 
 
+MAX_ASSOCIATIONS: typing.Final = 64
+"""Most associations one turn carries."""
+
+
+def approximate_tokens(text: str) -> int:
+    """Approximate model tokens in ``text``: one per four UTF-8 bytes, rounded up (the default counter)."""
+
+    return -(-len(text.encode("utf-8")) // 4)
+
+
+class CueData(pydantic.BaseModel):
+    """What to associate from: the memory rendering of a stimulus and who is present."""
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
+        frozen=True,
+        extra="forbid",
+        json_schema_extra={
+            "examples": [
+                {
+                    "cue": [{"kind": "text", "text": "Ada: can you call me back at noon?"}],
+                    "participants": [{"ref": "+15555550100", "role": "source"}],
+                }
+            ]
+        },
+    )
+
+    cue: tuple[text.ContentPart, ...] = pydantic.Field(
+        default=(),
+        max_length=MAX_EPISODE_PARTS,
+        description="The memory rendering of the stimulus this turn is about. Empty skips the nearest lane.",
+        examples=[[{"kind": "text", "text": "Ada: can you call me back at noon?"}]],
+    )
+    participants: tuple[mosfet.Participant, ...] = pydantic.Field(
+        default=(),
+        max_length=MAX_PARTICIPANTS,
+        description="Who is present now, as the stimulus producer stamped them.",
+        examples=[[{"ref": "+15555550100", "role": "source"}]],
+    )
+
+    @pydantic.model_validator(mode="after")
+    def _validate_cue(self) -> typing.Self:
+        _check_parts(self.cue)
+        return self
+
+
+class Association(pydantic.BaseModel):
+    """One memory surfaced for the current turn."""
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
+        frozen=True,
+        extra="forbid",
+        json_schema_extra={
+            "examples": [
+                {
+                    "ref": "5d0c3f7e9a1b4c2d8e6f0a1b2c3d4e5f",
+                    "kind": "episode",
+                    "text": "Ada: can you call me back at noon?",
+                    "images": [],
+                    "at": "2026-10-14T16:30:00.000000Z",
+                    "lanes": ["similar", "present"],
+                    "involves": ["+15555550100"],
+                }
+            ]
+        },
+    )
+
+    ref: str = pydantic.Field(
+        min_length=1,
+        description="The remembered node's id; name it to think about this memory in full.",
+        examples=["5d0c3f7e9a1b4c2d8e6f0a1b2c3d4e5f"],
+    )
+    kind: NodeKind = pydantic.Field(description="What the memory is.", examples=["episode"])
+    text: str = pydantic.Field(
+        description="What the memory says, as it was kept.", examples=["Ada: can you call me back at noon?"]
+    )
+    images: tuple[media.ReleasedImage, ...] = pydantic.Field(
+        default=(),
+        description="Images the memory holds, as placeholders without their bytes.",
+    )
+    at: datetime.datetime = pydantic.Field(description="When the memory was made (UTC).")
+    lanes: tuple[Lane, ...] = pydantic.Field(min_length=1, description="What surfaced it.")
+    involves: tuple[str, ...] = pydantic.Field(
+        default=(),
+        description="Participant refs of who the memory involves.",
+        examples=[["+15555550100"]],
+    )
+
+
+class AssociationsData(pydantic.BaseModel):
+    """What memory surfaced for one turn, best first."""
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(frozen=True, extra="forbid")
+    # Ranked best first: a prompt that cannot hold them all keeps the best.
+    __model_facing_budgeted_fields__: typing.ClassVar[dict[str, typing.Literal["head", "tail"]]] = {"items": "head"}
+
+    items: tuple[Association, ...] = pydantic.Field(
+        default=(), max_length=MAX_ASSOCIATIONS, description="The memories surfaced, best first."
+    )
+    omitted: int = pydantic.Field(
+        default=0, ge=0, description="Memories surfaced but left out to fit the association token budget."
+    )
+
+
+class Weights(pydantic.BaseModel):
+    """How Associative scores a candidate; a capacity of the composition, never a per-turn choice.
+
+    ``score = similarity * cosine + recency * 0.5 ** (age / recency_half_life) + present * [involves someone
+    present] + linked * link_weight``.
+    """
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(frozen=True, extra="forbid")
+
+    similarity: float = pydantic.Field(default=1.0, ge=0.0, description="Weight of cosine similarity to the cue.")
+    recency: float = pydantic.Field(default=0.35, ge=0.0, description="Weight of how recent the memory is.")
+    recency_half_life: datetime.timedelta = pydantic.Field(
+        default=datetime.timedelta(days=2),
+        gt=datetime.timedelta(0),
+        description="Age at which the recency term halves.",
+    )
+    present: float = pydantic.Field(default=0.5, ge=0.0, description="Weight of involving someone present now.")
+    linked: float = pydantic.Field(default=0.6, ge=0.0, description="Weight of the link a memory was reached through.")
+
+
 __all__ = [
+    "MAX_ASSOCIATIONS",
     "MAX_EPISODE_PARTS",
     "MAX_EPISODE_TEXT_BYTES",
     "MAX_PARTICIPANTS",
     "Act",
+    "Association",
+    "AssociationsData",
     "BackfillData",
     "BackfilledData",
     "Candidate",
     "ConsolidateData",
     "ConsolidatedData",
+    "CueData",
     "Episode",
     "EpisodeData",
     "EpisodesData",
@@ -790,4 +917,6 @@ __all__ = [
     "UnitNode",
     "UnitRef",
     "UnitRole",
+    "Weights",
+    "approximate_tokens",
 ]

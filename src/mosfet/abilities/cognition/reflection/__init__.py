@@ -5,7 +5,6 @@ from .reflection import (
     CHANGE_INSTRUCTIONS,
     INSTRUCTIONS,
     SELECT_INSTRUCTIONS,
-    CognitiveEpisode,
     ChangeWriteInput,
     InputData,
     InputEvent,
@@ -14,13 +13,11 @@ from .reflection import (
     ProcessorInput,
     Reflection,
     SelectInput,
-    episode_from_turn,
     behavior_events,
 )
 
 __all__ = [
     "CHANGE_INSTRUCTIONS",
-    "CognitiveEpisode",
     "ChangeWriteInput",
     "INSTRUCTIONS",
     "InputData",
@@ -31,7 +28,6 @@ __all__ = [
     "Reflection",
     "SELECT_INSTRUCTIONS",
     "SelectInput",
-    "episode_from_turn",
     "behavior_events",
     "revision",
 ]

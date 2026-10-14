@@ -609,6 +609,7 @@ class MemoryOwningCognition(cognition.Cognition):
             intuition=cognition.Intuition(processor=_DecidesNothing()),
             reasoning=cognition.Reasoning(processor=_DecidesNothing()),
             reflection=cognition.Reflection(processor=_DecidesNothing(), memory=store),
+            memory=store,
         )
 
     @override

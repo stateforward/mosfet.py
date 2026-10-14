@@ -450,15 +450,16 @@ def test_stimulus_name_labels_a_named_event_with_its_event_name() -> None:
 
 
 def test_stimulus_name_lives_only_on_cognition_input() -> None:
-    """Hard cutover: the label is not re-exported by reflection or defined by episodes."""
+    """Hard cutover: the label is not re-exported by reflection, and the episodes module is gone."""
 
-    from mosfet.abilities.cognition import episodes, reflection
+    from mosfet.abilities import cognition
+    from mosfet.abilities.cognition import reflection
 
     assert "stimulus_name" in cognition_input.__all__
     assert not hasattr(reflection, "stimulus_name")
     assert "stimulus_name" not in reflection.__all__
-    assert not hasattr(episodes, "stimulus_name")
-    assert "stimulus_name" not in episodes.__all__
+    assert not hasattr(cognition, "episodes")
+    assert not hasattr(cognition, "directives")
 
 
 def _input_with_participants(count: int) -> cognition_input.InputData:

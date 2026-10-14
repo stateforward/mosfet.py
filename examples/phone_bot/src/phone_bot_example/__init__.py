@@ -425,17 +425,17 @@ def _openai_reflection_client(config: CognitionConfig) -> OpenAIChatClient:
 def _phone_cognition(
     config: CognitionConfig | None = None,
     *,
-    memory: memory.Memory | None = None,
+    store: memory.Memory | None = None,
 ) -> cognition.Cognition:
     config = config or CognitionConfig()
-    store = memory if memory is not None else _memory()
+    store = store if store is not None else _memory()
     # Communication ships a seeded autonomy wire: SpeechEvent → Communication.input.
     # Communication owns routing the admitted turn to its active Conversation.
     from mosfet.abilities import communication as communication_ability
 
     # Mercury 2 intuition (OpenAI-compat); OpenAI Terra reasoning + reflection.
-    # Reflection owns the shared Memory lifecycle. Autonomy, Reasoning, and Routines are its
-    # peers: they reach it by message and never attach it again.
+    # Cognition owns the shared Memory lifecycle. Autonomy, Reflection, Routines, and Associative
+    # are its peers: they reach it by message and never attach it again.
     intuition = OpenAIProcessor(
         client=_mercury_intuition_client(config),
         provider="mercury2_intuition",
@@ -463,10 +463,12 @@ def _phone_cognition(
             seeded_behaviors=(communication_ability.speech_heard_seed(),),
         ),
         intuition=cognition.Intuition(processor=intuition),
-        reasoning=cognition.Reasoning(processor=deliberate, memory=store),
+        reasoning=cognition.Reasoning(processor=deliberate),
         reflection=cognition.Reflection(processor=reflection_processor, memory=store),
         # Persistent routines the bot authors keep running here; their schedules read UTC wall time.
         routines=cognition.Routines(memory=store, clock=functools.partial(datetime.datetime.now, datetime.UTC)),
+        memory=store,
+        associative=memory.Associative(memory=store),
     )
 
 
@@ -915,7 +917,7 @@ class PhoneBot(Bot):
         self._voice = voice if voice is not None else _voice()
         self._memory = memory if memory is not None else _memory()
         cognition_instance = (
-            cognition if cognition is not None else _phone_cognition(cognition_config, memory=self._memory)
+            cognition if cognition is not None else _phone_cognition(cognition_config, store=self._memory)
         )
         self._listening = listening if listening is not None else _listening(speech_config)
         self._conversation = conversation if conversation is not None else _conversation(speech_config)
@@ -1279,7 +1281,7 @@ async def run(
 ) -> dict[str, object]:
     app_config = config or AppConfig.from_env_file()
     store = _memory()
-    cognition_ability = _phone_cognition(app_config.cognition, memory=store)
+    cognition_ability = _phone_cognition(app_config.cognition, store=store)
     conversation = _conversation(app_config.speech)
     livekit_url = app_config.livekit.url if connect_livekit and app_config.livekit.can_connect_room() else None
     livekit_token = app_config.livekit.token if connect_livekit and app_config.livekit.can_connect_room() else None

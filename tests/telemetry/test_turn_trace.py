@@ -162,8 +162,10 @@ def _run_turn() -> tuple[str, list[dict[str, typing.Any]], list[dict[str, typing
         ability = cognition.Cognition(
             autonomy=cognition.Autonomy(memory=store),
             intuition=cognition.Intuition(processor=_Unhandled()),
-            reasoning=cognition.Reasoning(processor=_Reply(), memory=store),
+            reasoning=cognition.Reasoning(processor=_Reply()),
             reflection=cognition.Reflection(processor=_NoChange(), memory=store),
+            memory=store,
+            associative=memory.Associative(memory=store),
         )
         carrier = _Carrier()
         handset = smart_phone.SmartPhone(service=carrier)

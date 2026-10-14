@@ -107,3 +107,56 @@ def test_failure_data_carries_a_closed_kind() -> None:
         "stale_lease",
         "timeout",
     }
+
+
+def test_a_cue_keeps_the_episode_bounds() -> None:
+    cue = memory.CueData(
+        cue=(text.TextPart(text="Ada: noon?"), _image()),
+        participants=(mosfet.Participant(ref="+15555550100", role=mosfet.ParticipantRole.SOURCE),),
+    )
+    assert len(cue.cue) == 2
+    with pytest.raises(pydantic.ValidationError, match="image parts"):
+        _ = memory.CueData(cue=(_image(),) * 9)
+    with pytest.raises(pydantic.ValidationError, match="UTF-8 bytes"):
+        _ = memory.CueData(cue=(text.TextPart(text="x" * (memory.MAX_EPISODE_TEXT_BYTES + 1)),))
+
+
+def test_associations_are_ranked_head_budgeted_and_carry_placeholders_only() -> None:
+    at = datetime.datetime(2026, 10, 14, tzinfo=datetime.UTC)
+    released = media.ReleasedImage.of(media.Image(content=_PNG, media_type="image/png"), reason="memory")
+    association = memory.Association(
+        ref="node-1", kind=memory.NodeKind.EPISODE, text="Ada", images=(released,), at=at, lanes=(memory.Lane.RECENT,)
+    )
+    surfaced = memory.AssociationsData(items=(association,) * 3, omitted=2)
+
+    assert memory.AssociationsData.__model_facing_budgeted_fields__ == {"items": "head"}
+    assert surfaced.omitted == 2
+    with pytest.raises(pydantic.ValidationError):
+        _ = memory.AssociationsData(items=(association,) * (memory.MAX_ASSOCIATIONS + 1))
+    with pytest.raises(pydantic.ValidationError):
+        _ = memory.Association(ref="node-1", kind=memory.NodeKind.EPISODE, text="Ada", at=at, lanes=())
+    rendered = "".join(
+        part.text
+        for part in projection.model_facing_content(surfaced, capacity=media.ImageCapacity())
+        if isinstance(part, text.TextPart)
+    )
+    assert 'omitted="memory"' in rendered
+    for model in (memory.CueData, memory.Association):
+        assert model.model_json_schema().get("examples"), model.__name__
+
+
+def test_weights_are_a_bounded_scoring_capacity() -> None:
+    weights = memory.Weights()
+    assert (weights.similarity, weights.recency, weights.present, weights.linked) == (1.0, 0.35, 0.5, 0.6)
+    assert weights.recency_half_life == datetime.timedelta(days=2)
+    with pytest.raises(pydantic.ValidationError):
+        _ = memory.Weights(recency_half_life=datetime.timedelta(0))
+    with pytest.raises(pydantic.ValidationError):
+        _ = memory.Weights(similarity=-1.0)
+
+
+def test_approximate_tokens_counts_four_utf8_bytes_per_token_rounded_up() -> None:
+    assert memory.approximate_tokens("") == 0
+    assert memory.approximate_tokens("abcd") == 1
+    assert memory.approximate_tokens("abcde") == 2
+    assert memory.approximate_tokens("é" * 2) == 1

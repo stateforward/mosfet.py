@@ -1115,6 +1115,15 @@ class InputData(pydantic.BaseModel):
         ),
         examples=["Return an immediate typed result only when the input is already unambiguous."],
     )
+    recalled: SkipJsonSchema[pydantic.BaseModel | None] = pydantic.Field(
+        default=None,
+        exclude=True,
+        repr=False,
+        description=(
+            "Recalled memory the host attached to this pass; rendered after the stimulus as its own element and "
+            "trimmed to the remaining budget; never a reason to fail."
+        ),
+    )
     patch: SkipJsonSchema[SchemaPatch | None] = pydantic.Field(
         default=None,
         exclude=True,
@@ -1166,9 +1175,14 @@ class InputData(pydantic.BaseModel):
         budgeted fields (``__model_facing_budgeted_fields__``) is trimmed to fit rather than
         failing the turn.
 
+        ``recalled`` renders last, as its own element after the stimulus, into the bytes the
+        instructions, the tool menu, and the stimulus leave; its budgeted fields trim to fit, and
+        when not even its frame fits it is left out. Images it carries render as placeholders only:
+        the stimulus's images are the ones this pass attaches.
+
         Raises ``ValueError`` when the instructions are over the scalar budget, or when the
         instructions, the dispatch tool, and the stimulus without its budgeted items together
-        exceed the provider-neutral prompt budgets.
+        exceed the provider-neutral prompt budgets. Recalled memory never raises.
         """
 
         instructions = self.instructions or ""
@@ -1181,7 +1195,21 @@ class InputData(pydantic.BaseModel):
             separators=(",", ":"),
         )
         reserved = len(instructions.encode("utf-8")) + len(tool.encode("utf-8"))
-        return model_facing_content(self.input, capacity=capacity, budget_bytes=_MAX_MODEL_PROMPT_BYTES - reserved)
+        parts = model_facing_content(self.input, capacity=capacity, budget_bytes=_MAX_MODEL_PROMPT_BYTES - reserved)
+        if self.recalled is None:
+            return parts
+        stimulus = sum(len(part.text.encode("utf-8")) for part in parts if isinstance(part, text.TextPart))
+        # A newline joins the recalled element to the stimulus text that precedes it.
+        remaining = _MAX_MODEL_PROMPT_BYTES - reserved - stimulus - len("\n")
+        try:
+            recalled = model_facing_content(self.recalled, capacity=media.ImageCapacity(), budget_bytes=remaining)
+        except ValueError:
+            return parts
+        rendered = "".join(part.text for part in recalled if isinstance(part, text.TextPart))
+        last = parts[-1] if parts else None
+        if isinstance(last, text.TextPart):
+            return (*parts[:-1], text.TextPart(text=f"{last.text}\n{rendered}"))
+        return (*parts, text.TextPart(text=rendered))
 
 
 class CompletionData(pydantic.BaseModel):

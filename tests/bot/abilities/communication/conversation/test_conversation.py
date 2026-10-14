@@ -5,7 +5,8 @@ from mosfet.abilities import processing
 from mosfet.abilities.hearing import voice
 from mosfet.abilities.listening import interpretation
 from mosfet.abilities.communication.conversation import turn_detector
-from mosfet.abilities.communication.conversation import memory as conversation_memory
+from mosfet.abilities.cognition import event as cognition_event
+from mosfet.abilities.language import text
 from mosfet.abilities.identity import value
 
 import asyncio
@@ -557,26 +558,6 @@ def test_three_voice_observations_reuse_one_detector_track() -> None:
 
 
 def test_vector_context_basis_is_scale_invariant_and_collision_safe() -> None:
-    forward = conversation_memory.relationship_context_ref(
-        source_ids=frozenset({"alice"}),
-        target_ids=frozenset({(3.0, 4.0)}),
-    )
-    scaled = conversation_memory.relationship_context_ref(
-        source_ids=frozenset({"alice"}),
-        target_ids=frozenset({(0.6, 0.8)}),
-    )
-    reverse = conversation_memory.relationship_context_ref(
-        source_ids=frozenset({(0.6, 0.8)}),
-        target_ids=frozenset({"alice"}),
-    )
-    unrelated = conversation_memory.relationship_context_ref(
-        source_ids=frozenset({"alice"}),
-        target_ids=frozenset({(0.0, 1.0)}),
-    )
-
-    assert forward == scaled == reverse
-    assert forward != unrelated
-
     ability, context = started_conversation()
     first = run_input(
         ability,
@@ -1446,6 +1427,57 @@ def test_messages_reject_raw_media_and_preserve_immutable_provenance() -> None:
             content_type="audio/pcm",
             provenance=conversation.MessageProvenance(event="test.input"),
         )
+
+
+def test_memory_keeps_the_inbound_turn_behind_a_history_emission_not_the_history() -> None:
+    """Messages declares __memory_fields__ = {parent}: memory keeps the causal turn, the prompt keeps history."""
+
+    turn = conversation.TurnData(
+        source_ids=frozenset({"caller"}),
+        target_ids=frozenset({"bot"}),
+        content="call me back at noon",
+        content_type="text/plain",
+    )
+    history = conversation.Messages(
+        parent=mosfet.StimulusData(event=conversation.InputEvent.name, data=turn, id="turn-1"),
+        messages=(
+            conversation.Message(
+                sequence=0,
+                direction="inbound",
+                source_ids=frozenset({"caller"}),
+                target_ids=frozenset({"bot"}),
+                content="an earlier line of history",
+                content_type="text/plain",
+                provenance=conversation.MessageProvenance(event="test.input"),
+            ),
+        ),
+    )
+    emitted = conversation.OutputEvent.with_data(history)
+
+    kept = "".join(
+        part.text
+        for part in cognition_event.memory_content(emitted, capacity=media.ImageCapacity())
+        if isinstance(part, text.TextPart)
+    )
+    prompt = "".join(
+        part.text
+        for part in cognition_event.model_facing_content(emitted, capacity=media.ImageCapacity())
+        if isinstance(part, text.TextPart)
+    )
+
+    assert "call me back at noon" in kept
+    assert "an earlier line of history" not in kept
+    assert "an earlier line of history" in prompt
+    assert "call me back at noon" not in prompt
+
+
+def test_conversation_takes_no_memory() -> None:
+    """Hard cutover: Conversation neither recalls nor stores; Cognition remembers every turn."""
+
+    with pytest.raises(TypeError):
+        _ = conversation.Conversation(**typing.cast(typing.Any, {"memory": object()}))
+    assert "memories" not in conversation.ParticipatedTurn.model_fields
+    assert typing.get_args(conversation.Stage) == ("turn_detector", "voice_routing")
 
 
 def test_conversation_append_same_correlation_is_idempotent() -> None:
