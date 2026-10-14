@@ -37,6 +37,7 @@ from mosfet.bot import Bot
 import mosfet.bot as bot_module
 from mosfet.device import Device
 from mosfet import event as event_contract
+from mosfet import media
 from mosfet.event import event_json_schema
 from mosfet.protocols import attachment
 
@@ -2140,7 +2141,8 @@ def test_bot_fans_out_visual_event_to_input_without_cognition() -> None:
         listening_ability = RecordingListening()
         active_bot = AbilityAgent(devices={}, cognition=ability, input=(listening_ability,))
         _ = await start_bot_with_devices(active_bot)
-        visual = VisualEvent.with_data(VisualData(image=b"frame-bytes", media_type="image/png"))
+        frame = media.Image(content=b"\x89PNG\r\n\x1a\n" + b"frame-bytes", media_type="image/png")
+        visual = VisualEvent.with_data(VisualData(image=frame, kind="camera"))
         await active_bot.dispatch(active_bot.context(), visual)
         await asyncio.sleep(0.05)
         return ability.calls, active_bot.state() or ""

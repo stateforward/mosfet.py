@@ -12,6 +12,8 @@ import typing
 import hsm
 import pydantic
 
+from mosfet import media
+
 
 class SoundData(pydantic.BaseModel):
     """Acoustic energy available to a bot's input (hearing) abilities.
@@ -103,36 +105,26 @@ class SoundData(pydantic.BaseModel):
 
 
 class VisualData(pydantic.BaseModel):
-    """Visual energy available to a bot's input (vision) abilities."""
+    """Visual energy available to a bot's input (vision) abilities, as one typed encoded image."""
 
     model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
         frozen=True,
-        ser_json_bytes="base64",
-        val_json_bytes="base64",
         json_schema_extra={
             "description": "Universal visual stimulus for bot input vision abilities.",
             "examples": [
                 {
-                    "image": "aW1hZ2UtYnl0ZXM=",
-                    "media_type": "image/png",
+                    "image": {"content": "iVBORw0KGgo=", "media_type": "image/png", "width_px": 640, "height_px": 480},
+                    "kind": "camera",
                 }
             ],
         },
     )
 
-    image: bytes = pydantic.Field(
-        min_length=1,
+    image: media.Image = pydantic.Field(
         description=(
-            "Raw or encoded image bytes for this visual frame. JSON callers must provide this "
-            "field as base64-encoded bytes."
+            "The visual frame as one encoded image file with its media type and optional pixel size. JSON "
+            "callers provide the image content as base64."
         ),
-        examples=["aW1hZ2UtYnl0ZXM="],
-    )
-    media_type: str | None = pydantic.Field(
-        default=None,
-        min_length=1,
-        description="Optional media type for the image bytes, such as image/png or image/jpeg.",
-        examples=["image/png", "image/jpeg"],
     )
     kind: str | None = pydantic.Field(
         default=None,
