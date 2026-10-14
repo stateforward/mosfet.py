@@ -255,20 +255,22 @@ def compile_statements(
 def recent_select(*criteria: ColumnElement[bool], limit: int) -> Select[typing.Any]:
     """SELECT the ``limit`` most recent ``bot_memory`` rows matching ``criteria``, oldest first.
 
-    Recency is ``created_at``. Rows that share a stamp (the column default has one-second
-    resolution) fall back to ``memory_id`` so the window and its order stay deterministic on every
-    dialect. The window is taken newest-first, then re-read in chronological order for consumers.
+    Recency is ``created_at``. Rows that share a stamp read in insertion order: SQLite's implicit
+    ``rowid`` (``bot_memory`` has a TEXT primary key, so it keeps one) breaks the tie, never the
+    uuid ``memory_id``. The window is taken newest-first, then re-read in chronological order for
+    consumers; the result carries exactly the ``bot_memory`` columns.
     """
 
     table = schema.memory_table
+    insertion = sqlalchemy.literal_column(f"{table.name}.rowid", sqlalchemy.Integer).label("insertion")
     window = (
-        select(table)
+        select(table, insertion)
         .where(*criteria)
-        .order_by(table.c.created_at.desc(), table.c.memory_id.desc())
+        .order_by(table.c.created_at.desc(), insertion.desc())
         .limit(limit)
         .subquery()
     )
-    return select(window).order_by(window.c.created_at, window.c.memory_id)
+    return select(*(window.c[column.name] for column in table.c)).order_by(window.c.created_at, window.c.insertion)
 
 
 def _statement_kind(sql: str) -> str:

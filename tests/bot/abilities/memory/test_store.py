@@ -244,41 +244,61 @@ def test_open_sqlite_engine_upgrades_baseline_behavior_rows_to_turn_lifetime(tmp
     assert [tuple(row) for row in lifetimes] == [("Greeting", "turn")]
 
 
-def test_recent_select_windows_the_newest_rows_oldest_first_and_breaks_ties_by_memory_id() -> None:
+def test_recent_select_returns_same_instant_rows_in_insertion_order() -> None:
     """Recall reaches the latest rows; within the window they read in the order they happened.
 
-    ``created_at`` decides recency even when ``memory_id`` sorts the other way; equal timestamps
-    fall back to ``memory_id`` so the window and its order are deterministic.
+    ``created_at`` decides recency even when ``memory_id`` sorts the other way, and rows that share
+    one ``created_at`` read in insertion order, never in ``memory_id`` (uuid) order, both when the
+    window is cut and when it is re-read oldest first.
     """
+
+    import uuid
 
     from sqlalchemy import insert
 
     table = memory.memory_table
+    same_instant = "2026-01-01 00:00:03.000000"
     rows = (
-        ("oldest", "2026-01-01 00:00:01", "z"),
-        ("older", "2026-01-01 00:00:02", "y"),
-        ("tied-first", "2026-01-01 00:00:03", "b"),
-        ("tied-second", "2026-01-01 00:00:03", "c"),
-        ("other-tag", "2026-01-01 00:00:04", "a"),
+        ("oldest", "2026-01-01 00:00:01.000000", uuid.UUID(int=0xF).hex),
+        ("older", "2026-01-01 00:00:02.000000", uuid.UUID(int=0xE).hex),
+        ("first", same_instant, uuid.UUID(int=0xC).hex),
+        ("second", same_instant, uuid.UUID(int=0xA).hex),
+        ("third", same_instant, uuid.UUID(int=0xB).hex),
+        ("other-tag", "2026-01-01 00:00:04.000000", uuid.UUID(int=0x1).hex),
     )
-    store = memory.Memory()
-    for content, created_at, memory_id in rows:
-        _ = store.execute(
-            memory.InputData(
-                statements=memory.compile_statements(
-                    insert(table).values(
-                        memory_id=memory_id,
-                        content=content,
-                        query_tags="other" if content == "other-tag" else "t",
-                        created_at=created_at,
+
+    async def run() -> tuple[memory.OutputData, memory.OutputData]:
+        store = memory.Memory()
+        await start_abilities_for_test(shared_hsm_context(), store)
+        for content, created_at, memory_id in rows:
+            _ = await dispatch_ability_for_test(
+                store,
+                None,
+                memory.InputData(
+                    statements=memory.compile_statements(
+                        insert(table).values(
+                            memory_id=memory_id,
+                            content=content,
+                            query_tags="other" if content == "other-tag" else "t",
+                            created_at=created_at,
+                        )
                     )
-                )
+                ),
             )
-        )
 
-    recalled = store.execute(
-        memory.InputData(statements=memory.compile_statements(memory.recent_select(table.c.query_tags == "t", limit=3)))
-    )
+        async def recall(limit: int) -> memory.OutputData:
+            return await dispatch_ability_for_test(
+                store,
+                None,
+                memory.InputData(
+                    statements=memory.compile_statements(memory.recent_select(table.c.query_tags == "t", limit=limit))
+                ),
+            )
 
-    assert recalled.contents() == ("older", "tied-first", "tied-second")
-    assert [row.as_mapping()["memory_id"] for row in recalled.results[0].rows] == ["y", "b", "c"]
+        return await recall(4), await recall(2)
+
+    window, cut = asyncio.run(run())
+
+    assert window.contents() == ("older", "first", "second", "third")
+    assert cut.contents() == ("second", "third")
+    assert set(window.results[0].rows[0].as_mapping()) == {column.name for column in table.c}
