@@ -15,6 +15,8 @@ from . import autonomy, event, input, intuition, reasoning, reflection, routines
 if typing.TYPE_CHECKING:
     from .autonomy import Autonomy
     from .cognition import (
+        ArousalData,
+        ArousalEvent,
         CancelData,
         CancelEvent,
         CancelledData,
@@ -33,6 +35,8 @@ if typing.TYPE_CHECKING:
     from .types import EventData, IgnoreData, IgnoreEvent, is_ignore_event, is_output
 
 _LAZY_EXPORT_MODULES = {
+    "ArousalData": ".cognition",
+    "ArousalEvent": ".cognition",
     "InputEvent": ".cognition",
     "OutputEvent": ".cognition",
     "CancelData": ".cognition",
@@ -57,6 +61,8 @@ _LAZY_EXPORT_MODULES = {
 }
 
 __all__ = [
+    "ArousalData",
+    "ArousalEvent",
     "InputEvent",
     "OutputEvent",
     "CancelData",

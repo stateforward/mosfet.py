@@ -125,6 +125,24 @@ it in one transaction; `ReleaseEvent` gives a unit back. Every request gets exac
 `FailedEvent` with `FailureKind` (`invalid_input`, `unavailable`, `store_failed`, `stale_lease`,
 `timeout`); a detached Memory answers `unavailable`.
 
+Consolidation runs while the bot rests. With `memory.Consolidation` composed, Cognition between
+turns is `ready/awake` rather than `ready/idle`; once it has been awake for `rest_after` (default
+ten minutes) it moves to `ready/resting` and sends Consolidation a `memory.RestEvent`. Any
+cognition input, and the `cognition.ArousalEvent` the body sends for every environment stimulus it
+fans out, wakes it (`memory.WakeEvent`); an arousal while awake restarts the timer. A cognition
+without consolidation stays `ready/idle` and never rests. At rest Consolidation backfills
+missing vectors, then leases unit after unit and shows each to its model, which is offered only
+the model-callable events Memory declares (`bot.ability.memory.consolidate`) and is told its
+capacities (link, merge, forget, or leave the unit as it is), never which to use. Selections go
+to Memory with Consolidation as their authority, so Memory's reply comes back to it, correlated
+by the decision id. Memory takes one decision per lease: a copy of the decision selected again is
+refused `stale_lease`, and Consolidation counts that refusal instead of reading it as the unit's
+outcome. A unit left as it is, or refused as invalid, is reviewed; a unit whose
+decision cannot be made or applied is given back unreviewed and the rest ends, and failing again
+on its next lease leaves it reviewed so leasing moves on. Waking cancels a running model call and
+gives an undecided unit back unreviewed. Consolidation tells its owner what became of every unit
+(`memory.UnitOutcomeEvent`).
+
 Cognition owns the bot's memory: it attaches `memory.Memory` and remembers every turn it settles
 (completed, failed, or cancelled) with one `RememberEvent` it does not wait on, rendering the
 stimulus through `cognition.event.memory_content` (a payload's `__memory_fields__` choose what is

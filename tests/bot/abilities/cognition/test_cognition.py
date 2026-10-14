@@ -15,6 +15,7 @@ import collections.abc
 import dataclasses
 import datetime
 import inspect
+import itertools
 import pathlib
 import sqlite3
 import typing
@@ -1145,7 +1146,7 @@ def test_cognition_detaches_once_through_group_and_can_reattach(
         attachment.AttachCompleteEvent.name,
     ]
     assert [event.id for event in lifecycle] == ["cognition-detach", "cognition-second-attach"]
-    assert state == "/CognitionLifecycle/attached/behavior/idle"
+    assert state == "/CognitionLifecycle/attached/behavior/ready/idle"
 
 
 def test_cognition_detach_cancels_active_intuition_through_group() -> None:
@@ -1993,7 +1994,7 @@ def test_cognitive_rejects_output_for_unoffered_event() -> None:
 
     state, failures = asyncio.run(run())
 
-    assert state == "/RecordingCognitionLifecycle/attached/behavior/idle"
+    assert state == "/RecordingCognitionLifecycle/attached/behavior/ready/idle"
     assert failures
     assert failures[0].message == "Selection rejected: Processing selected unavailable event: nope.unavailable."
 
@@ -2019,7 +2020,7 @@ def test_cognitive_rejects_output_data_that_does_not_match_offered_event_schema(
 
     state, failures = asyncio.run(run())
 
-    assert state == "/RecordingCognitionLifecycle/attached/behavior/idle"
+    assert state == "/RecordingCognitionLifecycle/attached/behavior/ready/idle"
     assert failures
     expected_message = (
         "Selection rejected: Processing selected invalid focus selection data for event: bot.focus_device: "
@@ -2051,7 +2052,7 @@ def test_cognitive_rejects_schema_only_operation_data_that_does_not_match_offere
 
     state, failures = asyncio.run(run())
 
-    assert state == "/RecordingCognitionLifecycle/attached/behavior/idle"
+    assert state == "/RecordingCognitionLifecycle/attached/behavior/ready/idle"
     assert failures
     expected_message = (
         "Selection rejected: Processing selected invalid focus selection data for event: bot.focus_device: "
@@ -2127,7 +2128,7 @@ def test_cognitive_model_tracks_processing_lifecycle() -> None:
     assert "/CognitionLifecycle/attaching" not in view.members
     assert "/CognitionLifecycle/attached" in view.members
     assert "/CognitionLifecycle/attached/behavior/initializing" in view.members
-    assert "/CognitionLifecycle/attached/behavior/idle" in view.members
+    assert "/CognitionLifecycle/attached/behavior/ready/idle" in view.members
     processing_path = "/CognitionLifecycle/attached/behavior/processing"
     assert processing_path in view.members
     assert f"{processing_path}/autonomy" in view.members
@@ -2152,7 +2153,8 @@ def test_cognitive_model_tracks_processing_lifecycle() -> None:
     initializing_events = view.transition_map["/CognitionLifecycle/attached/behavior/initializing"]
     assert "bot.ability.attachment.terminal" in initializing_events
     assert "bot.ability.cognition.initializing.complete" not in initializing_events
-    assert "bot.ability.cognition.input" in view.transition_map["/CognitionLifecycle/attached/behavior/idle"]
+    assert "bot.ability.cognition.input" in view.transition_map["/CognitionLifecycle/attached/behavior/ready/idle"]
+    assert "bot.ability.cognition.input" in view.transition_map["/CognitionLifecycle/attached/behavior/ready/resting"]
     assert "bot.ability.autonomy.output" in view.transition_map[f"{processing_path}/autonomy"]
     assert "bot.ability.intuition.output" in view.transition_map[f"{processing_path}/intuition"]
     assert "bot.ability.reasoning.output" in view.transition_map[f"{processing_path}/reasoning"]
@@ -2208,7 +2210,7 @@ def test_cognitive_dispatch_returns_modeled_output_event_result() -> None:
 
     assert result == no_output("fast")
     assert outputs == [no_output("fast")]
-    assert state == "/RecordingCognitionLifecycle/attached/behavior/idle"
+    assert state == "/RecordingCognitionLifecycle/attached/behavior/ready/idle"
 
 
 def test_cognitive_completes_when_trace_metadata_present() -> None:
@@ -2549,7 +2551,7 @@ def test_cognitive_routes_processing_failure_to_failed_event() -> None:
 
     state, failures = asyncio.run(run())
 
-    assert state == "/RecordingCognitionLifecycle/attached/behavior/idle"
+    assert state == "/RecordingCognitionLifecycle/attached/behavior/ready/idle"
     assert failures
     assert "reasoning failed" in failures[-1].message
 
@@ -2571,7 +2573,7 @@ def test_cognitive_routes_invalid_output_to_failed_event() -> None:
 
     state, failures = asyncio.run(run())
 
-    assert state == "/RecordingCognitionLifecycle/attached/behavior/idle"
+    assert state == "/RecordingCognitionLifecycle/attached/behavior/ready/idle"
     assert failures
     assert "array of events" in failures[-1].message or "output schema" in failures[-1].message
 
@@ -4282,3 +4284,142 @@ def test_a_recall_that_fails_is_observed_too_never_silently_dropped() -> None:
     failure = stimulus.data
     assert isinstance(failure, abilities.FailureData)
     assert failure.message.startswith("unavailable")
+
+
+# --- rest ---------------------------------------------------------------------------------------
+
+
+class _LeaveAsIs(processing.Processor):
+    @typing.override
+    async def process(self, input: processing.InputData) -> processing.Events:
+        del input
+        return ()
+
+
+class _RecordingConsolidation(memory.Consolidation):
+    """Consolidation that records the rest and wake notices Cognition sends it (test-only observation)."""
+
+    notices: list[str]
+
+    def __init__(self, *, memory: memory.Memory) -> None:
+        super().__init__(memory=memory, processor=_LeaveAsIs())
+        self.notices = []
+
+    @typing.override
+    def dispatch(self, ctx: hsm.Context, event: hsm.Event[typing.Any]) -> collections.abc.Awaitable[bool]:
+        if event.name in (memory.RestEvent.name, memory.WakeEvent.name):
+            self.notices.append(event.name.rsplit(".", 1)[-1])
+        return super().dispatch(ctx, event)
+
+
+async def _until_rest(condition: collections.abc.Callable[[], bool], *, timeout: float = 3.0) -> None:
+    async with asyncio.timeout(timeout):
+        while not condition():
+            await asyncio.sleep(0.01)
+
+
+async def _resting_cognition(
+    rest_after: datetime.timedelta,
+) -> tuple[cognition.Cognition, _RecordingConsolidation, hsm.Context, _RoutineTickBody]:
+    store = memory.Memory()
+    consolidation = _RecordingConsolidation(memory=store)
+    intuition, reasoning = cognition_abilities(
+        intuition_processor=RecordingIntuitionProcessor(cognition.intuition.OutputData(result=no_output("fast")))
+    )
+    ability = cognition.Cognition(
+        intuition=intuition,
+        reasoning=reasoning,
+        reflection=cognition.Reflection(processor=FixedProcessor(no_output("reflection")), memory=store),
+        memory=store,
+        consolidation=consolidation,
+        rest_after=rest_after,
+    )
+    body = _RoutineTickBody()
+    ctx = shared_hsm_context()
+    _ = await mosfet.started(ctx, body, body.model)
+    await ability.attach(ctx, attachment.AttachEvent.with_data_and_id(attachment.AttachData(actor=body), "attach"))
+    await _until_rest(lambda: ability.state().endswith("/ready/awake"))
+    return ability, consolidation, ctx, body
+
+
+async def _arouse(ctx: hsm.Context, ability: cognition.Cognition, body: hsm.Instance) -> None:
+    _ = await hsm.dispatch(
+        ctx,
+        ability,
+        dataclasses.replace(
+            cognition.ArousalEvent.with_data(cognition.ArousalData(stimulus="environment.sound")),
+            source=hsm.id(body),
+            target=hsm.id(ability),
+        ),
+    )
+
+
+def test_cognition_rest_needs_memory_and_a_positive_rest_after() -> None:
+    store = memory.Memory()
+    intuition, reasoning = cognition_abilities()
+    reflection = cognition.Reflection(processor=FixedProcessor(no_output("unused")), memory=store)
+    with pytest.raises(ValueError, match="consolidation requires memory"):
+        _ = cognition.Cognition(
+            intuition=intuition,
+            reasoning=reasoning,
+            reflection=reflection,
+            consolidation=memory.Consolidation(memory=store, processor=_LeaveAsIs()),
+        )
+    with pytest.raises(ValueError, match="rest_after must be positive"):
+        _ = cognition.Cognition(
+            intuition=intuition, reasoning=reasoning, reflection=reflection, rest_after=datetime.timedelta(0)
+        )
+    members = require_model(cognition.Cognition.model).members
+    for state in ("ready", "ready/idle", "ready/awake", "ready/resting"):
+        assert f"/CognitionLifecycle/attached/behavior/{state}" in members
+    assert cognition.ArousalEvent.name == "bot.ability.cognition.arousal"
+    assert cognition.ArousalEvent.kind != processing.EventKind
+
+
+def test_cognition_rests_after_inactivity_and_arousal_or_any_input_wakes_it() -> None:
+    async def run() -> tuple[list[str], list[str], list[str], str]:
+        ability, consolidation, ctx, body = await _resting_cognition(datetime.timedelta(milliseconds=50))
+        try:
+            await _until_rest(lambda: consolidation.notices == ["rest"])
+            resting = ability.state()
+            await _arouse(ctx, ability, body)
+            await _until_rest(lambda: consolidation.notices[-1:] == ["wake"])
+            woken = list(consolidation.notices)
+            # Idle again, so it rests again; a turn wakes it the same way.
+            await _until_rest(lambda: consolidation.notices[-1:] == ["rest"])
+            _ = await hsm.dispatch(
+                ctx, ability, ability.input_event.with_data_and_id(await started_cognition_input(ctx), "turn-1")
+            )
+            await _until_rest(lambda: consolidation.notices[2:4] == ["rest", "wake"])
+            by_turn = list(consolidation.notices[:4])
+            return woken, by_turn, list(consolidation.notices), resting
+        finally:
+            await ability.stop(ctx)
+
+    woken, by_turn, notices, resting = asyncio.run(run())
+
+    assert resting.endswith("/ready/resting")
+    assert woken == ["rest", "wake"]
+    assert by_turn == ["rest", "wake", "rest", "wake"]
+    # Rest and wake always alternate: every rest is woken once.
+    assert all(a != b for a, b in itertools.pairwise(notices))
+
+
+def test_arousal_while_awake_restarts_the_inactivity_timer() -> None:
+    async def run() -> tuple[list[str], list[str]]:
+        ability, consolidation, ctx, body = await _resting_cognition(datetime.timedelta(milliseconds=500))
+        try:
+            await asyncio.sleep(0.35)
+            await _arouse(ctx, ability, body)
+            await asyncio.sleep(0.35)
+            # 0.7 s since attach: without the restart it would have rested at 0.5 s.
+            before = list(consolidation.notices)
+            await _until_rest(lambda: consolidation.notices == ["rest"])
+            return before, list(consolidation.notices)
+        finally:
+            await ability.stop(ctx)
+
+    before, after = asyncio.run(run())
+
+    assert before == []
+    assert after == ["rest"]

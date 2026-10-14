@@ -2206,6 +2206,59 @@ def test_bot_fans_out_visual_event_to_input_without_cognition() -> None:
     assert state.endswith("/active/unfocused")
 
 
+class ArousalRecordingCognition(cognition.Cognition):
+    """Cognition that records the arousal notices the body sends it (test-only observation)."""
+
+    arousals: list[hsm.Event[typing.Any]]
+    calls: list[processing.InputData]
+
+    def __init__(self) -> None:
+        store = memory.Memory()
+        ignore = IgnoreProcessor()
+        super().__init__(
+            intuition=cognition.Intuition(processor=ignore),
+            reasoning=cognition.Reasoning(processor=_NoopReasoningProcessor()),
+            reflection=_reflection_for_test(store),
+            memory=store,
+        )
+        self.arousals = []
+        self.calls = ignore.calls
+
+    @typing.override
+    def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[bool]:
+        if event.name == cognition.ArousalEvent.name:
+            self.arousals.append(event)
+        return super().dispatch(ctx, event)
+
+
+def test_bot_arouses_cognition_once_for_every_environment_stimulus() -> None:
+    """The reflex floor: any stimulus the body fans out can wake a resting bot; nothing is ranked."""
+
+    async def run() -> tuple[list[hsm.Event[typing.Any]], str, list[processing.InputData]]:
+        ability = ArousalRecordingCognition()
+        active_bot = AbilityAgent(devices={}, cognition=ability, input=())
+        _ = await start_bot_with_devices(active_bot)
+        sound = SoundEvent.with_data(
+            SoundData(audio=b"heard-chunk", media_type="audio/pcm", sample_rate_hz=48_000, channels=1)
+        )
+        frame = media.Image(content=b"\x89PNG\r\n\x1a\n" + b"frame-bytes", media_type="image/png")
+        await active_bot.dispatch(active_bot.context(), sound)
+        await active_bot.dispatch(active_bot.context(), VisualEvent.with_data(VisualData(image=frame, kind="camera")))
+        await wait_until(lambda: len(ability.arousals) == 2)
+        await asyncio.sleep(0.05)
+        return list(ability.arousals), hsm.id(active_bot), ability.calls
+
+    arousals, bot_id, calls = asyncio.run(run())
+
+    assert [event.data for event in arousals] == [
+        cognition.ArousalData(stimulus=SoundEvent.name),
+        cognition.ArousalData(stimulus=VisualEvent.name),
+    ]
+    assert all(event.source == bot_id for event in arousals)
+    # Arousal is not a turn: the stimulus itself still never reaches cognition.
+    assert calls == []
+
+
 def test_bot_records_environment_stimuli_in_stm_register() -> None:
     """Admitted environment stimuli land in the short-term register, grounded as observed.
 

@@ -567,6 +567,8 @@ def test_phone_cognition_preserves_shared_memory_collaboration() -> None:
     assert "reflection=cognition.Reflection(processor=reflection_processor, memory=store)" in source
     # Cognition attaches the one memory and associates every turn from it.
     assert "associative=memory.Associative(memory=store)" in source
+    # While the bot rests, its reflection model consolidates that memory.
+    assert "consolidation=memory.Consolidation(memory=store, processor=reflection_processor)" in source
 
 
 def test_phone_bot_example_loads_local_provider_env_without_secret_output(tmp_path: pathlib.Path) -> None:

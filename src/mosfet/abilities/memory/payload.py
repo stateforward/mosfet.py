@@ -755,6 +755,50 @@ class ReleasedData(pydantic.BaseModel):
     unit: str = pydantic.Field(description="The released unit.")
 
 
+class RestData(pydantic.BaseModel):
+    """The bot came to rest: its memory may be consolidated until it wakes."""
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
+        frozen=True, extra="forbid", json_schema_extra={"examples": [{}]}
+    )
+
+
+class WakeData(pydantic.BaseModel):
+    """The bot woke: consolidation stops, and a unit not yet committed is given back unreviewed."""
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
+        frozen=True, extra="forbid", json_schema_extra={"examples": [{}]}
+    )
+
+
+UnitOutcome: typing.TypeAlias = typing.Literal["committed", "reviewed", "interrupted", "failed", "exhausted"]
+
+
+class UnitOutcomeData(pydantic.BaseModel):
+    """What became of one consolidation unit during a rest."""
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
+        frozen=True,
+        extra="forbid",
+        json_schema_extra={"examples": [{"unit": "0f1e2d3c4b5a69788796a5b4c3d2e1f0", "outcome": "committed"}]},
+    )
+
+    unit: str | None = pydantic.Field(
+        default=None,
+        max_length=64,
+        description="The leased unit; None when no unit was leased (nothing left, or the lease failed).",
+        examples=["0f1e2d3c4b5a69788796a5b4c3d2e1f0"],
+    )
+    outcome: UnitOutcome = pydantic.Field(
+        description=(
+            "'committed': the decision was applied in one transaction; 'reviewed': the bot left the unit as it is; "
+            "'interrupted': the bot woke before the unit was decided; 'failed': no decision could be made or "
+            "applied; 'exhausted': nothing unreviewed is left."
+        ),
+        examples=["committed"],
+    )
+
+
 MAX_ASSOCIATIONS: typing.Final = 64
 """Most associations one turn carries."""
 
@@ -1012,11 +1056,15 @@ __all__ = [
     "ReleaseData",
     "ReleasedData",
     "RememberedData",
+    "RestData",
     "SearchData",
     "UnitData",
     "UnitNode",
+    "UnitOutcome",
+    "UnitOutcomeData",
     "UnitRef",
     "UnitRole",
+    "WakeData",
     "Weights",
     "approximate_tokens",
 ]

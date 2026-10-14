@@ -54,6 +54,7 @@ def build(config: runtime.Config) -> runtime.Assembly:
             reflection=cognition.Reflection(processor=processor, memory=store),
             memory=store,
             associative=memory.Associative(memory=store),
+            consolidation=memory.Consolidation(memory=store, processor=processor),
         ),
     )
     return runtime.Assembly(bots={"minimal": bot})

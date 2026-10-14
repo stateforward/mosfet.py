@@ -495,6 +495,8 @@ def _listen_speak_cognition(config: CognitionConfig) -> cognition.Cognition:
         routines=cognition.Routines(memory=store, clock=functools.partial(datetime.datetime.now, datetime.UTC)),
         memory=store,
         associative=memory.Associative(memory=store),
+        # While the bot rests, its deliberate model consolidates what it remembers.
+        consolidation=memory.Consolidation(memory=store, processor=deliberate_processor),
     )
 
 

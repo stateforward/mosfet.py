@@ -7,11 +7,15 @@ with ``transact``), and it keeps every cognition turn as an episode node of a gr
 persons it involves, with a canonical vector per node in its embedder's space (``Index`` /
 ``ExactIndex`` search it). ``Associative`` surfaces what memory associates with a turn, scored and
 fit to a token budget, and brings a memory to mind in full when the bot deliberately recalls it
-(the model-callable ``RecallEvent``, answered by a ``RecollectedEvent`` observation). ``StmMemory`` is the short-term register of admitted stimuli.
+(the model-callable ``RecallEvent``, answered by a ``RecollectedEvent`` observation).
+``Consolidation`` works through memory while the bot rests: it backfills vectors, then offers a
+model one unit at a time to link, merge, forget, or leave as it is. ``StmMemory`` is the short-term
+register of admitted stimuli.
 """
 
-from . import associative, graph, index, memory, payload, schema, stm, store
+from . import associative, consolidation, graph, index, memory, payload, schema, stm, store
 from .associative import AssociateEvent, AssociatedEvent, Associative, RecallEvent, RecollectedEvent
+from .consolidation import Consolidation, RestEvent, UnitOutcomeEvent, WakeEvent
 from .index import ExactIndex, Index, Neighbor
 from .memory import (
     REQUESTS,
@@ -69,9 +73,12 @@ from .payload import (
     ReleaseData,
     ReleasedData,
     RememberedData,
+    RestData,
     SearchData,
     UnitData,
     UnitNode,
+    UnitOutcomeData,
+    WakeData,
     Weights,
     approximate_tokens,
 )
@@ -117,6 +124,7 @@ __all__ = [
     "ConsolidateEvent",
     "ConsolidatedData",
     "ConsolidatedEvent",
+    "Consolidation",
     "CueData",
     "Episode",
     "EpisodeData",
@@ -165,6 +173,8 @@ __all__ = [
     "RememberedData",
     "RememberedEvent",
     "RequestError",
+    "RestData",
+    "RestEvent",
     "Row",
     "SearchData",
     "SearchEvent",
@@ -173,11 +183,16 @@ __all__ = [
     "StmMemory",
     "UnitData",
     "UnitNode",
+    "UnitOutcomeData",
+    "UnitOutcomeEvent",
+    "WakeData",
+    "WakeEvent",
     "Weights",
     "approximate_tokens",
     "associative",
     "compile_statement",
     "compile_statements",
+    "consolidation",
     "graph",
     "index",
     "memory",

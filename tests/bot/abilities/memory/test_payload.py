@@ -229,3 +229,18 @@ def test_a_recollection_is_recalled_context_and_memory_keeps_only_what_was_thoug
     assert isinstance(kept, text.TextPart)
     assert 'about="the gate"' in kept.text
     assert "x" * 100 not in kept.text
+
+
+def test_rest_and_wake_carry_nothing_and_a_unit_outcome_is_a_closed_label() -> None:
+    assert memory.RestData() == memory.RestData()
+    assert memory.WakeData() == memory.WakeData()
+    for notice in (memory.RestData, memory.WakeData):
+        with pytest.raises(pydantic.ValidationError):
+            _ = notice.model_validate({"why": "tired"})
+    for outcome in ("committed", "reviewed", "interrupted", "failed", "exhausted"):
+        assert memory.UnitOutcomeData(unit="u1", outcome=outcome).outcome == outcome
+    assert memory.UnitOutcomeData(outcome="exhausted").unit is None
+    with pytest.raises(pydantic.ValidationError):
+        _ = memory.UnitOutcomeData.model_validate({"unit": "u1", "outcome": "skipped"})
+    schema = memory.UnitOutcomeData.model_json_schema()
+    assert schema["properties"]["outcome"]["description"]

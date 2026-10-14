@@ -469,6 +469,8 @@ def _phone_cognition(
         routines=cognition.Routines(memory=store, clock=functools.partial(datetime.datetime.now, datetime.UTC)),
         memory=store,
         associative=memory.Associative(memory=store),
+        # While the bot rests, its reflection model consolidates what it remembers.
+        consolidation=memory.Consolidation(memory=store, processor=reflection_processor),
     )
 
 

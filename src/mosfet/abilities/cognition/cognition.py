@@ -44,6 +44,9 @@ _REASONING_ID_SUFFIX = ":reasoning"
 _REFLECTION_ID_SUFFIX = ":reflection"
 _REMEMBER_ID_SUFFIX = ":remember"
 _CHILD_OPERATION_TIMEOUT = datetime.timedelta(seconds=30)
+# How long cognition stays idle before it rests (and consolidation may run): a capacity of the
+# composition, like the processing timeout, not a choice the bot makes.
+_DEFAULT_REST_AFTER: typing.Final = datetime.timedelta(minutes=10)
 _CANCEL_TEARDOWN_TIMEOUT = datetime.timedelta(seconds=5)
 # What memory keeps of a stimulus's images: at most one turn's worth, of every accepted media type.
 _MEMORY_IMAGES: typing.Final = media.ImageCapacity(
@@ -92,6 +95,23 @@ class CancelledData(pydantic.BaseModel):
     )
 
 
+class ArousalData(pydantic.BaseModel):
+    """The body perceived an environment stimulus: whatever it is, it wakes a resting bot."""
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
+        frozen=True,
+        extra="forbid",
+        json_schema_extra={"examples": [{"stimulus": "environment.sound"}]},
+    )
+
+    stimulus: str = pydantic.Field(
+        min_length=1,
+        max_length=200,
+        description="Name of the environment stimulus the body fanned out (a low-cardinality label).",
+        examples=["environment.sound"],
+    )
+
+
 class _UseFailedEventData(pydantic.BaseModel):
     """Private failure payload carrying failure details and operation identity."""
 
@@ -124,6 +144,11 @@ CancelledEvent = hsm.Event[CancelledData](
     kind=hsm.CompletionEventKind,
     schema=CancelledData,
 )
+ArousalEvent = hsm.Event[ArousalData](
+    name="bot.ability.cognition.arousal",
+    schema=ArousalData,
+)
+"""Sent by the body for every environment stimulus it fans out; wakes rest and restarts the rest timer."""
 _CancelPendingEvent = hsm.Event[CancelData](
     name="bot.ability.cognition.cancel.pending",
     schema=CancelData,
@@ -269,6 +294,11 @@ class Cognition(ability.Ability[InputData, OutputData]):
     Cognition and goes to the body as a ``cognition.InputEvent`` observing it: a new turn the bot
     decides on, the way a routine tick is.
 
+    With ``consolidation`` composed too, Cognition rests once it has been idle for ``rest_after``:
+    it sends ``consolidation`` a ``memory.RestEvent``, and the first cognition input or body
+    ``ArousalEvent`` (sent for every environment stimulus) wakes it with ``memory.WakeEvent``. An
+    arousal while awake restarts the inactivity timer.
+
     With ``routines`` composed, Reflection settling a turn sends Routines a reconcile (its
     inventory writes may have created, changed, or broken a persistent routine), and every
     routine tick Routines forwards goes to the body as a ``cognition.InputEvent`` observing
@@ -290,6 +320,8 @@ class Cognition(ability.Ability[InputData, OutputData]):
     _routines: routines.Routines | None
     _memory: memory.Memory | None
     _associative: memory.Associative | None
+    _consolidation: memory.Consolidation | None
+    _rest_after: datetime.timedelta
     # Injected operation bounds (None = live module default, so tests may still tune
     # the module constants around construction). Never hardcode per-caller durations.
     _child_operation_timeout: datetime.timedelta | None
@@ -1533,6 +1565,52 @@ class Cognition(ability.Ability[InputData, OutputData]):
         )
 
     @staticmethod
+    def _has_consolidation(
+        ctx: hsm.Context,
+        instance: "Cognition",
+        event: hsm.Event[typing.Any],
+    ) -> bool:
+        del ctx, event
+        return instance._consolidation is not None
+
+    @staticmethod
+    def _rest_delay(
+        ctx: hsm.Context,
+        instance: "Cognition",
+        event: hsm.Event[typing.Any],
+    ) -> datetime.timedelta:
+        del ctx, event
+        return instance._rest_after
+
+    @staticmethod
+    def _notify_consolidation(
+        ctx: hsm.Context,
+        instance: "Cognition",
+        notice: hsm.Event[typing.Any],
+    ) -> None:
+        consolidation = instance._consolidation
+        assert consolidation is not None, "only a cognition with consolidation rests"
+        _ = hsm.dispatch(
+            ctx,
+            consolidation,
+            dataclasses.replace(notice, source=hsm.id(instance), target=hsm.id(consolidation)),
+        )
+
+    @staticmethod
+    def _rest(ctx: hsm.Context, instance: "Cognition", event: hsm.Event[typing.Any]) -> None:
+        """Resting: memory may be consolidated until anything wakes the bot."""
+
+        del event
+        Cognition._notify_consolidation(ctx, instance, memory.RestEvent.with_data(memory.RestData()))
+
+    @staticmethod
+    def _wake(ctx: hsm.Context, instance: "Cognition", event: hsm.Event[typing.Any]) -> None:
+        """Leaving rest for any reason (input, arousal, reboot, detach): consolidation stops."""
+
+        del event
+        Cognition._notify_consolidation(ctx, instance, memory.WakeEvent.with_data(memory.WakeData()))
+
+    @staticmethod
     def _accept_ignore(
         ctx: hsm.Context,
         instance: "Cognition",
@@ -1553,17 +1631,34 @@ class Cognition(ability.Ability[InputData, OutputData]):
                 hsm.on(ability.Ability._composite_attachment_terminal_event),
                 hsm.guard(_is_attach_complete_with_routines),
                 hsm.effect(ability.Ability._deliver_composite_attachment_terminal, _reconcile_routines),
-                hsm.target("/Cognition/idle"),
+                hsm.target("/Cognition/ready/settling"),
             ),
             hsm.transition(
                 hsm.on(ability.Ability._composite_attachment_terminal_event),
                 hsm.guard(ability.Ability._is_composite_attach_complete),
                 hsm.effect(ability.Ability._deliver_composite_attachment_terminal),
-                hsm.target("/Cognition/idle"),
+                hsm.target("/Cognition/ready/settling"),
             ),
         ),
+        # Not processing a turn. A cognition that cannot consolidate is simply idle. One that can
+        # is awake, and rests once it has been awake for rest_after; every input and every body
+        # arousal leaves rest through these shared transitions, which wakes it.
         hsm.state(
-            "idle",
+            "ready",
+            hsm.initial(hsm.target("/Cognition/ready/idle")),
+            hsm.choice(
+                "settling",
+                hsm.transition(hsm.guard(_has_consolidation), hsm.target("/Cognition/ready/awake")),
+                hsm.transition(hsm.target("/Cognition/ready/idle")),
+            ),
+            hsm.state("idle"),
+            hsm.state(
+                "awake",
+                hsm.transition(hsm.after(_rest_delay), hsm.target("/Cognition/ready/resting")),
+            ),
+            hsm.state("resting", hsm.entry(_rest), hsm.exit(_wake)),
+            # Arousal restarts the inactivity timer while awake, and wakes a resting bot.
+            hsm.transition(hsm.on(ArousalEvent), hsm.guard(_has_consolidation), hsm.target("/Cognition/ready/awake")),
             # Call surface for deliberative tools (snapshot-offered when host is an actor).
             hsm.transition(
                 hsm.on(types.IgnoreEvent),
@@ -1659,7 +1754,7 @@ class Cognition(ability.Ability[InputData, OutputData]):
                 hsm.guard(_has_failure),
                 hsm.effect(_dispatch_failure),
                 hsm.effect(_finish_turn),
-                hsm.target("/Cognition/idle"),
+                hsm.target("/Cognition/ready/settling"),
             ),
             hsm.state(
                 "autonomy",
@@ -1685,14 +1780,14 @@ class Cognition(ability.Ability[InputData, OutputData]):
                     hsm.guard(_autonomy_is_handled),
                     hsm.effect(_complete_processing),
                     hsm.effect(_finish_turn),
-                    hsm.target("/Cognition/idle"),
+                    hsm.target("/Cognition/ready/settling"),
                 ),
                 hsm.transition(
                     hsm.on(ability.FailedEvent),
                     hsm.guard(_matches_autonomy_failure),
                     hsm.effect(_fail_child),
                     hsm.effect(_finish_turn),
-                    hsm.target("/Cognition/idle"),
+                    hsm.target("/Cognition/ready/settling"),
                 ),
                 hsm.transition(
                     hsm.on(_ChildHopTimedOutEvent),
@@ -1735,14 +1830,14 @@ class Cognition(ability.Ability[InputData, OutputData]):
                     hsm.guard(_intuition_is_handled),
                     hsm.effect(_complete_processing),
                     hsm.effect(_finish_turn),
-                    hsm.target("/Cognition/idle"),
+                    hsm.target("/Cognition/ready/settling"),
                 ),
                 hsm.transition(
                     hsm.on(ability.FailedEvent),
                     hsm.guard(_matches_intuition_failure),
                     hsm.effect(_fail_child),
                     hsm.effect(_finish_turn),
-                    hsm.target("/Cognition/idle"),
+                    hsm.target("/Cognition/ready/settling"),
                 ),
                 hsm.transition(
                     hsm.on(_ChildHopTimedOutEvent),
@@ -1764,14 +1859,14 @@ class Cognition(ability.Ability[InputData, OutputData]):
                     hsm.guard(_matches_reasoning_output),
                     hsm.effect(_complete_processing),
                     hsm.effect(_finish_turn),
-                    hsm.target("/Cognition/idle"),
+                    hsm.target("/Cognition/ready/settling"),
                 ),
                 hsm.transition(
                     hsm.on(ability.FailedEvent),
                     hsm.guard(_matches_reasoning_failure),
                     hsm.effect(_fail_child),
                     hsm.effect(_finish_turn),
-                    hsm.target("/Cognition/idle"),
+                    hsm.target("/Cognition/ready/settling"),
                 ),
                 hsm.transition(
                     hsm.on(_ChildHopTimedOutEvent),
@@ -1791,7 +1886,7 @@ class Cognition(ability.Ability[InputData, OutputData]):
                     hsm.guard(_matches_child_cancelled),
                     hsm.effect(_emit_cancelled),
                     hsm.effect(_finish_turn),
-                    hsm.target("/Cognition/idle"),
+                    hsm.target("/Cognition/ready/settling"),
                 ),
                 # A directed autonomy cancel settles through its pending acknowledgement: autonomy
                 # is an Ability (not Processing) whose cancellation is best-effort — an empty
@@ -1804,7 +1899,7 @@ class Cognition(ability.Ability[InputData, OutputData]):
                     hsm.guard(_is_cancel_request),
                     hsm.effect(_emit_cancelled),
                     hsm.effect(_finish_turn),
-                    hsm.target("/Cognition/idle"),
+                    hsm.target("/Cognition/ready/settling"),
                 ),
                 hsm.transition(
                     hsm.on(autonomy.OutputEvent),
@@ -1834,7 +1929,7 @@ class Cognition(ability.Ability[InputData, OutputData]):
                         hsm.guard(_is_cancel_request),
                         hsm.effect(_emit_cancelled),
                         hsm.effect(_finish_turn),
-                        hsm.target("/Cognition/idle"),
+                        hsm.target("/Cognition/ready/settling"),
                     ),
                 ),
             ),
@@ -1862,7 +1957,7 @@ class Cognition(ability.Ability[InputData, OutputData]):
                 hsm.on(ability.Ability._composite_attachment_terminal_event),
                 hsm.guard(ability.Ability._is_composite_detach_failed),
                 hsm.effect(ability.Ability._deliver_composite_attachment_terminal),
-                hsm.target("/Cognition/idle"),
+                hsm.target("/Cognition/ready/settling"),
             ),
         ),
     )
@@ -1877,6 +1972,8 @@ class Cognition(ability.Ability[InputData, OutputData]):
         routines: routines.Routines | None = None,
         memory: memory.Memory | None = None,
         associative: memory.Associative | None = None,
+        consolidation: memory.Consolidation | None = None,
+        rest_after: datetime.timedelta = _DEFAULT_REST_AFTER,
         child_operation_timeout: datetime.timedelta | None = None,
         cancel_teardown_timeout: datetime.timedelta | None = None,
     ) -> None:
@@ -1887,6 +1984,10 @@ class Cognition(ability.Ability[InputData, OutputData]):
             raise ValueError("cancel_teardown_timeout must be positive.")
         if associative is not None and memory is None:
             raise ValueError("associative requires memory: Cognition attaches the memory it associates from.")
+        if consolidation is not None and memory is None:
+            raise ValueError("consolidation requires memory: Cognition attaches the memory it consolidates.")
+        if rest_after <= datetime.timedelta():
+            raise ValueError("rest_after must be positive.")
         self._autonomy = autonomy
         self._intuition = intuition
         self._reasoning = reasoning
@@ -1894,6 +1995,8 @@ class Cognition(ability.Ability[InputData, OutputData]):
         self._routines = routines
         self._memory = memory
         self._associative = associative
+        self._consolidation = consolidation
+        self._rest_after = rest_after
         self._child_operation_timeout = child_operation_timeout
         self._cancel_teardown_timeout = cancel_teardown_timeout
         children: list[hsm.Instance] = []
@@ -1905,12 +2008,16 @@ class Cognition(ability.Ability[InputData, OutputData]):
             children.append(memory)
         if associative is not None:
             children.append(associative)
+        if consolidation is not None:
+            children.append(consolidation)
         if routines is not None:
             children.append(routines)
         self._attachment_group = attachment.Group(*children)
 
 
 __all__ = [
+    "ArousalData",
+    "ArousalEvent",
     "InputEvent",
     "OutputEvent",
     "Cognition",

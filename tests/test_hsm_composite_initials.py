@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import hsm
 
+from mosfet.abilities.cognition.cognition import Cognition
 from mosfet.abilities.communication.conversation.conversation import Conversation
 from mosfet.abilities.listening.interpretation import Interpretation
+from mosfet.abilities.memory.consolidation import Consolidation
 from mosfet.abilities.memory.memory import Memory
 from mosfet.abilities.reading.reading import Reading
 
@@ -45,6 +47,8 @@ def test_hsm_init_required_composites_declare_nested_initials() -> None:
         # not nested attempt_0/1/2 states (retries continue until same diagnostics twice).
         (Conversation, "active", "waiting"),
         (Memory, "serving", "idle"),
+        (Consolidation, "resting", "backfilling"),
+        (Cognition, "ready", "idle"),
     ]
     for machine_cls, composite_name, expected_target_suffix in cases:
         model = _behavior_model(machine_cls)

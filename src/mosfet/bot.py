@@ -737,6 +737,18 @@ class Bot(Traced, abc.ABC):
                         dataclasses.replace(event, target=hsm.id(ability), metadata=dict(event.metadata))
                     ),
                 )
+            # Reflex floor: any stimulus can wake a resting bot. The notice is uniform and carries
+            # only the stimulus name, never its media; the body ranks and interprets nothing.
+            _ = hsm.dispatch(
+                ctx,
+                instance._cognition,
+                dataclasses.replace(
+                    cognition.ArousalEvent.with_data(cognition.ArousalData(stimulus=event.name)),
+                    source=hsm.id(instance),
+                    target=hsm.id(instance._cognition),
+                    metadata=dict(event.metadata),
+                ),
+            )
 
     @staticmethod
     def _has_focused_device(ctx: hsm.Context, instance: "Bot", event: hsm.Event[typing.Any]) -> bool:
@@ -1726,7 +1738,8 @@ class Bot(Traced, abc.ABC):
                 hsm.effect(_clear_focus),
                 hsm.target("../reboot_deactivating"),
             ),
-            # Explicit environment input events fan out in parallel to input abilities (never cognition).
+            # Explicit environment input events fan out in parallel to input abilities (never cognition;
+            # cognition is only told, uniformly, that a stimulus arrived).
             # Efference is Speaking→Listening only (speaking-owned product), not body fan-out.
             hsm.transition(
                 hsm.on(SoundEvent, VisualEvent),
