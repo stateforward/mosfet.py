@@ -16,7 +16,6 @@ from .reflection import (
     SelectInput,
     episode_from_turn,
     behavior_events,
-    stimulus_name,
 )
 
 __all__ = [
@@ -35,5 +34,4 @@ __all__ = [
     "episode_from_turn",
     "behavior_events",
     "revision",
-    "stimulus_name",
 ]

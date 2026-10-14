@@ -47,11 +47,37 @@ def test_an_adopted_name_is_a_fact_about_the_bot_itself() -> None:
     row = rows[0]
     assert row["query_tags"] == identity.NAME_QUERY
     assert row["subject_ref"] == identity.NAME_SUBJECT
-    assert row["kind"] == str(memory.MemoryClassificationKind.FACT)
+    assert row["kind"] == "fact"
     assert row["retention"] == "retain"
     assert row["sensitivity"] == "standard"
     assert row["scope"] == "long_term"
     assert row["content_format"] == "application/json"
+
+
+def test_a_name_is_always_a_fact() -> None:
+    """A name is a fact about the bot, never an instruction; the schema admits nothing else."""
+
+    schema = identity.Name.model_json_schema()
+
+    assert identity.Name(text="Bob").kind == "fact"
+    assert schema["properties"]["kind"]["const"] == "fact"
+    assert "$defs" not in schema
+
+
+def test_a_name_row_written_before_the_kind_was_narrowed_still_decodes() -> None:
+    """Rows already on disk hold ``kind`` ``fact`` in both the column and the JSON content."""
+
+    store, connection = open_store()
+    try:
+        _ = store.execute(identity.name_insert_input(identity.Name(text="Bob")))
+        recalled = store.execute(identity.name_select_input())
+    finally:
+        connection.close()
+
+    row = recalled.results[0].rows[0].as_mapping()
+    assert row["kind"] == "fact"
+    assert identity.Name.model_validate_json('{"text": "Bob", "kind": "fact"}') == identity.Name(text="Bob")
+    assert identity.adopted_name(recalled) == identity.Name(text="Bob")
 
 
 def test_the_most_recently_adopted_name_is_the_one_the_bot_answers_to() -> None:

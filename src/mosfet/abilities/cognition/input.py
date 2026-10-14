@@ -82,6 +82,14 @@ class InputData(pydantic.BaseModel):
     )
 
 
+def stimulus_name(stimulus: mosfet.InputData) -> str | None:
+    """Low-cardinality stimulus label: the event name, or ``bot.input`` for device input."""
+
+    if isinstance(stimulus, mosfet.InputEventData):
+        return mosfet.InputEvent.name
+    return stimulus.name
+
+
 def is_input(value: object) -> typing.TypeGuard[InputData]:
     return isinstance(value, InputData)
 
@@ -154,4 +162,5 @@ __all__ = [
     "InputData",
     "build_processing_input",
     "is_input",
+    "stimulus_name",
 ]

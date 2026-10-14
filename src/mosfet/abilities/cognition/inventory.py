@@ -43,7 +43,7 @@ def revision(behavior: Instance) -> str:
     return hashlib.sha256(behavior.source.encode("utf-8")).hexdigest()[:12]
 
 
-def _load(store: memory.Memory, name: str) -> Instance | None:
+def _load(store: memory.MemoryStore, name: str) -> Instance | None:
     output = store.execute(
         memory.InputData(statements=memory.compile_statements(*behavior_storage.select_behavior_by_name_clauses(name)))
     )
@@ -56,7 +56,7 @@ def _load(store: memory.Memory, name: str) -> Instance | None:
     return loaded[0] if loaded else None
 
 
-def store_behavior(store: memory.Memory, behavior: Instance, *, cause: Cause) -> None:
+def store_behavior(store: memory.MemoryStore, behavior: Instance, *, cause: Cause) -> None:
     """Replace ``behavior``'s inventory row and record the status change it makes."""
 
     previous = _load(store, behavior.name)

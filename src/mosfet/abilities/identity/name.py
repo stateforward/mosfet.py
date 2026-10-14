@@ -2,9 +2,9 @@
 
 A name is a **fact about a subject**, and the subject is the bot itself: ``kind=fact``,
 ``subject_ref=self``, ``query_tags=self_name`` on the existing ``bot_memory`` schema — no new
-table, no migration. It is deliberately *not* a standing directive: a directive is something the
-bot was told to *do* and stays outstanding until released (see ``cognition.directives``), while a
-name is something the bot *is*. Nothing about a name is ever completed, released, or acted on.
+table, no migration. A name is a fact row, not an episode and not an instruction: it records
+something the bot *is*, never something it was told to *do*. Nothing about a name is ever
+completed, released, or acted on.
 
 Adoption is append-only. A bot that was renamed still remembers having been called something
 else, so the current name is simply the most recently adopted row.
@@ -47,10 +47,10 @@ class Name(pydantic.BaseModel):
         description="The name as the bot adopted it, in plain language.",
         examples=["Bob"],
     )
-    kind: memory.MemoryClassificationKind = pydantic.Field(
-        default=memory.MemoryClassificationKind.FACT,
-        description="Memory classification written on the name row.",
-        examples=[memory.MemoryClassificationKind.FACT],
+    kind: typing.Literal["fact"] = pydantic.Field(
+        default="fact",
+        description="Always `fact`: a name is a fact about the bot, never an instruction.",
+        examples=["fact"],
     )
 
 
@@ -102,7 +102,7 @@ def name_insert_input(
         scope=scope,
         context_ref=None,
         subject_ref=NAME_SUBJECT,
-        kind=str(name.kind),
+        kind=name.kind,
         sensitivity="standard",
         retention="retain",
         content=name.model_dump_json(),

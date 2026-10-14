@@ -20,6 +20,7 @@ from mosfet.telemetry import span
 from mosfet.behavior import BreakData, ChangeData, CreateData
 from . import directives
 from . import episodes
+from . import input as cognition_input
 from . import types
 
 # No static system prose: deliberative turns use the same per-turn world XML on the system
@@ -355,7 +356,7 @@ def _episode_from_reasoning(
         raise TypeError(f"Reasoning cannot retain unsupported stimulus type {type(stimulus)!r}.")
     return episodes.CognitiveEpisode(
         focus=_context_ref_from_input(input),
-        stimulus_name=episodes.stimulus_name(stimulus),
+        stimulus_name=cognition_input.stimulus_name(stimulus),
         output=reasoned.result,
         behavior=reasoned.behavior_data(),
     )

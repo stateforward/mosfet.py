@@ -423,3 +423,37 @@ def test_frame_filters_over_effort_ceiling() -> None:
         )
 
     asyncio.run(run())
+
+
+def test_stimulus_name_labels_device_input_as_bot_input() -> None:
+    """Device input has no event name of its own, so it is labelled with the bot input event."""
+
+    from mosfet.abilities import cognition
+
+    stimulus = mosfet.InputEventData(target_device="phone", priority=0)
+
+    assert cognition.stimulus_name(stimulus) == mosfet.InputEvent.name
+    assert cognition.stimulus_name is cognition_input.stimulus_name
+
+
+def test_stimulus_name_labels_a_named_event_with_its_event_name() -> None:
+    """An environment stimulus keeps its own low-cardinality event name."""
+
+    from mosfet.abilities import cognition
+    from mosfet.environment import SoundData, SoundEvent
+
+    stimulus = SoundEvent.with_data(SoundData(audio=b"ring", kind="phone.ringing"))
+
+    assert cognition.stimulus_name(stimulus) == SoundEvent.name
+
+
+def test_stimulus_name_lives_only_on_cognition_input() -> None:
+    """Hard cutover: the label is not re-exported by reflection or defined by episodes."""
+
+    from mosfet.abilities.cognition import episodes, reflection
+
+    assert "stimulus_name" in cognition_input.__all__
+    assert not hasattr(reflection, "stimulus_name")
+    assert "stimulus_name" not in reflection.__all__
+    assert not hasattr(episodes, "stimulus_name")
+    assert "stimulus_name" not in episodes.__all__

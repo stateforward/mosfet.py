@@ -321,7 +321,7 @@ def _compile_statements(clauses: tuple[ClauseElement, ...]) -> tuple[memory.Stat
     return memory.compile_statements(*clauses)
 
 
-def _load_behavior(store: memory.Memory, name: str) -> Instance | None:
+def _load_behavior(store: memory.MemoryStore, name: str) -> Instance | None:
     output = store.execute(
         memory.InputData(statements=_compile_statements(behavior_storage.select_behavior_by_name_clauses(name)))
     )
@@ -423,7 +423,7 @@ def _evidence_trigger_names(write: ChangeWriteInput) -> tuple[str, ...]:
     """Stimulus names the bot's own evidence can vouch for this authoring request."""
 
     names: list[str] = []
-    turn_stimulus = episodes.stimulus_name(write.cognition_input.stimulus)
+    turn_stimulus = input.stimulus_name(write.cognition_input.stimulus)
     if turn_stimulus:
         names.append(turn_stimulus)
     for episode in write.prior_episodes:
@@ -487,7 +487,7 @@ class Revision(processing.Processing):
     _composite_attachment_lifecycle: typing.ClassVar[bool] = True
 
     _change_processing: processing.Processing
-    _memory: memory.Memory
+    _memory: memory.MemoryStore
     # Authoring attempt index for child correlation (HSM-CORRELATION-001 / HSM-CONTEXT-001).
     # Set from write.attempt in _dispatch_change — never parsed from instance.state().
     _active_attempt: int | None
@@ -1276,7 +1276,7 @@ class Revision(processing.Processing):
         hsm.state("rebooting", hsm.defer(input_event)),
     )
 
-    def __init__(self, *, processor: processing.Processor | ProcessorFactory, memory: memory.Memory) -> None:
+    def __init__(self, *, processor: processing.Processor | ProcessorFactory, memory: memory.MemoryStore) -> None:
         super(processing.Processing, self).__init__()
         leaf = processor() if not isinstance(processor, processing.Processor) else processor
         self._change_processing = processing.Processing(processor=leaf, instructions=type(self).instructions)

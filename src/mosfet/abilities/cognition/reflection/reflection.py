@@ -58,7 +58,6 @@ from .. import types
 from . import revision
 
 CognitiveEpisode = episodes.CognitiveEpisode
-stimulus_name = episodes.stimulus_name
 
 SELECT_INSTRUCTIONS = (
     "Select at most one offered behavior inventory event (bot.behavior.create, change, or break) "
@@ -268,7 +267,7 @@ def episode_from_turn(
     return CognitiveEpisode(
         focus=cognition_turn.cognition_input.focus,
         focus_candidates=cognition_turn.cognition_input.focus_candidates,
-        stimulus_name=stimulus_name(cognition_turn.cognition_input.stimulus),
+        stimulus_name=input.stimulus_name(cognition_turn.cognition_input.stimulus),
         output=cognition_turn.cognition_output,
         behavior=behavior,
     )
@@ -313,7 +312,7 @@ def _compile_behavior_statements(clauses: tuple[ClauseElement, ...]) -> tuple[me
     return memory.compile_statements(*clauses)
 
 
-def _load_behavior(store: memory.Memory, *, name: str) -> Instance | None:
+def _load_behavior(store: memory.MemoryStore, *, name: str) -> Instance | None:
     out = store.execute(
         memory.InputData(
             statements=_compile_behavior_statements(behavior_storage.select_behavior_by_name_clauses(name))
@@ -327,7 +326,7 @@ def _load_behavior(store: memory.Memory, *, name: str) -> Instance | None:
     return loaded[0] if loaded else None
 
 
-def _load_all_behaviors(store: memory.Memory) -> tuple[Instance, ...]:
+def _load_all_behaviors(store: memory.MemoryStore) -> tuple[Instance, ...]:
     """Load full behavior inventory (any status) for Reflection select context."""
 
     out = store.execute(
@@ -341,7 +340,7 @@ def _load_all_behaviors(store: memory.Memory) -> tuple[Instance, ...]:
 
 
 def _store_episode(
-    store: memory.Memory,
+    store: memory.MemoryStore,
     episode: CognitiveEpisode,
     *,
     context_ref: str | None,
@@ -354,7 +353,7 @@ def _store_episode(
     _ = store.execute(insert_input)
 
 
-def _apply_break(data: BreakData, *, store: memory.Memory) -> BreakData:
+def _apply_break(data: BreakData, *, store: memory.MemoryStore) -> BreakData:
     """Set status=BROKEN in inventory; do not delete (change can revive it later)."""
 
     existing = _load_behavior(store, name=data.name)
@@ -387,7 +386,7 @@ class Reflection(processing.Processing):
 
     _select_processing: processing.Processing
     _revision: revision.Revision
-    _memory: memory.Memory
+    _memory: memory.MemoryStore
     _events: tuple[processing.Event[typing.Any], ...]
 
     @staticmethod
@@ -1359,7 +1358,7 @@ class Reflection(processing.Processing):
         self,
         *,
         processor: processing.Processor | ProcessorFactory,
-        memory: memory.Memory,
+        memory: memory.MemoryStore,
     ) -> None:
         super(processing.Processing, self).__init__()
         leaf = processor() if not isinstance(processor, processing.Processor) else processor
@@ -1399,5 +1398,4 @@ __all__ = [
     "Reflection",
     "episode_from_turn",
     "behavior_events",
-    "stimulus_name",
 ]

@@ -240,14 +240,14 @@ class Identity(ability.Ability[SoundData, cognition.InputData]):
     output_event: typing.ClassVar[hsm.Event[cognition.InputData]] = cognition.InputEvent
 
     _recognizer: recognition.NameRecognizer
-    _memory: memory.Memory | None
+    _memory: memory.MemoryStore | None
     _name: Name | None
 
     def __init__(
         self,
         *,
         recognizer: recognition.NameRecognizer,
-        memory: memory.Memory | None = None,
+        memory: memory.MemoryStore | None = None,
     ) -> None:
         super().__init__()
         self._recognizer = recognizer

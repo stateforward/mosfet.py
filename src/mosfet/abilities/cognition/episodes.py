@@ -6,7 +6,6 @@ Episodes are prior turns in memory. Behavior inventory types live in ``mosfet.be
 
 from __future__ import annotations
 
-import mosfet
 from mosfet.behavior import BreakData, CreateData, ChangeData
 from .. import memory
 
@@ -45,14 +44,6 @@ class CognitiveEpisode(pydantic.BaseModel):
         default=None,
         description="Behavior create/change/break payload recorded with this episode, if any.",
     )
-
-
-def stimulus_name(stimulus: mosfet.InputData) -> str | None:
-    """Low-cardinality stimulus label for episode recall (event name or bot.input)."""
-
-    if isinstance(stimulus, mosfet.InputEventData):
-        return mosfet.InputEvent.name
-    return stimulus.name
 
 
 def episodes_from_contents(contents: tuple[str, ...]) -> tuple[CognitiveEpisode, ...]:
@@ -119,5 +110,4 @@ __all__ = [
     "episode_select_input",
     "episodes_from_contents",
     "episodes_from_output",
-    "stimulus_name",
 ]

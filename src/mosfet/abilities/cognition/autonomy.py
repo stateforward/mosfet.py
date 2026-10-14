@@ -37,7 +37,6 @@ from mosfet.behavior import storage as behavior_storage
 from mosfet import telemetry
 from mosfet.telemetry import span
 
-from . import episodes
 from . import inventory
 from . import input
 from . import types
@@ -102,7 +101,7 @@ class _InitializeData(pydantic.BaseModel):
         frozen=True,
     )
 
-    store: memory.Memory | None
+    store: memory.MemoryStore | None
 
 
 class _MatchData(pydantic.BaseModel):
@@ -296,7 +295,7 @@ class _CandidateUsageData(pydantic.BaseModel):
     result: _CandidateResultData
     behavior: Instance
     outcome: typing.Literal["used", "failed"]
-    store: memory.Memory | None
+    store: memory.MemoryStore | None
 
 
 _CandidateMaterializeEvent = hsm.Event[_StartCandidateEventData](
@@ -1517,7 +1516,7 @@ class Autonomy(ability.Ability[types.TurnData, types.CompletionData]):
         kind=hsm.ErrorEventKind,
         schema=types.FailureData,
     )
-    _memory: memory.Memory | None
+    _memory: memory.MemoryStore | None
     _behaviors: tuple[Instance, ...]
     _seeded_behaviors: tuple[seed.Seed, ...]
 
@@ -1797,7 +1796,7 @@ class Autonomy(ability.Ability[types.TurnData, types.CompletionData]):
             if processing.active_operation(instance, event.id) is None:
                 _ = await processing.start_operation(instance, event.id)
             cognition_input = data.turn.input
-            stimulus = episodes.stimulus_name(cognition_input.stimulus)
+            stimulus = input.stimulus_name(cognition_input.stimulus)
             candidates = tuple(item for item in data.inventory if _matches_trigger(item, stimulus))
             # Zero candidates from a non-empty inventory is a trigger mismatch, not a missing
             # behavior — the two look identical downstream, where the turn is simply unhandled.
@@ -2904,12 +2903,12 @@ class Autonomy(ability.Ability[types.TurnData, types.CompletionData]):
     def __init__(
         self,
         *,
-        memory: memory.Memory | None = None,
+        memory: memory.MemoryStore | None = None,
         seeded_behaviors: tuple[seed.Seed, ...] = (),
     ) -> None:
-        """Construct Autonomy with optional Memory inventory and native seed descriptors.
+        """Construct Autonomy with an optional MemoryStore inventory and native seed descriptors.
 
-        ``memory`` is the owner-injected Memory capability used to load learned Starlark
+        ``memory`` is the owner-injected MemoryStore capability used to load learned Starlark
         inventory on attach; it may be ``None`` for seed-only operation. ``seeded_behaviors``
         is an immutable tuple of trusted ``Seed`` descriptors. Autonomy does not construct
         or start their machines here: each matching turn must receive a fresh Ability from

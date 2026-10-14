@@ -1,7 +1,7 @@
 """Routines: the persistent routines cognition keeps running across turns and restarts.
 
 A routine is a behavior whose inventory ``lifetime`` is ``persistent`` (see
-``mosfet.behavior``). Routines loads every ACTIVE persistent row from the injected Memory
+``mosfet.behavior``). Routines loads every ACTIVE persistent row from the injected MemoryStore
 when it attaches, builds each one with the injected wall clock, and starts it under its own
 lifetime context with itself as the attachment owner, so the routine's schedules run until
 it is stopped. Nothing is replayed after a restart: intervals restart from start and
@@ -120,7 +120,7 @@ class Routines(ability.Ability[ReconcileData, behavior.TickData]):
     input_event: typing.ClassVar[hsm.Event[typing.Any]] = ReconcileEvent
     output_event: typing.ClassVar[hsm.Event[typing.Any]] = behavior.TickEvent
 
-    _memory: memory.Memory
+    _memory: memory.MemoryStore
     _clock: schedule.WallClock
     _timers: hsm.Clock | None
     _running: dict[str, _Running]
@@ -337,7 +337,7 @@ class Routines(ability.Ability[ReconcileData, behavior.TickData]):
     def __init__(
         self,
         *,
-        memory: memory.Memory,
+        memory: memory.MemoryStore,
         clock: schedule.WallClock,
         timers: hsm.Clock | None = None,
     ) -> None:
