@@ -90,7 +90,7 @@ def test_conversation_recalls_and_persists_relationship_memory() -> None:
     async def run() -> tuple[conversation.ParticipatedTurn, conversation.ParticipatedTurn, list[tuple[str]]]:
         connection = sqlite3.connect(":memory:", check_same_thread=False)
         try:
-            memory = memory_ability.Memory(connection=connection)
+            memory = memory_ability.Memory(engine=memory_ability.store.open_sqlite_engine(connection=connection))
             ability = conversation.Conversation(memory=memory)
             context = hsm.Context()
             await start_ability_tree(context, memory)
@@ -156,7 +156,7 @@ def test_remember_failure_rolls_back_new_detector_and_profile() -> None:
                     end_of_turn_silence_seconds=0.01,
                 )
 
-            memory = memory_ability.Memory(connection=connection)
+            memory = memory_ability.Memory(engine=memory_ability.store.open_sqlite_engine(connection=connection))
             ability_instance = conversation.Conversation(
                 memory=memory,
                 turn_detector_factory=factory,
@@ -228,7 +228,7 @@ def test_remember_failure_preserves_existing_participant_profile() -> None:
     async def run() -> None:
         connection = sqlite3.connect(":memory:", check_same_thread=False)
         try:
-            memory = memory_ability.Memory(connection=connection)
+            memory = memory_ability.Memory(engine=memory_ability.store.open_sqlite_engine(connection=connection))
             ability_instance = conversation.Conversation(memory=memory)
             context = hsm.Context()
             await start_ability_tree(context, memory)
@@ -281,7 +281,7 @@ def test_remember_failure_preserves_existing_participant_profile() -> None:
 def test_memory_failure_is_a_typed_conversation_failure() -> None:
     async def run() -> None:
         connection = sqlite3.connect(":memory:", check_same_thread=False)
-        memory = memory_ability.Memory(connection=connection)
+        memory = memory_ability.Memory(engine=memory_ability.store.open_sqlite_engine(connection=connection))
         ability = conversation.Conversation(memory=memory)
         context = hsm.Context()
         await start_ability_tree(context, memory)

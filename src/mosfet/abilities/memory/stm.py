@@ -10,6 +10,12 @@ Retention is access-reinforced (reconsolidation discipline): grounding an entry 
 access time, and both recall and eviction read the effective clock max(created_at,
 last_accessed_at) — how recently the entry *mattered*, not only when it arrived. Capacity
 remains a fixed count invariant enforced at every write; the recency window is a read-policy.
+
+Nothing sent to the register is lost silently. A request it cannot serve (while detaching,
+degraded, or not attached) is answered with the failed event, ``unavailable: …``; a notification
+it cannot apply is counted. Telemetry: ``bot.ability.request.dropped.count`` with
+``bot.ability.name`` = ``StmMemory``, ``bot.ability.drop.reason`` ∈ {detached, detaching,
+degraded} and ``bot.ability.replied`` ∈ {true, false}: 6 series.
 """
 
 from __future__ import annotations
@@ -17,6 +23,7 @@ from __future__ import annotations
 from . import schema
 from . import store
 from .. import ability
+from mosfet.protocols import attachment
 
 import collections.abc
 import dataclasses
@@ -386,7 +393,10 @@ _SettledEvent = hsm.Event[None](
     schema=type(None),
 )
 
-_REQUESTS = (store.MemoryStore.input_event, RecordEvent, ReinforceEvent, RecentEvent)
+_REQUESTS = (store.MemoryStore.input_event, RecentEvent)
+"""Requests the register answers."""
+_NOTIFICATIONS = (RecordEvent, ReinforceEvent)
+"""Notifications the register applies without a reply."""
 
 
 class StmMemory(store.MemoryStore):
@@ -399,12 +409,19 @@ class StmMemory(store.MemoryStore):
     here. ``RecentEvent`` reads entries inside the recency window ordered by the effective
     clock and is answered with ``RecentOutputEvent`` (or the failed event) at the requester.
     The inherited statement-transaction request stays available for maintenance. Requests
-    are applied one at a time; the rest wait.
+    are applied one at a time; the rest wait. A detach enters the register's own
+    ``detaching`` state, so whatever still waits there is answered unavailable or counted.
     """
 
     input_data_type: typing.ClassVar[type[object] | tuple[type[object], ...] | None] = store.InputData
     output_data_type: typing.ClassVar[type[object] | tuple[type[object], ...] | None] = store.OutputData
+    detached_requests: typing.ClassVar[tuple[hsm.Event[typing.Any], ...]] = _REQUESTS
+    detached_notifications: typing.ClassVar[tuple[hsm.Event[typing.Any], ...]] = _NOTIFICATIONS
+    # The composite form gives the register its own detaching state, so what waits behind the
+    # request being applied is answered there instead of being discarded on detach.
+    _composite_attachment_lifecycle: typing.ClassVar[bool] = True
 
+    _attachment_group: attachment.Group | None
     _capacity: int
     _recency_window: datetime.timedelta
     _clock: collections.abc.Callable[[], datetime.datetime]
@@ -427,6 +444,13 @@ class StmMemory(store.MemoryStore):
         self._capacity = capacity
         self._recency_window = recency_window if recency_window is not None else _DEFAULT_RECENCY_WINDOW
         self._clock = clock if clock is not None else (lambda: datetime.datetime.now(datetime.timezone.utc))
+        self._attachment_group = attachment.Group()
+
+    @classmethod
+    @typing.override
+    def detached_failure(cls, event: hsm.Event[typing.Any]) -> pydantic.BaseModel:
+        del event
+        return ability.FailureData(message=f"unavailable: {cls.__name__} is not attached.")
 
     def _record(self, data: RecordData) -> None:
         insert_clause = insert(schema.stm_memory_table).values(
@@ -445,7 +469,7 @@ class StmMemory(store.MemoryStore):
                 .limit(self._capacity)
             )
         )
-        _ = self.execute(store.InputData(statements=store.compile_statements(insert_clause, evict_clause)))
+        _ = self._execute(store.InputData(statements=store.compile_statements(insert_clause, evict_clause)))
 
     def _reinforce(self, data: ReinforceData) -> None:
         access_clause = (
@@ -453,7 +477,7 @@ class StmMemory(store.MemoryStore):
             .where(schema.stm_memory_table.c.stm_id.in_(data.stm_ids))
             .values(last_accessed_at=_utc_text(self._clock()))
         )
-        _ = self.execute(store.InputData(statements=store.compile_statements(access_clause)))
+        _ = self._execute(store.InputData(statements=store.compile_statements(access_clause)))
 
     def _recent(self, data: RecentData) -> RecentOutputData:
         cutoff = _utc_text(self._clock() - self._recency_window)
@@ -471,7 +495,7 @@ class StmMemory(store.MemoryStore):
         if data.stimulus_name is not None:
             clause = clause.where(schema.stm_memory_table.c.stimulus_name == data.stimulus_name)
         clause = clause.order_by(effective.desc(), schema.stm_memory_table.c.stm_id.desc()).limit(data.limit)
-        output = self.execute(store.InputData(statements=store.compile_statements(clause)))
+        output = self._execute(store.InputData(statements=store.compile_statements(clause)))
         rows = tuple(row.as_mapping() for row in output.results[0].rows)
         return RecentOutputData(entries=tuple(self._observed_from_row(row) for row in rows))
 
@@ -529,6 +553,35 @@ class StmMemory(store.MemoryStore):
         _ = hsm.dispatch(ctx, instance, carrier.with_data(terminal))
 
     @staticmethod
+    def _reply_unavailable(
+        ctx: hsm.Context,
+        instance: "StmMemory",
+        event: hsm.Event[typing.Any],
+        reason: typing.Literal["detaching", "degraded"],
+    ) -> None:
+        failure = ability.FailureData(message=f"unavailable: {type(instance).__name__} is {reason}.")
+        StmMemory._reply(ctx, instance, event, instance.failed_event.with_data(failure))
+        ability.Ability._count_dropped(instance, reason=reason, replied=True)
+
+    @staticmethod
+    def _reply_unavailable_detaching(ctx: hsm.Context, instance: "StmMemory", event: hsm.Event[typing.Any]) -> None:
+        StmMemory._reply_unavailable(ctx, instance, event, "detaching")
+
+    @staticmethod
+    def _reply_unavailable_degraded(ctx: hsm.Context, instance: "StmMemory", event: hsm.Event[typing.Any]) -> None:
+        StmMemory._reply_unavailable(ctx, instance, event, "degraded")
+
+    @staticmethod
+    def _drop_detaching(ctx: hsm.Context, instance: "StmMemory", event: hsm.Event[typing.Any]) -> None:
+        del ctx, event
+        ability.Ability._count_dropped(instance, reason="detaching", replied=False)
+
+    @staticmethod
+    def _drop_degraded(ctx: hsm.Context, instance: "StmMemory", event: hsm.Event[typing.Any]) -> None:
+        del ctx, event
+        ability.Ability._count_dropped(instance, reason="degraded", replied=False)
+
+    @staticmethod
     async def _apply_activity(ctx: hsm.Context, instance: "StmMemory", event: hsm.Event[typing.Any]) -> None:
         """Apply one request, answer it when it has a reply contract, then settle."""
 
@@ -542,7 +595,7 @@ class StmMemory(store.MemoryStore):
                 StmMemory._reply(ctx, instance, event, RecentOutputEvent.with_data(instance._recent(data)))
             else:
                 assert isinstance(data, store.InputData)
-                StmMemory._reply(ctx, instance, event, instance.output_event.with_data(instance.execute(data)))
+                StmMemory._reply(ctx, instance, event, instance.output_event.with_data(instance._execute(data)))
         except Exception as error:
             if isinstance(data, RecordData | ReinforceData):
                 # Notifications have no requester to tell; the register's own log is the record.
@@ -554,20 +607,62 @@ class StmMemory(store.MemoryStore):
 
     submodel: typing.ClassVar[hsm.Model | None] = mosfet.define(
         "StmMemory",
-        hsm.initial(hsm.target("/StmMemory/idle")),
+        hsm.initial(hsm.target("/StmMemory/initializing")),
+        hsm.state(
+            "initializing",
+            hsm.defer(attachment.AttachEvent, attachment.DetachEvent, *_REQUESTS, *_NOTIFICATIONS),
+            hsm.activity(ability.Ability._attach_composite_group),
+            hsm.transition(
+                hsm.on(ability.Ability._composite_attachment_terminal_event),
+                hsm.guard(ability.Ability._is_composite_attach_complete),
+                hsm.effect(ability.Ability._deliver_composite_attachment_terminal),
+                hsm.target("/StmMemory/idle"),
+            ),
+            hsm.transition(
+                hsm.on(ability.Ability._composite_attachment_terminal_event),
+                # Unreachable with the empty group; kept so the composite lifecycle's targets exist.
+                hsm.guard(ability.Ability._is_composite_detached_terminal),
+                hsm.effect(ability.Ability._deliver_composite_attachment_terminal),
+                hsm.target("/StmMemory/degraded"),
+            ),
+        ),
         hsm.state(
             "idle",
             hsm.transition(
-                hsm.on(*_REQUESTS),
+                hsm.on(*_REQUESTS, *_NOTIFICATIONS),
                 hsm.guard(_is_request),
                 hsm.target("/StmMemory/applying"),
             ),
         ),
         hsm.state(
             "applying",
-            hsm.defer(*_REQUESTS),
+            hsm.defer(*_REQUESTS, *_NOTIFICATIONS),
             hsm.activity(_apply_activity),
             hsm.transition(hsm.on(_SettledEvent), hsm.target("/StmMemory/idle")),
+        ),
+        hsm.state(
+            "detaching",
+            hsm.defer(attachment.AttachEvent, attachment.DetachEvent),
+            hsm.activity(ability.Ability._detach_composite_group),
+            hsm.transition(hsm.on(*_REQUESTS), hsm.effect(_reply_unavailable_detaching)),
+            hsm.transition(hsm.on(*_NOTIFICATIONS), hsm.effect(_drop_detaching)),
+            hsm.transition(
+                hsm.on(ability.Ability._composite_attachment_terminal_event),
+                hsm.guard(ability.Ability._is_composite_rollback_failure),
+                hsm.effect(ability.Ability._deliver_composite_attachment_terminal),
+                hsm.target("/StmMemory/degraded"),
+            ),
+            hsm.transition(
+                hsm.on(ability.Ability._composite_attachment_terminal_event),
+                hsm.guard(ability.Ability._is_composite_detach_failed),
+                hsm.effect(ability.Ability._deliver_composite_attachment_terminal),
+                hsm.target("/StmMemory/idle"),
+            ),
+        ),
+        hsm.state(
+            "degraded",
+            hsm.transition(hsm.on(*_REQUESTS), hsm.effect(_reply_unavailable_degraded)),
+            hsm.transition(hsm.on(*_NOTIFICATIONS), hsm.effect(_drop_degraded)),
         ),
     )
 

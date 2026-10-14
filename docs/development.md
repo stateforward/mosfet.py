@@ -79,10 +79,14 @@ scripts/smoke_wheels.sh --find-links dist-native dist
 Memory storage schema (`src/mosfet/abilities/memory/schema.py` plus
 `src/mosfet/behavior/storage.py`, sharing one `metadata`) is brought up by Alembic
 revisions in `src/mosfet/abilities/memory/migrations/versions/` (package data, not an
-importable package). `open_sqlite_engine` and `MemoryStore(engine=...)` call
-`store.migrate(engine)`, which upgrades to head (and stamps a pre-migration `create_all`
-database at `0001` first). There is no `alembic.ini`; `store.migration_config()` builds the
-config in code. To add a revision:
+importable package). Revision `0001` is the one baseline: relational memory rows, behavior
+inventory, the short-term register, and the episodic graph (`bot_memory_node`, `_part`,
+`_edge`, `_vector`, `_index_attempt`). `open_sqlite_engine` and `MemoryStore(engine=...)` call
+`store.migrate(engine)`, which upgrades to head; a database holding memory tables without an
+`alembic_version` table matches no revision and raises `store.MigrationError`. Provider vector
+index tables (`bot_memory_vec_*`, created by `sqlite_memory.VecIndex`) are excluded in
+`migrations/env.py` and never managed by Alembic. There is no `alembic.ini`;
+`store.migration_config()` builds the config in code. To add a revision:
 
 1. Change the table definitions in `schema.py` / `behavior/storage.py`.
 2. Autogenerate a draft against a database at the current head:
@@ -105,10 +109,34 @@ config in code. To add a revision:
 4. Run `tests/bot/abilities/memory/test_store.py`; its drift test fails until the
    migrated schema matches `metadata` again. Never edit a revision that has shipped.
 
+## Episodic memory
+
+`memory.Memory` is the bot's one durable memory, a state machine reached by message only
+(`memory.transact` for relational statements; typed request events for everything else). It
+keeps each remembered turn (`RememberEvent`, `EpisodeData`: rendered stimulus parts with images,
+producer-stamped participants, acts, outcome) as an episode node, one person node per
+participant ref with `involves_source`/`involves_target` links, and a canonical vector per node
+in its embedder's `embedding.Space`. `SearchEvent` runs the nearest, recent, present, and
+one-link lanes at once; `FetchEvent` reads nodes in full (image bytes on request) and can
+reinforce them; `RecentEvent` reads the latest episodes oldest first. Consolidation leases a
+unit (`LeaseEvent`, nodes named by unit aliases), the model decides with the one model-callable
+`ConsolidateEvent` (links, merges into concept nodes, hard-delete forgets), and Memory applies
+it in one transaction; `ReleaseEvent` gives a unit back. Every request gets exactly one reply or
+`FailedEvent` with `FailureKind` (`invalid_input`, `unavailable`, `store_failed`, `stale_lease`,
+`timeout`); a detached Memory answers `unavailable`.
+
+All SQL runs on one database worker thread per Memory, for the object's lifetime. Without an
+embedder (`embedder=None`) nothing is indexed and the nearest lane is skipped. A node the
+embedder cannot take (too long, unsupported, invalid) is kept unindexed and recorded in
+`bot_memory_index_attempt`; `BackfillEvent` batches within the embedder's whole capacity,
+attributes a failure to the item it names, and never retries a permanently unindexable node in
+that space. `index=None` uses the exact in-process `ExactIndex`; production roots pass
+`sqlite_memory.VecIndex()` and `sqlite_memory.open_engine(...)`.
+
 ## Persistent routines
 
 A behavior's Starlark `lifetime` global is `turn` (default) or `persistent`, stored in
-`bot_behavior.lifetime` (memory revision `0002`). Autonomy matches only ACTIVE `turn`
+`bot_behavior.lifetime` (memory baseline revision `0001`). Autonomy matches only ACTIVE `turn`
 behaviors, one turn at a time, and silences them after `instance.TURN_SILENCE_BOUND`
 (`check()` rejects a turn `hsm.after` longer than that). A persistent routine must schedule
 at least one transition with `hsm.every(seconds=N)` (N at least `check(min_every=...)`,
@@ -163,7 +191,7 @@ studio (publishes topology into the `web/` studio for inspection) with `BOT_MODE
 | Body | `bot.Bot` — lifecycle, device attachment, stimulus fan-out, cognition handoff, reflex floor |
 | Devices | `bot.devices.phone` (basic phone: ringing, dialing, call lifecycle, busy/reorder tones), `bot.devices.smart_phone` (a phone that also texts: incoming texts, notification ding, lock screen, sending texts), `bot.devices.audio` (microphone, speaker with placement) |
 | Environment | broadcast scope, typed stimuli (`environment.sound`, …), world snapshots, `bot.environment.space` propagation law |
-| Abilities | Listening (VAD · STT · sensitivity/self-sound), Hearing (voice identity), Vision, Reading, Language, Memory (STM/register, associative, consolidation, long-term), Communication (Conversation + turn detection), Speaking, Identity (name, recognition, values), Classifying, Decoding/Encoding |
+| Abilities | Listening (VAD · STT · sensitivity/self-sound), Hearing (voice identity), Vision, Reading, Language, Memory (one durable `memory.Memory`: relational transactions plus an episodic graph of episodes, persons and concepts with a vector per node; `StmMemory` register), Communication (Conversation + turn detection), Speaking, Identity (name, recognition, values), Classifying, Decoding/Encoding |
 | Cognition | Autonomy, Intuition, Reasoning, Reflection, Learning, Routines — all typed |
 | Behavior | Starlark → HSM compiler, verified seed/native behaviors, persistent routines, durable storage, diagnostics |
 | Telemetry | HSM observation → OpenTelemetry metrics + spans, low-cardinality by contract |
@@ -179,6 +207,6 @@ studio (publishes topology into the `web/` studio for inspection) with `BOT_MODE
 | `mosfet-provider-mlx-vlm` | local VLM reading (Apple Silicon) |
 | `mosfet-provider-llama-cpp` | in-process llama.cpp on a pinned `llama-cpp-python` build (Metal / CUDA / CPU) |
 | `mosfet-provider-pyannote` | voice diarization & speaker identification |
-| `mosfet-provider-sqlite-memory` | turnkey SQLite durable memory |
+| `mosfet-provider-sqlite-memory` | SQLite + sqlite-vec for `memory.Memory`: `open_engine` (vec0 loaded) and the `VecIndex` vector index |
 | `mosfet-provider-typesafe` | label-tier selection (system_one Choice/Score/Noul) |
 | `mosfet-provider-needle` | local Needle 3 tool calling for the Intuition reflex tier (Apache-2.0, on-device) |

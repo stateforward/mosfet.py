@@ -28,7 +28,7 @@ from mosfet.abilities.hearing import speech
 from mosfet.environment import Environment, SoundData, SoundEvent
 from mosfet.protocols import attachment
 
-from tests.bot.abilities.memory.memory_fixtures import MessageOnlyMemory
+from tests.bot.abilities.memory.memory_fixtures import execute_on
 from tests.bot.abilities.support import shared_hsm_context, start_abilities_for_test
 
 _LISTENING = "/knowing/listening"
@@ -55,14 +55,14 @@ class FailingSpeechDecoder(speech.SpeechDecoder):
         raise RuntimeError("recognizer unavailable")
 
 
-class WriteRefusingMemory(MessageOnlyMemory):
+class WriteRefusingMemory(memory.Memory):
     """Memory that can be read but not written, as a full or read-only store would be."""
 
     @override
-    def execute(self, data: memory.InputData) -> memory.OutputData:
+    def _execute(self, data: memory.InputData) -> memory.OutputData:
         if any(statement.sql.lstrip().upper().startswith("INSERT") for statement in data.statements):
             raise RuntimeError("memory is read-only")
-        return super().execute(data)
+        return super()._execute(data)
 
 
 class RecordingIdentity(identity.Identity):
@@ -84,11 +84,11 @@ class RecordingIdentity(identity.Identity):
         self.failures = []
 
 
-def open_store(store_type: type[memory.Memory] = MessageOnlyMemory) -> tuple[memory.Memory, sqlite3.Connection]:
+def open_store(store_type: type[memory.Memory] = memory.Memory) -> tuple[memory.Memory, sqlite3.Connection]:
     """A memory that only answers requests sent by message (a direct call into it fails)."""
 
     connection = sqlite3.connect(":memory:", check_same_thread=False)
-    return store_type(connection=connection), connection
+    return store_type(engine=memory.store.open_sqlite_engine(connection=connection)), connection
 
 
 async def attach_store(ctx: hsm.Context, store: memory.Memory) -> None:
@@ -582,7 +582,7 @@ class _DecidesNothing(processing.Processor):
         return ()
 
 
-class SlowToAttachMemory(MessageOnlyMemory):
+class SlowToAttachMemory(memory.Memory):
     """A memory that takes a moment to come up once its owner attaches it, as a large one may."""
 
     @override
@@ -626,9 +626,10 @@ def test_a_bot_wakes_up_remembering_its_name_when_its_memory_comes_up_alongside_
 
     async def run() -> tuple[list[str], str]:
         connection = sqlite3.connect(":memory:", check_same_thread=False)
+        engine = memory.store.open_sqlite_engine(connection=connection)
         try:
-            _ = memory.Memory(connection=connection).execute(identity.name_insert_input(identity.Name(text="Bob")))
-            store = SlowToAttachMemory(connection=connection)
+            _ = execute_on(engine, identity.name_insert_input(identity.Name(text="Bob")))
+            store = SlowToAttachMemory(engine=engine)
             ears = identity.Identity(
                 recognizer=identity.SpeechNameRecognizer(decoder=RecordingSpeechDecoder()),
                 memory=store,

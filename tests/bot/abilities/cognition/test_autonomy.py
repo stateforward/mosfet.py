@@ -16,6 +16,7 @@ import dataclasses
 import datetime
 import inspect
 import pathlib
+import sqlite3
 import typing
 
 import hsm
@@ -24,7 +25,6 @@ import pytest
 from mosfet import behavior
 from mosfet.devices import phone as phone_device
 from mosfet.environment import SoundData, SoundEvent, Environment
-from tests.bot.abilities.memory.memory_fixtures import MessageOnlyMemory
 from tests.bot.abilities.support import dispatch_ability_for_test, shared_hsm_context, start_abilities_for_test
 from tests.bot.abilities.cognition.metadata_contract import assert_metadata_is_not_coordination
 from tests.hsm_model import choice_transitions, transition_map
@@ -68,10 +68,18 @@ class _CandidateModelFactory(typing.Protocol):
     ) -> hsm.Model: ...
 
 
-async def _attached_memory(*rows: behavior.Instance) -> MessageOnlyMemory:
-    """The bot's memory, attached by its own owner and seeded by message; Autonomy is only a peer."""
+async def _attached_memory(*rows: behavior.Instance, connection: sqlite3.Connection | None = None) -> memory.Memory:
+    """The bot's memory, attached by its own owner and seeded by message; Autonomy is only a peer.
 
-    store = MessageOnlyMemory()
+    With ``connection`` the memory runs on that SQLite connection, so a test can install
+    triggers on the database to observe or refuse writes.
+    """
+
+    store = (
+        memory.Memory()
+        if connection is None
+        else memory.Memory(engine=memory.store.open_sqlite_engine(connection=connection))
+    )
     ctx = shared_hsm_context()
     await start_abilities_for_test(ctx, store)
     for row in rows:
@@ -324,20 +332,15 @@ def test_autonomy_reports_success_when_usage_persistence_degrades(
             name="DelayedRing",
             triggers=(SoundEvent.name,),
         )
-        store = await _attached_memory(installed)
+        connection = sqlite3.connect(":memory:", check_same_thread=False)
+        store = await _attached_memory(installed, connection=connection)
         autonomy = cognition.Autonomy(memory=store)
         ctx = shared_hsm_context()
         await start_abilities_for_test(ctx, autonomy)
-
-        original_execute = store.execute
-
-        def fail_usage_execute(data: memory.InputData) -> memory.OutputData:
-            # Reads still answer (the turn's inventory refresh); the usage write fails.
-            if data.statements[0].sql.lstrip().upper().startswith("SELECT"):
-                return original_execute(data)
-            raise RuntimeError("storage unavailable")
-
-        monkeypatch.setattr(store, "execute", fail_usage_execute)
+        # Reads still answer (the turn's inventory refresh); the usage write (a row replace) fails.
+        _ = connection.execute(
+            "CREATE TRIGGER refuse_usage BEFORE DELETE ON bot_behavior BEGIN SELECT RAISE(ABORT, 'storage unavailable'); END"
+        )
         return await dispatch_ability_for_test(autonomy, ctx, _turn(), timeout=5.0)
 
     output = asyncio.run(run())
@@ -645,22 +648,23 @@ def test_usage_inventory_changes_only_after_persistence_completion(
             name="DelayedRing",
             triggers=(SoundEvent.name,),
         )
-        store = await _attached_memory(installed)
+        connection = sqlite3.connect(":memory:", check_same_thread=False)
+        store = await _attached_memory(installed, connection=connection)
         autonomy = cognition.Autonomy(memory=store)
         ctx = shared_hsm_context()
         await start_abilities_for_test(ctx, autonomy)
         observed_counts: list[int] = []
-        original_execute = store.execute
 
-        def observe_inventory(data: memory.InputData) -> memory.OutputData:
+        def observe_inventory() -> int:
+            # Only the usage write replaces the row; the per-turn refresh reads never fire this.
             inventory = typing.cast(tuple[behavior.Instance, ...], vars(autonomy)["_behaviors"])
-            # Only writes carry the update; the per-turn inventory refresh reads may observe
-            # any snapshot without changing this write-order assertion.
-            if not data.statements[0].sql.lstrip().upper().startswith("SELECT"):
-                observed_counts.append(inventory[0].used_count)
-            return original_execute(data)
+            observed_counts.append(inventory[0].used_count)
+            return 0
 
-        monkeypatch.setattr(store, "execute", observe_inventory)
+        connection.create_function("observe_inventory", 0, observe_inventory)
+        _ = connection.execute(
+            "CREATE TRIGGER observe_usage AFTER INSERT ON bot_behavior BEGIN SELECT observe_inventory(); END"
+        )
         _ = await dispatch_ability_for_test(autonomy, ctx, _turn(), timeout=5.0)
         inventory = typing.cast(tuple[behavior.Instance, ...], vars(autonomy)["_behaviors"])
         return observed_counts, inventory[0].used_count

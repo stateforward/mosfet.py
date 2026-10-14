@@ -46,7 +46,7 @@ def build(config: runtime.Config) -> runtime.Assembly:
         ),
         provider="minimal_bot",
     )
-    store = memory.ShortTermMemory()
+    store = memory.Memory()
     bot = MinimalBot(
         cognition=cognition.Cognition(
             intuition=cognition.Intuition(processor=processor),

@@ -768,8 +768,8 @@ def _speaking(
     )
 
 
-def _memory() -> memory.ShortTermMemory:
-    return memory.ShortTermMemory()
+def _memory() -> memory.Memory:
+    return memory.Memory()
 
 
 def _observed_event(event: hsm.Event[typing.Any]) -> hsm.Event[typing.Any]:

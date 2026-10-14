@@ -17,6 +17,7 @@ import collections.abc
 import dataclasses
 import datetime
 import importlib.resources
+import sqlite3
 import typing
 import uuid
 
@@ -24,11 +25,13 @@ import hsm
 import mosfet
 import pydantic
 import sqlalchemy
+import sqlalchemy.event
 from alembic import command
 from alembic.config import Config
 from sqlalchemy import create_engine
 from sqlalchemy.engine import Dialect
 from sqlalchemy.engine import Engine
+from sqlalchemy.pool import StaticPool
 from sqlalchemy import Select
 from sqlalchemy import select
 from sqlalchemy.sql import ClauseElement
@@ -174,53 +177,6 @@ class OutputData(pydantic.BaseModel):
         return tuple(contents)
 
 
-class MemoryRecord(pydantic.BaseModel):
-    """Row projection of bot_memory for callers that need a structured record."""
-
-    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
-        frozen=True,
-        extra="forbid",
-    )
-
-    memory_id: str = pydantic.Field(min_length=1, description="Primary key of the memory row.")
-    scope: str = pydantic.Field(min_length=1, description="Memory scope label.", examples=["short_term"])
-    context_ref: str | None = pydantic.Field(default=None, min_length=1)
-    subject_ref: str | None = pydantic.Field(default=None, min_length=1)
-    kind: str | None = pydantic.Field(default=None)
-    content: str = pydantic.Field(min_length=1, description="Primary text or JSON body.")
-    content_format: str = pydantic.Field(default="text/plain", min_length=1)
-    query_tags: str | None = pydantic.Field(default=None)
-
-    @classmethod
-    def from_row(cls, row: Row) -> "MemoryRecord":
-        data = row.as_mapping()
-        memory_id = data.get("memory_id")
-        content = data.get("content")
-        if not isinstance(memory_id, str) or not memory_id:
-            memory_id = uuid.uuid4().hex
-        if not isinstance(content, str) or not content:
-            raise ValueError("MemoryRecord requires content column.")
-        scope = data.get("scope")
-        return cls(
-            memory_id=memory_id,
-            scope=scope if isinstance(scope, str) and scope else "memory",
-            context_ref=_optional_str(data.get("context_ref")),
-            subject_ref=_optional_str(data.get("subject_ref")),
-            kind=_optional_str(data.get("kind")),
-            content=content,
-            content_format=_optional_str(data.get("content_format")) or "text/plain",
-            query_tags=_optional_str(data.get("query_tags")),
-        )
-
-
-def _optional_str(value: ParameterValue) -> str | None:
-    if value is None:
-        return None
-    if isinstance(value, str):
-        return value or None
-    return str(value)
-
-
 def compile_statement(
     clause: ClauseElement,
     *,
@@ -316,13 +272,8 @@ def _execute_transaction(
     return OutputData(results=tuple(results))
 
 
-# Alembic version table name and the baseline revision (the create_all-era schema).
+# Alembic version table name.
 VERSION_TABLE = "alembic_version"
-BASELINE_REVISION = "0001"
-
-# Frozen: exactly the tables revision 0001 creates. Later revisions must not change this set;
-# it only identifies databases that ``metadata.create_all`` created before migrations existed.
-_BASELINE_TABLES = frozenset({"bot_behavior", "bot_behavior_trigger", "bot_memory", "bot_stm_memory"})
 
 
 class MigrationError(RuntimeError):
@@ -344,46 +295,71 @@ def migration_config() -> Config:
 def migrate(engine: Engine) -> None:
     """Bring ``engine``'s database to the head memory schema revision (performs database I/O).
 
-    Runs in one transaction. A database ``metadata.create_all`` created before migrations
-    existed (all baseline tables, no ``alembic_version``) is stamped at ``0001`` first — the
-    one-time cutover documented in ``migrations/versions/0001_initial_memory_schema.py``.
+    Runs in one transaction. A database that holds memory tables but no ``alembic_version``
+    table was not created by these migrations; it matches no revision and is refused rather
+    than guessed at.
 
     Raises:
-        MigrationError: the database has some baseline tables but no version table.
+        MigrationError: the database has memory tables but no version table.
     """
 
     config = migration_config()
     with engine.begin() as connection:
         config.attributes["connection"] = connection
         tables = set(sqlalchemy.inspect(connection).get_table_names())
-        if VERSION_TABLE not in tables and tables & _BASELINE_TABLES:
-            missing = sorted(_BASELINE_TABLES - tables)
-            if missing:
-                message = f"Unversioned memory database lacks baseline tables {missing}; not stamping it."
-                raise MigrationError(message)
-            command.stamp(config, BASELINE_REVISION)
+        known = tables & set(schema.metadata.tables)
+        if VERSION_TABLE not in tables and known:
+            message = f"Unversioned memory database already holds {sorted(known)}; not migrating it."
+            raise MigrationError(message)
         command.upgrade(config, "head")
 
 
-def open_sqlite_engine(*, database: str = ":memory:", connection: typing.Any | None = None) -> Engine:
+def open_sqlite_engine(
+    *,
+    database: str = ":memory:",
+    connection: typing.Any | None = None,
+    on_connect: collections.abc.Callable[[sqlite3.Connection], None] | None = None,
+) -> Engine:
     """Composition-root factory: open a private SQLite engine migrated to the head schema.
 
     The ``sqlite+pysqlite`` URL default lives here — not in :class:`MemoryStore` — so the
     ability stays dialect-agnostic and the sqlite_memory provider (or any explicit root)
     owns the SQLite default. Pass the result as ``MemoryStore(engine=...)``.
 
+    An in-memory database (``":memory:"``, or a caller's ``connection``) is one shared
+    connection (``StaticPool``), so every thread sees the same database. ``on_connect`` runs
+    on every new DBAPI connection before the schema is migrated; a provider loads extensions
+    and sets pragmas there.
+
     Raises:
         MigrationError: the database matches no known schema revision.
     """
 
     if connection is not None:
-        engine = create_engine("sqlite+pysqlite://", creator=lambda: typing.cast(object, connection))
-    else:
-        url = "sqlite+pysqlite:///:memory:" if database == ":memory:" else f"sqlite+pysqlite:///{database}"
         engine = create_engine(
-            url,
+            "sqlite+pysqlite://",
+            creator=lambda: typing.cast(object, connection),
+            poolclass=StaticPool,
+        )
+    elif database == ":memory:":
+        engine = create_engine(
+            "sqlite+pysqlite://",
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
+        )
+    else:
+        engine = create_engine(
+            f"sqlite+pysqlite:///{database}",
             connect_args={"check_same_thread": False},
         )
+    if on_connect is not None:
+        hook = on_connect
+
+        def connected(dbapi_connection: sqlite3.Connection, record: object) -> None:
+            del record
+            hook(dbapi_connection)
+
+        sqlalchemy.event.listen(engine, "connect", connected)
     migrate(engine)
     return engine
 
@@ -434,12 +410,12 @@ class MemoryStore(ability.Ability[InputData, OutputData]):
             return
         self._engine = open_sqlite_engine(database=database, connection=connection)
 
-    def execute(self, data: InputData) -> OutputData:
+    def _execute(self, data: InputData) -> OutputData:
         """Run one SQL transaction on this store's engine and return per-statement results.
 
-        This is the machine's own transaction primitive, run by its applying activity. Peer
-        machines never call it: a store is a state machine and is reached by message only
-        (:func:`transact` sends ``input_event`` and awaits the correlated reply).
+        The machine's own transaction primitive, run by its applying activity. A store is a
+        state machine and is reached by message only (:func:`transact` sends ``input_event``
+        and awaits the correlated reply).
         """
 
         return _execute_transaction(self._engine, data.statements)
@@ -500,7 +476,7 @@ class MemoryStore(ability.Ability[InputData, OutputData]):
         data = event.data
         assert isinstance(data, InputData)
         try:
-            output = instance.execute(data)
+            output = instance._execute(data)
         except Exception as error:
             _ = hsm.dispatch(
                 ctx,
@@ -614,11 +590,9 @@ async def transact(
 
 
 __all__ = [
-    "BASELINE_REVISION",
     "MEMORY_TABLE",
     "OPERATION_TIMEOUT",
     "InputData",
-    "MemoryRecord",
     "MemoryStore",
     "MigrationError",
     "OutputData",

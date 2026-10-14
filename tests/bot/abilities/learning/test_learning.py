@@ -13,6 +13,7 @@ import typing
 
 import hsm
 import pytest
+from sqlalchemy.engine import Engine
 
 import mosfet
 from mosfet import behavior
@@ -27,7 +28,7 @@ from mosfet.abilities.cognition import types as cognition_types
 from mosfet.abilities.learning import Learning
 from mosfet.abilities.learning import learning as learning_impl
 from mosfet.protocols import attachment
-from tests.bot.abilities.memory.memory_fixtures import MessageOnlyMemory, register_recent, register_record
+from tests.bot.abilities.memory.memory_fixtures import execute_on, register_recent, register_record
 from tests.bot.abilities.support import dispatch_ability_for_test, shared_hsm_context, start_abilities_for_test
 
 # One Learning revision performs one isolated Starlark validation (a cold validation worker can
@@ -171,7 +172,8 @@ def test_learning_prefers_memory_episodes_for_runtime_input() -> None:
 
     async def run() -> learning.OutputData:
         connection = sqlite3.connect(":memory:", check_same_thread=False)
-        store = memory.Memory(connection=connection)
+        engine = memory.store.open_sqlite_engine(connection=connection)
+        store = memory.Memory(engine=engine)
         episode = episodes.CognitiveEpisode(
             focus="phone",
             focus_candidates=("phone",),
@@ -185,7 +187,7 @@ def test_learning_prefers_memory_episodes_for_runtime_input() -> None:
                 ),
             ),
         )
-        _ = store.execute(episodes.episode_insert_input(episode, context_ref="phone"))
+        _ = execute_on(engine, episodes.episode_insert_input(episode, context_ref="phone"))
         # Model invents a wrong expected event; memory prefer-step should restore episode output.
         selection = (
             processing.SelectedEvent(
@@ -311,7 +313,8 @@ def test_learning_grounds_payload_in_event_register_when_memory_empty() -> None:
 
     async def run() -> tuple[learning.OutputData, memory.ObservedEvent]:
         connection = sqlite3.connect(":memory:", check_same_thread=False)
-        store = MessageOnlyMemory(connection=connection)
+        engine = memory.store.open_sqlite_engine(connection=connection)
+        store = memory.Memory(engine=engine)
         register = memory.StmMemory()
         await _seed_register_knock(register)
         processor = LearningTestProcessor(
@@ -352,7 +355,8 @@ def test_learning_register_payload_backs_memory_grounded_stimulus() -> None:
     async def run() -> tuple[learning.OutputData, memory.ObservedEvent]:
         # Memory and the register are peers reached by message: the store refuses direct calls.
         connection = sqlite3.connect(":memory:", check_same_thread=False)
-        store = MessageOnlyMemory(connection=connection)
+        engine = memory.store.open_sqlite_engine(connection=connection)
+        store = memory.Memory(engine=engine)
         await _attached(store)
         _ = await memory.transact(
             shared_hsm_context(), store, episodes.episode_insert_input(_ring_episode(), context_ref="phone")
@@ -398,7 +402,8 @@ def test_learning_grounds_in_the_latest_remembered_turn_beyond_the_recall_window
 
     async def run() -> learning.OutputData:
         connection = sqlite3.connect(":memory:", check_same_thread=False)
-        store = memory.Memory(connection=connection)
+        engine = memory.store.open_sqlite_engine(connection=connection)
+        store = memory.Memory(engine=engine)
         for index in range(60):
             episode = episodes.CognitiveEpisode(
                 focus="phone",
@@ -413,8 +418,8 @@ def test_learning_grounds_in_the_latest_remembered_turn_beyond_the_recall_window
                     ),
                 ),
             )
-            _ = store.execute(
-                episodes.episode_insert_input(episode, context_ref="phone", memory_id=f"episode-{index:02d}")
+            _ = execute_on(
+                engine, episodes.episode_insert_input(episode, context_ref="phone", memory_id=f"episode-{index:02d}")
             )
         processor = LearningTestProcessor(
             selection=_generate_selection(),
@@ -453,8 +458,8 @@ def _ring_episode() -> episodes.CognitiveEpisode:
     )
 
 
-def _seed_ring_episode(store: memory.Memory) -> None:
-    _ = store.execute(episodes.episode_insert_input(_ring_episode(), context_ref="phone"))
+def _seed_ring_episode(engine: Engine) -> None:
+    _ = execute_on(engine, episodes.episode_insert_input(_ring_episode(), context_ref="phone"))
 
 
 def test_learning_fails_honestly_without_memory_stimulus() -> None:
@@ -466,7 +471,8 @@ def test_learning_fails_honestly_without_memory_stimulus() -> None:
             selection=_generate_selection(),
             write=behavior.ChangeData(name="Unused", source=ANSWER_RING_BEHAVIOR_SOURCE),
         )
-        store = memory.Memory(connection=connection)
+        engine = memory.store.open_sqlite_engine(connection=connection)
+        store = memory.Memory(engine=engine)
         ability = Learning(
             decoder=TextDecoder(),
             processor=processor,
@@ -491,8 +497,9 @@ def test_learning_fails_honestly_without_memory_stimulus() -> None:
 def test_learning_decodes_grounds_memory_and_generates_behavior() -> None:
     async def run() -> learning.OutputData:
         connection = sqlite3.connect(":memory:", check_same_thread=False)
-        store = memory.Memory(connection=connection)
-        _seed_ring_episode(store)
+        engine = memory.store.open_sqlite_engine(connection=connection)
+        store = memory.Memory(engine=engine)
+        _seed_ring_episode(engine)
         processor = LearningTestProcessor(
             selection=_generate_selection(),
             write=behavior.ChangeData(
@@ -531,8 +538,9 @@ def test_learning_decodes_grounds_memory_and_generates_behavior() -> None:
 def test_learning_empty_generate_selection_fails() -> None:
     async def run() -> None:
         connection = sqlite3.connect(":memory:", check_same_thread=False)
-        store = memory.Memory(connection=connection)
-        _seed_ring_episode(store)
+        engine = memory.store.open_sqlite_engine(connection=connection)
+        store = memory.Memory(engine=engine)
+        _seed_ring_episode(engine)
         processor = LearningTestProcessor(
             selection=(),
             write=behavior.ChangeData(name="Unused", source=ANSWER_RING_BEHAVIOR_SOURCE),
@@ -560,8 +568,9 @@ def test_learning_empty_generate_selection_fails() -> None:
 def test_learning_rejects_lesson_text_as_runtime_input_payload() -> None:
     async def run() -> None:
         connection = sqlite3.connect(":memory:", check_same_thread=False)
-        store = memory.Memory(connection=connection)
-        _seed_ring_episode(store)
+        engine = memory.store.open_sqlite_engine(connection=connection)
+        store = memory.Memory(engine=engine)
+        _seed_ring_episode(engine)
         lesson = "When the phone rings, answer it immediately without delay."
         selection = (
             processing.SelectedEvent(
@@ -667,8 +676,9 @@ def test_learning_reboot_reason_is_learning_domain(monkeypatch: pytest.MonkeyPat
     async def run() -> tuple[list[hsm.Event[typing.Any]], str]:
         monkeypatch.setattr(learning_impl, "_CANCEL_TEARDOWN_TIMEOUT", datetime.timedelta(0))
         connection = sqlite3.connect(":memory:", check_same_thread=False)
-        store = memory.Memory(connection=connection)
-        _seed_ring_episode(store)
+        engine = memory.store.open_sqlite_engine(connection=connection)
+        store = memory.Memory(engine=engine)
+        _seed_ring_episode(engine)
         processor = LearningTestProcessor(
             selection=_generate_selection(),
             write=behavior.ChangeData(name="Unused", source=ANSWER_RING_BEHAVIOR_SOURCE),
@@ -744,8 +754,9 @@ def test_learning_does_not_promote_domain_keys_into_runtime_payload() -> None:
 
     async def run() -> learning.OutputData:
         connection = sqlite3.connect(":memory:", check_same_thread=False)
-        store = memory.Memory(connection=connection)
-        _seed_ring_episode(store)
+        engine = memory.store.open_sqlite_engine(connection=connection)
+        store = memory.Memory(engine=engine)
+        _seed_ring_episode(engine)
         selection = (
             processing.SelectedEvent(
                 event=learning.GenerateEvent.name,
@@ -812,15 +823,15 @@ class _RecallFailingMemory(memory.Memory):
 
     armed: bool
 
-    def __init__(self, *, connection: typing.Any) -> None:
-        super().__init__(connection=connection)
+    def __init__(self, *, engine: Engine) -> None:
+        super().__init__(engine=engine)
         self.armed = False
 
     @typing.override
-    def execute(self, data: memory.InputData) -> memory.OutputData:
+    def _execute(self, data: memory.InputData) -> memory.OutputData:
         if self.armed and any("cognitive_episode" in str(item.parameters) for item in data.statements):
             raise RuntimeError("memory backend unavailable")
-        return super().execute(data)
+        return super()._execute(data)
 
 
 def test_learning_recall_failure_is_not_reported_as_missing_memory() -> None:
@@ -828,8 +839,9 @@ def test_learning_recall_failure_is_not_reported_as_missing_memory() -> None:
 
     async def run() -> None:
         connection = sqlite3.connect(":memory:", check_same_thread=False)
-        store = _RecallFailingMemory(connection=connection)
-        _seed_ring_episode(store)
+        engine = memory.store.open_sqlite_engine(connection=connection)
+        store = _RecallFailingMemory(engine=engine)
+        _seed_ring_episode(engine)
         store.armed = True
         processor = LearningTestProcessor(
             selection=_generate_selection(),
@@ -860,12 +872,14 @@ def test_learning_no_stimulus_message_distinguishes_empty_from_ungroundable() ->
 
     async def run() -> None:
         connection = sqlite3.connect(":memory:", check_same_thread=False)
-        store = memory.Memory(connection=connection)
-        _ = store.execute(
+        engine = memory.store.open_sqlite_engine(connection=connection)
+        store = memory.Memory(engine=engine)
+        _ = execute_on(
+            engine,
             episodes.episode_insert_input(
                 episodes.CognitiveEpisode(focus="phone", focus_candidates=("phone",), stimulus_name=None, output=()),
                 context_ref="phone",
-            )
+            ),
         )
         processor = LearningTestProcessor(
             selection=_generate_selection(),
@@ -899,8 +913,9 @@ class _FailingDecoder(decoding.Decoder[learning.InputData, learning.DecodedData]
 def test_learning_decode_failure_surfaces() -> None:
     async def run() -> None:
         connection = sqlite3.connect(":memory:", check_same_thread=False)
-        store = memory.Memory(connection=connection)
-        _seed_ring_episode(store)
+        engine = memory.store.open_sqlite_engine(connection=connection)
+        store = memory.Memory(engine=engine)
+        _seed_ring_episode(engine)
         processor = LearningTestProcessor(
             selection=_generate_selection(),
             write=behavior.ChangeData(name="Unused", source=ANSWER_RING_BEHAVIOR_SOURCE),
@@ -952,8 +967,9 @@ def test_learning_hands_revision_the_lesson_as_typed_data_not_a_synthetic_select
 
     async def run() -> _CapturingLearningProcessor:
         connection = sqlite3.connect(":memory:", check_same_thread=False)
-        store = memory.Memory(connection=connection)
-        _seed_ring_episode(store)
+        engine = memory.store.open_sqlite_engine(connection=connection)
+        store = memory.Memory(engine=engine)
+        _seed_ring_episode(engine)
         processor = _CapturingLearningProcessor(
             selection=_generate_selection(),
             write=behavior.ChangeData(
@@ -1000,7 +1016,8 @@ def test_learning_input_is_offered_as_a_model_callable_tool() -> None:
 
     async def run() -> tuple[tuple[str, ...], str | None]:
         connection = sqlite3.connect(":memory:", check_same_thread=False)
-        store = memory.Memory(connection=connection)
+        engine = memory.store.open_sqlite_engine(connection=connection)
+        store = memory.Memory(engine=engine)
         ability = Learning(
             decoder=TextDecoder(),
             processor=LearningTestProcessor(

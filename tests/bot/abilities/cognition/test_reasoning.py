@@ -12,7 +12,7 @@ import typing
 
 import hsm
 
-from tests.bot.abilities.memory.memory_fixtures import MessageOnlyMemory
+from tests.bot.abilities.memory.memory_fixtures import execute_on
 from tests.bot.abilities.support import dispatch_ability_for_test, shared_hsm_context, start_abilities_for_test
 from tests.bot.abilities.cognition.metadata_contract import assert_metadata_is_not_coordination
 
@@ -93,7 +93,7 @@ def test_reasoning_retains_environment_event_stimulus_without_stranding() -> Non
     """The retain stage sends memory an insert request; it never calls into the memory machine."""
 
     async def run() -> tuple[processing.CompletionData, tuple[cognition.episodes.CognitiveEpisode, ...], str]:
-        store = MessageOnlyMemory()
+        store = memory.Memory()
         reasoning = cognition.Reasoning(processor=EmptyProcessor(), memory=store)
         ctx = shared_hsm_context()
         await start_abilities_for_test(ctx, store, reasoning)
@@ -206,7 +206,7 @@ def test_reasoning_recalls_standing_directives_alongside_prior_episodes() -> Non
     """
 
     async def run() -> reasoning_module.ProcessorInput:
-        store = MessageOnlyMemory()
+        store = memory.Memory()
         ctx = shared_hsm_context()
         await start_abilities_for_test(ctx, store)
         _ = await memory.transact(
@@ -259,27 +259,30 @@ def test_reasoning_without_memory_recalls_no_standing_directives() -> None:
 def test_reasoning_recall_decodes_both_statements_from_one_transaction() -> None:
     """The two SELECTs are positional inside a single committed transaction."""
 
-    store = memory.Memory()
-    _ = store.execute(
+    store = memory.store.open_sqlite_engine()
+    _ = execute_on(
+        store,
         cognition.episodes.episode_insert_input(
             cognition.episodes.CognitiveEpisode(stimulus_name="bot.input", output=()),
             context_ref=None,
-        )
+        ),
     )
-    _ = store.execute(
+    _ = execute_on(
+        store,
         cognition.directives.directive_insert_input(
             cognition.directives.Directive(text="Water the plants."),
             context_ref=None,
-        )
+        ),
     )
 
-    recalled = store.execute(
+    recalled = execute_on(
+        store,
         memory.InputData(
             statements=(
                 *cognition.episodes.episode_select_input().statements,
                 *cognition.directives.directive_select_input().statements,
             )
-        )
+        ),
     )
 
     assert len(recalled.results) == 2

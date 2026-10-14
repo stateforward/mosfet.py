@@ -1,28 +1,25 @@
-from mosfet.abilities.memory import (
-    InputData,
-    MEMORY_TABLE,
-    Memory,
-    OutputData,
-    Statement,
-    StatementResult,
-)
-from .memory import (
-    MemoryStore,
-    ProviderError,
-    SqliteMemory,
-)
+"""SQLite + sqlite-vec storage for ``memory.Memory``: a vector-capable engine and a ``vec0`` index.
+
+Usage::
+
+    from mosfet.abilities import memory
+    from mosfet.providers import sqlite_memory
+
+    store = memory.Memory(
+        engine=sqlite_memory.open_engine(database_path="bot-memory.sqlite3"),
+        index=sqlite_memory.VecIndex(),
+        embedder=embedder,
+    )
+"""
+
+from .engine import ProviderError, open_engine
+from .index import VecIndex
 
 __version__ = "0.1.0"
 
 __all__ = [
-    "InputData",
-    "MEMORY_TABLE",
-    "Memory",
-    "MemoryStore",
-    "OutputData",
     "ProviderError",
-    "SqliteMemory",
-    "Statement",
-    "StatementResult",
+    "VecIndex",
     "__version__",
+    "open_engine",
 ]

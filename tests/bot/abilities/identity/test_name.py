@@ -5,13 +5,19 @@ from __future__ import annotations
 import datetime
 import sqlite3
 
+from sqlalchemy.engine import Engine
+
 from mosfet.abilities import identity
 from mosfet.abilities import memory
 
+from tests.bot.abilities.memory.memory_fixtures import execute_on
 
-def open_store() -> tuple[memory.Memory, sqlite3.Connection]:
+
+def open_store() -> tuple[Engine, sqlite3.Connection]:
+    """A migrated memory database: name rows are plain relational rows, read and written as SQL."""
+
     connection = sqlite3.connect(":memory:", check_same_thread=False)
-    return memory.Memory(connection=connection), connection
+    return memory.store.open_sqlite_engine(connection=connection), connection
 
 
 def test_a_store_with_no_name_row_reads_as_nameless() -> None:
@@ -19,7 +25,7 @@ def test_a_store_with_no_name_row_reads_as_nameless() -> None:
 
     store, connection = open_store()
     try:
-        recalled = store.execute(identity.name_select_input())
+        recalled = execute_on(store, identity.name_select_input())
     finally:
         connection.close()
 
@@ -36,8 +42,8 @@ def test_an_adopted_name_is_a_fact_about_the_bot_itself() -> None:
 
     store, connection = open_store()
     try:
-        _ = store.execute(identity.name_insert_input(identity.Name(text="Bob")))
-        recalled = store.execute(identity.name_select_input())
+        _ = execute_on(store, identity.name_insert_input(identity.Name(text="Bob")))
+        recalled = execute_on(store, identity.name_select_input())
         rows = [row.as_mapping() for row in recalled.results[0].rows]
     finally:
         connection.close()
@@ -69,8 +75,8 @@ def test_a_name_row_written_before_the_kind_was_narrowed_still_decodes() -> None
 
     store, connection = open_store()
     try:
-        _ = store.execute(identity.name_insert_input(identity.Name(text="Bob")))
-        recalled = store.execute(identity.name_select_input())
+        _ = execute_on(store, identity.name_insert_input(identity.Name(text="Bob")))
+        recalled = execute_on(store, identity.name_select_input())
     finally:
         connection.close()
 
@@ -92,9 +98,9 @@ def test_the_most_recently_adopted_name_is_the_one_the_bot_answers_to() -> None:
 
     store, connection = open_store()
     try:
-        _ = store.execute(identity.name_insert_input(identity.Name(text="Bob"), created_at=first))
-        _ = store.execute(identity.name_insert_input(identity.Name(text="Ada"), created_at=second))
-        recalled = store.execute(identity.name_select_input())
+        _ = execute_on(store, identity.name_insert_input(identity.Name(text="Bob"), created_at=first))
+        _ = execute_on(store, identity.name_insert_input(identity.Name(text="Ada"), created_at=second))
+        recalled = execute_on(store, identity.name_select_input())
     finally:
         connection.close()
 
@@ -114,9 +120,9 @@ def test_a_name_is_not_recalled_as_a_standing_directive() -> None:
 
     store, connection = open_store()
     try:
-        _ = store.execute(identity.name_insert_input(identity.Name(text="Bob")))
-        recalled_directives = store.execute(directives.directive_select_input())
-        recalled_names = store.execute(identity.name_select_input())
+        _ = execute_on(store, identity.name_insert_input(identity.Name(text="Bob")))
+        recalled_directives = execute_on(store, directives.directive_select_input())
+        recalled_names = execute_on(store, identity.name_select_input())
     finally:
         connection.close()
 
@@ -131,13 +137,14 @@ def test_a_bot_renamed_more_often_than_the_recall_window_answers_to_its_latest_n
     store, connection = open_store()
     try:
         for index in range(60):
-            _ = store.execute(
+            _ = execute_on(
+                store,
                 identity.name_insert_input(
                     identity.Name(text=f"Name {index:02d}"),
                     created_at=base + datetime.timedelta(minutes=index),
-                )
+                ),
             )
-        recalled = store.execute(identity.name_select_input(limit=50))
+        recalled = execute_on(store, identity.name_select_input(limit=50))
     finally:
         connection.close()
 

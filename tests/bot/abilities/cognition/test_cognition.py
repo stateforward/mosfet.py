@@ -19,7 +19,8 @@ import sqlite3
 import typing
 
 import hsm
-from tests.bot.abilities.memory.memory_fixtures import MessageOnlyMemory
+from sqlalchemy.engine import Engine
+from tests.bot.abilities.memory.memory_fixtures import execute_on
 from tests.bot.abilities.support import dispatch_ability_for_test, shared_hsm_context, start_abilities_for_test
 import pydantic
 import pytest
@@ -632,7 +633,7 @@ class RecordingReflectionAbility(cognition.Reflection):
     ) -> None:
         super().__init__(
             processor=FixedProcessor(selection or behavior_create_selection()),
-            memory=memory.Memory(connection=connection),
+            memory=memory.Memory(engine=memory.store.open_sqlite_engine(connection=connection)),
         )
 
 
@@ -900,7 +901,7 @@ def test_cognitive_abilities_are_concrete_processing_abilities() -> None:
     reasoning_processor = RecordingReasoningProcessor(focus_output("phone", "deliberate"))
     intuition = cognition.Intuition(processor=intuition_processor)
     reasoning = cognition.Reasoning(processor=reasoning_processor)
-    connection = sqlite3.connect(":memory:")
+    connection = sqlite3.connect(":memory:", check_same_thread=False)
     try:
         reflection = RecordingReflectionAbility(connection)
 
@@ -951,7 +952,7 @@ def test_cognition_builds_one_group_for_required_children_and_waits_for_aggregat
                 memory=memory.Memory(),
             ),
         )
-        connection = sqlite3.connect(":memory:")
+        connection = sqlite3.connect(":memory:", check_same_thread=False)
         try:
             maximal = cognition.Cognition(
                 autonomy=cognition.Autonomy(),
@@ -959,7 +960,7 @@ def test_cognition_builds_one_group_for_required_children_and_waits_for_aggregat
                 reasoning=cognition.Reasoning(processor=RecordingReasoningProcessor(no_output("slow"))),
                 reflection=cognition.Reflection(
                     processor=FixedProcessor(no_output("reflect")),
-                    memory=memory.Memory(connection=connection),
+                    memory=memory.Memory(engine=memory.store.open_sqlite_engine(connection=connection)),
                 ),
             )
         finally:
@@ -2700,9 +2701,10 @@ def test_reasoning_recalls_prior_episodes_and_retains_behavior_episode() -> None
         list[processing.InputData],
         tuple[cognition.episodes.CognitiveEpisode, ...],
     ]:
-        store = memory.Memory()
+        engine = memory.store.open_sqlite_engine()
+        store = memory.Memory(engine=engine)
         seed = cognition.episodes.episode_insert_input(prior, context_ref="phone")
-        _ = store.execute(seed)
+        _ = execute_on(engine, seed)
 
         processor = RecordingReasoningProcessor(
             cognition.reasoning.OutputData(
@@ -2788,7 +2790,7 @@ def test_reflection_creates_validates_and_stores_behavior() -> None:
         )
 
         select = cognition.episodes.episode_select_input(context_ref=None)
-        recalled = store.execute(select)
+        recalled = await memory.transact(ctx, store, select)
         episodes = cognition.episodes.episodes_from_output(recalled)
 
         from mosfet.behavior import storage as behavior_storage
@@ -2796,7 +2798,7 @@ def test_reflection_creates_validates_and_stores_behavior() -> None:
         behavior_select = memory.InputData(
             statements=memory.compile_statements(*behavior_storage.select_all_behaviors_clauses())
         )
-        behavior_out = store.execute(behavior_select)
+        behavior_out = await memory.transact(ctx, store, behavior_select)
         behavior_sources = _behavior_sources_from_output(behavior_out)
         return result, episodes, behavior_sources, processor.builds, processor.write_step.calls
 
@@ -2882,8 +2884,10 @@ behavior = hsm.define(
             )
         from mosfet.behavior import storage as behavior_storage
 
-        behavior_out = store.execute(
-            memory.InputData(statements=memory.compile_statements(*behavior_storage.select_all_behaviors_clauses()))
+        behavior_out = await memory.transact(
+            ctx,
+            store,
+            memory.InputData(statements=memory.compile_statements(*behavior_storage.select_all_behaviors_clauses())),
         )
         behaviors = behavior_storage.instances_from_behavior_results(
             tuple(row.as_mapping() for row in behavior_out.results[0].rows),
@@ -2960,8 +2964,10 @@ def test_reflection_change_retries_while_diagnostics_change_without_fixed_budget
         )
         from mosfet.behavior import storage as behavior_storage
 
-        behavior_out = store.execute(
-            memory.InputData(statements=memory.compile_statements(*behavior_storage.select_all_behaviors_clauses()))
+        behavior_out = await memory.transact(
+            ctx,
+            store,
+            memory.InputData(statements=memory.compile_statements(*behavior_storage.select_all_behaviors_clauses())),
         )
         behaviors = behavior_storage.instances_from_behavior_results(
             tuple(row.as_mapping() for row in behavior_out.results[0].rows),
@@ -3037,7 +3043,7 @@ behavior = hsm.define(
         behavior_select = memory.InputData(
             statements=memory.compile_statements(*behavior_storage.select_all_behaviors_clauses())
         )
-        behavior_out = store.execute(behavior_select)
+        behavior_out = await memory.transact(ctx, store, behavior_select)
         sources = _behavior_sources_from_output(behavior_out)
         behaviors = behavior_storage.instances_from_behavior_results(
             tuple(row.as_mapping() for row in behavior_out.results[0].rows),
@@ -3081,7 +3087,7 @@ def _behavior_sources_from_output(output: memory.OutputData) -> tuple[str, ...]:
 
 
 async def _seed_behavior_record(
-    store: memory.Memory,
+    store: memory.Memory | Engine,
     *,
     name: str = "AnswerIncomingRing",
     triggers: tuple[str, ...] = (),
@@ -3092,7 +3098,7 @@ async def _seed_behavior_record(
     """Insert executable behavior into bot_behavior / bot_behavior_trigger tables.
 
     With ``ctx`` the row is written by message to an attached store (the way a peer would);
-    without it the store is seeded before anything attaches it.
+    without it the store's database engine is seeded before anything attaches the store.
     """
 
     from mosfet.behavior import storage as behavior_storage
@@ -3112,10 +3118,11 @@ async def _seed_behavior_record(
             triggers=triggers if triggers else None,
         )
     seed = memory.InputData(statements=memory.compile_statements(*behavior_storage.insert_behavior_clauses(behavior)))
-    if ctx is not None:
+    if isinstance(store, memory.Memory):
+        assert ctx is not None, "an attached store is reached by message"
         _ = await memory.transact(ctx, store, seed)
         return
-    _ = store.execute(seed)
+    _ = execute_on(store, seed)
 
 
 def test_reflection_change_loads_existing_and_writes_update() -> None:
@@ -3158,9 +3165,10 @@ def test_reflection_change_loads_existing_and_writes_update() -> None:
         list[processing.InputData],
         behavior_events.CreateData | behavior_events.ChangeData | behavior_events.BreakData | None,
     ]:
-        store = memory.Memory()
+        engine = memory.store.open_sqlite_engine()
+        store = memory.Memory(engine=engine)
         await _seed_behavior_record(
-            store,
+            engine,
             name="AnswerIncomingRing",
             triggers=("environment.sound",),
             description="Original description.",
@@ -3182,10 +3190,10 @@ def test_reflection_change_loads_existing_and_writes_update() -> None:
         behavior_select = memory.InputData(
             statements=memory.compile_statements(*behavior_storage.select_all_behaviors_clauses())
         )
-        behavior_out = store.execute(behavior_select)
+        behavior_out = await memory.transact(ctx, store, behavior_select)
         sources = _behavior_sources_from_output(behavior_out)
         select = cognition.episodes.episode_select_input(context_ref=None)
-        episodes = cognition.episodes.episodes_from_output(store.execute(select))
+        episodes = cognition.episodes.episodes_from_output(await memory.transact(ctx, store, select))
         latest_behavior = episodes[-1].behavior if episodes else None
         return result, sources, processor.change_step.calls, latest_behavior
 
@@ -3231,7 +3239,7 @@ def test_reflection_break_marks_behavior_broken_without_write_step() -> None:
         int,
     ]:
         # Break reads and rewrites the inventory row by message: the store refuses direct calls.
-        store = MessageOnlyMemory()
+        store = memory.Memory()
         processor = FixedProcessor(selection)
         reflection = cognition.Reflection(processor=processor, memory=store)
         ctx = await start_cognition_ability_for_test(reflection)
@@ -3309,7 +3317,7 @@ def test_reflection_no_selection_still_stores_episode() -> None:
         )
         result = await dispatch_ability_for_test(reflection, ctx, input)
         select = cognition.episodes.episode_select_input(context_ref=None)
-        recalled = store.execute(select)
+        recalled = await memory.transact(ctx, store, select)
         episodes = cognition.episodes.episodes_from_output(recalled)
         return result, episodes
 
@@ -3382,9 +3390,10 @@ def test_autonomy_handles_matching_behavior_without_intuition_processor() -> Non
     """Stimulus → behavior Behavior → EventData selection without deliberative Processing."""
 
     async def run() -> tuple[list[cognition.types.OutputData], list[processing.InputData], list[processing.InputData]]:
-        store = memory.Memory()
+        engine = memory.store.open_sqlite_engine()
+        store = memory.Memory(engine=engine)
         await _seed_behavior_record(
-            store,
+            engine,
             name="FocusOnRing",
             triggers=("environment.sound",),
             source=_FOCUS_RING_BEHAVIOR_SOURCE,
@@ -3441,9 +3450,10 @@ def test_autonomy_handles_matching_behavior_without_intuition_processor() -> Non
 
 def test_autonomy_unhandled_falls_through_to_intuition() -> None:
     async def run() -> tuple[list[cognition.types.OutputData], list[processing.InputData]]:
-        store = memory.Memory()
+        engine = memory.store.open_sqlite_engine()
+        store = memory.Memory(engine=engine)
         await _seed_behavior_record(
-            store,
+            engine,
             name="FocusOnRing",
             triggers=("environment.sound",),
             source=_FOCUS_RING_BEHAVIOR_SOURCE,
@@ -3639,7 +3649,7 @@ def test_cognition_reconciles_routines_after_reflection_settles() -> None:
     from tests.bot.behavior.support import ManualTimers
 
     async def run() -> tuple[list[datetime.timedelta], list[datetime.timedelta]]:
-        store = MessageOnlyMemory()
+        store = memory.Memory()
         timers = ManualTimers()
         intuition, reasoning = cognition_abilities()
         ability = cognition.Cognition(
@@ -3703,7 +3713,7 @@ def test_cognition_hands_routine_ticks_to_the_body_as_observed_input(tmp_path: p
             _ = connection.exec_driver_sql(statement.sql, statement.parameters)
 
     async def run() -> tuple[hsm.Event[typing.Any], str]:
-        store = MessageOnlyMemory(database=database)
+        store = memory.Memory(database=database)
         timers = ManualTimers()
         intuition, reasoning = cognition_abilities()
         ability = cognition.Cognition(

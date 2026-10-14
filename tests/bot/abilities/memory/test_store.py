@@ -12,7 +12,7 @@ import mosfet
 import pytest
 from sqlalchemy.engine import Engine
 
-from tests.bot.abilities.memory.memory_fixtures import MessageOnlyMemory
+from tests.bot.abilities.memory.memory_fixtures import execute_on
 from tests.bot.abilities.support import dispatch_ability_for_test, shared_hsm_context, start_abilities_for_test
 
 
@@ -122,12 +122,19 @@ def test_memory_store_accepts_injected_engine() -> None:
     from mosfet.abilities.memory import store as store_module
 
     engine = store_module.open_sqlite_engine()
-    injected = memory.MemoryStore(engine=engine)
-    output = injected.execute(
-        memory.InputData(statements=(_insert_content(content="injected-engine", query_tags="task"),))
-    )
+
+    async def run() -> memory.OutputData:
+        injected = memory.MemoryStore(engine=engine)
+        await start_abilities_for_test(shared_hsm_context(), injected)
+        return await dispatch_ability_for_test(
+            injected,
+            None,
+            memory.InputData(statements=(_insert_content(content="injected-engine", query_tags="task"),)),
+        )
+
+    output = asyncio.run(run())
     assert len(output.results) == 1
-    selected = injected.execute(memory.InputData(statements=(_select_by_query_tags(query_tags="task"),)))
+    selected = execute_on(engine, memory.InputData(statements=(_select_by_query_tags(query_tags="task"),)))
     assert "injected-engine" in selected.contents()
     with pytest.raises(ValueError, match="either engine or database/connection"):
         _ = memory.MemoryStore(engine=engine, database="/tmp/memory-store-injected.db")
@@ -149,23 +156,6 @@ def _schema_revision_state(engine: Engine) -> tuple[str | None, str | None, list
         return context.get_current_revision(), head, diffs
 
 
-def _create_all_era_database(path: pathlib.Path) -> None:
-    """A database as ``metadata.create_all`` left it before migrations: baseline tables, no version table."""
-
-    from alembic import command
-    from sqlalchemy import create_engine, text
-
-    from mosfet.abilities.memory import store as store_module
-
-    config = store_module.migration_config()
-    engine = create_engine(f"sqlite+pysqlite:///{path}")
-    with engine.begin() as connection:
-        config.attributes["connection"] = connection
-        command.upgrade(config, store_module.BASELINE_REVISION)
-        _ = connection.execute(text(f"DROP TABLE {store_module.VERSION_TABLE}"))
-    engine.dispose()
-
-
 def test_open_sqlite_engine_upgrades_fresh_database_to_head_without_drift() -> None:
     """Bring-up runs every revision; the migrated schema matches ``memory.metadata`` exactly."""
 
@@ -179,73 +169,44 @@ def test_open_sqlite_engine_upgrades_fresh_database_to_head_without_drift() -> N
     assert diffs == []
 
 
-def test_open_sqlite_engine_stamps_and_upgrades_create_all_era_database(tmp_path: pathlib.Path) -> None:
-    """A pre-migration database keeps its rows, is stamped at the baseline, and reaches head."""
-
-    from sqlalchemy import create_engine, inspect
-
-    from mosfet.abilities.memory import store as store_module
-
-    path = tmp_path / "legacy.db"
-    _create_all_era_database(path)
-    legacy = create_engine(f"sqlite+pysqlite:///{path}")
-    assert store_module.VERSION_TABLE not in inspect(legacy).get_table_names()
-    _ = memory.MemoryStore(engine=legacy).execute(
-        memory.InputData(statements=(_insert_content(content="pre-cutover", query_tags="legacy"),))
-    )
-    legacy.dispose()
-
-    engine = store_module.open_sqlite_engine(database=str(path))
-    current, head, diffs = _schema_revision_state(engine)
-    assert current == head
-    assert diffs == []
-    selected = memory.MemoryStore(engine=engine).execute(
-        memory.InputData(statements=(_select_by_query_tags(query_tags="legacy"),))
-    )
-    engine.dispose()
-    assert selected.contents() == ("pre-cutover",)
-
-
-def test_open_sqlite_engine_rejects_unversioned_partial_database(tmp_path: pathlib.Path) -> None:
-    """Some baseline tables without a version table match no revision and are not guessed at."""
+def test_open_sqlite_engine_rejects_an_unversioned_database_that_holds_memory_tables(tmp_path: pathlib.Path) -> None:
+    """Memory tables without a version table were not made by these migrations and are not guessed at."""
 
     import contextlib
     import sqlite3
 
     from mosfet.abilities.memory import store as store_module
 
-    path = tmp_path / "partial.db"
+    path = tmp_path / "unversioned.db"
     with contextlib.closing(sqlite3.connect(path)) as connection, connection:
         _ = connection.execute(f"CREATE TABLE {memory.MEMORY_TABLE} (memory_id TEXT PRIMARY KEY)")
-    with pytest.raises(store_module.MigrationError, match="lacks baseline tables"):
+    with pytest.raises(store_module.MigrationError, match="Unversioned memory database"):
         _ = store_module.open_sqlite_engine(database=str(path))
 
 
-def test_open_sqlite_engine_upgrades_baseline_behavior_rows_to_turn_lifetime(tmp_path: pathlib.Path) -> None:
-    """Revision 0002 adds ``bot_behavior.lifetime``; behaviors stored before it are turn behaviors."""
+def test_the_one_baseline_revision_creates_and_drops_every_memory_table() -> None:
+    """Revision 0001 is the whole schema (relational, behavior, register, episodic graph); no data moves."""
 
     from alembic import command
-    from sqlalchemy import create_engine, text
+    from alembic.script import ScriptDirectory
+    from sqlalchemy import create_engine, inspect
 
     from mosfet.abilities.memory import store as store_module
 
-    path = tmp_path / "baseline.db"
     config = store_module.migration_config()
-    baseline = create_engine(f"sqlite+pysqlite:///{path}")
-    with baseline.begin() as connection:
+    assert [script.revision for script in ScriptDirectory.from_config(config).walk_revisions()] == ["0001"]
+    engine = create_engine("sqlite+pysqlite://")
+    with engine.begin() as connection:
         config.attributes["connection"] = connection
-        command.upgrade(config, store_module.BASELINE_REVISION)
-        _ = connection.execute(text("INSERT INTO bot_behavior (name, source) VALUES ('Greeting', 'x')"))
-    baseline.dispose()
-
-    engine = store_module.open_sqlite_engine(database=str(path))
-    current, head, diffs = _schema_revision_state(engine)
-    with engine.connect() as connection:
-        lifetimes = connection.execute(text("SELECT name, lifetime FROM bot_behavior")).all()
+        command.upgrade(config, "head")
+        created = set(inspect(connection).get_table_names())
+        command.downgrade(config, "base")
+        remaining = set(inspect(connection).get_table_names())
     engine.dispose()
-    assert current == head
-    assert diffs == []
-    assert [tuple(row) for row in lifetimes] == [("Greeting", "turn")]
+    assert set(memory.metadata.tables) <= created
+    assert remaining == {store_module.VERSION_TABLE}
+    lifetime = {column.name for column in memory.metadata.tables["bot_behavior"].columns}
+    assert "lifetime" in lifetime
 
 
 def test_recent_select_returns_same_instant_rows_in_insertion_order() -> None:
@@ -310,7 +271,7 @@ def test_recent_select_returns_same_instant_rows_in_insertion_order() -> None:
 
 def test_transact_reaches_the_store_by_message_and_returns_its_committed_reply() -> None:
     async def run() -> memory.OutputData:
-        store = MessageOnlyMemory()
+        store = memory.Memory()
         ctx = shared_hsm_context()
         await start_abilities_for_test(ctx, store)
         return await memory.transact(
@@ -329,7 +290,7 @@ def test_transact_reaches_the_store_by_message_and_returns_its_committed_reply()
 
 def test_transact_raises_request_error_when_the_store_rolls_back() -> None:
     async def run() -> tuple[str, ...]:
-        store = MessageOnlyMemory()
+        store = memory.Memory()
         ctx = shared_hsm_context()
         await start_abilities_for_test(ctx, store)
         with pytest.raises(memory.RequestError, match="not_a_table"):
@@ -354,7 +315,7 @@ def test_transact_raises_request_error_for_a_store_that_is_not_started() -> None
         with pytest.raises(memory.RequestError, match="cannot be reached"):
             _ = await memory.transact(
                 shared_hsm_context(),
-                MessageOnlyMemory(),
+                memory.Memory(),
                 memory.InputData(statements=(_select_by_query_tags(query_tags="none"),)),
             )
 
@@ -363,7 +324,7 @@ def test_transact_raises_request_error_for_a_store_that_is_not_started() -> None
 
 def test_transact_raises_request_error_when_the_store_never_answers() -> None:
     async def run() -> None:
-        store = MessageOnlyMemory()
+        store = memory.MemoryStore()
         ctx = shared_hsm_context()
         # Started but never attached: the request reaches a machine that cannot serve it yet.
         _ = await mosfet.started(ctx, store, typing.cast(hsm.Model, store.model))
@@ -376,3 +337,45 @@ def test_transact_raises_request_error_when_the_store_never_answers() -> None:
             )
 
     asyncio.run(run())
+
+
+def test_in_memory_engine_is_shared_across_threads() -> None:
+    """A row written on a worker thread is visible from the caller thread: one ``:memory:`` database."""
+
+    import concurrent.futures
+
+    from sqlalchemy import insert, select
+
+    from mosfet.abilities.memory import store as store_module
+
+    engine = store_module.open_sqlite_engine()
+    table = memory.memory_table
+
+    def write() -> None:
+        with engine.begin() as connection:
+            _ = connection.execute(insert(table).values(memory_id="threaded", content="written on a worker"))
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as worker:
+        worker.submit(write).result()
+    with engine.connect() as connection:
+        contents = connection.execute(select(table.c.content)).scalars().all()
+    engine.dispose()
+    assert contents == ["written on a worker"]
+
+
+def test_open_sqlite_engine_runs_the_connect_hook_before_migrating() -> None:
+    """``on_connect`` sees every new DBAPI connection before the schema is brought up."""
+
+    import sqlite3
+
+    from mosfet.abilities.memory import store as store_module
+
+    seen: list[list[str]] = []
+
+    def on_connect(connection: sqlite3.Connection) -> None:
+        tables = [row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")]
+        seen.append(tables)
+
+    engine = store_module.open_sqlite_engine(on_connect=on_connect)
+    engine.dispose()
+    assert seen == [[]]

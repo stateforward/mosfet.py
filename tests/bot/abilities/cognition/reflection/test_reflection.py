@@ -20,7 +20,6 @@ import uuid
 
 import hsm
 import pytest
-from tests.bot.abilities.memory.memory_fixtures import MessageOnlyMemory
 from tests.type_helpers import model_view
 from tests.bot.abilities.cognition.metadata_contract import assert_metadata_is_not_coordination
 
@@ -123,7 +122,9 @@ def reflection_with_processor(
     """Reflection over a memory that only answers requests sent by message (it refuses direct calls)."""
 
     connection = sqlite3.connect(":memory:", check_same_thread=False)
-    return cognition.Reflection(processor=processor, memory=MessageOnlyMemory(connection=connection)), connection
+    return cognition.Reflection(
+        processor=processor, memory=memory.Memory(engine=memory.store.open_sqlite_engine(connection=connection))
+    ), connection
 
 
 def reflection_input() -> cognition.reflection.InputData:
@@ -142,7 +143,7 @@ def reflection_input() -> cognition.reflection.InputData:
 def test_reflection_ignores_forged_selected_event_without_turn_capability() -> None:
     async def run() -> tuple[str, object]:
         connection = sqlite3.connect(":memory:", check_same_thread=False)
-        store = MessageOnlyMemory(connection=connection)
+        store = memory.Memory(engine=memory.store.open_sqlite_engine(connection=connection))
         reflection = cognition.Reflection(processor=HangingProcessor(), memory=store)
         ctx = hsm.Context()
         owner = AttachmentOwner()
@@ -614,7 +615,9 @@ def test_reflection_builds_one_attachment_group_for_fixed_children(
     group_init = attachment.Group.__init__
 
     def record_group(group: attachment.Group, *members: hsm.Instance) -> None:
-        groups.append(members)
+        # The memory child builds its own group (empty without an embedder); count Reflection's.
+        if members:
+            groups.append(members)
         group_init(group, *members)
 
     monkeypatch.setattr(attachment.Group, "__init__", record_group)
@@ -851,7 +854,9 @@ def test_reflection_detaches_once_and_cancels_active_processing(
             ctx: hsm.Context,
             event: hsm.Event[attachment.DetachData],
         ) -> None:
-            requests.append(event)
+            # The memory child detaches its own (empty) group too; count Reflection's tree only.
+            if not (isinstance(event.data, attachment.DetachData) and isinstance(event.data.actor, memory.Memory)):
+                requests.append(event)
             await group_detach(group, ctx, event)
 
         monkeypatch.setattr(attachment.Group, "detach", record_detach)
@@ -919,7 +924,9 @@ def test_reflection_detaches_once_from_synchronous_activity_state(
             ctx: hsm.Context,
             event: hsm.Event[attachment.DetachData],
         ) -> None:
-            requests.append(event)
+            # The memory child detaches its own (empty) group too; count Reflection's tree only.
+            if not (isinstance(event.data, attachment.DetachData) and isinstance(event.data.actor, memory.Memory)):
+                requests.append(event)
             await group_detach(group, ctx, event)
 
         monkeypatch.setattr(attachment.Group, "detach", record_detach)
@@ -1061,7 +1068,9 @@ def test_reflection_detaches_once_through_group_and_can_reattach(
             ctx: hsm.Context,
             event: hsm.Event[attachment.DetachData],
         ) -> None:
-            requests.append(event)
+            # The memory child detaches its own (empty) group too; count Reflection's tree only.
+            if not (isinstance(event.data, attachment.DetachData) and isinstance(event.data.actor, memory.Memory)):
+                requests.append(event)
             await group_detach(group, ctx, event)
 
         monkeypatch.setattr(attachment.Group, "detach", record_detach)

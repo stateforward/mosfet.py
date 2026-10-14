@@ -20,8 +20,16 @@ grep for `_` in `tests/` does not normalize new reach-in.
 | `tests/bot/abilities/memory/test_store.py::test_memory_store_accepts_injected_engine` | `src/mosfet/abilities/memory/store.py` (injected engine path, exclusive args) |
 | `tests/bot/abilities/memory/test_store.py::test_transact_*` | `src/mosfet/abilities/memory/store.py` (`transact`: a peer reaches the store by message; committed reply, rollback, unreachable and unanswered stores fail as `RequestError`) |
 | `tests/bot/abilities/memory/test_stm.py` | `src/mosfet/abilities/memory/stm.py` (record/reinforce notifications and the recent request/reply, capacity, recency window, reinforcement, failure replies) |
-| `tests/bot/abilities/memory/test_store.py::test_open_sqlite_engine_*` | `src/mosfet/abilities/memory/store.py` bring-up via `src/mosfet/abilities/memory/migrations/` (head without drift, create_all-era stamp, partial-DB refusal) |
-| `tests/bot/abilities/memory/test_store.py::test_open_sqlite_engine_upgrades_baseline_behavior_rows_to_turn_lifetime` | memory revision `0002` (`bot_behavior.lifetime`, existing rows read as turn behaviors) |
+| `tests/bot/abilities/memory/test_store.py::test_open_sqlite_engine_*` | `src/mosfet/abilities/memory/store.py` bring-up via `src/mosfet/abilities/memory/migrations/` (head without drift, unversioned-DB refusal, connect hook before migration) |
+| `tests/bot/abilities/memory/test_store.py::test_the_one_baseline_revision_creates_and_drops_every_memory_table` | memory baseline revision `0001` (the only revision; graph tables and `bot_behavior.lifetime`; downgrade) |
+| `tests/bot/abilities/memory/test_store.py::test_in_memory_engine_is_shared_across_threads` | `src/mosfet/abilities/memory/store.py` (`:memory:` is one `StaticPool` connection) |
+| `tests/bot/abilities/memory/test_memory.py` | `src/mosfet/abilities/memory/memory.py` (remember/search/fetch/recent/backfill/lease/consolidate/release by message; a request waiting on its embed holds no other request and resumes on the embed reply; exactly one reply per request on completion, timeout, detach (waiting on an embed included), stop, detached; composite lifecycle; backfill attribution within the embedder capacity) |
+| `tests/bot/abilities/memory/test_payload.py` | `src/mosfet/abilities/memory/payload.py` (bounds, validators, model-facing schemas, budgeted unit rendering) |
+| `tests/bot/abilities/memory/test_index.py` | `src/mosfet/abilities/memory/index.py` (`ExactIndex` order, k, kind filter, space isolation; float32 packing) |
+| `tests/bot/abilities/memory/test_graph.py` | `src/mosfet/abilities/memory/graph.py` (parameterized builders, explicit forget deletes, fixed-width UTC times) |
+| `tests/bot/abilities/test_ability.py::test_a_request_to_a_detached_ability_*`, `::test_an_ability_without_detached_declarations_*` | `src/mosfet/abilities/ability.py` (C22 detached replies and counted drops; empty declarations leave the lifecycle unchanged) |
+| `src/providers/sqlite_memory/tests/test_engine.py` | `sqlite_memory/engine.py` (`open_engine`: vec0 loaded and locked, WAL, busy timeout, fail closed; migrations leave vec0 tables alone) |
+| `src/providers/sqlite_memory/tests/test_index.py` | `sqlite_memory/index.py` (`VecIndex` agrees with `ExactIndex`, kind filter, transactional removal, table names; Memory end to end) |
 | `tests/bot/behavior/test_events.py` | `src/mosfet/behavior/events.py` (`TickData` / `TickEvent` routine tick contract) |
 | `tests/bot/behavior/test_instance.py` | `src/mosfet/behavior/instance.py` (`check` lifetime rules: E0009 interval minimum and turn `after` bound) |
 | `tests/bot/behavior/test_schedule.py` | `src/mosfet/behavior/schedule.py` (`at()` occurrences: weekdays, time zones, DST) |

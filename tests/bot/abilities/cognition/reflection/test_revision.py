@@ -14,7 +14,6 @@ from mosfet.abilities.cognition.reflection import revision
 from tests.bot.abilities.cognition.test_cognition import FixedProcessor
 from tests.bot.abilities.cognition.test_cognition import cognition_input
 from tests.bot.abilities.cognition.test_cognition import focus_output
-from tests.bot.abilities.memory.memory_fixtures import MessageOnlyMemory
 from tests.bot.abilities.support import dispatch_ability_for_test, shared_hsm_context, start_abilities_for_test
 
 ANSWER_RING_BEHAVIOR_SOURCE = """
@@ -54,10 +53,10 @@ behavior = hsm.define(
 _REVISION_TIMEOUT_SECONDS = 60.0
 
 
-async def _attached_memory() -> tuple[hsm.Context, MessageOnlyMemory]:
+async def _attached_memory() -> tuple[hsm.Context, memory.Memory]:
     """The bot's memory, attached by its own owner; Revision is only its peer (no direct calls)."""
 
-    store = MessageOnlyMemory()
+    store = memory.Memory()
     ctx = shared_hsm_context()
     await start_abilities_for_test(ctx, store)
     return ctx, store
@@ -531,7 +530,7 @@ def test_revision_reports_a_typed_failure_when_memory_cannot_be_reached() -> Non
     async def run() -> None:
         actor = revision.Revision(
             processor=FixedProcessor(write=behavior.ChangeData(name="AnswerIncomingRing")),
-            memory=MessageOnlyMemory(),
+            memory=memory.Memory(),
         )
         _ = await dispatch_ability_for_test(
             actor,

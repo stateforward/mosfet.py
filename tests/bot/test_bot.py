@@ -1091,8 +1091,9 @@ def test_bot_and_nested_cognition_use_private_attachment_groups(monkeypatch: pyt
 
     attach_calls, detach_calls, group_is_private, state = asyncio.run(run())
 
-    assert attach_calls == 4
-    assert detach_calls == 4
+    # Memory is a composite ability too: its own (embedding) group is one of these.
+    assert attach_calls == 5
+    assert detach_calls == 5
     assert group_is_private
     assert state == "/Bot/inactive"
 

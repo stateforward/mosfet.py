@@ -68,6 +68,13 @@ def test_provider_bundles_redistribution_licenses() -> None:
     assert "vendor/sqlite-objstore/third_party/blake3/LICENSE_CC0" in force_include
     assert "vendor/sqlite-vec/LICENSE-MIT" in force_include
     assert "vendor/sqlite-vec/LICENSE-APACHE" in force_include
+    assert all(target.startswith("mosfet/providers/sqlite_memory/_licenses/") for target in force_include.values())
+
+
+def test_built_native_extensions_are_ignored() -> None:
+    ignored = (PACKAGE_ROOT / ".gitignore").read_text().splitlines()
+
+    assert "src/mosfet/providers/sqlite_memory/_native/" in ignored
 
 
 def test_provider_version_is_dynamic() -> None:

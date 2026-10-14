@@ -19,9 +19,18 @@ _connection = context.config.attributes.get("connection")
 if not isinstance(_connection, Connection):
     raise RuntimeError("Memory migrations require config.attributes['connection'] to be a SQLAlchemy Connection.")
 
+
+def _include_name(name: str | None, type_: str, parent_names: object) -> bool:
+    """Leave provider-created vector index tables (and their vec0 shadow tables) alone."""
+
+    del parent_names
+    return not (type_ == "table" and name is not None and name.startswith(schema.VECTOR_INDEX_PREFIX))
+
+
 context.configure(
     connection=_connection,
     target_metadata=schema.metadata,
+    include_name=_include_name,
     # SQLite cannot ALTER most column/constraint changes in place; batch mode copies the table.
     render_as_batch=_connection.dialect.name == "sqlite",
 )

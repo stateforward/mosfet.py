@@ -1403,3 +1403,106 @@ def test_ability_detach_when_stopped_emits_detach_failed() -> None:
     failures = asyncio.run(run())
     assert len(failures) == 1
     assert failures[0].name == attachment.DetachFailedEvent.name
+
+
+_DetachedNoticeEvent = hsm.Event[TerminalOperationInputData](
+    name="test.ability.detached.notice",
+    schema=TerminalOperationInputData,
+)
+
+
+class DetachedReplyingAbility(abilities.Ability[TerminalOperationInputData, TerminalOperationOutputData]):
+    """An ability that declares which requests a detached instance answers and which it only counts."""
+
+    input_event = TerminalOperationInputEvent
+    output_event = TerminalOperationOutputEvent
+    failed_event = TerminalOperationFailedEvent
+    detached_requests = (TerminalOperationInputEvent,)
+    detached_notifications = (_DetachedNoticeEvent,)
+    submodel: typing.ClassVar[hsm.Model | None] = mosfet.define(
+        "DetachedReplyingAbility",
+        hsm.initial(hsm.target("idle")),
+        hsm.state("idle"),
+    )
+
+
+def _model_shape(model: hsm.Model) -> list[tuple[str, str]]:
+    """Every member path with its element type: a snapshot of a model's states and transitions."""
+
+    return sorted((path, type(element).__name__) for path, element in model.members.items())
+
+
+def test_a_request_to_a_detached_ability_is_answered_with_its_declared_failure(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """C22: a declared request reaching ``…Lifecycle/detached`` gets one typed failure, correlated by id."""
+
+    from tests import metric_reader
+
+    async def run(reader: metric_reader.Reader) -> tuple[list[hsm.Event[typing.Any]], str, list[metric_reader.Point]]:
+        ctx = environment.Environment()
+        child = DetachedReplyingAbility()
+        _ = await mosfet.started(ctx, child, require_model(child.model))
+        before = reader.points("bot.ability.request.dropped.count")
+        result = await ability_module.run_terminal_operation(
+            ctx,
+            child=child,
+            request=terminal_operation_request("never-attached", "hello"),
+            terminals=(TerminalOperationOutputEvent, TerminalOperationFailedEvent),
+            timeout=datetime.timedelta(seconds=1),
+        )
+        _ = await hsm.dispatch(
+            ctx,
+            child,
+            _DetachedNoticeEvent.with_data_and_id(TerminalOperationInputData(value="notice"), "notice"),
+        )
+        _ = await hsm.dispatch(ctx, child, TerminalOperationInputEvent.with_data(TerminalOperationInputData(value="x")))
+        await asyncio.sleep(0)
+        changes = [
+            metric_reader.Point(attributes=point.attributes, value=point.value - _value(before, point.attributes))
+            for point in reader.points("bot.ability.request.dropped.count")
+        ]
+        return [result], hsm.id(child), changes
+
+    with metric_reader.recording(tmp_path, monkeypatch) as reader:
+        results, child_id, changes = asyncio.run(run(reader))
+
+    (result,) = results
+    assert result.name == TerminalOperationFailedEvent.name
+    assert result.id == "never-attached"
+    assert result.source == child_id
+    assert isinstance(result.data, abilities.FailureData)
+    assert result.data.message == "DetachedReplyingAbility is not attached."
+    counted = {
+        (point.attributes["bot.ability.drop.reason"], point.attributes["bot.ability.replied"]): point.value
+        for point in changes
+        if point.attributes.get("bot.ability.name") == "DetachedReplyingAbility" and point.value
+    }
+    assert counted == {("detached", "true"): 1.0, ("detached", "false"): 2.0}
+
+
+def _value(points: collections.abc.Sequence[typing.Any], attributes: dict[str, object]) -> float:
+    for point in points:
+        if point.attributes == attributes:
+            return float(point.value)
+    return 0.0
+
+
+def test_an_ability_without_detached_declarations_keeps_its_lifecycle_model() -> None:
+    """C22 is additive: with empty tuples the detached state keeps exactly its attach/detach transitions."""
+
+    def detached_transitions(model: hsm.Model | None, name: str) -> list[str]:
+        assert model is not None
+        prefix = f"/{name}Lifecycle/detached/"
+        return [
+            path for path in model.members if path.startswith(prefix + "transition_") and "/" not in path[len(prefix) :]
+        ]
+
+    plain = TerminalOperationAbility.model
+    assert plain is not None
+    rebuilt = abilities.Ability.define_lifecycle_model(
+        "TerminalOperationAbility", require_model(TerminalOperationAbility.submodel)
+    )
+    assert _model_shape(rebuilt) == _model_shape(plain)
+    assert len(detached_transitions(plain, "TerminalOperationAbility")) == 3
+    assert len(detached_transitions(DetachedReplyingAbility.model, "DetachedReplyingAbility")) == 3 + 3

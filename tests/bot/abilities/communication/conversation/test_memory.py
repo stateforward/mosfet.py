@@ -6,6 +6,8 @@ from pydantic import ValidationError
 from mosfet.abilities import memory as memory_ability
 from mosfet.abilities.communication.conversation import memory
 
+from tests.bot.abilities.memory.memory_fixtures import execute_on
+
 
 def test_memory_model_is_runtime_resolvable() -> None:
     item = memory.Memory(
@@ -218,7 +220,7 @@ def test_conversation_recall_returns_the_most_recent_window_oldest_first() -> No
     these rows carry in insertion order.
     """
 
-    store = memory_ability.Memory()
+    store = memory_ability.store.open_sqlite_engine()
     for index in range(60):
         item = memory.Memory(
             source_ids=frozenset({"caller"}),
@@ -226,10 +228,10 @@ def test_conversation_recall_returns_the_most_recent_window_oldest_first() -> No
             content=f"line {index:02d}",
             content_type="text/plain",
         )
-        _ = store.execute(memory.conversation_memory_insert_input(item, memory_id=f"memory-{index:02d}"))
+        _ = execute_on(store, memory.conversation_memory_insert_input(item, memory_id=f"memory-{index:02d}"))
 
     recalled = memory.conversation_memories_from_output(
-        store.execute(memory.conversation_memory_recall_input(source_ids=["caller"], target_ids=["bot"], limit=50))
+        execute_on(store, memory.conversation_memory_recall_input(source_ids=["caller"], target_ids=["bot"], limit=50))
     )
 
     assert [item.content for item in recalled] == [f"line {index:02d}" for index in range(10, 60)]

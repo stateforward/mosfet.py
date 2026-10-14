@@ -9,6 +9,7 @@ import uuid
 import hsm
 import mosfet
 import pydantic
+from opentelemetry import metrics
 from pydantic.json_schema import SkipJsonSchema
 
 from mosfet import lifecycle
@@ -16,6 +17,15 @@ from mosfet import scope
 from mosfet.protocols import attachment
 from mosfet.telemetry import observer
 from mosfet.telemetry.hsm import Traced
+
+# Requests and notifications that reach an ability which cannot serve them (C22). Attributes are
+# closed sets from code: the ability class name (only classes that declare detached tuples or
+# their own counted drop transitions), the drop reason, and whether the requester was answered.
+_REQUEST_DROPPED = metrics.get_meter("bot.abilities").create_counter(
+    "bot.ability.request.dropped.count",
+    unit="{event}",
+    description="Requests and notifications an ability could not serve, by ability, reason, and whether it replied.",
+)
 
 TInput = typing.TypeVar("TInput")
 TOutput = typing.TypeVar("TOutput")
@@ -251,6 +261,79 @@ class Ability(Traced, attachment.Attachment, typing.Generic[TInput, TOutput]):
     input_data_type: typing.ClassVar[_DataType] = None
     output_data_type: typing.ClassVar[_DataType] = None
     submodel: typing.ClassVar[hsm.Model | None] = None
+    # Requests a detached instance (never attached, or already detached) answers with one
+    # ``failed_event`` carrying ``detached_failure(request)``, correlated by the request's id and
+    # sent to its source; notifications it only counts. Both default to empty, which leaves the
+    # lifecycle model exactly as it is for every ability that declares neither.
+    detached_requests: typing.ClassVar[tuple[hsm.Event[typing.Any], ...]] = ()
+    detached_notifications: typing.ClassVar[tuple[hsm.Event[typing.Any], ...]] = ()
+
+    @classmethod
+    def detached_failure(cls, event: hsm.Event[typing.Any]) -> pydantic.BaseModel:
+        """The failure payload a detached instance answers ``event`` with; override for a typed kind."""
+
+        del event
+        return FailureData(message=f"{cls.__name__} is not attached.")
+
+    @staticmethod
+    def _is_addressed_request(
+        ctx: hsm.Context,
+        instance: "Ability[typing.Any, typing.Any]",
+        event: hsm.Event[typing.Any],
+    ) -> bool:
+        del ctx, instance
+        return bool(event.id) and bool(event.source)
+
+    @staticmethod
+    def _reply_detached(
+        ctx: hsm.Context,
+        instance: "Ability[typing.Any, typing.Any]",
+        event: hsm.Event[typing.Any],
+    ) -> None:
+        """Answer a request that reached the detached lifecycle state; nothing serves it here."""
+
+        cls = type(instance)
+        _ = hsm.dispatch_to(
+            ctx,
+            dataclasses.replace(
+                cls.failed_event.with_data(cls.detached_failure(event)),
+                id=event.id,
+                source=hsm.id(instance),
+                target=event.source,
+                metadata=dict(event.metadata),
+            ),
+            event.source,
+        )
+        Ability._count_dropped(instance, reason="detached", replied=True)
+
+    @staticmethod
+    def _count_dropped(
+        instance: "Ability[typing.Any, typing.Any]",
+        *,
+        reason: typing.Literal["detached", "detaching", "degraded"],
+        replied: bool,
+    ) -> None:
+        """Count one request or notification this ability could not serve (metric ``bot.ability.request.dropped.count``)."""
+
+        _REQUEST_DROPPED.add(
+            1,
+            {
+                "bot.ability.name": type(instance).__name__,
+                "bot.ability.drop.reason": reason,
+                "bot.ability.replied": "true" if replied else "false",
+            },
+        )
+
+    @staticmethod
+    def _count_detached_drop(
+        ctx: hsm.Context,
+        instance: "Ability[typing.Any, typing.Any]",
+        event: hsm.Event[typing.Any],
+    ) -> None:
+        """Count an unaddressed request or a notification that reached the detached state."""
+
+        del ctx, event
+        Ability._count_dropped(instance, reason="detached", replied=False)
 
     @staticmethod
     def _carries_event(
@@ -732,8 +815,24 @@ class Ability(Traced, attachment.Attachment, typing.Generic[TInput, TOutput]):
         *,
         composite_attachment_lifecycle: bool = False,
         initial_state: typing.Literal["detached", "attached"] = "detached",
+        detached_requests: tuple[hsm.Event[typing.Any], ...] = (),
+        detached_notifications: tuple[hsm.Event[typing.Any], ...] = (),
     ) -> hsm.Model:
         root = f"/{name}Lifecycle"
+        detached_drops: list[hsm.Element] = []
+        if detached_requests:
+            detached_drops.append(
+                hsm.transition(
+                    hsm.on(*detached_requests),
+                    hsm.guard(Ability._is_addressed_request),
+                    hsm.effect(Ability._reply_detached),
+                )
+            )
+            detached_drops.append(hsm.transition(hsm.on(*detached_requests), hsm.effect(Ability._count_detached_drop)))
+        if detached_notifications:
+            detached_drops.append(
+                hsm.transition(hsm.on(*detached_notifications), hsm.effect(Ability._count_detached_drop))
+            )
         attached = f"{root}/attached"
         if composite_attachment_lifecycle:
             attach_effect = hsm.effect(
@@ -801,6 +900,7 @@ class Ability(Traced, attachment.Attachment, typing.Generic[TInput, TOutput]):
                     hsm.guard(attachment.Attachment._is_detach_request),
                     hsm.effect(attachment.Attachment._dispatch_detach_complete_absent),
                 ),
+                *detached_drops,
             ),
             *attaching,
             hsm.state(
@@ -863,6 +963,8 @@ class Ability(Traced, attachment.Attachment, typing.Generic[TInput, TOutput]):
             name,
             submodel,
             composite_attachment_lifecycle=composite_attachment_lifecycle,
+            detached_requests=cls.detached_requests,
+            detached_notifications=cls.detached_notifications,
         )
 
     def __init_subclass__(cls) -> None:
@@ -877,6 +979,8 @@ class Ability(Traced, attachment.Attachment, typing.Generic[TInput, TOutput]):
             cls.__name__,
             submodel,
             composite_attachment_lifecycle=cls._composite_attachment_lifecycle,
+            detached_requests=cls.detached_requests,
+            detached_notifications=cls.detached_notifications,
         )
 
     def __init__(self) -> None:

@@ -2,15 +2,28 @@
 
 Domain code builds Core ``select`` / ``insert`` / ``update`` / ``delete`` against
 ``memory_table``. The store and providers compile those clauses to dialect SQL.
+
+The episodic graph lives beside it: ``node_table`` (episodes, persons, concepts),
+``part_table`` (each node's ordered text and image parts), ``edge_table`` (typed links),
+``vector_table`` (the canonical vector of a node in one embedding space), and
+``index_attempt_table`` (failed indexing attempts, so backfill never retries what cannot
+succeed in a space). No foreign key cascades are relied on: Memory deletes dependent rows
+explicitly inside the transaction that forgets a node. Provider-created vector index tables
+(``bot_memory_vec_*``) are not part of this metadata and are never managed by migrations.
 """
 
 from __future__ import annotations
 
 from sqlalchemy import Column
+from sqlalchemy import Float
 from sqlalchemy import Index
+from sqlalchemy import Integer
+from sqlalchemy import LargeBinary
 from sqlalchemy import MetaData
+from sqlalchemy import PrimaryKeyConstraint
 from sqlalchemy import Table
 from sqlalchemy import Text
+from sqlalchemy import UniqueConstraint
 from sqlalchemy import func
 
 # Logical table name (dialect-neutral identifier).
@@ -18,6 +31,16 @@ MEMORY_TABLE = "bot_memory"
 
 # Logical table name for the short-term memory register (dialect-neutral identifier).
 STM_MEMORY_TABLE = "bot_stm_memory"
+
+# Episodic graph tables.
+NODE_TABLE = "bot_memory_node"
+PART_TABLE = "bot_memory_part"
+EDGE_TABLE = "bot_memory_edge"
+VECTOR_TABLE = "bot_memory_vector"
+INDEX_ATTEMPT_TABLE = "bot_memory_index_attempt"
+
+# Prefix of provider-created vector index tables; migrations never manage these.
+VECTOR_INDEX_PREFIX = "bot_memory_vec_"
 
 metadata = MetaData()
 
@@ -69,10 +92,105 @@ stm_memory_table = Table(
     Index("bot_stm_memory_created_idx", "created_at"),
 )
 
+# One graph node. ``seq`` is the insertion order (it breaks same-instant ties and keys every
+# dependent row); ``node_id`` is the opaque public id. Times are UTC ISO text at microsecond
+# resolution, fixed width, so text order is chronological order.
+node_table = Table(
+    NODE_TABLE,
+    metadata,
+    Column("seq", Integer, primary_key=True, autoincrement=True),
+    Column("node_id", Text, nullable=False),
+    Column("kind", Text, nullable=False),
+    # The participant ref of a person node; NULL for every other kind.
+    Column("key", Text, nullable=True),
+    Column("text", Text, nullable=False, server_default=""),
+    # Kind-specific typed JSON (an episode's stimulus, acts, outcome, turn id, focus, participants).
+    Column("content_json", Text, nullable=False, server_default="{}"),
+    Column("created_at", Text, nullable=False),
+    Column("updated_at", Text, nullable=False),
+    Column("recalled_at", Text, nullable=True),
+    Column("recall_count", Integer, nullable=False, server_default="0"),
+    Column("reviewed_at", Text, nullable=True),
+    UniqueConstraint("node_id", name="bot_memory_node_id_key"),
+    UniqueConstraint("kind", "key", name="bot_memory_node_kind_key"),
+    Index("bot_memory_node_recent_idx", "kind", "created_at", "seq"),
+    Index("bot_memory_node_review_idx", "kind", "reviewed_at", "seq"),
+    sqlite_autoincrement=True,
+)
+
+part_table = Table(
+    PART_TABLE,
+    metadata,
+    Column("node_seq", Integer, nullable=False),
+    Column("ordinal", Integer, nullable=False),
+    Column("kind", Text, nullable=False),
+    Column("text", Text, nullable=True),
+    Column("media_type", Text, nullable=True),
+    Column("width_px", Integer, nullable=True),
+    Column("height_px", Integer, nullable=True),
+    Column("content", LargeBinary, nullable=True),
+    PrimaryKeyConstraint("node_seq", "ordinal", name="bot_memory_part_pkey"),
+)
+
+edge_table = Table(
+    EDGE_TABLE,
+    metadata,
+    Column("source_seq", Integer, nullable=False),
+    Column("target_seq", Integer, nullable=False),
+    Column("relation", Text, nullable=False),
+    Column("weight", Float, nullable=False, server_default="1.0"),
+    Column("created_at", Text, nullable=False),
+    # ``stamped`` when the producer's data implied it (an episode involves a person), ``model``
+    # when consolidation chose it.
+    Column("origin", Text, nullable=False),
+    PrimaryKeyConstraint("source_seq", "target_seq", "relation", name="bot_memory_edge_pkey"),
+    Index("bot_memory_edge_target_idx", "target_seq"),
+)
+
+# The canonical vector of a node in one embedding space (little-endian float32). A vector
+# index is only an accelerator and can be rebuilt from these rows.
+vector_table = Table(
+    VECTOR_TABLE,
+    metadata,
+    Column("node_seq", Integer, nullable=False),
+    Column("space_model", Text, nullable=False),
+    Column("dimensions", Integer, nullable=False),
+    Column("embedding", LargeBinary, nullable=False),
+    PrimaryKeyConstraint("node_seq", "space_model", "dimensions", name="bot_memory_vector_pkey"),
+)
+
+# The last failed attempt to index a node in one space. ``permanent`` attempts (the item can
+# never be embedded in that space) are never selected again; transient ones are retried, at
+# most once per backfill pass (``pass_id``).
+index_attempt_table = Table(
+    INDEX_ATTEMPT_TABLE,
+    metadata,
+    Column("node_seq", Integer, nullable=False),
+    Column("space_model", Text, nullable=False),
+    Column("dimensions", Integer, nullable=False),
+    Column("failure_kind", Text, nullable=False),
+    Column("permanent", Integer, nullable=False),
+    Column("pass_id", Text, nullable=True),
+    Column("attempted_at", Text, nullable=False),
+    PrimaryKeyConstraint("node_seq", "space_model", "dimensions", name="bot_memory_index_attempt_pkey"),
+    Index("bot_memory_index_attempt_space_idx", "space_model", "dimensions", "permanent"),
+)
+
 __all__ = [
+    "EDGE_TABLE",
+    "INDEX_ATTEMPT_TABLE",
     "MEMORY_TABLE",
+    "NODE_TABLE",
+    "PART_TABLE",
     "STM_MEMORY_TABLE",
+    "VECTOR_INDEX_PREFIX",
+    "VECTOR_TABLE",
+    "edge_table",
+    "index_attempt_table",
     "memory_table",
     "metadata",
+    "node_table",
+    "part_table",
     "stm_memory_table",
+    "vector_table",
 ]

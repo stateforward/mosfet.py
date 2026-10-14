@@ -1,4 +1,4 @@
-"""Shared fixtures for memory tests after SQL-transaction hard cut."""
+"""Shared fixtures for memory tests: classification doubles, ability trees, and register helpers."""
 
 from mosfet import abilities
 from mosfet.abilities import memory
@@ -12,53 +12,11 @@ import uuid
 
 import hsm
 import mosfet
+from sqlalchemy.engine import Engine
 
 from tests.hsm_instance_state import ability_terminal_owner, remember_ability_terminal_owner
 
 _TResult = typing.TypeVar("_TResult")
-
-
-class MemoryEncoder(abilities.Encoder[str, bytes]):
-    @typing.override
-    async def encode(self, input: str) -> bytes:
-        return input.encode()
-
-
-class MemoryDecoder(abilities.Decoder[bytes, str]):
-    @typing.override
-    async def decode(self, input: bytes) -> str:
-        return input.decode()
-
-
-class PreferenceMemoryGenerator(memory.MemoryGenerator):
-    @typing.override
-    async def generate(self, input: memory.SourceData) -> memory.GeneratedMemory:
-        assert input.decoded == "Gabe prefers terse handoff notes."
-        return memory.GeneratedMemory(
-            content="The operator prefers terse handoff notes.",
-            kind=memory.MemoryClassificationKind.PREFERENCE,
-            subject_ref="operator",
-        )
-
-
-class GeneratedMemoryEncoder(abilities.Encoder[memory.GeneratedMemory, memory.EncodedMemory]):
-    @typing.override
-    async def encode(self, input: memory.GeneratedMemory) -> memory.EncodedMemory:
-        return memory.EncodedMemory(format="text/plain", value=input.content)
-
-
-class GeneratedMemoryDecoder(abilities.Decoder[memory.EncodedMemory, memory.GeneratedMemory]):
-    @typing.override
-    async def decode(self, input: memory.EncodedMemory) -> memory.GeneratedMemory:
-        content = input.value if isinstance(input.value, str) else str(input.value)
-        return memory.GeneratedMemory(content=content)
-
-
-class WrongGeneratedMemoryEncoder(abilities.Encoder[memory.GeneratedMemory, memory.EncodedMemory]):
-    @typing.override
-    async def encode(self, input: memory.GeneratedMemory) -> memory.EncodedMemory:
-        del input
-        raise RuntimeError("encoder failed")
 
 
 class RetainPreferenceClassifier(memory.MemoryClassifier):
@@ -103,81 +61,6 @@ def classification_output(
         sensitivity=sensitivity,
         confidence=confidence,
     )
-
-
-def preference_memory_generation() -> memory.MemoryGeneration:
-    return memory.MemoryGeneration(
-        generator=PreferenceMemoryGenerator(),
-        encoder=GeneratedMemoryEncoder(),
-    )
-
-
-def generated_candidate() -> memory.CandidateData:
-    return memory.CandidateData(
-        memory=memory.GeneratedMemory(
-            content="The operator prefers terse handoff notes.",
-            kind=memory.MemoryClassificationKind.PREFERENCE,
-            subject_ref="operator",
-        ),
-        encoded=memory.EncodedMemory(
-            format="text/plain",
-            value="The operator prefers terse handoff notes.",
-        ),
-    )
-
-
-class RecordingShortTermMemory(memory.ShortTermMemory):
-    inputs: list[memory.InputData]
-    outputs: list[memory.OutputData]
-    failures: list[object]
-
-    def __init__(self, **kwargs: typing.Any) -> None:
-        super().__init__(**kwargs)
-        self.inputs = []
-        self.outputs = []
-        self.failures = []
-
-    @typing.override
-    def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[bool]:
-        if event.name == self.input_event.name and isinstance(event.data, memory.InputData):
-            self.inputs.append(event.data)
-        return super().dispatch(ctx, event)
-
-
-class RecordingLongTermMemory(memory.LongTermMemory):
-    inputs: list[memory.InputData]
-    outputs: list[memory.OutputData]
-    failures: list[object]
-
-    def __init__(self, **kwargs: typing.Any) -> None:
-        super().__init__(**kwargs)
-        self.inputs = []
-        self.outputs = []
-        self.failures = []
-
-    @typing.override
-    def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[bool]:
-        if event.name == self.input_event.name and isinstance(event.data, memory.InputData):
-            self.inputs.append(event.data)
-        return super().dispatch(ctx, event)
-
-
-class RecordingMemory(memory.Memory):
-    inputs: list[memory.InputData]
-    outputs: list[memory.OutputData]
-    failures: list[object]
-
-    def __init__(self, **kwargs: typing.Any) -> None:
-        super().__init__(**kwargs)
-        self.inputs = []
-        self.outputs = []
-        self.failures = []
-
-    @typing.override
-    def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[bool]:
-        if event.name == self.input_event.name and isinstance(event.data, memory.InputData):
-            self.inputs.append(event.data)
-        return super().dispatch(ctx, event)
 
 
 def _record_memory_fixture_terminal_mirror_event(
@@ -276,33 +159,6 @@ def require_model(ability: abilities.Ability[typing.Any, typing.Any] | hsm.Model
     return ability
 
 
-class MessageOnlyMemory(memory.Memory):
-    """Memory that refuses every transaction that did not arrive as its input event.
-
-    A peer that calls ``execute`` directly hands it a payload no request carried; the call
-    raises, so the peer's typed failure path fires instead of a silent success. Tests seed and
-    read it the way production does: ``memory.transact`` once it is attached.
-    """
-
-    requested: list[memory.InputData]
-
-    def __init__(self, **kwargs: typing.Any) -> None:
-        super().__init__(**kwargs)
-        self.requested = []
-
-    @typing.override
-    def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[bool]:
-        if isinstance(event.data, memory.InputData):
-            self.requested.append(event.data)
-        return super().dispatch(ctx, event)
-
-    @typing.override
-    def execute(self, data: memory.InputData) -> memory.OutputData:
-        if not any(requested is data for requested in self.requested):
-            raise AssertionError(f"a peer called into {type(self).__name__} directly instead of sending a request")
-        return super().execute(data)
-
-
 async def register_recent(
     ctx: hsm.Context,
     register: memory.StmMemory,
@@ -330,3 +186,28 @@ async def register_record(ctx: hsm.Context, register: memory.StmMemory, event: h
 
     _ = await hsm.dispatch(ctx, register, memory.stm.RecordEvent.with_data(memory.stm.event_record(event)))
     _ = await register_recent(ctx, register, limit=1)
+
+
+def execute_on(engine: Engine, data: memory.InputData) -> memory.OutputData:
+    """Run one statement transaction straight on a test database engine.
+
+    For seeding and inspecting a test database only. Production code never calls into a Memory:
+    it sends ``memory.transact``. A test that shares the Memory's engine reads and writes rows here.
+    """
+
+    results: list[memory.StatementResult] = []
+    with engine.begin() as connection:
+        for statement in data.statements:
+            cursor = connection.exec_driver_sql(statement.sql, statement.parameters)
+            if cursor.returns_rows:
+                columns = tuple(cursor.keys())
+                rows = tuple(
+                    memory.Row(
+                        columns=columns, values=tuple(typing.cast(tuple[memory.ParameterValue, ...], tuple(row)))
+                    )
+                    for row in cursor.fetchall()
+                )
+                results.append(memory.StatementResult(rowcount=len(rows), rows=rows))
+            else:
+                results.append(memory.StatementResult(rowcount=max(cursor.rowcount, 0)))
+    return memory.OutputData(results=tuple(results))

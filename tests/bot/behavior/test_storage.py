@@ -176,23 +176,25 @@ def test_instances_from_behavior_results_round_trips_lifetime() -> None:
 def test_select_active_behaviors_clauses_filters_by_lifetime() -> None:
     from mosfet.abilities import memory
 
-    engine = memory.store.open_sqlite_engine()
-    store = memory.MemoryStore(engine=engine)
+    from tests.bot.abilities.memory.memory_fixtures import execute_on
+
+    store = memory.store.open_sqlite_engine()
     behaviors = (
         _base(name="Greeting"),
         _base(name="Morning", lifetime=LIFETIME_PERSISTENT),
         _base(name="Evening", lifetime=LIFETIME_PERSISTENT, status=STATUS_BROKEN),
     )
     for behavior in behaviors:
-        _ = store.execute(
-            memory.InputData(statements=memory.compile_statements(*storage.replace_behavior_clauses(behavior)))
+        _ = execute_on(
+            store, memory.InputData(statements=memory.compile_statements(*storage.replace_behavior_clauses(behavior)))
         )
 
     def active(lifetime: Lifetime) -> tuple[tuple[str, Lifetime], ...]:
-        output = store.execute(
+        output = execute_on(
+            store,
             memory.InputData(
                 statements=memory.compile_statements(*storage.select_active_behaviors_clauses(lifetime=lifetime))
-            )
+            ),
         )
         loaded = storage.instances_from_behavior_results(
             tuple(row.as_mapping() for row in output.results[0].rows),
@@ -202,4 +204,4 @@ def test_select_active_behaviors_clauses_filters_by_lifetime() -> None:
 
     assert active(LIFETIME_TURN) == (("Greeting", LIFETIME_TURN),)
     assert active(LIFETIME_PERSISTENT) == (("Morning", LIFETIME_PERSISTENT),)
-    engine.dispose()
+    store.dispose()

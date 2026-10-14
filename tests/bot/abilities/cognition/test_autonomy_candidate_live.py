@@ -5,6 +5,8 @@ from mosfet import behavior
 from mosfet.behavior import storage as behavior_storage
 from mosfet.environment import SoundData, SoundEvent
 
+from tests.bot.abilities.memory.memory_fixtures import execute_on
+
 _MINIMAL_ANSWER = """input_event = hsm.event(
     name = "bot.behavior.autonomy_probe.input",
     schema = {"type": "object", "additionalProperties": True},
@@ -35,13 +37,17 @@ def test_autonomy_runs_a_late_authored_behavior_on_a_live_turn() -> None:
     pins it: late-authored rows materialize, run, and emit their terminal selections."""
 
     async def run() -> tuple[str, int]:
-        store = memory.Memory()
+        engine = memory.store.open_sqlite_engine()
+        store = memory.Memory(engine=engine)
         installed = behavior.Instance(
             name="AutonomyProbeAnswer", source=_MINIMAL_ANSWER, triggers=("environment.sound",), description="probe"
         )
         installed = behavior_storage.mark_active(installed)
-        _ = store.execute(
-            memory.InputData(statements=memory.compile_statements(*behavior_storage.insert_behavior_clauses(installed)))
+        _ = execute_on(
+            engine,
+            memory.InputData(
+                statements=memory.compile_statements(*behavior_storage.insert_behavior_clauses(installed))
+            ),
         )
         autonomy = cognition.Autonomy(memory=store)
         from tests.bot.abilities.support import dispatch_ability_for_test, shared_hsm_context, start_abilities_for_test

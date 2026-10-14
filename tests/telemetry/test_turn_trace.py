@@ -158,7 +158,7 @@ async def _idle(settle: float = 0.3, limit: float = 10.0) -> None:
 
 def _run_turn() -> tuple[str, list[dict[str, typing.Any]], list[dict[str, typing.Any]]]:
     async def run() -> tuple[str, int, int]:
-        store = memory.ShortTermMemory()
+        store = memory.Memory()
         ability = cognition.Cognition(
             autonomy=cognition.Autonomy(memory=store),
             intuition=cognition.Intuition(processor=_Unhandled()),
@@ -244,7 +244,7 @@ def test_behavior_inventory_writes_record_status_change_in_the_active_trace() ->
     from tests.bot.abilities.support import shared_hsm_context, start_abilities_for_test
 
     async def run() -> tuple[str, Instance]:
-        store = memory.ShortTermMemory()
+        store = memory.Memory()
         ctx = shared_hsm_context()
         # The writes reach the store by message, so it is attached by its owner first.
         await start_abilities_for_test(ctx, store)

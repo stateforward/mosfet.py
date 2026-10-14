@@ -22,6 +22,7 @@ from pathlib import Path
 
 import hsm
 import pytest
+from sqlalchemy.engine import Engine
 
 import mosfet
 from mosfet import behavior as behavior_events
@@ -31,6 +32,7 @@ from mosfet.abilities import processing
 from mosfet.devices import phone as phone_device
 from mosfet.behavior import storage as behavior_storage
 from mosfet.environment import SoundData, SoundEvent, Environment
+from tests.bot.abilities.memory.memory_fixtures import execute_on
 from tests.bot.abilities.support import dispatch_ability_for_test, shared_hsm_context, start_abilities_for_test
 from tests.hsm_instance_state import phone_firmware
 
@@ -184,7 +186,7 @@ def _cognition_input(*, focus: str | None = "phone") -> cognition.InputData:
     )
 
 
-async def _seed_ring_answer_episodes(store: memory.Memory, *, count: int = 3) -> None:
+async def _seed_ring_answer_episodes(engine: Engine, *, count: int = 3) -> None:
     """Store repeated ring→answer cognition episodes so reflection has a clear pattern."""
 
     for index in range(count):
@@ -196,14 +198,14 @@ async def _seed_ring_answer_episodes(store: memory.Memory, *, count: int = 3) ->
             behavior=None,
         )
         insert = cognition.episodes.episode_insert_input(episode, context_ref="phone")
-        _ = store.execute(insert)
+        _ = execute_on(engine, insert)
 
 
-async def _behavior_contents(store: memory.Memory) -> tuple[str, ...]:
+async def _behavior_contents(engine: Engine) -> tuple[str, ...]:
     from mosfet.behavior import storage as behavior_storage
 
     select = memory.InputData(statements=memory.compile_statements(*behavior_storage.select_all_behaviors_clauses()))
-    out = store.execute(select)
+    out = execute_on(engine, select)
     if not out.results:
         return ()
     sources: list[str] = []
@@ -214,9 +216,9 @@ async def _behavior_contents(store: memory.Memory) -> tuple[str, ...]:
     return tuple(sources)
 
 
-async def _episodes(store: memory.Memory) -> tuple[cognition.episodes.CognitiveEpisode, ...]:
+async def _episodes(engine: Engine) -> tuple[cognition.episodes.CognitiveEpisode, ...]:
     select = cognition.episodes.episode_select_input(context_ref="phone")
-    out = store.execute(select)
+    out = execute_on(engine, select)
     return cognition.episodes.episodes_from_output(out)
 
 
@@ -236,8 +238,9 @@ def test_live_reflection_writes_behavior_from_repeated_ring_pattern() -> None:
     print(f"\nReflection model={_openai_model()!r} base_url={_openai_base_url()!r}")
 
     async def run() -> tuple[None, tuple[str, ...], tuple[cognition.episodes.CognitiveEpisode, ...]]:
-        store = memory.Memory()
-        await _seed_ring_answer_episodes(store, count=3)
+        engine = memory.store.open_sqlite_engine()
+        store = memory.Memory(engine=engine)
+        await _seed_ring_answer_episodes(engine, count=3)
         reflection = cognition.Reflection(processor=_openai_reflection_processor(), memory=store)
         ctx = await _start_reflection(reflection)
         input = cognition.reflection.InputData(
@@ -249,7 +252,7 @@ def test_live_reflection_writes_behavior_from_repeated_ring_pattern() -> None:
             timeout=_LIVE_TIMEOUT_S + 5.0,
         )
         assert result is None
-        return result, await _behavior_contents(store), await _episodes(store)
+        return result, await _behavior_contents(engine), await _episodes(engine)
 
     _result, stored_behaviors, episodes = asyncio.run(run())
 
@@ -286,7 +289,8 @@ def test_live_reflection_empty_when_no_repeated_pattern() -> None:
     print(f"\nReflection model={_openai_model()!r} base_url={_openai_base_url()!r}")
 
     async def run() -> tuple[tuple[str, ...], tuple[cognition.episodes.CognitiveEpisode, ...]]:
-        store = memory.Memory()
+        engine = memory.store.open_sqlite_engine()
+        store = memory.Memory(engine=engine)
         # No prior episodes seeded.
         reflection = cognition.Reflection(processor=_openai_reflection_processor(), memory=store)
         ctx = await _start_reflection(reflection)
@@ -298,7 +302,7 @@ def test_live_reflection_empty_when_no_repeated_pattern() -> None:
             dispatch_ability_for_test(reflection, ctx, input, timeout=_LIVE_TIMEOUT_S),
             timeout=_LIVE_TIMEOUT_S + 5.0,
         )
-        return await _behavior_contents(store), await _episodes(store)
+        return await _behavior_contents(engine), await _episodes(engine)
 
     behaviors, episodes = asyncio.run(run())
 
@@ -338,8 +342,9 @@ def _live_behavior_answers_phone_call(
             focus_candidates=("phone",),
         )
         for attempt in range(3):
-            store = memory.Memory()
-            await _seed_ring_answer_episodes(store, count=3)
+            engine = memory.store.open_sqlite_engine()
+            store = memory.Memory(engine=engine)
+            await _seed_ring_answer_episodes(engine, count=3)
             reflection = cognition.Reflection(processor=reflection_processor, memory=store)
             ctx = await _start_reflection(reflection)
             input = cognition.reflection.InputData(
@@ -357,11 +362,11 @@ def _live_behavior_answers_phone_call(
             except Exception as error:  # noqa: BLE001 — live model flakiness; retry
                 errors.append(f"attempt {attempt + 1}: {error}")
                 continue
-            behaviors = await _behavior_contents(store)
+            behaviors = await _behavior_contents(engine)
             if not behaviors:
                 errors.append(f"attempt {attempt + 1}: no behavior inventory row")
                 continue
-            episodes = await _episodes(store)
+            episodes = await _episodes(engine)
             latest = episodes[-1]
             if latest.behavior is None or not isinstance(latest.behavior, behavior_events.CreateData):
                 errors.append(f"attempt {attempt + 1}: episode missing create payload")
@@ -391,9 +396,13 @@ def _live_behavior_answers_phone_call(
 
     async def run_behavior_and_answer() -> tuple[object, tuple[str, ...], str]:
         call_id = "livekit:caller"
-        store = memory.Memory()
-        _ = store.execute(
-            memory.InputData(statements=memory.compile_statements(*behavior_storage.insert_behavior_clauses(installed)))
+        engine = memory.store.open_sqlite_engine()
+        store = memory.Memory(engine=engine)
+        _ = execute_on(
+            engine,
+            memory.InputData(
+                statements=memory.compile_statements(*behavior_storage.insert_behavior_clauses(installed))
+            ),
         )
 
         environment = Environment()
@@ -549,7 +558,8 @@ def test_live_behavior_forms_after_n_natural_calls_without_preload() -> None:
         raise TimeoutError(f"{type(ability).__name__} not idle: {ability.state()!r}")
 
     async def run() -> tuple[int | None, tuple[str, ...], list[str]]:
-        store = memory.Memory()
+        engine = memory.store.open_sqlite_engine()
+        store = memory.Memory(engine=engine)
         reasoning = _AnswerRingReasoning()
         reflection = cognition.Reflection(processor=_openai_reflection_processor(), memory=store)
         ability = cognition.Cognition(
@@ -613,15 +623,15 @@ def test_live_behavior_forms_after_n_natural_calls_without_preload() -> None:
             await wait_idle(reflection, timeout=_LIVE_TIMEOUT_S + 30.0)
             await wait_idle(ability, timeout=30.0)
 
-            behaviors = await _behavior_contents(store)
-            episodes = await _episodes(store)
+            behaviors = await _behavior_contents(engine)
+            episodes = await _episodes(engine)
             print(f"after call {n}: behaviors={len(behaviors)} episodes={len(episodes)}")
             if behaviors and formed_at is None:
                 formed_at = n
                 print(f"\n*** behavior formed after {n} natural call(s) ***\n{behaviors[0][:800]}\n")
                 break
 
-        final_behaviors = await _behavior_contents(store)
+        final_behaviors = await _behavior_contents(engine)
         return formed_at, final_behaviors, list(reasoning.answered)
 
     formed_at, behaviors, answered = asyncio.run(run())

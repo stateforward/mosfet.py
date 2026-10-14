@@ -115,7 +115,7 @@ def test_phone_bot_example_is_provider_package_example() -> None:
     assert 'DEFAULT_GEMINI_TTS_MODEL = "gemini-3.1-flash-tts-preview"' in source
     assert 'DEFAULT_GEMINI_TTS_VOICE = "Kore"' in source
     assert 'DEFAULT_SILERO_VAD_MODEL = "mlx-community/silero-vad"' in source
-    assert "ShortTermMemory()" in source
+    assert "memory.Memory()" in source
     assert "class ExampleConversation" in source
     assert "speech_decoder=None" in source
     assert "PhoneService(" in source
@@ -1181,11 +1181,11 @@ def _wires_speech_heard(item) -> bool:
     return CONVERSATION_INPUT in (item.source or "")
 
 
-def _inventory(store: memory.Memory):
+async def _inventory(ctx, store: memory.Memory):
     select = memory.InputData(
         statements=memory.compile_statements(*behavior_storage.select_all_behaviors_clauses())
     )
-    out = store.execute(select)
+    out = await memory.transact(ctx, store, select)
     if len(out.results) < 2:
         return ()
     return behavior_storage.instances_from_behavior_results(
@@ -1210,7 +1210,7 @@ async def main() -> None:
         print("SKIP missing cognition credentials")
         return
 
-    store = memory.ShortTermMemory()
+    store = memory.Memory()
     environment = Environment()
     body = await start_bot(
         "e2e-speech-wire",
@@ -1245,7 +1245,7 @@ async def main() -> None:
                 or (body.state() or "").endswith("/inactive"),
                 timeout_s=TURN_TIMEOUT_S,
             )
-            for item in _inventory(store):
+            for item in await _inventory(environment, store):
                 if _wires_speech_heard(item):
                     found = item
                     break

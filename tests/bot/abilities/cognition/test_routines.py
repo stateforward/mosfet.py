@@ -21,7 +21,6 @@ from mosfet.abilities import memory
 from mosfet.behavior import storage as behavior_storage
 from mosfet.protocols import attachment
 
-from tests.bot.abilities.memory.memory_fixtures import MessageOnlyMemory
 from tests.bot.abilities.support import shared_hsm_context, start_abilities_for_test
 from tests.bot.behavior.support import ManualTimers, routine_source
 
@@ -126,7 +125,7 @@ def test_routines_rehydrate_from_inventory_across_a_restart(tmp_path: pathlib.Pa
     database = str(tmp_path / "bot.db")
 
     async def lifetime(*, install: bool) -> tuple[behavior.TickData, hsm.Event[typing.Any], str]:
-        store = MessageOnlyMemory(database=database)
+        store = memory.Memory(database=database)
         ctx = await _memory(store)
         if install:
             _ = await _install(ctx, store, routine_source(schedule=_EVERY))
@@ -157,7 +156,7 @@ def test_routines_wait_for_the_owner_before_reading_inventory() -> None:
     """Attaching starts nothing: memory is a peer, and only the owner knows when it can answer."""
 
     async def run() -> tuple[list[datetime.timedelta], list[datetime.timedelta]]:
-        store = MessageOnlyMemory()
+        store = memory.Memory()
         ctx = await _memory(store)
         _ = await _install(ctx, store, routine_source(schedule=_EVERY))
         timers = ManualTimers()
@@ -182,7 +181,7 @@ def test_routines_never_run_turn_behaviors_or_drafts() -> None:
     from tests.bot.behavior.support import greeting_behavior_source
 
     async def run() -> list[datetime.timedelta]:
-        store = MessageOnlyMemory()
+        store = memory.Memory()
         ctx = await _memory(store)
         _ = await _install(ctx, store, greeting_behavior_source())
         checked = behavior.check(routine_source(schedule=_EVERY))
@@ -202,7 +201,7 @@ def test_routines_never_run_turn_behaviors_or_drafts() -> None:
 
 def test_routines_stop_a_broken_routine_on_reconcile() -> None:
     async def run() -> tuple[list[datetime.timedelta], list[datetime.timedelta], int]:
-        store = MessageOnlyMemory()
+        store = memory.Memory()
         ctx = await _memory(store)
         installed = await _install(ctx, store, routine_source(schedule=_EVERY))
         timers = ManualTimers()
@@ -226,7 +225,7 @@ def test_routines_stop_a_broken_routine_on_reconcile() -> None:
 
 def test_routines_restart_a_changed_routine_and_start_a_new_one_on_reconcile() -> None:
     async def run() -> tuple[str, list[str], list[datetime.timedelta]]:
-        store = MessageOnlyMemory()
+        store = memory.Memory()
         ctx = await _memory(store)
         _ = await _install(ctx, store, routine_source(schedule=_EVERY))
         timers = ManualTimers()
@@ -255,7 +254,7 @@ def test_routines_restart_a_changed_routine_and_start_a_new_one_on_reconcile() -
 
 def test_routines_stop_ticking_when_detached() -> None:
     async def run() -> tuple[list[datetime.timedelta], list[datetime.timedelta]]:
-        store = MessageOnlyMemory()
+        store = memory.Memory()
         ctx = await _memory(store)
         _ = await _install(ctx, store, routine_source(schedule=_EVERY))
         timers = ManualTimers()

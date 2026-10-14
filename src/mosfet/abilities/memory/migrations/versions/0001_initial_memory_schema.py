@@ -1,18 +1,13 @@
-"""Initial memory schema: the full create_all-era schema.
+"""Memory schema baseline: every table the memory store owns.
 
 Revision ID: 0001
 Revises:
-Create Date: 2026-10-05 09:29:19.541641
+Create Date: 2026-10-14 16:30:00.000000
 
-Creates exactly the tables and indexes ``schema.metadata.create_all`` created before
-migrations existed (same SQLite DDL, byte for byte).
-
-One-time cutover: a database ``create_all`` created has all of these tables but no
-``alembic_version`` table. ``mosfet.abilities.memory.store.migrate`` detects that shape,
-stamps it at this revision without running it, then upgrades to head like any other
-database. An unversioned database holding only some of these tables matches no revision
-and raises ``store.MigrationError`` instead of being guessed at. This baseline is frozen:
-schema changes go in new revisions, never here.
+The one baseline revision: relational memory rows, behavior inventory (with each behavior's
+``lifetime``), the short-term register, and the episodic graph (nodes, parts, edges,
+canonical vectors, index attempts). Provider-created vector index tables are not managed
+here. Schema changes after this baseline go in new revisions.
 """
 
 from __future__ import annotations
@@ -55,6 +50,7 @@ def upgrade() -> None:
         sa.Column("source", sa.Text(), nullable=False),
         sa.Column("description", sa.Text(), server_default="", nullable=False),
         sa.Column("examples_json", sa.Text(), server_default="[]", nullable=False),
+        sa.Column("lifetime", sa.Text(), server_default="turn", nullable=False),
         sa.Column("status", sa.Text(), server_default="ACTIVE", nullable=False),
         sa.Column("status_reason", sa.Text(), server_default="", nullable=False),
         sa.Column("status_updated_at", sa.Text(), server_default="", nullable=False),
@@ -91,8 +87,89 @@ def upgrade() -> None:
     op.create_index("bot_stm_memory_recent_idx", "bot_stm_memory", ["stimulus_name", "created_at"])
     op.create_index("bot_stm_memory_created_idx", "bot_stm_memory", ["created_at"])
 
+    _ = op.create_table(
+        "bot_memory_node",
+        sa.Column("seq", sa.Integer(), autoincrement=True, nullable=False),
+        sa.Column("node_id", sa.Text(), nullable=False),
+        sa.Column("kind", sa.Text(), nullable=False),
+        sa.Column("key", sa.Text(), nullable=True),
+        sa.Column("text", sa.Text(), server_default="", nullable=False),
+        sa.Column("content_json", sa.Text(), server_default="{}", nullable=False),
+        sa.Column("created_at", sa.Text(), nullable=False),
+        sa.Column("updated_at", sa.Text(), nullable=False),
+        sa.Column("recalled_at", sa.Text(), nullable=True),
+        sa.Column("recall_count", sa.Integer(), server_default="0", nullable=False),
+        sa.Column("reviewed_at", sa.Text(), nullable=True),
+        sa.PrimaryKeyConstraint("seq"),
+        sa.UniqueConstraint("node_id", name="bot_memory_node_id_key"),
+        sa.UniqueConstraint("kind", "key", name="bot_memory_node_kind_key"),
+        sqlite_autoincrement=True,
+    )
+    op.create_index("bot_memory_node_recent_idx", "bot_memory_node", ["kind", "created_at", "seq"])
+    op.create_index("bot_memory_node_review_idx", "bot_memory_node", ["kind", "reviewed_at", "seq"])
+
+    _ = op.create_table(
+        "bot_memory_part",
+        sa.Column("node_seq", sa.Integer(), nullable=False),
+        sa.Column("ordinal", sa.Integer(), nullable=False),
+        sa.Column("kind", sa.Text(), nullable=False),
+        sa.Column("text", sa.Text(), nullable=True),
+        sa.Column("media_type", sa.Text(), nullable=True),
+        sa.Column("width_px", sa.Integer(), nullable=True),
+        sa.Column("height_px", sa.Integer(), nullable=True),
+        sa.Column("content", sa.LargeBinary(), nullable=True),
+        sa.PrimaryKeyConstraint("node_seq", "ordinal", name="bot_memory_part_pkey"),
+    )
+
+    _ = op.create_table(
+        "bot_memory_edge",
+        sa.Column("source_seq", sa.Integer(), nullable=False),
+        sa.Column("target_seq", sa.Integer(), nullable=False),
+        sa.Column("relation", sa.Text(), nullable=False),
+        sa.Column("weight", sa.Float(), server_default="1.0", nullable=False),
+        sa.Column("created_at", sa.Text(), nullable=False),
+        sa.Column("origin", sa.Text(), nullable=False),
+        sa.PrimaryKeyConstraint("source_seq", "target_seq", "relation", name="bot_memory_edge_pkey"),
+    )
+    op.create_index("bot_memory_edge_target_idx", "bot_memory_edge", ["target_seq"])
+
+    _ = op.create_table(
+        "bot_memory_vector",
+        sa.Column("node_seq", sa.Integer(), nullable=False),
+        sa.Column("space_model", sa.Text(), nullable=False),
+        sa.Column("dimensions", sa.Integer(), nullable=False),
+        sa.Column("embedding", sa.LargeBinary(), nullable=False),
+        sa.PrimaryKeyConstraint("node_seq", "space_model", "dimensions", name="bot_memory_vector_pkey"),
+    )
+
+    _ = op.create_table(
+        "bot_memory_index_attempt",
+        sa.Column("node_seq", sa.Integer(), nullable=False),
+        sa.Column("space_model", sa.Text(), nullable=False),
+        sa.Column("dimensions", sa.Integer(), nullable=False),
+        sa.Column("failure_kind", sa.Text(), nullable=False),
+        sa.Column("permanent", sa.Integer(), nullable=False),
+        sa.Column("pass_id", sa.Text(), nullable=True),
+        sa.Column("attempted_at", sa.Text(), nullable=False),
+        sa.PrimaryKeyConstraint("node_seq", "space_model", "dimensions", name="bot_memory_index_attempt_pkey"),
+    )
+    op.create_index(
+        "bot_memory_index_attempt_space_idx",
+        "bot_memory_index_attempt",
+        ["space_model", "dimensions", "permanent"],
+    )
+
 
 def downgrade() -> None:
+    op.drop_index("bot_memory_index_attempt_space_idx", table_name="bot_memory_index_attempt")
+    op.drop_table("bot_memory_index_attempt")
+    op.drop_table("bot_memory_vector")
+    op.drop_index("bot_memory_edge_target_idx", table_name="bot_memory_edge")
+    op.drop_table("bot_memory_edge")
+    op.drop_table("bot_memory_part")
+    op.drop_index("bot_memory_node_review_idx", table_name="bot_memory_node")
+    op.drop_index("bot_memory_node_recent_idx", table_name="bot_memory_node")
+    op.drop_table("bot_memory_node")
     op.drop_index("bot_stm_memory_created_idx", table_name="bot_stm_memory")
     op.drop_index("bot_stm_memory_recent_idx", table_name="bot_stm_memory")
     op.drop_table("bot_stm_memory")

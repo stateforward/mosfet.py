@@ -13,11 +13,15 @@ import typing
 import uuid
 
 import hsm
+import mosfet
 import pydantic
 import pytest
 
+from mosfet.protocols import attachment
+
+from tests import metric_reader
 from tests.bot.abilities.memory.memory_fixtures import register_recent, register_record
-from tests.bot.abilities.support import shared_hsm_context, start_abilities_for_test
+from tests.bot.abilities.support import require_model, shared_hsm_context, start_abilities_for_test
 
 _TIMELINE_START = datetime.datetime(2026, 7, 7, 12, 0, 0, tzinfo=datetime.timezone.utc)
 
@@ -268,7 +272,7 @@ def test_register_reinforce_rejects_empty_ids() -> None:
 def test_register_answers_a_failed_read_with_the_failed_event_at_the_requester() -> None:
     class _BrokenRegister(memory.StmMemory):
         @typing.override
-        def execute(self, data: memory.InputData) -> memory.OutputData:
+        def _execute(self, data: memory.InputData) -> memory.OutputData:
             raise RuntimeError("disk gone")
 
     async def scenario(peer: _Peer) -> None:
@@ -289,10 +293,10 @@ def test_register_answers_a_failed_read_with_the_failed_event_at_the_requester()
 def test_register_logs_a_failed_record_and_keeps_serving(caplog: pytest.LogCaptureFixture) -> None:
     class _ReadOnlyRegister(memory.StmMemory):
         @typing.override
-        def execute(self, data: memory.InputData) -> memory.OutputData:
+        def _execute(self, data: memory.InputData) -> memory.OutputData:
             if data.statements[0].sql.lstrip().upper().startswith("INSERT"):
                 raise RuntimeError("read-only")
-            return super().execute(data)
+            return super()._execute(data)
 
     async def scenario(peer: _Peer) -> None:
         await peer.record(_notable_event("dropped"))
@@ -302,3 +306,144 @@ def test_register_logs_a_failed_record_and_keeps_serving(caplog: pytest.LogCaptu
         _run(_ReadOnlyRegister(), scenario)
 
     assert any("bot.ability.memory.stm.record failed" in record.getMessage() for record in caplog.records)
+
+
+# --- what the register cannot serve -------------------------------------------------------------
+
+
+class _Recorder(hsm.Instance):
+    """Attachment owner and requester: records every event delivered to it; ``react`` may answer one."""
+
+    events: list[hsm.Event[typing.Any]]
+    changed: asyncio.Event
+    react: collections.abc.Callable[[hsm.Context, hsm.Event[typing.Any]], None] | None
+
+    @staticmethod
+    def _record(ctx: hsm.Context, instance: "_Recorder", event: hsm.Event[typing.Any]) -> None:
+        instance.events.append(event)
+        instance.changed.set()
+        if instance.react is not None:
+            instance.react(ctx, event)
+
+    model: typing.ClassVar[hsm.Model] = mosfet.define(
+        "StmTestRecorder",
+        hsm.initial(hsm.target("recording")),
+        hsm.state("recording", hsm.transition(hsm.on(hsm.AnyEvent), hsm.effect(_record))),
+    )
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.events = []
+        self.changed = asyncio.Event()
+        self.react = None
+
+    def replies(self, request_id: str) -> list[hsm.Event[typing.Any]]:
+        names = {stm.RecentOutputEvent.name, ability.FailedEvent.name}
+        return [event for event in self.events if event.id == request_id and event.name in names]
+
+    async def until(self, predicate: collections.abc.Callable[[], bool]) -> None:
+        async with asyncio.timeout(5.0):
+            while not predicate():
+                self.changed.clear()
+                _ = await self.changed.wait()
+
+
+def _recent_request(request_id: str, requester: hsm.Instance) -> hsm.Event[typing.Any]:
+    return dataclasses.replace(
+        stm.RecentEvent.with_data_and_id(stm.RecentData(limit=1), request_id), source=hsm.id(requester)
+    )
+
+
+def _dropped(points: collections.abc.Sequence[metric_reader.Point]) -> dict[tuple[object, object], float]:
+    return {
+        (point.attributes["bot.ability.drop.reason"], point.attributes["bot.ability.replied"]): point.value
+        for point in points
+        if point.attributes.get("bot.ability.name") == "StmMemory"
+    }
+
+
+def test_a_detached_register_answers_requests_unavailable_and_counts_notifications(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """C22: nothing sent to a register that is not attached is lost silently, before or after attach."""
+
+    async def run(
+        reader: metric_reader.Reader,
+    ) -> tuple[list[hsm.Event[typing.Any]], list[hsm.Event[typing.Any]], str, dict[tuple[object, object], float]]:
+        ctx = shared_hsm_context()
+        owner = _Recorder()
+        _ = await mosfet.started(ctx, owner, _Recorder.model)
+        never = memory.StmMemory()
+        _ = await mosfet.started(ctx, never, require_model(never.model))
+        register = memory.StmMemory()
+        _ = await register.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)))
+        await owner.until(lambda: any(e.name == attachment.AttachCompleteEvent.name for e in owner.events))
+        _ = await register.detach(ctx, attachment.DetachEvent.with_data(attachment.DetachData(actor=owner)))
+        await owner.until(lambda: register.state() == "/StmMemoryLifecycle/detached")
+        before = _dropped(reader.points("bot.ability.request.dropped.count"))
+        _ = await hsm.dispatch(ctx, never, _recent_request("never-attached", owner))
+        _ = await hsm.dispatch(ctx, register, _recent_request("after-detach", owner))
+        _ = await hsm.dispatch(ctx, register, stm.RecordEvent.with_data(stm.event_record(_notable_event("late"))))
+        _ = await hsm.dispatch(ctx, register, stm.ReinforceEvent.with_data(stm.ReinforceData(stm_ids=("x",))))
+        await owner.until(lambda: bool(owner.replies("never-attached")) and bool(owner.replies("after-detach")))
+        after = _dropped(reader.points("bot.ability.request.dropped.count"))
+        changes = {key: value - before.get(key, 0.0) for key, value in after.items() if value - before.get(key, 0.0)}
+        return owner.replies("never-attached"), owner.replies("after-detach"), hsm.id(register), changes
+
+    with metric_reader.recording(tmp_path, monkeypatch) as reader:
+        never, detached, register_id, changes = asyncio.run(run(reader))
+
+    for answered in (never, detached):
+        (reply,) = answered
+        assert reply.name == ability.FailedEvent.name
+        assert isinstance(reply.data, ability.FailureData)
+        assert reply.data.message == "unavailable: StmMemory is not attached."
+    assert detached[0].source == register_id
+    assert changes == {("detached", "true"): 2.0, ("detached", "false"): 2.0}
+
+
+def test_requests_that_arrive_with_a_detach_are_each_answered_exactly_once() -> None:
+    """A request queued ahead of the detach is served; one queued behind it is answered unavailable."""
+
+    async def scenario() -> tuple[dict[str, list[hsm.Event[typing.Any]]], str]:
+        ctx = shared_hsm_context()
+        owner = _Recorder()
+        _ = await mosfet.started(ctx, owner, _Recorder.model)
+        register = memory.StmMemory()
+        _ = await register.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)))
+        await owner.until(lambda: any(e.name == attachment.AttachCompleteEvent.name for e in owner.events))
+
+        def burst(reaction_ctx: hsm.Context, event: hsm.Event[typing.Any]) -> None:
+            # Sent while the register is still answering the first request: they queue behind it.
+            if event.id != "first" or event.name != stm.RecentOutputEvent.name:
+                return
+            _ = hsm.dispatch(reaction_ctx, register, _recent_request("ahead", owner))
+            _ = hsm.dispatch(
+                reaction_ctx, register, attachment.DetachEvent.with_data(attachment.DetachData(actor=owner))
+            )
+            _ = hsm.dispatch(reaction_ctx, register, _recent_request("behind", owner))
+
+        owner.react = burst
+        _ = await hsm.dispatch(ctx, register, _recent_request("first", owner))
+        await owner.until(lambda: all(owner.replies(request) for request in ("first", "ahead", "behind")))
+        await asyncio.sleep(0.05)
+        return {request: owner.replies(request) for request in ("first", "ahead", "behind")}, register.state()
+
+    replies, state = asyncio.run(scenario())
+
+    assert state == "/StmMemoryLifecycle/detached"
+    assert [reply.name for reply in replies["first"]] == [stm.RecentOutputEvent.name]
+    assert [reply.name for reply in replies["ahead"]] == [stm.RecentOutputEvent.name]
+    (behind,) = replies["behind"]
+    assert behind.name == ability.FailedEvent.name
+    assert isinstance(behind.data, ability.FailureData)
+    assert behind.data.message.startswith("unavailable")
+
+
+def test_the_register_owns_a_detaching_state() -> None:
+    """Composite lifecycle: a detach enters the register's own detaching state, which answers what waits."""
+
+    model = memory.StmMemory.model
+    assert model is not None
+    assert "/StmMemoryLifecycle/attached/behavior/detaching" in model.members
+    assert "/StmMemoryLifecycle/attached/behavior/degraded" in model.members

@@ -25,14 +25,14 @@ exclude = ["src/mosfet/__init__.pyi"]
 artifacts = ["src/mosfet/providers/sqlite_memory/_native/*"]
 
 [tool.hatch.build.targets.wheel.force-include]
-"vendor/sqlite-objstore/LICENSE" = "bot/providers/sqlite_memory/_licenses/sqlite-objstore-LICENSE"
-"vendor/sqlite-objstore/THIRD_PARTY_NOTICES.md" = "bot/providers/sqlite_memory/_licenses/sqlite-objstore-THIRD_PARTY_NOTICES.md"
-"vendor/sqlite-objstore/third_party/blake3/LICENSE_A2" = "bot/providers/sqlite_memory/_licenses/blake3-LICENSE_A2"
-"vendor/sqlite-objstore/third_party/blake3/LICENSE_A2LLVM" = "bot/providers/sqlite_memory/_licenses/blake3-LICENSE_A2LLVM"
-"vendor/sqlite-objstore/third_party/blake3/LICENSE_CC0" = "bot/providers/sqlite_memory/_licenses/blake3-LICENSE_CC0"
-"vendor/sqlite-vec/LICENSE-MIT" = "bot/providers/sqlite_memory/_licenses/sqlite-vec-LICENSE-MIT"
-"vendor/sqlite-vec/LICENSE-APACHE" = "bot/providers/sqlite_memory/_licenses/sqlite-vec-LICENSE-APACHE"
-"vendor/sqlite-vec/THIRD_PARTY_NOTICES.md" = "bot/providers/sqlite_memory/_licenses/sqlite-vec-THIRD_PARTY_NOTICES.md"
+"vendor/sqlite-objstore/LICENSE" = "mosfet/providers/sqlite_memory/_licenses/sqlite-objstore-LICENSE"
+"vendor/sqlite-objstore/THIRD_PARTY_NOTICES.md" = "mosfet/providers/sqlite_memory/_licenses/sqlite-objstore-THIRD_PARTY_NOTICES.md"
+"vendor/sqlite-objstore/third_party/blake3/LICENSE_A2" = "mosfet/providers/sqlite_memory/_licenses/blake3-LICENSE_A2"
+"vendor/sqlite-objstore/third_party/blake3/LICENSE_A2LLVM" = "mosfet/providers/sqlite_memory/_licenses/blake3-LICENSE_A2LLVM"
+"vendor/sqlite-objstore/third_party/blake3/LICENSE_CC0" = "mosfet/providers/sqlite_memory/_licenses/blake3-LICENSE_CC0"
+"vendor/sqlite-vec/LICENSE-MIT" = "mosfet/providers/sqlite_memory/_licenses/sqlite-vec-LICENSE-MIT"
+"vendor/sqlite-vec/LICENSE-APACHE" = "mosfet/providers/sqlite_memory/_licenses/sqlite-vec-LICENSE-APACHE"
+"vendor/sqlite-vec/THIRD_PARTY_NOTICES.md" = "mosfet/providers/sqlite_memory/_licenses/sqlite-vec-THIRD_PARTY_NOTICES.md"
 
 [tool.hatch.build.hooks.custom]
 path = "hatch_build.py"

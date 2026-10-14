@@ -47,6 +47,8 @@ failed, not which library raised:
 | `unsupported_input` | the request is well formed but outside the provider's declared capacity |
 | `too_long` | an input exceeds the model's token bound and was not truncated; split it |
 | `overloaded` | a bounded admission queue was full; retry later or shed load |
+| `store_failed` | a storage transaction failed and rolled back; nothing was changed |
+| `stale_lease` | a decision or release named a leased unit that is no longer leased |
 | `unknown` | derivation produced nothing usable — a bug in the call site |
 
 Add a kind only when an operator would act differently on it. Two kinds that
