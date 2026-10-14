@@ -11,8 +11,8 @@ from mosfet.device import Device
 class Keyboard(Device):
     """Remote-side port that hands each key a person pressed to whatever is attached to it.
 
-    A keyboard makes no decision about what a key means. The link that carries the remote keyboard
-    delivers ``devices.hid.key`` here, and the keyboard re-addresses it, from itself, to every
+    A keyboard makes no decision about what a key means. The keyboard stream it owns delivers
+    ``devices.hid.key`` here, and the keyboard re-addresses it, from itself, to every
     controller holding it; the controller (a computer's operating system) decides what the key is
     for. It has no firmware of its own and no ``environment.*`` transition: a keystroke on a remote
     machine is not something the room hears, so environment broadcasts reach it and go unhandled.
@@ -22,7 +22,7 @@ class Keyboard(Device):
 
     @staticmethod
     def _is_key(ctx: hsm.Context, instance: "Keyboard", event: hsm.Event[typing.Any]) -> bool:
-        """Only a validated key is a key; the link validates wire data before delivering it."""
+        """Only a validated key is a key; the stream's codec validates wire data before delivering it."""
 
         del ctx, instance
         return isinstance(event.data, KeyData)

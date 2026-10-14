@@ -1,7 +1,7 @@
 """Human Interface Device ports for stateforward.mosfet devices.
 
-A keyboard and a pointer are remote-side transducers: a link delivers what a person did on the
-remote hardware, and the port hands it to whatever is attached to it. Neither hears the environment.
+A keyboard and a pointer are remote-side transducers: each owns a stream that delivers what a person
+did on the remote hardware, and the port hands it to whatever is attached to it. Neither hears the environment.
 """
 
 from . import keyboard, pointer

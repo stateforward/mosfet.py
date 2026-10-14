@@ -11,8 +11,8 @@ from mosfet.device import Device
 class Pointer(Device):
     """Remote-side port that hands each pointer transition a person made to whatever is attached to it.
 
-    A pointer makes no decision about what a press or a movement means. The link that carries the
-    remote mouse, touch surface or pen delivers ``devices.hid.pointer`` here, and the pointer
+    A pointer makes no decision about what a press or a movement means. The pointer stream it owns,
+    from a remote mouse, touch surface or pen, delivers ``devices.hid.pointer`` here, and the pointer
     re-addresses it, from itself, to every controller holding it; the controller (a computer's
     operating system) hit-tests and decides what it is for. It has no firmware of its own and no
     ``environment.*`` transition, so environment broadcasts reach it and go unhandled.
@@ -22,7 +22,7 @@ class Pointer(Device):
 
     @staticmethod
     def _is_pointer(ctx: hsm.Context, instance: "Pointer", event: hsm.Event[typing.Any]) -> bool:
-        """Only a validated pointer transition counts; the link validates wire data before delivering it."""
+        """Only a validated pointer transition counts; the stream's codec validates wire data first."""
 
         del ctx, instance
         return isinstance(event.data, PointerData)

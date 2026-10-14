@@ -1,7 +1,7 @@
 """Human Interface Device contracts: one key transition, one pointer transition.
 
-These are link-plane facts about what a person did on a remote input device. A link validates wire
-data into these payloads and hands them to the matching port; they are never environment stimuli and
+These are link-plane facts about what a person did on a remote input device. The codec on a port's
+stream validates wire data into these payloads and the stream hands them to the port that owns it; they are never environment stimuli and
 never model-callable.
 """
 
@@ -27,7 +27,7 @@ class KeyData(pydantic.BaseModel):
 
     kind: typing.Literal["hid.key"] = pydantic.Field(
         default="hid.key",
-        description="Discriminator for a key transition inside a closed union of link-plane messages.",
+        description="Discriminator: this payload is a key transition.",
         examples=["hid.key"],
     )
     action: typing.Literal["down", "up"] = pydantic.Field(
@@ -98,7 +98,7 @@ class PointerData(pydantic.BaseModel):
 
     kind: typing.Literal["hid.pointer"] = pydantic.Field(
         default="hid.pointer",
-        description="Discriminator for a pointer transition inside a closed union of link-plane messages.",
+        description="Discriminator: this payload is a pointer transition.",
         examples=["hid.pointer"],
     )
     action: typing.Literal["down", "move", "up", "cancel"] = pydantic.Field(

@@ -228,7 +228,7 @@ studio (publishes topology into the `web/` studio for inspection) with `BOT_MODE
 | Layer | What ships |
 |---|---|
 | Body | `bot.Bot` — lifecycle, device attachment, stimulus fan-out, cognition handoff, reflex floor |
-| Devices | `bot.devices.phone` (basic phone: ringing, dialing, call lifecycle, busy/reorder tones), `bot.devices.smart_phone` (a phone that also texts: incoming texts, notification ding, lock screen, sending texts), `bot.devices.audio` (microphone, speaker with placement) |
+| Devices | `bot.devices.phone` (basic phone: ringing, dialing, call lifecycle, busy/reorder tones), `bot.devices.smart_phone` (a phone that also texts: incoming texts, notification ding, lock screen, sending texts), `bot.devices.audio` (microphone, speaker with placement, binary PCM stream codec), `bot.devices.hid` (remote keyboard and pointer ports), `bot.devices.computer` (a person's computer reached through a transport, each remote port owning one stream of its link: text/field/button display driven by `computer.show`, remote camera and microphone put into the room, a mouthpiece that carries the bot's voice to the remote speaker) |
 | Environment | broadcast scope, typed stimuli (`environment.sound`, …), world snapshots, `bot.environment.space` propagation law |
 | Abilities | Listening (VAD · STT · sensitivity/self-sound), Hearing (voice identity), Vision, Reading, Language, Memory (one durable `memory.Memory`: relational transactions plus an episodic graph of episodes, persons and concepts with a vector per node; `StmMemory` register), Communication (Conversation + turn detection), Speaking, Identity (name, recognition, values), Classifying, Decoding/Encoding |
 | Cognition | Autonomy, Intuition, Reasoning, Reflection, Learning, Routines — all typed |
