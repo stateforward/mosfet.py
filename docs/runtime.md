@@ -102,8 +102,52 @@ stopping              one stop_grace bound           -> stopped (0, 70 or 78) | 
 | `70` | `exhausted` | A bot used up its restart budget. Kept when a first signal arrives during that stop. |
 | `78` | `boot_failed` | Import failed, factory missing or raised, invalid assembly, missing secret, or actor or supervisor bring-up failed or timed out. Kept when a first signal arrives during that stop. |
 
-`64` (usage error) belongs to the command-line boundary, which rejects a malformed target before a
-Runtime exists.
+`64` (usage error) belongs to the command-line boundary, which rejects bad arguments before a Runtime
+exists.
+
+## Command line (`mosfet run`)
+
+```bash
+mosfet run [flags] module.path:attribute
+```
+
+The command is the application boundary. It parses the flags, snapshots the process environment once into
+the `runtime.Config`, creates the data directory, configures telemetry once with `service.name` and
+`service.instance.id`, creates the one process `Environment`, starts the `Runtime` in it, and exits with
+the code the Runtime reports. Stdout stays empty; diagnostics go to stderr. The command reads no
+environment variables of its own beyond the `HOSTNAME` default below; `BOT_OTEL_*` and `OTEL_*` keep their
+telemetry meaning.
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--name NAME` | top-level package of the target | `Config.name`, `service.name` |
+| `--instance-id ID` | `$HOSTNAME`, else the host name | `Config.instance_id`, `service.instance.id` |
+| `--data-dir PATH` | `./.mosfet` | `Config.data_dir`, created `0700` when absent |
+| `--secrets-dir PATH` | `/run/secrets` | Directory searched first by `Config.secrets` |
+| `--ready-file PATH` | unset | Exists exactly while the Runtime is `running/ready` (for `HEALTHCHECK test -f`) |
+| `--stop-grace SECONDS` | `8` | `Policy.stop_grace` |
+| `--bot-stop-timeout SECONDS` | `4` | `Policy.bot_stop_timeout` |
+| `--bot-release-timeout SECONDS` | `1` | `Policy.bot_release_timeout` |
+| `--start-timeout SECONDS` | `120` | `Policy.start_timeout` |
+| `--max-restarts N` | `5` | `Policy.max_restarts` |
+| `--backoff-initial SECONDS` | `1` | `Policy.backoff_initial` |
+| `--backoff-max SECONDS` | `60` | `Policy.backoff_max` |
+| `--stable-after SECONDS` | `60` | `Policy.stable_after` |
+
+The policy flags are generated from the `runtime.Policy` fields, so an omitted flag keeps the policy
+default and an out-of-range value (for example `--bot-stop-timeout` plus `--bot-release-timeout` not below
+`--stop-grace`) is a usage error, `64`. A data directory that cannot be created, or a telemetry
+configuration that fails, is a configuration failure, `78`.
+
+* **Signals.** While the Runtime runs, SIGTERM and SIGINT each dispatch `runtime.StopEvent` with reason
+  `signal`; the first starts the graceful stop and a second one forces it. The handlers are removed once
+  the Runtime reports its exit. SIGHUP keeps its default disposition.
+* **Bounded exit.** After the Runtime reports its exit, the command cancels every remaining task and waits
+  at most 1 s for them and for threads running blocking calls (for example a factory that has not
+  returned), then flushes telemetry for at most 0.5 s. If anything is still running, it ends the process
+  with `os._exit` and the Runtime's exit code; `atexit` handlers do not run on that path. From SIGTERM to
+  process exit therefore takes at most `--stop-grace` plus 1.5 s, 9.5 s by default, which is under
+  Docker's 10 s SIGKILL. Raising `--stop-grace` needs a matching `docker run --stop-timeout`.
 
 ## Bot supervision (`runtime.Supervisor`)
 
@@ -147,9 +191,13 @@ process), so cardinality stays bounded; operation ids, secrets and messages are 
 | `bot.runtime.bot.stop.count` | `bot.name`, `outcome` (`graceful`, `timed_out`) |
 | `bot.runtime.bot.running` | none |
 | `bot.runtime.signal.count` | `signal` (`SIGTERM`, `SIGINT`) |
+| `bot.runtime.stop.duration` | `outcome` (`graceful`, `forced`) |
 
 The machines read no clock of their own: every bound is an `hsm.after` timer on the machine's injected
-`hsm` clock, so a test that injects a clock decides when each bound expires.
+`hsm` clock, so a test that injects a clock decides when each bound expires. The wall-clock
+`bot.runtime.stop.duration` is therefore recorded by `mosfet run`, the process boundary: the time from the
+first stop signal to the Runtime's exit, `forced` when the Runtime exits `forced`. A stop that no signal
+started (exhaustion, bring-up failure) is not timed.
 
 Spans: `runtime.boot` (failure kind on failure), `runtime.supervisor.attempt` (one bot attach request:
 `bot.name`, `bot.runtime.attempt`), `runtime.stop` (stopping the supervisors and actors:

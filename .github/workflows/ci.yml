@@ -90,6 +90,15 @@ jobs:
           uv run --locked basedpyright --project examples/listen_speak_bot
           uv run --locked python -m pytest -q -m 'not live' tests/examples/test_listen_speak_bot.py
 
+      - name: Minimal example quality gates
+        run: |
+          uv run --locked --project examples/minimal_bot ruff check examples/minimal_bot/src examples/minimal_bot/tests
+          uv run --locked --project examples/minimal_bot ruff format --check \
+            examples/minimal_bot/src \
+            examples/minimal_bot/tests
+          uv run --locked --project examples/minimal_bot basedpyright --project examples/minimal_bot
+          uv run --locked --project examples/minimal_bot python -m pytest -q examples/minimal_bot/tests
+
       - name: Ruff
         run: |
           # Provider list derived via glob so new providers are covered automatically.

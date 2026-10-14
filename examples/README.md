@@ -4,7 +4,17 @@ Examples live outside `src` so they stay out of the distributable stateforward.m
 Each single-file example is a `uv` script with its own inline metadata, which keeps
 example-only dependencies out of the root project and provider packages.
 
-Run an example from the repository root:
+`minimal_bot` is the smallest bot factory for `mosfet run`: one device-free bot with a full
+cognition on any OpenAI-compatible endpoint. Its own project installs `mosfet` and the factory, so
+the command runs exactly as documented; see [`minimal_bot/README.md`](minimal_bot/README.md):
+
+```bash
+uv sync --project examples/minimal_bot
+OPENAI_BASE_URL=... OPENAI_MODEL=... OPENAI_API_KEY=... \
+  examples/minimal_bot/.venv/bin/mosfet run minimal_bot_example:build
+```
+
+The other examples run as programs from the repository root:
 
 ```bash
 uv run --project examples/listen_speak_bot listen-speak-bot

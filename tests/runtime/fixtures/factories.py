@@ -1,12 +1,15 @@
 """Test-only bot factories and doubles for the ``mosfet run`` runtime.
 
-Factories here are importable targets (``tests.runtime.fixtures.factories:<name>``). ``configured`` is a
+Factories here are importable targets (``tests.runtime.fixtures.factories:<name>``), run in process by
+``tests/runtime`` and as ``mosfet run`` children by ``tests/test_cli.py``. ``configured`` is a
 placeholder each test replaces with the factory it runs.
 """
 
 import asyncio
 import collections.abc
 import datetime
+import pathlib
+import time
 import typing
 
 import hsm
@@ -124,6 +127,22 @@ class GatedDevice(Device):
         _ = await self.gate.wait()
 
 
+class MarkingDevice(GatedDevice):
+    """A gated device that touches ``marker`` when its firmware bring-up begins, so a test in another
+    process can tell that the bot is activating."""
+
+    marker: pathlib.Path
+
+    def __init__(self, marker: pathlib.Path) -> None:
+        super().__init__(asyncio.Event())
+        self.marker = marker
+
+    @typing.override
+    async def _after_firmware_started(self, ctx: hsm.Context, event: hsm.Event[typing.Any]) -> None:
+        self.marker.touch()
+        await super()._after_firmware_started(ctx, event)
+
+
 class DeafDevice(Device):
     """Never answers a detach request, so a bot holding it waits out its own detach bound."""
 
@@ -229,6 +248,41 @@ def quiet(config: runtime.Config) -> runtime.Assembly:
 
     del config
     return runtime.Assembly(bots={"quiet": QuietBot()})
+
+
+def activating(config: runtime.Config) -> runtime.Assembly:
+    """One bot that never finishes activating; ``<data_dir>/activating`` appears once it has begun."""
+
+    return runtime.Assembly(bots={"slow": QuietBot({"device": MarkingDevice(config.data_dir / "activating")})})
+
+
+def mute(config: runtime.Config) -> runtime.Assembly:
+    """One bot that activates and then never answers a stop."""
+
+    del config
+    return runtime.Assembly(bots={"mute": MuteBot()})
+
+
+def stubborn(config: runtime.Config) -> runtime.Assembly:
+    """One prompt bot and a shared actor whose stop ignores cancellation and is never released."""
+
+    del config
+    return runtime.Assembly(bots={"quiet": QuietBot()}, actors=(StubbornActor("stubborn", []),))
+
+
+def failing(config: runtime.Config) -> runtime.Assembly:
+    """One bot whose activation always fails, so it exhausts its restart budget."""
+
+    del config
+    return runtime.Assembly(bots={"failing": QuietBot({"device": FailingDevice()})})
+
+
+def blocking(config: runtime.Config) -> runtime.Assembly:
+    """A factory stuck in a blocking call for a minute; ``<data_dir>/booting`` appears once it is."""
+
+    (config.data_dir / "booting").touch()
+    time.sleep(60)
+    return quiet(config)
 
 
 def configured(config: runtime.Config) -> runtime.Assembly:

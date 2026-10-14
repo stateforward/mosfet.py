@@ -35,6 +35,25 @@ and `turn_detector/turn_detector.py`
 (`.../turn_detector/test_turn_detector.py`); the files above close the
 remaining gaps without duplicating them.
 
+## Process runtime and `mosfet run`
+
+| Test | Source under test |
+| --- | --- |
+| `tests/runtime/test_target.py` | `src/mosfet/runtime/target.py` (parse into usage errors, resolve into boot failure kinds) |
+| `tests/runtime/test_config.py` | `src/mosfet/runtime/config.py` (secret precedence, no value in errors or `repr`, immutable environ) |
+| `tests/runtime/test_errors.py` | `src/mosfet/runtime/errors.py` |
+| `tests/runtime/test_policy.py` | `src/mosfet/runtime/policy.py` (positive bounds, backoff cap, bot stop inside the grace) |
+| `tests/runtime/test_assembly.py` | `src/mosfet/runtime/assembly.py` (bot names and count, actor class models, placement keys) |
+| `tests/runtime/test_events.py` | `src/mosfet/runtime/events.py` (payload schemas, exit code per reason, no tool-kind event) |
+| `tests/runtime/test_supervisor.py` | `src/mosfet/runtime/supervisor.py` (operation ids, recovery and backoff, exhaustion, bounded stop) |
+| `tests/runtime/test_runtime.py` | `src/mosfet/runtime/runtime.py` (boot, bring-up, readiness, single-grace stop, exit codes) |
+| `tests/test_cli.py` | `src/mosfet/cli.py` (exit codes 0/1/64/70/78, signals in a child process, bounded process exit) |
+| `examples/minimal_bot/tests/test_minimal_bot.py` | `examples/minimal_bot` (`build` assembly and its configuration; the installed `mosfet run minimal_bot_example:build` reaches ready and exits 0 on SIGTERM) |
+
+`tests/runtime/fixtures/factories.py` holds the test-only factories and doubles both suites import;
+`tests/test_cli.py` runs them as `mosfet run` children with the repository root on the child's
+`PYTHONPATH` only.
+
 ## Intentional indirect coverage (do not "fix" by reaching in further)
 
 - `tests/bot/abilities/test_ability.py` subclasses `abilities.Ability` to

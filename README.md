@@ -65,6 +65,42 @@ that answers a real call over LiveKit.
 Every stateful concern is modeled with
 [`stateforward-hsm`](https://github.com/stateforward/hsm.py).
 
+## Running a bot
+
+`mosfet run` runs a bot factory as one supervised process. The factory takes the process
+configuration and returns the bots to run:
+
+```python
+# my_bot/app.py
+from mosfet import runtime
+
+from my_bot.assistant import Assistant  # the bot class above
+
+
+def build(config: runtime.Config) -> runtime.Assembly:
+    """Build the bots this process runs. ``config`` carries the data dir and secrets."""
+
+    return runtime.Assembly(bots={"assistant": Assistant(cognition=...)})
+```
+
+```bash
+mosfet run my_bot.app:build --ready-file /tmp/ready
+```
+
+The module is imported from the installed environment. The process stops gracefully on SIGTERM
+or SIGINT, keeps stdout empty, and exits `0` (graceful stop), `1` (forced stop), `64` (usage
+error), `70` (a bot used up its restart budget) or `78` (boot or configuration failure).
+[`examples/minimal_bot`](examples/minimal_bot/README.md) is the smallest runnable factory, one
+device-free bot on any OpenAI-compatible endpoint:
+
+```bash
+uv sync --project examples/minimal_bot
+OPENAI_BASE_URL=https://api.openai.com/v1 OPENAI_MODEL=gpt-5.4-mini OPENAI_API_KEY=... \
+  examples/minimal_bot/.venv/bin/mosfet run minimal_bot_example:build --ready-file /tmp/ready
+```
+
+[`docs/runtime.md`](docs/runtime.md) has every flag, the stop bound and the restart policy.
+
 ## Package name, event names
 
 The import package is `mosfet`. The events are `bot.*`, because they name what a bot did,
