@@ -72,7 +72,24 @@ def test_build_recipe_is_not_a_workspace_member() -> None:
 def test_public_exports_are_intentional() -> None:
     module = importlib.import_module("mosfet.providers.llama_cpp")
 
-    assert getattr(module, "__all__") == ["Accelerator", "Library", "LibraryError", "Weights", "__version__"]
+    assert getattr(module, "__all__") == [
+        "Accelerator",
+        "EmbedData",
+        "EmbedEvent",
+        "EmbedFailedEvent",
+        "EmbeddedEvent",
+        "Embedder",
+        "EmbeddingContext",
+        "EmbeddingModel",
+        "EmbeddingSession",
+        "Library",
+        "LibraryError",
+        "Model",
+        "Runtime",
+        "Weights",
+        "__version__",
+        "embedding_capacity",
+    ]
 
 
 def test_provider_version_matches_installed_metadata() -> None:

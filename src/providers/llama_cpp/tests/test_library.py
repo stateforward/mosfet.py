@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import pathlib
 import sys
 
 import pytest
@@ -84,6 +85,21 @@ def test_bindings_without_system_info_are_refused() -> None:
 
     with pytest.raises(llama_cpp.LibraryError, match="system info"):
         _ = library.accelerator()
+
+
+@pytest.mark.parametrize("version", ["0.3.36", "0.3.37"])
+def test_load_refuses_any_build_other_than_the_pinned_one(version: str) -> None:
+    library = llama_cpp.Library(module=Bindings(version=version))
+    weights = llama_cpp.Weights(model=pathlib.Path("embedding.gguf"))
+
+    with pytest.raises(llama_cpp.LibraryError, match="not the pinned build"):
+        _ = library.load(weights, llama_cpp.EmbeddingContext())
+
+
+def test_library_satisfies_the_runtime_protocol() -> None:
+    runtime: llama_cpp.Runtime = llama_cpp.Library(module=Bindings())
+
+    assert callable(runtime.load)
 
 
 @pytest.mark.live

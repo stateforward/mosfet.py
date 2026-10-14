@@ -43,15 +43,20 @@ remaining gaps without duplicating them.
 | `tests/bot/abilities/embedding/test_embedder.py` | `src/mosfet/abilities/embedding/embedder.py` (`Instructions.render` prefixes, `EMBEDDING_GEMMA_2`, `Capacity` bounds, `Error.failure_kind`, plain-attribute `Embedder` satisfied by a frozen dataclass) |
 | `tests/bot/abilities/embedding/test_embedding.py` | `src/mosfet/abilities/embedding/embedding.py` (HSM runtime: admission, FIFO queue, overload, `hsm.after` timeout with a late result ignored, invalid responses, composite attach/detach of the embedder's attachments, `UNAVAILABLE` while not serving, metric attribute sets) |
 
-## llama.cpp provider build
+## llama.cpp provider
 
 Paths are relative to `src/providers/llama_cpp/`.
 
 | Test | Source under test |
 | --- | --- |
 | `tests/test_package_metadata.py` | `pyproject.toml` (pinned `llama-cpp-python` path source, dynamic version, wheel ships only `src/mosfet`, recipe is not a workspace member) and `src/mosfet/providers/llama_cpp/__init__.py` (`__all__`) |
-| `tests/test_library.py` | `src/mosfet/providers/llama_cpp/library.py` (system info → `Accelerator`, any build but `0.3.36+mosfet.4fbc76de` → `LibraryError(initialization)`; the `live` case loads the installed build) |
+| `tests/test_library.py` | `src/mosfet/providers/llama_cpp/library.py` (system info → `Accelerator`, any build but `0.3.36+mosfet.4fbc76de` → `LibraryError(initialization)` from `accelerator()` and `load()`; the `live` case loads the installed build) |
 | `tests/test_weights.py` | `src/mosfet/providers/llama_cpp/weights.py` |
+| `tests/test_runtime.py` | `src/mosfet/providers/llama_cpp/runtime.py` (`EmbeddingContext` defaults and bounds) |
+| `tests/test_model.py` | `src/mosfet/providers/llama_cpp/model.py` (HSM runtime through `EmbeddingModel` with a gated fake runtime: root-owned lifetime and private-scope refusal, load/fail/timeout replies to `reply_to`, abandoning/releasing, multi-owner residency, deferred and stalled work, `_deadline` lifetime, `stop` closing exactly once in every state; two `embedding.Embedding` owners sharing one model) |
+| `tests/test_embedding_model.py` | `src/mosfet/providers/llama_cpp/embedding_model.py` (`EmbedData` schema, event names, terminal correlation, Matryoshka truncation and normalization, prefixes applied once, unsupported space or image, item failures, `require_accelerator`) |
+| `tests/test_embedder.py` | `src/mosfet/providers/llama_cpp/embedder.py` (`embedding_capacity` with and without a projector, WebP refused, non-actor `Embedder` with `attachments == (model,)`, end to end through `embedding.Embedding`) |
+| `tests/test_embedder_live.py` | `embedder.py`, `embedding_model.py`, `model.py` and `library.py` on the installed native build (`live`: spike parity of cosines and image tokens, `too_long`, media marker refused) |
 | `tests/test_backend.py` | `vendor/llama-cpp-python/_build/backend.py`, `recipe.toml` and the recipe `pyproject.toml` (synthetic archives: sha256, pax commit, ABI headers, unsafe members, local sources, upstream metadata drift, version rewrite; the measured pins) |
 | `tests/scripts/test_smoke_wheels.py` (repository root) | `scripts/smoke_wheels.sh` `--find-links` (a fake `uv` records every install) |
 

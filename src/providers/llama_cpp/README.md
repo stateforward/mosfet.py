@@ -56,14 +56,72 @@ uv run --package mosfet-provider-llama-cpp python -c \
   "from mosfet.providers import llama_cpp; print(llama_cpp.Library().accelerator())"
 ```
 
+## Embedding in process
+
+`EmbeddingModel` is one EmbeddingGemma-2-class model resident on one device and shared by every bot that
+embeds with it. `Embedder` is the core `embedding.Embedder` over it: a plain value object, not an actor, that
+the owning `embedding.Embedding` ability uses. `embedding_capacity` derives what the model accepts from the same
+configuration the model loads with.
+
+The composition root owns the model's lifetime. It starts the model in a long-lived scope before the bots and
+stops it after them; abilities only attach and detach. Under `mosfet run`, put the model in `Assembly.actors`:
+
+```python
+import pathlib
+
+from mosfet import runtime
+from mosfet.abilities import embedding
+from mosfet.providers import llama_cpp
+
+
+def build(config: runtime.Config) -> runtime.Assembly:
+    weights = llama_cpp.Weights(
+        model=pathlib.Path(config.environ["EMBEDDING_MODEL"]),
+        projector=pathlib.Path(config.environ["EMBEDDING_PROJECTOR"]),
+    )
+    context = llama_cpp.EmbeddingContext()
+    space = embedding.Space(model="google/embeddinggemma-2", dimensions=768)
+    model = llama_cpp.EmbeddingModel(weights=weights, context=context)
+    embedder = llama_cpp.Embedder(
+        model=model,
+        capacity=llama_cpp.embedding_capacity(weights, context, space=space),
+        instructions=embedding.EMBEDDING_GEMMA_2,
+    )
+    bot = ...  # an embedding.Embedding(embedder=embedder) inside the bot's cognition
+    return runtime.Assembly(bots={"main": bot}, actors=(model,))  # started before the bots, stopped after
+```
+
+A script root does the same by hand: `await mosfet.started(environment, model, llama_cpp.EmbeddingModel.model)`
+before starting the bots, and `await model.stop(environment)` after stopping them.
+
+- The model loads on the first owner's attach and unloads on the last owner's detach. A model that cannot load
+  fails the owner's attach with `initialization`.
+- `start` refuses a private scope. A model the root never started is auto-started by the owner's attachment
+  group under that group's private scope, which `start` refuses, so the owner's attach fails with
+  `initialization` instead of tying the shared model to its first owner.
+- Stopping one owner never stops the model; the other owners keep embedding. A model stopped while owners are
+  still attached makes their next embed fail with `timeout`.
+- `EmbeddingModel(require_accelerator=True)` refuses a build that computes on the CPU.
+- Items are never truncated: an item longer than `EmbeddingContext.tokens` fails with `too_long`. Text that
+  contains the projector's media marker (`<__media__>`) fails with `invalid_input`. Images must be PNG or JPEG.
+
 ## Tests
 
 ```sh
 uv run --package mosfet-provider-llama-cpp python -m pytest src/providers/llama_cpp/tests -m 'not live'
 ```
 
-The build-recipe tests use small synthetic archives and never touch the network. The one
-`live` test loads the installed native library and checks that it is the pinned build.
+The build-recipe tests use small synthetic archives and never touch the network. The model, embedder and
+machine tests use a fake runtime. The `live` tests load the installed native library: one checks that it is
+the pinned build, and `tests/test_embedder_live.py` checks parity with the measured spike when
+`BOT_LLAMA_CPP_EMBEDDING_MODEL` and `BOT_LLAMA_CPP_EMBEDDING_PROJECTOR` name an EmbeddingGemma-2 GGUF and its
+mmproj:
+
+```sh
+BOT_LLAMA_CPP_EMBEDDING_MODEL=/models/embeddinggemma-2.gguf \
+BOT_LLAMA_CPP_EMBEDDING_PROJECTOR=/models/mmproj.gguf \
+  uv run --package mosfet-provider-llama-cpp python -m pytest src/providers/llama_cpp/tests -m live
+```
 
 ## Publishing
 
