@@ -985,7 +985,7 @@ class _TerminalOperation(Traced):
 async def run_terminal_operation(
     ctx: hsm.Context,
     *,
-    child: Ability[typing.Any, typing.Any],
+    child: hsm.Instance,
     request: hsm.Event[typing.Any],
     terminals: tuple[hsm.Event[typing.Any], ...],
     timeout: datetime.timedelta,
@@ -998,14 +998,16 @@ async def run_terminal_operation(
     preserved for correlation. The child must return one of ``terminals`` with the same id,
     ``source=hsm.id(child)``, and ``target`` set to the operation actor.
 
-    The caller must supply a started ``child`` with an HSM addressing scope. The operation actor
+    ``child`` is any started, addressable HSM actor: an Ability, or a provider actor that is not
+    one. The caller must supply it started with an HSM addressing scope. The operation actor
     shares that address map so the child can deliver its terminal directly, while its lifetime is
     parented to ``ctx`` rather than the child's lifetime.
 
-    Child terminal emission follows the Ability terminal postcondition: a set
-    target is delivered once to that address and never also to the owner; an
-    absent or empty target is delivered once to the attachment owner or
-    dropped; source is rewritten to the emitting child.
+    Any child must reply to the request with one of ``terminals``. An Ability satisfies this
+    through its terminal postcondition: a set target is delivered once to that address and never
+    also to the owner; an absent or empty target is delivered once to the attachment owner or
+    dropped; source is rewritten to the emitting child. A child that is not an Ability must
+    address its terminal directly to the request's ``source``.
 
     The result awaitable is invocation-local and captured by the operation model; it is never
     stored on an HSM instance or in a shared registry. Caller cancellation stops only this reply

@@ -18,6 +18,7 @@ import pytest
 import mosfet.abilities as abilities_module
 import mosfet.abilities.ability as ability_module
 import mosfet.lifecycle
+import mosfet.telemetry
 from mosfet.protocols import attachment
 
 from tests.type_helpers import invalid_value, object_dict
@@ -205,6 +206,43 @@ class TerminalOperationAbility(abilities.Ability[TerminalOperationInputData, Ter
             hsm.transition(
                 hsm.on(TerminalOperationInputEvent),
                 hsm.effect(record_request),
+            ),
+        ),
+    )
+
+
+class TerminalOperationReplier(mosfet.telemetry.Traced):
+    """A plain addressable HSM actor, not an Ability, that answers each request with its terminal."""
+
+    @staticmethod
+    def reply(
+        ctx: hsm.Context,
+        instance: "TerminalOperationReplier",
+        event: hsm.Event[typing.Any],
+    ) -> None:
+        del ctx
+        data = event.data
+        assert isinstance(data, TerminalOperationInputData)
+        _ = hsm.dispatch_to(
+            instance.context(),
+            dataclasses.replace(
+                TerminalOperationOutputEvent.with_data(TerminalOperationOutputData(value=data.value.upper())),
+                id=event.id,
+                source=hsm.id(instance),
+                target=event.source,
+                metadata=dict(event.metadata),
+            ),
+            event.source,
+        )
+
+    model: typing.ClassVar[hsm.Model] = mosfet.define(
+        "TerminalOperationReplier",
+        hsm.initial(hsm.target("ready")),
+        hsm.state(
+            "ready",
+            hsm.transition(
+                hsm.on(TerminalOperationInputEvent),
+                hsm.effect(reply),
             ),
         ),
     )
@@ -752,6 +790,30 @@ def test_terminal_operation_returns_correlated_typed_failure() -> None:
 
     assert result.name == TerminalOperationFailedEvent.name
     assert result.data == abilities.FailureData(message="failed")
+
+
+def test_run_terminal_operation_accepts_plain_hsm_child() -> None:
+    """Any started, addressable HSM actor may be the child, not only an Ability."""
+
+    async def run() -> tuple[hsm.Event[typing.Any], str]:
+        ctx = environment.Environment()
+        child = TerminalOperationReplier()
+        _ = await mosfet.started(ctx, child, TerminalOperationReplier.model)
+        result = await ability_module.run_terminal_operation(
+            ctx,
+            child=child,
+            request=terminal_operation_request("plain", "input"),
+            terminals=(TerminalOperationOutputEvent, TerminalOperationFailedEvent),
+            timeout=datetime.timedelta(seconds=1),
+        )
+        return result, hsm.id(child)
+
+    result, child_id = asyncio.run(run())
+
+    assert result.name == TerminalOperationOutputEvent.name
+    assert result.id == "plain"
+    assert result.source == child_id
+    assert result.data == TerminalOperationOutputData(value="INPUT")
 
 
 def test_targeted_terminal_is_delivered_once_without_owner_fallback() -> None:
