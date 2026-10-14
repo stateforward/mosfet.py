@@ -5,11 +5,19 @@ carries as image content parts. Each ``media.Image`` found anywhere in the paylo
 ``<media:image …/>`` placeholder and never as bytes; the images the model's injected
 ``media.ImageCapacity`` admits follow their placeholder as an ``ImagePart``.
 
-Metrics (scope ``bot.abilities.processing``, recorded once per image placeholder):
+A payload may declare recalled context it carries as budgeted sequence fields
+(``__model_facing_budgeted_fields__``). Those render last, trimmed item by item to the bytes the
+rest of the stimulus leaves, so recalled context never makes a prompt fail.
+
+Metrics (scope ``bot.abilities.processing``):
 
 - ``bot.processing.prompt.image.count`` with ``outcome`` (``attached``, ``omitted_capacity``,
-  ``omitted_media_type``) and ``media_type`` (the three ``media.ImageMediaType`` values);
-- ``bot.processing.prompt.image.size`` (bytes, attached images only) with ``media_type``.
+  ``omitted_media_type``) and ``media_type`` (the three ``media.ImageMediaType`` values), once per
+  image placeholder;
+- ``bot.processing.prompt.image.size`` (bytes, attached images only) with ``media_type``;
+- ``bot.processing.prompt.recalled.omitted`` (items a budgeted field left out) with
+  ``bot.processing.recalled.field``, the budgeted field's code-defined name (a closed set of
+  identifiers declared by payload classes, never a value).
 """
 
 import collections.abc
@@ -42,6 +50,13 @@ _MAX_PROMPT_PROJECTION_NODES: typing.Final = 4_096
 _MAX_PROMPT_PROJECTION_ITEMS: typing.Final = 4_096
 _MAX_PROMPT_PROJECTION_SCALAR_CHARACTERS: typing.Final = 65_536
 _METRIC_SCOPE: typing.Final = "bot.abilities.processing"
+_INDENT: typing.Final = "  "
+# Most bytes ``_attach_images`` adds to one placeholder for its verdict: a ``ref`` (numbered at
+# most once per node) or an ``omitted`` reason.
+_IMAGE_VERDICT_BYTES: typing.Final = max(
+    len(f' ref="image-{_MAX_PROMPT_PROJECTION_NODES}"'),
+    *(len(f' omitted="{omission}"') for omission in typing.cast(tuple[str, ...], typing.get_args(media.ImageOmission))),
+)
 
 _IMAGE_COUNT = metrics.get_meter(_METRIC_SCOPE).create_counter(
     "bot.processing.prompt.image.count",
@@ -53,10 +68,37 @@ _IMAGE_SIZE = metrics.get_meter(_METRIC_SCOPE).create_histogram(
     unit="By",
     description="Encoded size of each image attached to a model prompt, by media type.",
 )
+_RECALLED_OMITTED = metrics.get_meter(_METRIC_SCOPE).create_counter(
+    "bot.processing.prompt.recalled.omitted",
+    unit="{item}",
+    description="Recalled items a budgeted field left out of a model prompt to fit the budget, by field.",
+)
+
+
+@dataclasses.dataclass(frozen=True)
+class _BudgetedField:
+    """A budgeted sequence field whose items render after the rest of the payload."""
+
+    element: ElementTree.Element
+    name: str
+    keep: typing.Literal["head", "tail"]
+    items: tuple[object, ...]
+    serialized: tuple[object, ...]
+
+
+@dataclasses.dataclass(frozen=True)
+class _Mark:
+    encoded_bytes: int
+    nodes: int
+    collection_items: int
+    images: int
 
 
 @dataclasses.dataclass
 class _ProjectionBudget:
+    # Bytes the rendered text may take; the running ``encoded_bytes`` tally is an early guard
+    # against the projection's own cap.
+    limit_bytes: int = _MAX_PROMPT_PROJECTION_BYTES
     encoded_bytes: int = 0
     nodes: int = 0
     collection_items: int = 0
@@ -65,6 +107,19 @@ class _ProjectionBudget:
     images: list[tuple[ElementTree.Element, media.Image]] = dataclasses.field(
         default_factory=list[tuple[ElementTree.Element, media.Image]]
     )
+    # Budgeted fields met while rendering; their items render once the rest of the payload has.
+    # Items of a budgeted field render whole: a budgeted field inside one is not deferred again.
+    deferred: list[_BudgetedField] = dataclasses.field(default_factory=list[_BudgetedField])
+    defer: bool = True
+
+    def mark(self) -> _Mark:
+        return _Mark(self.encoded_bytes, self.nodes, self.collection_items, len(self.images))
+
+    def rewind(self, mark: _Mark) -> None:
+        self.encoded_bytes = mark.encoded_bytes
+        self.nodes = mark.nodes
+        self.collection_items = mark.collection_items
+        del self.images[mark.images :]
 
     def consume_node(self, name: str) -> None:
         self.nodes += 1
@@ -88,7 +143,7 @@ class _ProjectionBudget:
             raise ValueError("prompt projection encoded byte budget exceeded")
 
     def verify_rendered(self, value: str) -> None:
-        if len(value.encode("utf-8")) > _MAX_PROMPT_PROJECTION_BYTES:
+        if len(value.encode("utf-8")) > self.limit_bytes:
             raise ValueError("prompt projection encoded byte budget exceeded")
 
 
@@ -141,6 +196,20 @@ def _image_placeholder(image: media.Image | media.ReleasedImage, budget: _Projec
     else:
         budget.images.append((placeholder, image))
     return placeholder
+
+
+def _attachment_bytes(image: media.Image) -> int:
+    """Most bytes ``_attach_images`` adds to the placeholder of ``image``."""
+
+    described = (("media_type", image.media_type), ("width_px", image.width_px), ("height_px", image.height_px))
+    return _IMAGE_VERDICT_BYTES + sum(len(f' {name}="{value}"') for name, value in described if value is not None)
+
+
+def _serialized_bytes(element: ElementTree.Element, *, level: int) -> int:
+    """Encoded size of ``element`` rendered at indentation ``level`` (its tail excluded)."""
+
+    ElementTree.indent(element, space=_INDENT, level=level)
+    return len(ElementTree.tostring(element, encoding="unicode").encode("utf-8"))
 
 
 def _excluded_field_names(level: object) -> frozenset[str]:
@@ -261,6 +330,11 @@ def _model_element(
     excluded_fields = frozenset(
         name for level in _payload_ancestry(type(model)) for name in _excluded_field_names(level)
     )
+    budgeted = typing.cast(
+        collections.abc.Mapping[object, object], getattr(type(model), "__model_facing_budgeted_fields__", {})
+    )
+    if any(keep not in ("head", "tail") for keep in budgeted.values()):
+        raise TypeError("__model_facing_budgeted_fields__ maps field names to 'head' or 'tail'")
     root: ElementTree.Element | None = None
     current: ElementTree.Element | None = None
     rendered: set[str] = set()
@@ -283,7 +357,14 @@ def _model_element(
                 and getattr(type(value), "__model_facing_event_data__", False)
             ):
                 continue
-            _fill_field(element, name, value, serialized_model[name], budget)
+            _fill_field(
+                element,
+                name,
+                value,
+                serialized_model[name],
+                budget,
+                keep=typing.cast(typing.Literal["head", "tail"] | None, budgeted.get(name)),
+            )
     if root is None:
         root = _element(_payload_tag(type(model)), budget)
     if envelope is not None:
@@ -299,8 +380,14 @@ def _fill_field(
     value: object,
     serialized: object,
     budget: _ProjectionBudget,
+    *,
+    keep: typing.Literal["head", "tail"] | None = None,
 ) -> None:
-    """Place one canonical JSON field on ``element`` as a presentation detail."""
+    """Place one canonical JSON field on ``element`` as a presentation detail.
+
+    A sequence field with ``keep`` set is budgeted: its element is placed now and its items are
+    deferred to ``_render_budgeted``.
+    """
 
     if serialized is None:
         return
@@ -347,6 +434,15 @@ def _fill_field(
     if isinstance(value, collections.abc.Set | collections.abc.Sequence):
         items = tuple(typing.cast(collections.abc.Collection[object], value))
         serialized_items = tuple(typing.cast(collections.abc.Collection[object], serialized))
+        if keep is not None and budget.defer and items:
+            container = _subelement(element, name, budget)
+            # Upper bounds for the final count and omission, settled once the items render.
+            _set_attribute(container, "count", str(len(items)), budget)
+            _set_attribute(container, "omitted", str(len(items)), budget)
+            budget.deferred.append(
+                _BudgetedField(element=container, name=name, keep=keep, items=items, serialized=serialized_items)
+            )
+            return
         budget.consume_collection(len(serialized_items))
         child = _subelement(element, name, budget)
         _set_attribute(child, "count", str(len(serialized_items)), budget)
@@ -363,6 +459,74 @@ def _fill_field(
         _set_attribute(element, name, str(serialized), budget)
     else:
         raise TypeError(f"canonical event field {name!r} is not XML-presentable")
+
+
+def _render_budgeted(root: ElementTree.Element, budget: _ProjectionBudget) -> None:
+    """Render deferred budgeted items, item by item, into the bytes the rest of ``root`` leaves.
+
+    Raises ``ValueError`` when ``root`` without any budgeted item already exceeds the budget: the
+    stimulus alone overflows. An item that would exceed any budget dimension is not rendered;
+    its field records how many it left out as ``omitted="<n>"``. ``head`` fields offer their items
+    first to last (ranked), ``tail`` fields last to first (chronological); kept items keep their
+    order. Sizes are measured as rendered and indented, and every image placeholder reserves the
+    attribute bytes ``_attach_images`` may add, so the rendered text fits the budget exactly.
+    """
+
+    if not budget.deferred:
+        return
+    budget.defer = False
+    depth = {id(root): 0}
+    for parent in root.iter():
+        for child in parent:
+            depth[id(child)] = depth[id(parent)] + 1
+    used = _serialized_bytes(root, level=0) + sum(_attachment_bytes(image) for _, image in budget.images)
+    if used > budget.limit_bytes:
+        raise ValueError("prompt projection encoded byte budget exceeded")
+    for field in budget.deferred:
+        level = depth[id(field.element)] + 1
+        # Each item rides on its own indented line; the first one also turns the empty
+        # ``<field … />`` into ``<field …>`` + indentation + ``</field>``.
+        line = len("\n") + len(_INDENT) * level
+        opening = len(">") - len(" />") + len(f"</{field.element.tag}>".encode("utf-8")) + line
+        order = range(len(field.items)) if field.keep == "head" else range(len(field.items) - 1, -1, -1)
+        kept: dict[int, ElementTree.Element] = {}
+        skipped = 0
+        for index in order:
+            item, serialized = field.items[index], field.serialized[index]
+            mark = budget.mark()
+            try:
+                budget.consume_collection(1)
+                if isinstance(item, pydantic.BaseModel):
+                    element = _model_element(item, budget=budget, serialized=serialized)
+                elif isinstance(serialized, bool | str | int | float):
+                    rendered = str(serialized).lower() if isinstance(serialized, bool) else str(serialized)
+                    budget.consume_scalar(rendered)
+                    element = _element("item", budget)
+                    element.text = rendered
+                else:
+                    budget.rewind(mark)
+                    skipped += 1
+                    continue
+            except ValueError:
+                budget.rewind(mark)
+                continue
+            attachments = sum(_attachment_bytes(image) for _, image in budget.images[mark.images :])
+            cost = _serialized_bytes(element, level=level) + line + attachments + (0 if kept else opening)
+            tally = budget.encoded_bytes + sum(_attachment_bytes(image) for _, image in budget.images)
+            if used + cost > budget.limit_bytes or tally > _MAX_PROMPT_PROJECTION_BYTES:
+                budget.rewind(mark)
+                continue
+            used += cost
+            kept[index] = element
+        for index in sorted(kept):
+            field.element.append(kept[index])
+        omitted = len(field.items) - len(kept) - skipped
+        field.element.set("count", str(len(kept)))
+        if omitted:
+            field.element.set("omitted", str(omitted))
+            _RECALLED_OMITTED.add(omitted, attributes={"bot.processing.recalled.field": field.name})
+        else:
+            del field.element.attrib["omitted"]
 
 
 def _attach_images(
@@ -385,7 +549,9 @@ def _attach_images(
     return admitted
 
 
-def model_facing_content(value: object, *, capacity: media.ImageCapacity) -> tuple[text.ContentPart, ...]:
+def model_facing_content(
+    value: object, *, capacity: media.ImageCapacity, budget_bytes: int = _MAX_PROMPT_PROJECTION_BYTES
+) -> tuple[text.ContentPart, ...]:
     """Render the terminal event/Data payload for a model: pseudo-XML text with images attached.
 
     Typed causal parents are intentionally omitted from this presentation projection. They remain
@@ -401,11 +567,21 @@ def model_facing_content(value: object, *, capacity: media.ImageCapacity) -> tup
     alternates text and image parts, starting with text; with no admitted image it is exactly
     one ``TextPart``.
 
-    Raises ``TypeError`` for raw bytes outside a ``media.Image`` and ``ValueError`` when the
-    rendered text exceeds the projection budgets.
+    ``budget_bytes`` bounds the encoded bytes of the rendered text (never above the projection's
+    own cap); a caller passes what its instructions and tool menu leave. A payload class may
+    declare ``__model_facing_budgeted_fields__``, a mapping of tuple field name to ``"head"``
+    (ranked: keep the first items) or ``"tail"`` (chronological: keep the last items). Those
+    fields hold recalled context: they render after the rest of the payload, item by item, and
+    an item that would exceed any budget dimension is left out and counted in the field's
+    ``omitted="<n>"`` attribute, so a budgeted field never makes the projection fail. Items of a
+    budgeted field render whole (a budgeted field inside one is not trimmed again).
+
+    Raises ``TypeError`` for raw bytes outside a ``media.Image`` or a malformed
+    ``__model_facing_budgeted_fields__``, and ``ValueError`` when the payload without its
+    budgeted items exceeds the projection budgets.
     """
 
-    budget = _ProjectionBudget()
+    budget = _ProjectionBudget(limit_bytes=min(budget_bytes, _MAX_PROMPT_PROJECTION_BYTES))
     if isinstance(value, pydantic.BaseModel) and getattr(type(value), "__model_facing_input__", False):
         value = getattr(value, "stimulus", None)
     envelope: hsm.Event[object] | None = value if isinstance(value, hsm.Event) else None
@@ -421,8 +597,9 @@ def model_facing_content(value: object, *, capacity: media.ImageCapacity) -> tup
             _fill_field(root, "content", payload, event.event_json_value(payload), budget)
         if envelope is not None:
             _set_event_attributes(root, envelope, budget)
+    _render_budgeted(root, budget)
     admitted = _attach_images(root, capacity, budget)
-    ElementTree.indent(root, space="  ")
+    ElementTree.indent(root, space=_INDENT)
     rendered = ElementTree.tostring(root, encoding="unicode")
     budget.verify_rendered(rendered)
     # Every rendered value is escaped, so ``<`` opens only real elements: a payload cannot forge

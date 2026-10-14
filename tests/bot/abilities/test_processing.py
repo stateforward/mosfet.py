@@ -1608,6 +1608,44 @@ def test_model_facing_content_does_not_count_image_bytes_toward_the_text_budget(
     assert sum(isinstance(part, text.ImagePart) for part in parts) == 1
 
 
+class _Recollection(pydantic.BaseModel):
+    """A stimulus with chronological recalled context the projection may trim."""
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(frozen=True)
+    __model_facing_budgeted_fields__: typing.ClassVar[dict[str, typing.Literal["head", "tail"]]] = {"recalled": "tail"}
+
+    stimulus: str
+    recalled: tuple[str, ...]
+
+
+def test_model_facing_content_trims_budgeted_fields_after_instructions_and_tools() -> None:
+    """Instructions and the tool menu are reserved first; recalled context trims to what is left."""
+
+    offered = hsm.Event[object](
+        name="tests.bot.speak",
+        kind=processing.EventKind,
+        schema=pydantic.TypeAdapter(object),
+    )
+    recollection = _Recollection(
+        stimulus="incoming speech",
+        recalled=tuple(f"memory-{index}-" + "m" * 5_000 for index in range(40)),
+    )
+    input = processing.InputData(input=recollection, schemas=(offered,), instructions="i" * 60_000)
+
+    parts = input.model_facing_content(media.ImageCapacity())
+
+    rendered = "".join(part.text for part in parts if isinstance(part, text.TextPart))
+    tool = json.dumps(
+        processing.dispatch_tool(input.schemas), allow_nan=False, ensure_ascii=False, separators=(",", ":")
+    )
+    assert sum(len(value.encode("utf-8")) for value in ("i" * 60_000, rendered, tool)) <= 262_144
+    assert "incoming speech" in rendered
+    kept = [index for index in range(40) if f"memory-{index}-" in rendered]
+    assert kept == list(range(40 - len(kept), 40))
+    assert 0 < len(kept) < 40
+    assert f'omitted="{40 - len(kept)}"' in rendered
+
+
 class _StampedData(pydantic.BaseModel):
     """A payload whose producer stamps ``attachments``; a model may never author them."""
 

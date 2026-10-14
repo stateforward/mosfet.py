@@ -1,7 +1,7 @@
 """Direct contract tests for cognition-owned model-facing event projections."""
 
 from mosfet import media
-from mosfet.abilities import cognition
+from mosfet.abilities import cognition, processing
 from mosfet.abilities.language import text
 from mosfet.environment import SoundData, SoundEvent
 
@@ -239,3 +239,149 @@ def test_model_facing_content_records_one_image_metric_per_placeholder(
     }
     assert after_size[0] - before_size[0] == 1
     assert after_size[1] - before_size[1] == len(_PNG)
+
+
+_PROJECTION_BYTES = 262_144
+
+
+def _recalled_omitted(metrics: metric_reader.Reader, field: str) -> int:
+    return sum(
+        int(point.value)
+        for point in metrics.points("bot.processing.prompt.recalled.omitted")
+        if point.attributes == {"bot.processing.recalled.field": field}
+    )
+
+
+class _Ranked(pydantic.BaseModel):
+    """A ranked list: the best items lead, so trimming keeps the head."""
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(frozen=True)
+    __model_facing_budgeted_fields__: typing.ClassVar[dict[str, typing.Literal["head", "tail"]]] = {"items": "head"}
+
+    items: tuple[str, ...]
+
+
+class _Chronicle(pydantic.BaseModel):
+    """A chronological list behind a stimulus field that is never trimmed."""
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(frozen=True)
+    __model_facing_budgeted_fields__: typing.ClassVar[dict[str, typing.Literal["head", "tail"]]] = {"entries": "tail"}
+
+    entries: tuple[_Photo | _Album | str, ...]
+    stimulus: str
+
+
+def test_budgeted_recalled_items_are_trimmed_not_raised(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    episodes = tuple(
+        cognition.episodes.CognitiveEpisode(stimulus_name=f"episode-{index}-" + "x" * 60_000, output=())
+        for index in range(6)
+    )
+    directives = tuple(cognition.directives.Directive(text=f"directive-{index}") for index in range(3))
+    reasoning_input = cognition.reasoning.ProcessorInput(
+        host_input=processing.InputData(input="incoming speech"),
+        prior_episodes=episodes,
+        standing_directives=directives,
+    )
+
+    with metric_reader.recording(tmp_path, monkeypatch) as metrics:
+        before = _recalled_omitted(metrics, "prior_episodes")
+        parts = cognition.event.model_facing_content(reasoning_input, capacity=_TEXT_ONLY)
+        omitted = _recalled_omitted(metrics, "prior_episodes") - before
+
+    rendered = _text(parts)
+    assert len(rendered.encode("utf-8")) <= _PROJECTION_BYTES
+    assert "incoming speech" in rendered
+    kept = [index for index in range(6) if f"episode-{index}-" in rendered]
+    # Recalled oldest first: trimming keeps the newest episodes.
+    assert kept == list(range(6 - len(kept), 6))
+    assert 0 < len(kept) < 6
+    assert f'<prior_episodes count="{len(kept)}" omitted="{6 - len(kept)}">' in rendered
+    assert omitted == 6 - len(kept)
+    for index in range(3):
+        assert f"directive-{index}" in rendered
+
+
+def test_budgeted_head_field_keeps_the_leading_items() -> None:
+    ranked = _Ranked(items=tuple(f"rank-{index}-" + "y" * 1_000 for index in range(10)))
+
+    parts = cognition.event.model_facing_content(ranked, capacity=_TEXT_ONLY, budget_bytes=4_000)
+
+    rendered = _text(parts)
+    assert len(rendered.encode("utf-8")) <= 4_000
+    kept = [index for index in range(10) if f"rank-{index}-" in rendered]
+    assert kept == list(range(len(kept)))
+    assert 0 < len(kept) < 10
+    assert f'omitted="{10 - len(kept)}"' in rendered
+
+
+def test_budgeted_field_that_fits_renders_without_an_omitted_marker() -> None:
+    parts = cognition.event.model_facing_content(_Ranked(items=("a", "b")), capacity=_TEXT_ONLY)
+
+    rendered = _text(parts)
+    assert '<items count="2">' in rendered
+    assert "omitted=" not in rendered
+
+
+def test_budgeted_item_over_a_scalar_budget_is_omitted_not_raised() -> None:
+    chronicle = _Chronicle(entries=("older", "z" * 70_000, "newest"), stimulus="now")
+
+    rendered = _text(cognition.event.model_facing_content(chronicle, capacity=_TEXT_ONLY))
+
+    assert "older" in rendered and "newest" in rendered and "now" in rendered
+    assert "z" * 100 not in rendered
+    assert '<entries count="2" omitted="1">' in rendered
+
+
+def test_budgeted_fields_never_hide_a_stimulus_that_alone_overflows() -> None:
+    chronicle = _Chronicle(entries=("small",), stimulus="s" * 20_000)
+
+    with pytest.raises(ValueError, match="budget"):
+        _ = cognition.event.model_facing_content(chronicle, capacity=_TEXT_ONLY, budget_bytes=10_000)
+
+
+def test_omitted_budgeted_items_attach_no_images() -> None:
+    older = media.Image(content=_PNG + b"older", media_type="image/png")
+    newest = media.Image(content=_PNG + b"newest", media_type="image/png")
+    chronicle = _Chronicle(
+        entries=(_Photo(caption="old " + "o" * 4_000, image=older), _Photo(caption="new", image=newest)),
+        stimulus="now",
+    )
+
+    parts = cognition.event.model_facing_content(chronicle, capacity=_capacity(2), budget_bytes=2_000)
+
+    assert _images(parts) == (newest,)
+    rendered = _text(parts)
+    assert len(rendered.encode("utf-8")) <= 2_000
+    assert '<entries count="1" omitted="1">' in rendered
+    assert rendered.count("<media:image") == 1
+
+
+def test_budgeted_rendering_fits_every_budget_it_admits() -> None:
+    sized = media.Image(content=_JPEG, media_type="image/jpeg", width_px=640, height_px=480)
+    released = media.ReleasedImage.of(media.Image(content=_PNG, media_type="image/png"), reason="memory")
+    chronicle = _Chronicle(
+        entries=(
+            _Photo(caption='it\'s <older> & "quoted"\nline', image=sized),
+            "plain " * 20,
+            _Photo(caption="newest", image=media.Image(content=_PNG, media_type="image/png")),
+            _Album(images=(released, sized)),
+        ),
+        stimulus="now",
+    )
+
+    for budget_bytes in range(150, 2_500, 3):
+        parts = cognition.event.model_facing_content(chronicle, capacity=_capacity(8), budget_bytes=budget_bytes)
+        assert len(_text(parts).encode("utf-8")) <= budget_bytes
+
+
+def test_malformed_budgeted_fields_marker_is_rejected() -> None:
+    class _Misdeclared(pydantic.BaseModel):
+        model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(frozen=True)
+        __model_facing_budgeted_fields__: typing.ClassVar[dict[str, str]] = {"items": "middle"}
+
+        items: tuple[str, ...]
+
+    with pytest.raises(TypeError, match="head"):
+        _ = cognition.event.model_facing_content(_Misdeclared(items=("a",)), capacity=_TEXT_ONLY)

@@ -4,6 +4,7 @@ from ..ability import Effort
 from .. import memory
 from .. import processing
 
+import collections.abc
 import dataclasses
 import typing
 import uuid
@@ -100,6 +101,12 @@ class ProcessorInput(pydantic.BaseModel):
             ),
         },
     )
+    # Recalled context renders after the host input and trims to the prompt budget instead of
+    # failing the turn. Both are recalled oldest first, so the newest survive.
+    __model_facing_budgeted_fields__: typing.ClassVar[collections.abc.Mapping[str, typing.Literal["head", "tail"]]] = {
+        "prior_episodes": "tail",
+        "standing_directives": "tail",
+    }
 
     host_input: processing.InputData = pydantic.Field(
         description="Original host processing input being evaluated.",

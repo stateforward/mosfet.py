@@ -1161,11 +1161,16 @@ class InputData(pydantic.BaseModel):
         menu, competing with the authoritative one for the same context window. The stimulus is
         what this content is for; the tool menu is what the tool channel is for.
 
-        Raises ``ValueError`` when instructions, text parts, and the dispatch tool together exceed
-        the provider-neutral prompt budgets.
+        Instructions and the dispatch tool are reserved first; the stimulus renders into the bytes
+        they leave of the provider-neutral prompt budget. Recalled context a stimulus carries in
+        budgeted fields (``__model_facing_budgeted_fields__``) is trimmed to fit rather than
+        failing the turn.
+
+        Raises ``ValueError`` when the instructions are over the scalar budget, or when the
+        instructions, the dispatch tool, and the stimulus without its budgeted items together
+        exceed the provider-neutral prompt budgets.
         """
 
-        parts = model_facing_content(self.input, capacity=capacity)
         instructions = self.instructions or ""
         if len(instructions) > _MAX_MODEL_PROMPT_SCALAR_CHARACTERS:
             raise ValueError("prompt projection scalar length budget exceeded")
@@ -1175,11 +1180,8 @@ class InputData(pydantic.BaseModel):
             ensure_ascii=False,
             separators=(",", ":"),
         )
-        rendered = (part.text for part in parts if isinstance(part, text.TextPart))
-        encoded_bytes = sum(len(part.encode("utf-8")) for part in (instructions, *rendered, tool))
-        if encoded_bytes > _MAX_MODEL_PROMPT_BYTES:
-            raise ValueError("prompt projection cumulative encoded byte budget exceeded")
-        return parts
+        reserved = len(instructions.encode("utf-8")) + len(tool.encode("utf-8"))
+        return model_facing_content(self.input, capacity=capacity, budget_bytes=_MAX_MODEL_PROMPT_BYTES - reserved)
 
 
 class CompletionData(pydantic.BaseModel):
