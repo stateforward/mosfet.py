@@ -10,10 +10,13 @@ from .phone import (
     PhoneService,
     PhoneServiceError,
 )
+from .transport import DataRoom, RoomTransport
 
 __version__ = "0.1.0"
 
 __all__ = [
+    "DataRoom",
+    "RoomTransport",
     "ServiceCallFailedEvent",
     "ServiceIncomingCallEvent",
     "ServiceMediaReadyEvent",

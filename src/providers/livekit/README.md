@@ -1,12 +1,14 @@
 # mosfet-provider-livekit
 
 LiveKit real-time media provider package for `bot`. This package owns the
-LiveKit Python SDK dependency and exposes a phone-facing provider surface:
+LiveKit Python SDK dependency and exposes a phone-facing provider surface and a
+device-agnostic room transport:
 
 - `PhoneService` — LiveKit call control + private room media
 - `Phone` — construction sugar over core `Phone` + `PhoneService` from room credentials
+- `RoomTransport` — one remote peer's channels over a LiveKit room of its own
 
-Construct only those two types from this package. Lower-level room/track/audio
+Construct only those three types from this package. Lower-level room/track/audio
 adapters stay package-private.
 
 Run its tests from the workspace root:
@@ -62,6 +64,88 @@ await hsm.dispatch(
 )
 await hsm.dispatch(service.context(), service, room_audio.RoomAudioDisconnectEvent)
 ```
+
+## Room transport
+
+`RoomTransport` carries one remote peer over one LiveKit room: the bot joins it
+as one participant, the peer (a browser, a kiosk) as another. It knows nothing
+of what the bytes mean. It is a shared actor reached only by message: the
+runtime root starts and stops it, and an endpoint — a device link — registers
+for the peer with `attachment.attach` carrying a `transport.PeerAttachData`
+(the peer's participant identity and its channel table: each channel's name,
+owner, codec and kind). One registered peer per room; a second registration,
+or a plain `attachment.AttachData`, is refused (`conflict`).
+
+```python
+import pydantic
+
+from mosfet.devices import computer
+from mosfet.providers import livekit
+
+room = livekit.RoomTransport(
+    url="wss://livekit.example.com",
+    token=pydantic.SecretStr("bot-jwt"),  # grants only this peer's room
+)
+laptop = computer.Computer(
+    device_id="studio-laptop", transport=room, peer_id="computer-studio-laptop", person_id="person-42"
+)
+```
+
+Mint tokens outside the runtime: one room per peer, each token granting only
+that room.
+
+- **Connections.** Whenever the peer is in the room the endpoint is told
+  `protocol.transport.peer.connected` (`connection_id` unique per attempt and
+  presence, `connection` the transport) and, once for each,
+  `protocol.transport.peer.disconnected` (`left`, `closed`,
+  `transport_lost`). Nothing reaches a channel owner until the endpoint
+  accepts the connection (`protocol.transport.peer.accept`). Accepted, every
+  owner whose codec encodes anything is told `protocol.transform.owned` with
+  the transport as its stream, and `protocol.transform.ended` when the
+  connection goes. `protocol.transport.peer.close` leaves the room (a
+  participant cannot evict another) and joins again after the backoff, where
+  the peer is offered as a new connection.
+- **Messages.** Inbound messages decode through their channel's codec into one
+  typed event dispatched to the channel's owner, stamped by the transport.
+  Whatever an owner sends the transport goes out on the channel it owns whose
+  codec encodes it. An owner holds at most 256 KiB of decoded messages it has
+  not finished processing per channel; past that, messages are dropped.
+- **Attempts.** Each connection attempt uses a fresh room handle and a fresh
+  room track path; the path owns joining, the published local audio track, and
+  leaving, and the transport reaches it only by `RoomAudioConnectEvent` /
+  `RoomAudioDisconnectEvent`. A lost room, a path that tears itself down, or a
+  connect that fails or exceeds `connect_timeout` releases the attempt and
+  retries after a backoff from `reconnect_initial` doubling to
+  `reconnect_max`, reset once the peer is reachable. A path whose own
+  disconnect fails is stopped and discarded after `release_timeout`, never
+  reused. Unregistering is answered at once; the release continues inside the
+  transport, and a registration that arrives during it waits for it.
+
+Wire:
+
+| Carries | LiveKit primitive | Direction |
+|---|---|---|
+| one codec message of a data channel | data packet, topic = channel name, reliable, to the peer only; over 14 KiB a byte stream on that topic | both |
+| one codec message of a data channel | byte stream, topic = channel name | peer → bot |
+| an audio channel | the peer's audio track whose publication is named after the channel | peer → bot |
+| an audio channel | the path's published local track | bot → peer |
+
+Audio channel messages are a 6-byte big-endian `!IH` header (sample rate in
+hertz, channel count) followed by signed 16-bit little-endian PCM; inbound
+audio is batched and packed that way before its codec decodes it.
+
+Every SDK callback admits at the edge: the sender must be the registered peer,
+the topic a registered data channel, and the size within `max_message_bytes`
+before anything is decoded. A refused message dispatches nothing and is counted
+as `bot.transport.rejected.count{transport, reason}` (`wrong_peer`,
+`refused_channel`, `oversize`, `backlog`). The transport also records
+`bot.transport.peer.active`, `bot.transport.connect.count` (`connected`,
+`failed`, `timed_out`) with a `transport.connect` span,
+`bot.transport.transfer.size{transport, direction}` and
+`bot.transport.send.dropped.count{transport, reason}`, plus the codec host's
+`bot.transform.*` set (messages, bytes, decode failures, drops: `unowned`,
+`flow_control`, `encode_failed`). Identities, peer ids, channel names, room
+names and tokens are never attributes.
 
 ## Call setup
 

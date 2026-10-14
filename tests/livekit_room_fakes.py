@@ -36,6 +36,7 @@ class FakeAudioSource:
 @dataclasses.dataclass(frozen=True)
 class FakeTrackPublication:
     sid: str
+    name: str = ""
 
 
 @dataclasses.dataclass(frozen=True)
@@ -58,6 +59,65 @@ class FakeRpcCall:
     destination_identity: str
     method: str
     payload: str
+
+
+@dataclasses.dataclass(frozen=True)
+class FakeDataPacket:
+    """One data packet as the room's ``data_received`` callback hands it over."""
+
+    data: bytes
+    participant: FakeRemoteParticipant | None
+    topic: str | None = None
+
+
+@dataclasses.dataclass(frozen=True)
+class FakePublishedData:
+    """One data packet this participant sent."""
+
+    payload: bytes | str
+    topic: str
+    reliable: bool
+    destination_identities: tuple[str, ...]
+
+
+@dataclasses.dataclass
+class FakeByteStreamWriter:
+    """A byte stream this participant opened: what was written, and whether it was closed."""
+
+    name: str
+    topic: str
+    mime_type: str
+    total_size: int | None
+    destination_identities: tuple[str, ...]
+    written: bytearray = dataclasses.field(default_factory=bytearray)
+    closed: bool = False
+
+    async def write(self, data: bytes) -> None:
+        self.written += data
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
+@dataclasses.dataclass(frozen=True)
+class FakeByteStreamInfo:
+    size: int | None
+    mime_type: str
+
+
+@dataclasses.dataclass
+class FakeByteStreamReader:
+    """An incoming byte stream: its header, then its chunks."""
+
+    info: FakeByteStreamInfo
+    chunks: tuple[bytes, ...] = ()
+
+    def __aiter__(self) -> collections.abc.AsyncIterator[bytes]:
+        return self._read()
+
+    async def _read(self) -> collections.abc.AsyncIterator[bytes]:
+        for chunk in self.chunks:
+            yield chunk
 
 
 @dataclasses.dataclass
@@ -113,6 +173,8 @@ class FakeLocalParticipant:
     unpublish_error: BaseException | None = None
     rpc_calls: list[FakeRpcCall] = dataclasses.field(default_factory=list)
     rpc_handlers: dict[str, collections.abc.Callable[[object], str]] = dataclasses.field(default_factory=dict)
+    published_data: list[FakePublishedData] = dataclasses.field(default_factory=list)
+    byte_streams: list[FakeByteStreamWriter] = dataclasses.field(default_factory=list)
 
     def __post_init__(self) -> None:
         self.sfu.endpoints[self.identity] = self
@@ -126,6 +188,45 @@ class FakeLocalParticipant:
         if self.unpublish_error is not None:
             raise self.unpublish_error
         self.unpublished.append(track_sid)
+
+    async def publish_data(
+        self,
+        payload: bytes | str,
+        *,
+        reliable: bool = True,
+        destination_identities: list[str] | None = None,
+        topic: str = "",
+    ) -> None:
+        self.published_data.append(
+            FakePublishedData(
+                payload=payload,
+                topic=topic,
+                reliable=reliable,
+                destination_identities=tuple(destination_identities or ()),
+            )
+        )
+
+    async def stream_bytes(
+        self,
+        name: str,
+        *,
+        total_size: int | None = None,
+        mime_type: str = "application/octet-stream",
+        attributes: dict[str, str] | None = None,
+        stream_id: str | None = None,
+        destination_identities: list[str] | None = None,
+        topic: str = "",
+    ) -> FakeByteStreamWriter:
+        del attributes, stream_id
+        writer = FakeByteStreamWriter(
+            name=name,
+            topic=topic,
+            mime_type=mime_type,
+            total_size=total_size,
+            destination_identities=tuple(destination_identities or ()),
+        )
+        self.byte_streams.append(writer)
+        return writer
 
     async def perform_rpc(
         self,
@@ -177,16 +278,55 @@ class FakeRoom:
     callbacks: dict[str, list[collections.abc.Callable[..., object]]] = dataclasses.field(default_factory=dict)
     off_calls: int = 0
     tracks_to_emit_on_connect: list[FakeRemoteTrack] = dataclasses.field(default_factory=list)
+    remote_participants: dict[str, FakeRemoteParticipant] = dataclasses.field(default_factory=dict)
+    byte_stream_handlers: dict[str, collections.abc.Callable[[typing.Any, str], None]] = dataclasses.field(
+        default_factory=dict
+    )
+    connect_error: BaseException | None = None
+    disconnect_error: BaseException | None = None
+    disconnect_calls: int = 0
 
     async def connect(self, url: str, token: str) -> None:
         self.connected.append((url, token))
         if self.connect_gate is not None:
             _ = await self.connect_gate.wait()
+        if self.connect_error is not None:
+            raise self.connect_error
         for track in self.tracks_to_emit_on_connect:
             self.emit("track_subscribed", track, FakeTrackPublication(sid="TR_remote"), object())
 
     async def disconnect(self) -> None:
+        self.disconnect_calls += 1
+        if self.disconnect_error is not None:
+            raise self.disconnect_error
         self.disconnected = True
+
+    def register_byte_stream_handler(
+        self, topic: str, handler: collections.abc.Callable[[typing.Any, str], None]
+    ) -> None:
+        if topic in self.byte_stream_handlers:
+            raise ValueError(f"byte stream handler for topic {topic!r} already set")
+        self.byte_stream_handlers[topic] = handler
+
+    def unregister_byte_stream_handler(self, topic: str) -> None:
+        _ = self.byte_stream_handlers.pop(topic, None)
+
+    def join(self, participant: FakeRemoteParticipant) -> None:
+        """A remote participant joins the room."""
+
+        self.remote_participants[participant.identity] = participant
+        self.emit("participant_connected", participant)
+
+    def leave(self, identity: str) -> None:
+        """A remote participant leaves the room."""
+
+        participant = self.remote_participants.pop(identity)
+        self.emit("participant_disconnected", participant)
+
+    def stream(self, topic: str, reader: FakeByteStreamReader, participant_identity: str) -> None:
+        """A remote participant opens a byte stream on ``topic``."""
+
+        self.byte_stream_handlers[topic](reader, participant_identity)
 
     def on(
         self,
