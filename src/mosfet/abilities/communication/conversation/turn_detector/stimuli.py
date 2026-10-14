@@ -6,6 +6,7 @@ import typing
 
 import pydantic
 
+from mosfet import media
 from mosfet.abilities.identity import value
 
 
@@ -57,17 +58,31 @@ class TextStimulus(pydantic.BaseModel):
 
 
 class ImageStimulus(pydantic.BaseModel):
-    """Image content produced by a participant."""
+    """One image produced by a participant, carried as a typed ``media.Image``."""
 
     model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
         frozen=True,
-        ser_json_bytes="base64",
-        val_json_bytes="base64",
+        json_schema_extra={
+            "examples": [
+                {
+                    "kind": "image",
+                    "source_participant_ref": "caller",
+                    "content": {
+                        "content": "iVBORw0KGgo=",
+                        "media_type": "image/png",
+                        "width_px": 640,
+                        "height_px": 480,
+                    },
+                }
+            ]
+        },
     )
 
     kind: typing.Literal["image"] = pydantic.Field(default="image")
     source_participant_ref: value.IdentityRef = pydantic.Field(description="Participant that produced the image.")
-    content: bytes = pydantic.Field(description="Image bytes.")
+    content: media.Image = pydantic.Field(
+        description="The encoded image with its validated media type and optional pixel size.",
+    )
 
 
 def _empty_payload() -> dict[str, object]:

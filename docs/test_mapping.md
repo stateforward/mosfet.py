@@ -12,7 +12,7 @@ grep for `_` in `tests/` does not normalize new reach-in.
 | `tests/bot/abilities/communication/test_seed_behaviors.py` | `src/mosfet/abilities/communication/behaviors.py` (trusted SpeechHeard seed: descriptor, admit, decline) |
 | `tests/bot/abilities/cognition/test_event_projection.py` | `src/mosfet/abilities/cognition/event.py` (`model_facing_content`, envelope identity, image placeholders and capacity trimming, raw non-image media refusal, budgets, image metrics) |
 | `tests/bot/abilities/communication/conversation/test_decision_input.py` | `src/mosfet/abilities/communication/conversation/decision_input.py` (host mapping, neutral priority) |
-| `tests/bot/abilities/communication/conversation/turn_detector/test_stimuli_turn.py` | `turn_detector/stimuli.py` + `turn_detector/turn.py` (stimulus kinds, boundary source match) |
+| `tests/bot/abilities/communication/conversation/turn_detector/test_stimuli_turn.py` | `turn_detector/stimuli.py` + `turn_detector/turn.py` (stimulus kinds, typed `media.Image` image stimulus, image turn updates, boundary source match) |
 | `tests/environment/test_snapshot.py` | `src/mosfet/environment/snapshot.py` (pure envelope rendering, `ModelRepr`) |
 | `tests/bot/test_event_envelope.py` | `src/mosfet/event.py` (canonical JSON value, raw-media refusal, schema round-trip) |
 | `tests/bot/test_media.py` | `src/mosfet/media.py` (`Image` signature and size validation, `ImageCapacity.admit`, `ImageRetention.retain`, `ReleasedImage`) |

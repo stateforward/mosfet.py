@@ -33,7 +33,7 @@ class TurnStartData(pydantic.BaseModel):
         ser_json_bytes="base64",
         val_json_bytes="base64",
         json_schema_extra={
-            "description": "Turn boundary carrying an optional first text or audio chunk.",
+            "description": "Turn boundary carrying an optional first text, audio, or image chunk.",
             "examples": [
                 {
                     "conversation_ref": "support-call",
@@ -59,7 +59,7 @@ class TurnStartData(pydantic.BaseModel):
 
 
 class TurnUpdateData(pydantic.BaseModel):
-    """Additional text or audio for an open turn."""
+    """Additional text, audio, or an image for an open turn."""
 
     model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
         frozen=True,
@@ -81,8 +81,8 @@ class TurnUpdateData(pydantic.BaseModel):
     conversation_ref: str = pydantic.Field(default="conversation", min_length=1, examples=["support-call"])
     turn_ref: str = pydantic.Field(min_length=1, description="Stable reference for the active turn.")
     source_participant_ref: value.IdentityRef = pydantic.Field(default="caller", examples=["caller"])
-    content: stimuli.TextStimulus | stimuli.AudioStimulus = pydantic.Field(
-        description="Incremental text or audio chunk."
+    content: stimuli.TextStimulus | stimuli.AudioStimulus | stimuli.ImageStimulus = pydantic.Field(
+        description="Incremental text or audio chunk, or one image the participant attached to the turn."
     )
 
     @pydantic.model_validator(mode="after")
@@ -123,7 +123,7 @@ class TurnEndData(pydantic.BaseModel):
         ser_json_bytes="base64",
         val_json_bytes="base64",
         json_schema_extra={
-            "description": "Turn boundary carrying an optional final text or audio chunk.",
+            "description": "Turn boundary carrying an optional final text, audio, or image chunk.",
             "examples": [
                 {"conversation_ref": "support-call", "turn_ref": "turn-1", "source_participant_ref": "caller"}
             ],

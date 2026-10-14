@@ -8,7 +8,9 @@ import typing
 import uuid
 
 import hsm
+import pytest
 
+from mosfet import media
 from mosfet.abilities import cognition
 from mosfet.abilities import communication
 from mosfet.abilities.communication import conversation
@@ -20,6 +22,7 @@ from mosfet.abilities import processing
 from mosfet.abilities import speaking
 from mosfet.abilities.hearing import speech
 from mosfet.abilities.hearing import voice as hearing_voice
+from mosfet.abilities.language import text
 from mosfet.bot import Bot
 from mosfet.device import Device
 from mosfet.environment import SoundData, SoundEvent, Environment
@@ -223,6 +226,69 @@ def test_bot_conversation_contribution_reaches_cognition_without_direct_speaking
     assert inbound.source_ids == frozenset({"caller"})
     assert inbound.target_ids == frozenset({"bot"})
     assert inbound.content_type == "text/plain"
+
+
+@pytest.mark.parametrize("decoder_equipped", [True, False], ids=["decoder", "decoderless"])
+def test_bot_image_only_contribution_reaches_cognition_with_image_part(decoder_equipped: bool) -> None:
+    """An image-only participant turn reaches the body's cognition, and the model sees the image."""
+
+    png = media.Image(content=b"\x89PNG\r\n\x1a\n" + b"photo", media_type="image/png")
+
+    async def run() -> list[processing.InputData]:
+        conversation_ability = _text_conversation() if decoder_equipped else conversation.Conversation()
+        communication_ability, _, speaking_ability = _text_communication(conversation_ability)
+        processor = CountingProcessor()
+
+        class Probe(Bot):
+            def __init__(self) -> None:
+                super().__init__(
+                    devices={"phone": Device()},
+                    cognition=as_cognition(processor),
+                    output=(speaking_ability,),
+                    acquired_abilities=(communication_ability,),
+                )
+
+        probe = Probe()
+        environment = Environment()
+        _ = await probe.attach(environment)
+        await _wait_until(lambda: (probe.state() or "").endswith("/unfocused"))
+        await _wait_until(lambda: (communication_ability.state() or "").endswith("/behavior/active"))
+        await _wait_until(lambda: (conversation_ability.state() or "").endswith("/behavior/inactive"))
+
+        message = conversation.TurnData(
+            source_ids=frozenset({"caller"}),
+            target_ids=frozenset({"bot"}),
+            content=None,
+            content_type="text/plain",
+            attachments=(png,),
+        )
+        _ = await hsm.dispatch(
+            environment,
+            communication_ability,
+            communication.InputEvent.with_data_and_id(message, uuid.uuid4().hex),
+        )
+        await _wait_until(lambda: len(processor.inputs) == 1, timeout=10.0)
+        return processor.inputs
+
+    inputs = asyncio.run(run())
+    (entry,) = inputs
+    stimulus = entry.input
+    assert isinstance(stimulus, hsm.Event)
+    assert isinstance(stimulus.data, conversation.Messages)
+    inbound = next(item for item in reversed(stimulus.data.messages) if item.direction == "inbound")
+    assert inbound.attachments == (png,)
+    parts = entry.model_facing_content(
+        media.ImageCapacity(max_images=1, max_total_bytes=len(png.content), media_types=frozenset({"image/png"}))
+    )
+    image_positions = [index for index, part in enumerate(parts) if isinstance(part, text.ImagePart)]
+    assert len(image_positions) == 1
+    (position,) = image_positions
+    image_part = parts[position]
+    assert isinstance(image_part, text.ImagePart)
+    assert image_part.image == png
+    preceding = parts[position - 1]
+    assert isinstance(preceding, text.TextPart)
+    assert preceding.text.endswith('<media:image ref="image-1" media_type="image/png" />')
 
 
 def test_bot_ignores_host_encoded_conversation_response() -> None:

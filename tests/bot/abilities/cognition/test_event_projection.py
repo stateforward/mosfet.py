@@ -203,10 +203,13 @@ def _image_counts() -> dict[tuple[object, object], int]:
 
 
 def _image_size_total() -> tuple[int, float]:
+    """Cumulative PNG attachment sizes; other tests in the process may record other media types."""
+
     count, total = 0, 0.0
     for point in metric_reader.points("bot.processing.prompt.image.size"):
         assert isinstance(point, HistogramDataPoint)
-        assert dict(point.attributes or {}) == {"media_type": "image/png"}
+        if dict(point.attributes or {}) != {"media_type": "image/png"}:
+            continue
         count += point.count
         total += point.sum
     return count, total

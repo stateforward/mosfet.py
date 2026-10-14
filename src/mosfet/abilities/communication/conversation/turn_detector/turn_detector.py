@@ -19,7 +19,7 @@ import mosfet
 import pydantic
 
 from mosfet.protocols import attachment
-from mosfet import telemetry
+from mosfet import media, telemetry
 from mosfet.telemetry import span
 
 ParticipantKind: typing.TypeAlias = typing.Literal["bot", "human", "service", "runtime"]
@@ -167,13 +167,18 @@ class TurnCompleteData(pydantic.BaseModel):
         ge=1,
         description="Channel count of raw PCM audio when audio is present.",
     )
+    images: tuple[media.Image, ...] = pydantic.Field(
+        default=(),
+        max_length=media.MAX_TURN_IMAGES,
+        description="Images the participant attached to this turn, in arrival order, alone or with a caption.",
+    )
 
     @pydantic.model_validator(mode="after")
     def validate_turn_product(self) -> typing.Self:
         if self.text.strip() and self.audio:
             raise ValueError("Turn product cannot contain both text and audio.")
-        if not self.text.strip() and not self.audio and self.content is None:
-            raise ValueError("Turn product requires text, audio, or modality-neutral content.")
+        if not self.text.strip() and not self.audio and self.content is None and not self.images:
+            raise ValueError("Turn product requires text, audio, modality-neutral content, or images.")
         return self
 
 
@@ -341,6 +346,8 @@ class TurnDetector(ability.Ability[object, TurnCompleteData]):
     _audio_channels: int | None
     _content: object | None
     _content_type: str | None
+    _images: list[media.Image]
+    _images_overflowed: bool
     _decoding: decoding.Decoding[ParticipationStimulus, str] | None
 
     def __init__(
@@ -376,6 +383,8 @@ class TurnDetector(ability.Ability[object, TurnCompleteData]):
         self._audio_channels = None
         self._content = None
         self._content_type = None
+        self._images = []
+        self._images_overflowed = False
         if decoding is None and decoder is not None:
             from mosfet.abilities.decoding import Decoding
 
@@ -390,6 +399,8 @@ class TurnDetector(ability.Ability[object, TurnCompleteData]):
         self._audio_channels = None
         self._content = None
         self._content_type = None
+        self._images = []
+        self._images_overflowed = False
         self._source_participant_ref = "caller"
         self._active_conversation_ref = None
         self._turn_ref = None
@@ -401,6 +412,8 @@ class TurnDetector(ability.Ability[object, TurnCompleteData]):
         self._audio_channels = None
         self._content = None
         self._content_type = None
+        self._images = []
+        self._images_overflowed = False
 
     @property
     def decoder(self) -> decoding.Decoder[ParticipationStimulus, str] | None:
@@ -528,8 +541,12 @@ class TurnDetector(ability.Ability[object, TurnCompleteData]):
             self._content = content.content
             self._content_type = content.content_type
         elif isinstance(content, ImageStimulus):
-            self._content = content.content
-            self._content_type = "image/*"
+            # A turn carries at most MAX_TURN_IMAGES. One more marks the turn, which then fails at
+            # close; the buffer never grows past the bound and the turn is never truncated.
+            if len(self._images) == media.MAX_TURN_IMAGES:
+                self._images_overflowed = True
+            else:
+                self._images.append(content.content)
         elif isinstance(content, EventStimulus):
             self._content = {"event": content.event, "payload": content.payload}
             self._content_type = "application/event"
@@ -636,12 +653,14 @@ class TurnDetector(ability.Ability[object, TurnCompleteData]):
             if isinstance(data, turn.TurnEndData):
                 instance._ingest_content(data.content, source_participant_ref=data.source_participant_ref)
             try:
+                if instance._images_overflowed:
+                    raise ValueError(f"Turn exceeds {media.MAX_TURN_IMAGES} images.")
                 if instance._turn_ref is None or instance._active_conversation_ref is None:
                     raise ValueError("Turn closed without an active turn reference.")
                 text = " ".join(instance._text_parts).strip()
                 audio = bytes(instance._audio)
-                if not text and not audio and instance._content is None:
-                    raise ValueError("Turn closed with neither text, audio, nor modality-neutral content.")
+                if not text and not audio and instance._content is None and not instance._images:
+                    raise ValueError("Turn closed with neither text, audio, modality-neutral content, nor images.")
                 output = TurnCompleteData(
                     conversation_ref=instance._active_conversation_ref,
                     turn_ref=instance._turn_ref,
@@ -654,10 +673,14 @@ class TurnDetector(ability.Ability[object, TurnCompleteData]):
                     content_type=("text/plain" if text else "audio/pcm" if audio else instance._content_type),
                     sample_rate_hz=instance._audio_sample_rate_hz if audio else None,
                     channels=instance._audio_channels if audio else None,
+                    images=tuple(instance._images),
                 )
             except Exception as error:
-                # Closing with nothing to show is a real end-of-turn failure, not a quiet drop.
-                span.record_current_failure("turn_closed_empty")
+                # Closing with nothing to show, or with more images than a turn carries, is a real
+                # end-of-turn failure, not a quiet drop.
+                span.record_current_failure(
+                    "turn_image_overflow" if instance._images_overflowed else "turn_closed_empty"
+                )
                 instance._clear_open()
                 failure = TurnDetectorFailedEvent.with_data(
                     FailedEventData(
@@ -685,6 +708,7 @@ class TurnDetector(ability.Ability[object, TurnCompleteData]):
             active.set_attribute("bot.turn.content.type", output.content_type or "")
             active.set_attribute("bot.turn.text.present", bool(output.text))
             active.set_attribute("bot.audio.byte.count", len(output.audio))
+            active.set_attribute("bot.turn.image.count", len(output.images))
             instance._clear_content()
             operation_id = event.id or uuid.uuid4().hex
             _ = hsm.dispatch(
@@ -862,6 +886,35 @@ class TurnDetector(ability.Ability[object, TurnCompleteData]):
         _ = hsm.dispatch(ctx, instance, ability.TerminalErrorEvent.with_data(terminal))
 
     @staticmethod
+    def _complete_normalization(
+        ctx: hsm.Context,
+        instance: "TurnDetector",
+        event: hsm.Event[typing.Any],
+        request: _TurnNormalizationRequestData,
+        turn: TurnCompleteData,
+    ) -> None:
+        _ = hsm.dispatch(
+            ctx,
+            instance,
+            dataclasses.replace(
+                _TurnNormalizationCompletedEvent.with_data(
+                    _TurnNormalizationCompletedData(
+                        provenance=TurnDetector._normalization_provenance(
+                            request.operation_id,
+                            turn,
+                            request.reply_target,
+                        ),
+                        turn=turn,
+                    )
+                ),
+                id=request.operation_id,
+                source=hsm.id(instance),
+                target=hsm.id(instance),
+                metadata=dict(event.metadata),
+            ),
+        )
+
+    @staticmethod
     async def _run_normalization_activity(
         ctx: hsm.Context,
         instance: "TurnDetector",
@@ -877,28 +930,13 @@ class TurnDetector(ability.Ability[object, TurnCompleteData]):
             request = event.data
             assert isinstance(request, _TurnNormalizationRequestData)
             output = request.turn
+            # Only text, audio, or structured content is decodable. An image-only product passes
+            # through undecoded with its images; a caption decodes as any text turn does.
+            decodable = bool(output.audio) or bool(output.text) or output.content_type is not None
             active.set_attribute("bot.turn.decoder.present", instance._decoding is not None)
-            if instance._decoding is None:
-                _ = hsm.dispatch(
-                    ctx,
-                    instance,
-                    dataclasses.replace(
-                        _TurnNormalizationCompletedEvent.with_data(
-                            _TurnNormalizationCompletedData(
-                                provenance=TurnDetector._normalization_provenance(
-                                    request.operation_id,
-                                    output,
-                                    request.reply_target,
-                                ),
-                                turn=output,
-                            )
-                        ),
-                        id=request.operation_id,
-                        source=hsm.id(instance),
-                        target=hsm.id(instance),
-                        metadata=dict(event.metadata),
-                    ),
-                )
+            active.set_attribute("bot.turn.decode.skipped", instance._decoding is not None and not decodable)
+            if instance._decoding is None or not decodable:
+                TurnDetector._complete_normalization(ctx, instance, event, request, output)
                 return
             try:
                 stimulus: ParticipationStimulus
@@ -971,26 +1009,7 @@ class TurnDetector(ability.Ability[object, TurnCompleteData]):
                 )
                 return
             normalized = output.model_copy(update={"text": terminal.data.strip(), "audio": b""})
-            _ = hsm.dispatch(
-                ctx,
-                instance,
-                dataclasses.replace(
-                    _TurnNormalizationCompletedEvent.with_data(
-                        _TurnNormalizationCompletedData(
-                            provenance=TurnDetector._normalization_provenance(
-                                request.operation_id,
-                                normalized,
-                                request.reply_target,
-                            ),
-                            turn=normalized,
-                        )
-                    ),
-                    id=request.operation_id,
-                    source=hsm.id(instance),
-                    target=hsm.id(instance),
-                    metadata=dict(event.metadata),
-                ),
-            )
+            TurnDetector._complete_normalization(ctx, instance, event, request, normalized)
 
     @staticmethod
     def _emit_normalized_output(

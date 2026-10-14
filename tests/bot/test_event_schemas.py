@@ -304,3 +304,51 @@ def test_inherited_phone_sound_stamps_event_envelope_on_outer_root() -> None:
     assert "<phone:sound" in xml
     assert "stimulus:event" not in phone
     assert "xmlns" not in xml
+
+
+def test_conversation_message_attachment_renders_inside_its_message_element() -> None:
+    image = media.Image(content=b"\x89PNG\r\n\x1a\n" + b"photo", media_type="image/png")
+    released = media.ReleasedImage.of(
+        media.Image(content=b"\x89PNG\r\n\x1a\n" + b"older", media_type="image/png"), reason="retention"
+    )
+    provenance = conversation.MessageProvenance(event=conversation.InputEvent.name, session_ref="session-1")
+    history = conversation.Messages(
+        messages=(
+            conversation.Message(
+                sequence=0,
+                direction="inbound",
+                source_ids=frozenset({"caller"}),
+                target_ids=frozenset({"bot"}),
+                content=None,
+                content_type="text/plain",
+                attachments=(released,),
+                provenance=provenance,
+            ),
+            conversation.Message(
+                sequence=1,
+                direction="inbound",
+                source_ids=frozenset({"caller"}),
+                target_ids=frozenset({"bot"}),
+                content="what is this",
+                content_type="text/plain",
+                attachments=(image,),
+                provenance=provenance,
+            ),
+        )
+    )
+
+    xml = _xml(
+        processing.InputData(
+            input=conversation.OutputEvent.with_data_and_id(history, "history-1")
+        ).model_facing_content(media.ImageCapacity())
+    )
+
+    first, second = xml.split('content="what is this"')
+    assert first.count("<media:image") == 1
+    assert '<media:image media_type="image/png" omitted="retention" />' in first
+    assert second.count("<media:image") == 1
+    # A text-only capacity admits no image type, so the attached image is only a placeholder.
+    placeholder = second.index('<media:image media_type="image/png" omitted="media_type" />')
+    assert placeholder < second.index("</communication:message>")
+    assert "photo" not in xml
+    assert "<media:image ref=" not in xml

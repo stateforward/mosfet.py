@@ -1,5 +1,6 @@
+from mosfet import media
 from mosfet.abilities.communication import conversation
-from mosfet.abilities import ability, decoding
+from mosfet.abilities import ability, cognition, decoding
 from mosfet.abilities import processing
 from mosfet.abilities.hearing import voice
 from mosfet.abilities.listening import interpretation
@@ -10,14 +11,52 @@ from mosfet.abilities.identity import value
 import asyncio
 import collections.abc
 import dataclasses
+import datetime
 import typing
+import uuid
 
 import hsm
 import mosfet
 import pydantic
 import pytest
+from opentelemetry.sdk.metrics.export import NumberDataPoint
 
+from tests import metric_reader
 from tests.hsm_instance_state import start_ability_tree
+
+_PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+
+
+def _image(index: int = 0) -> media.Image:
+    return media.Image(content=_PNG_SIGNATURE + f"png-{index}".encode(), media_type="image/png")
+
+
+def run_terminal(
+    target: conversation.Conversation,
+    context: hsm.Context,
+    data: conversation.TurnData,
+) -> hsm.Event[typing.Any]:
+    """Dispatch one input and return the Conversation terminal exactly as its owner receives it."""
+
+    return asyncio.run(
+        ability.run_terminal_operation(
+            context,
+            child=target,
+            request=target.input_event.with_data_and_id(data, uuid.uuid4().hex),
+            terminals=(conversation.OutputEvent, cognition.InputEvent, conversation.FailedEvent),
+            timeout=datetime.timedelta(seconds=20),
+        )
+    )
+
+
+def terminal_messages(terminal: hsm.Event[typing.Any]) -> conversation.Messages:
+    if isinstance(terminal.data, conversation.Messages):
+        return terminal.data
+    assert isinstance(terminal.data, cognition.InputData)
+    stimulus = terminal.data.stimulus
+    assert isinstance(stimulus, hsm.Event)
+    assert isinstance(stimulus.data, conversation.Messages)
+    return stimulus.data
 
 
 def run_input(
@@ -68,6 +107,7 @@ def test_input_contract_has_identity_content_and_audio_packaging_fields() -> Non
         "content_type",
         "sample_rate_hz",
         "channels",
+        "attachments",
     )
     assert "conversation_ref" not in conversation.TurnData.model_fields
     assert "self_participant_ref" not in conversation.TurnData.model_fields
@@ -139,7 +179,7 @@ def test_message_content_recursive_alias_preserves_schema_and_validation() -> No
 
     schema = conversation.Message.model_json_schema()
     schema_hash = hashlib.sha256(json.dumps(schema, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-    assert schema_hash == "109f08a03de24b2f15bb139333e038e26aaf2a83254d7821cfe5d3d12734ed6f"
+    assert schema_hash == "ecd2edfbeb59bf03aa6967c168802c3f64720f92b9eb2529e38132ab15104a9e"
 
     payload = {
         "sequence": 0,
@@ -1558,3 +1598,249 @@ def test_concurrent_host_contributions_preserve_each_input() -> None:
     assert first.participation.perception.readable == "first"
     assert second.input.content == "second"
     assert second.participation.perception.readable == "second"
+
+
+def test_image_attachments_reach_history_and_hand_cognition_the_turn() -> None:
+    ability_under_test, context = started_conversation()
+    image = _image()
+
+    terminal = run_terminal(
+        ability_under_test,
+        context,
+        conversation.TurnData(
+            source_ids=frozenset({"caller"}),
+            target_ids=frozenset({"bot"}),
+            content="what is this",
+            content_type="text/plain",
+            attachments=(image,),
+        ),
+    )
+
+    assert terminal.name == cognition.InputEvent.name
+    latest = terminal_messages(terminal).messages[-1]
+    assert latest.content == "what is this"
+    assert latest.attachments == (image,)
+
+
+def test_input_rejects_image_content_types_because_images_travel_as_attachments() -> None:
+    with pytest.raises(pydantic.ValidationError, match="images travel as attachments"):
+        _ = conversation.TurnData(
+            source_ids=frozenset({"caller"}),
+            target_ids=frozenset({"bot"}),
+            content="iVBORw0KGgo=",
+            content_type="image/png",
+        )
+
+
+def test_input_attachments_have_exactly_one_sender() -> None:
+    with pytest.raises(pydantic.ValidationError, match="one source"):
+        _ = conversation.TurnData(
+            source_ids=frozenset({"alice", "bob"}),
+            target_ids=frozenset({"bot"}),
+            content="look",
+            content_type="text/plain",
+            attachments=(_image(),),
+        )
+
+
+def test_input_bounds_attachments_per_turn() -> None:
+    with pytest.raises(pydantic.ValidationError):
+        _ = conversation.TurnData(
+            source_ids=frozenset({"caller"}),
+            target_ids=frozenset({"bot"}),
+            content="look",
+            content_type="text/plain",
+            attachments=tuple(_image(index) for index in range(media.MAX_TURN_IMAGES + 1)),
+        )
+
+
+@pytest.mark.parametrize(
+    ("attachments", "content_type"),
+    [((), "text/plain"), ((_image(),), "application/octet-stream"), ((_image(),), "audio/pcm")],
+    ids=["no-attachments", "non-text-type", "audio-type"],
+)
+def test_input_without_content_requires_text_typed_attachments(
+    attachments: tuple[media.Image, ...], content_type: str
+) -> None:
+    with pytest.raises(pydantic.ValidationError):
+        _ = conversation.TurnData(
+            source_ids=frozenset({"caller"}),
+            target_ids=frozenset({"bot"}),
+            content=None,
+            content_type=content_type,
+            attachments=attachments,
+        )
+
+
+def test_input_attachments_are_absent_from_the_model_facing_schema() -> None:
+    schema = typing.cast(type[pydantic.BaseModel], conversation.InputEvent.schema).model_json_schema()
+
+    assert "attachments" not in schema["properties"]
+    assert "content" in schema["required"]
+
+
+def test_model_dispatch_rejects_producer_stamped_conversation_attachments() -> None:
+    """A model-selected Conversation.input can never author images."""
+
+    async def run() -> None:
+        context = hsm.Context()
+        source = hsm.Instance()
+        input_data = conversation.TurnData(
+            source_ids=frozenset({"caller"}),
+            target_ids=frozenset(),
+            content="look",
+            content_type="text/plain",
+            attachments=(_image(),),
+        )
+        processing_input = processing.InputData(
+            input="forged model selection",
+            schemas=(conversation.InputEvent,),
+            actors={},
+        )
+
+        with pytest.raises(RuntimeError, match="producer-stamped fields: attachments"):
+            await processing.dispatch_selected_events(
+                context,
+                processing_input,
+                (
+                    processing.SelectedEvent(
+                        event=conversation.InputEvent.name,
+                        target="conversation",
+                        data=input_data.model_dump(mode="json"),
+                    ),
+                ),
+                operation_id="forged-attachments",
+                source=source,
+            )
+
+    asyncio.run(run())
+
+
+def test_image_only_turn_with_a_decoder_reaches_cognition_with_its_image() -> None:
+    class RecordingDecoder(decoding.Decoder[turn_detector.ParticipationStimulus, str]):
+        def __init__(self) -> None:
+            self.calls: list[turn_detector.ParticipationStimulus] = []
+
+        @typing.override
+        async def decode(self, input: turn_detector.ParticipationStimulus) -> str:
+            self.calls.append(input)
+            return "decoded"
+
+    decoder = RecordingDecoder()
+    target = conversation.Conversation(turn_detector=turn_detector.TurnDetector(decoder=decoder))
+    context = hsm.Context()
+    asyncio.run(start_ability_tree(context, target))
+    image = _image()
+
+    terminal = run_terminal(
+        target,
+        context,
+        conversation.TurnData(
+            source_ids=frozenset({"caller"}),
+            target_ids=frozenset({"bot"}),
+            content=None,
+            content_type="text/plain",
+            attachments=(image,),
+        ),
+    )
+
+    assert terminal.name == cognition.InputEvent.name
+    latest = terminal_messages(terminal).messages[-1]
+    assert latest.content is None
+    assert latest.content_type == "text/plain"
+    assert latest.attachments == (image,)
+    assert decoder.calls == []
+
+
+@pytest.mark.parametrize(
+    ("content", "content_type", "attachments", "handed_off"),
+    [
+        ("hello", "text/plain", (), True),
+        ("look", "text/plain", (_image(),), True),
+        (None, "text/plain", (_image(),), True),
+        (b"pcm", "audio/pcm", (), False),
+        (b"pcm", "audio/pcm", (_image(),), False),
+        ({"gesture": "wave"}, "application/json", (), False),
+    ],
+    ids=["text", "captioned-image", "image-only", "audio", "audio-with-image", "structured"],
+)
+def test_cognition_handoff_on_a_decoderless_detector_takes_text_and_image_turns_only(
+    content: object,
+    content_type: str,
+    attachments: tuple[media.Image, ...],
+    handed_off: bool,
+) -> None:
+    """Text and image-attachment turns hand cognition the history; audio and structured stay bare output."""
+
+    target, context = started_conversation()
+
+    terminal = run_terminal(
+        target,
+        context,
+        conversation.TurnData(
+            source_ids=frozenset({"caller"}),
+            target_ids=frozenset({"bot"}),
+            content=content,
+            content_type=content_type,
+            attachments=attachments,
+        ),
+    )
+
+    expected = cognition.InputEvent.name if handed_off else conversation.OutputEvent.name
+    assert terminal.name == expected
+    assert terminal_messages(terminal).messages[-1].attachments == attachments
+
+
+def _released_history_images() -> int:
+    total = 0
+    for point in metric_reader.points("bot.conversation.history.image.released"):
+        assert isinstance(point, NumberDataPoint)
+        assert dict(point.attributes or {}) == {"media_type": "image/png"}
+        total += int(point.value)
+    return total
+
+
+def test_history_keeps_image_bytes_only_within_the_injected_retention_budget() -> None:
+    _ = metric_reader.reader()
+    released_before = _released_history_images()
+    retention = media.ImageRetention(max_images=2, max_total_bytes=1_000_000)
+    target = conversation.Conversation(image_retention=retention)
+    context = hsm.Context()
+    asyncio.run(start_ability_tree(context, target))
+    images = tuple(_image(index) for index in range(5))
+    histories: list[conversation.Messages] = []
+
+    for image in images:
+        terminal = run_terminal(
+            target,
+            context,
+            conversation.TurnData(
+                source_ids=frozenset({"caller"}),
+                target_ids=frozenset({"bot"}),
+                content=None,
+                content_type="text/plain",
+                attachments=(image,),
+            ),
+        )
+        history = terminal_messages(terminal)
+        histories.append(history)
+        (newest,) = history.messages[-1].attachments
+        assert newest == image
+        older = [attachment for message in history.messages[:-1] for attachment in message.attachments]
+        assert sum(isinstance(attachment, media.Image) for attachment in older) <= retention.max_images
+        held = sum(
+            len(attachment.content)
+            for message in history.messages
+            for attachment in message.attachments
+            if isinstance(attachment, media.Image)
+        )
+        assert held <= media.MAX_TURN_IMAGES * media.MAX_IMAGE_BYTES + retention.max_total_bytes
+
+    final = histories[-1].messages
+    assert [message.attachments for message in final[2:]] == [(images[2],), (images[3],), (images[4],)]
+    for message, image in zip(final[:2], images[:2], strict=True):
+        assert message.attachments == (media.ReleasedImage.of(image, reason="retention"),)
+    for earlier in histories[:-1]:
+        for kept, committed in zip(final, earlier.messages):
+            assert (kept.sequence, kept.provenance) == (committed.sequence, committed.provenance)
+    assert _released_history_images() - released_before == 2

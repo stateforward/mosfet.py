@@ -27,10 +27,11 @@ from typing import override
 import hsm
 import mosfet
 import pydantic
+from opentelemetry import metrics
 from pydantic.config import JsonDict, JsonValue
 from pydantic.json_schema import SkipJsonSchema
 
-from mosfet import event
+from mosfet import event, media
 from mosfet.abilities import cognition
 from mosfet.abilities.listening import interpretation
 from mosfet import telemetry
@@ -48,6 +49,12 @@ _TURN_TIMEOUT_SECONDS = 5.0
 # Recall, detector ready, detector turn, and remember are sequential inner stages.
 # The contribution waiter must outlive one inner stage so a typed stage failure can settle.
 _CONTRIBUTION_TIMEOUT_STAGES = 4
+_DEFAULT_IMAGE_RETENTION: typing.Final = media.ImageRetention()
+_HISTORY_IMAGE_RELEASED = metrics.get_meter("bot.abilities.communication").create_counter(
+    "bot.conversation.history.image.released",
+    unit="{image}",
+    description="Images whose bytes Conversation history released to stay within its retention budget, by media type.",
+)
 
 
 def _default_turn_detector(session_ref: str, track_ref: TrackRef) -> turn_detector.TurnDetector:
@@ -73,9 +80,26 @@ _INPUT_EXAMPLE: JsonDict = {
 }
 
 
-def _schema(description: str, example: JsonDict) -> JsonDict:
-    examples: list[JsonValue] = [example]
-    return {"description": description, "examples": examples}
+def _input_schema(schema: JsonDict) -> None:
+    """Describe model-facing Conversation input; a model-selected input always carries ``content``.
+
+    ``content`` defaults to ``None`` only so a producer can stamp an image-only turn through the
+    hidden ``attachments`` field. A model can never stamp attachments, so its input must carry content.
+    """
+
+    examples: list[JsonValue] = [_INPUT_EXAMPLE]
+    required = schema.get("required")
+    names: list[JsonValue] = list(required) if isinstance(required, list) else []
+    schema.update(
+        {
+            "description": (
+                "Conversation input identified by source identities and an optional target identity set; an "
+                "empty target set represents an ambient input with an unknown addressee."
+            ),
+            "examples": examples,
+            "required": names if "content" in names else [*names, "content"],
+        }
+    )
 
 
 class TurnData(pydantic.BaseModel):
@@ -87,6 +111,10 @@ class TurnData(pydantic.BaseModel):
 
     Audio content is typed ``bytes``. Selection/JSON hops may carry base64 text; validation
     rehydrates audio/* content to bytes so downstream turn decode stays on typed events.
+
+    Images never travel as ``content``: a photo, with or without a caption, rides in
+    ``attachments`` as typed ``media.Image`` values that the producer stamps. A model never sees or
+    authors that field.
     """
 
     model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
@@ -95,13 +123,10 @@ class TurnData(pydantic.BaseModel):
         extra="forbid",
         ser_json_bytes="base64",
         val_json_bytes="base64",
-        json_schema_extra=_schema(
-            "Conversation input identified by source identities and an optional target identity set; an empty target set represents an ambient input with an unknown addressee.",
-            _INPUT_EXAMPLE,
-        ),
+        json_schema_extra=_input_schema,
     )
 
-    __producer_stamped_fields__: typing.ClassVar[frozenset[str]] = frozenset({"parent"})
+    __producer_stamped_fields__: typing.ClassVar[frozenset[str]] = frozenset({"parent", "attachments"})
 
     parent: SkipJsonSchema[mosfet.StimulusData[interpretation.SpeechData] | None] = pydantic.Field(
         default=None,
@@ -119,10 +144,12 @@ class TurnData(pydantic.BaseModel):
         description="Zero or more opaque identities addressed by this content; an empty set means the addressee is unknown or the input is ambient.",
         examples=[[], ["bot"]],
     )
-    content: object = pydantic.Field(
+    content: object | None = pydantic.Field(
+        default=None,
         description=(
             "Modality-specific content carried without interpretation by Conversation. "
-            "text/* uses str; audio/* uses bytes (base64 on JSON wires); other modalities may use structured objects."
+            "text/* uses str; audio/* uses bytes (base64 on JSON wires); other modalities may use structured objects. "
+            "Images are never content."
         ),
         examples=["What is the weather like?", "AAECAw=="],
     )
@@ -145,6 +172,11 @@ class TurnData(pydantic.BaseModel):
         ge=1,
         description="Channel count of raw PCM audio content. Omit for text and self-describing containers.",
         examples=[1],
+    )
+    attachments: SkipJsonSchema[tuple[media.Image, ...]] = pydantic.Field(
+        default=(),
+        max_length=media.MAX_TURN_IMAGES,
+        description="Images the source participant attached to this turn (a photo with or without a caption).",
     )
 
     @pydantic.model_validator(mode="before")
@@ -185,6 +217,18 @@ class TurnData(pydantic.BaseModel):
 
         if self.content_type.lower().startswith("audio/") and not isinstance(self.content, bytes):
             raise ValueError("audio/* conversation content must be bytes after typed validation")
+        return self
+
+    @pydantic.model_validator(mode="after")
+    def validate_attachments(self) -> typing.Self:
+        """Images ride only in ``attachments``, from one sender; a turn without content is text-typed images."""
+
+        if self.content_type.lower().startswith("image/"):
+            raise ValueError("image/* content is not accepted: images travel as attachments")
+        if self.attachments and len(self.source_ids) != 1:
+            raise ValueError("attachments require exactly one source identity")
+        if self.content is None and not (self.attachments and self.content_type.lower().startswith("text/")):
+            raise ValueError("content may be omitted only for text/* turns that carry attachments")
         return self
 
     @pydantic.field_serializer("source_ids", "target_ids", when_used="json")
@@ -282,6 +326,14 @@ class Message(pydantic.BaseModel):
         return raw_value
 
     content_type: str = pydantic.Field(min_length=1, description="Media type of the model-safe message content.")
+    attachments: tuple[media.Image | media.ReleasedImage, ...] = pydantic.Field(
+        default=(),
+        max_length=media.MAX_TURN_IMAGES,
+        description=(
+            "Images the sender attached to this message. History keeps image bytes only within its retention "
+            "budget; an older image whose bytes were released stays as metadata only."
+        ),
+    )
     provenance: MessageProvenance = pydantic.Field(description="Typed event provenance for this committed message.")
 
     @pydantic.field_validator("source_ids", "target_ids", mode="before")
@@ -346,6 +398,7 @@ def _message_for_turn(
     *,
     content: MessageContent,
     content_type: str,
+    attachments: tuple[media.Image, ...],
     sequence: int,
     provenance: MessageProvenance,
 ) -> Message:
@@ -356,6 +409,7 @@ def _message_for_turn(
         target_ids=data.target_ids,
         content=content,
         content_type=content_type,
+        attachments=attachments,
         provenance=provenance,
     )
 
@@ -846,28 +900,41 @@ def _model_safe_content(content: object) -> MessageContent:
 def _content_for_detector(
     data: TurnData,
     source_id: IdentityValue,
-) -> turn_detector.ParticipationStimulus:
-    """Preserve the declared modality while adapting to the detector boundary.
+) -> tuple[turn_detector.ParticipationStimulus, tuple[turn_detector.ImageStimulus, ...]]:
+    """Return the turn's stimuli in order: the one that opens the turn, then the images that follow.
 
-    Raw PCM (``audio/pcm``, ``audio/raw``, …) must stay an ``AudioStimulus`` with rate and
-    channels so STT can wrap WAV at the real sample rate. Only matching ``audio/raw`` used to
-    work; ``audio/pcm`` from Listening SpeechData fell through to ContentStimulus and lost packaging.
+    Content, when present, opens the turn and every attachment follows as one ``ImageStimulus``;
+    an image-only turn opens with its first image. The declared modality is preserved: raw PCM
+    (``audio/pcm``, ``audio/raw``, …) stays an ``AudioStimulus`` with rate and channels so STT can
+    wrap WAV at the real sample rate, and structured content that is neither text nor audio
+    travels as a ``ContentStimulus``.
     """
 
+    images = tuple(
+        turn_detector.ImageStimulus(source_participant_ref=source_id, content=image) for image in data.attachments
+    )
     content_type = data.content_type.lower()
+    if data.content is None:
+        return images[0], images[1:]
     if content_type == "text/plain" and isinstance(data.content, str):
-        return turn_detector.TextStimulus(source_participant_ref=source_id, content=data.content)
+        return turn_detector.TextStimulus(source_participant_ref=source_id, content=data.content), images
     if content_type.startswith("audio/") and isinstance(data.content, bytes):
-        return turn_detector.AudioStimulus(
+        return (
+            turn_detector.AudioStimulus(
+                source_participant_ref=source_id,
+                content=data.content,
+                sample_rate_hz=data.sample_rate_hz,
+                channels=data.channels,
+            ),
+            images,
+        )
+    return (
+        turn_detector.ContentStimulus(
             source_participant_ref=source_id,
             content=data.content,
-            sample_rate_hz=data.sample_rate_hz,
-            channels=data.channels,
-        )
-    return turn_detector.ContentStimulus(
-        source_participant_ref=source_id,
-        content=data.content,
-        content_type=data.content_type,
+            content_type=data.content_type,
+        ),
+        images,
     )
 
 
@@ -915,6 +982,18 @@ def _messages_from_contribution_terminal(terminal: hsm.Event[typing.Any]) -> Mes
     raise RuntimeError("Conversation produced no messages terminal.")
 
 
+def _cognition_ready(message: Message) -> bool:
+    """Whether a committed inbound message hands body cognition a typed history stimulus.
+
+    Text does, and so does a text-typed message that carries only images. Audio and structured
+    products do not, which preserves the audio trust boundary.
+    """
+
+    return message.content_type.lower().startswith("text/") and (
+        isinstance(message.content, str) or (message.content is None and bool(message.attachments))
+    )
+
+
 def _terminal_output(
     ctx: hsm.Context,
     instance: "Conversation",
@@ -929,14 +1008,10 @@ def _terminal_output(
         target=reply_target,
     )
     latest_inbound = next((item for item in reversed(output.messages) if item.direction == "inbound"), None)
-    text_product = (
-        latest_inbound is not None
-        and isinstance(latest_inbound.content, str)
-        and latest_inbound.content_type.lower().startswith("text/")
-    )
-    if text_product:
-        # Text contributions hand body cognition a typed history stimulus. Non-text products
-        # remain bare Conversation output terminals, preserving the audio trust boundary.
+    if latest_inbound is not None and _cognition_ready(latest_inbound):
+        # Text or image-attachment contributions hand body cognition a typed history stimulus.
+        # Audio and structured products remain bare Conversation output terminals, preserving the
+        # audio trust boundary.
         handoff = dataclasses.replace(
             _with_operation(
                 cognition.InputEvent.with_data(cognition.InputData(stimulus=history_event)),
@@ -973,6 +1048,11 @@ class Conversation(ability.Ability[TurnData, Messages]):
     targetless inputs in that instance share its ambient relationship. Separate
     rooms require separate Conversation instances because the input has no
     conversation_ref.
+
+    ``image_retention`` is the injected bound on image bytes this instance's
+    history keeps in process. The newest turn always keeps its images; older
+    attachments past the bound become metadata-only ``media.ReleasedImage``
+    values, newest kept first.
     """
 
     input_data_type: typing.ClassVar[type[object] | tuple[type[object], ...] | None] = TurnData
@@ -1001,6 +1081,7 @@ class Conversation(ability.Ability[TurnData, Messages]):
     _memory: ability.Ability[typing.Any, typing.Any] | None
     _history: list[Message]
     _history_parent: mosfet.StimulusData[TurnData] | None
+    _image_retention: media.ImageRetention
 
     def __init__(
         self,
@@ -1013,6 +1094,7 @@ class Conversation(ability.Ability[TurnData, Messages]):
         memory: ability.Ability[typing.Any, typing.Any] | None = None,
         similarity_threshold: float = 0.85,
         similarity_margin: float = 0.05,
+        image_retention: media.ImageRetention = _DEFAULT_IMAGE_RETENTION,
     ) -> None:
         if not 0.0 <= similarity_threshold <= 1.0:
             raise ValueError("similarity_threshold must be between 0.0 and 1.0.")
@@ -1041,6 +1123,7 @@ class Conversation(ability.Ability[TurnData, Messages]):
         self._similarity_margin = similarity_margin
         self._history = []
         self._history_parent = None
+        self._image_retention = image_retention
 
     @property
     def typing(self) -> language.TextGeneration | None:
@@ -1515,13 +1598,13 @@ class Conversation(ability.Ability[TurnData, Messages]):
                     raise RuntimeError(f"Participant track {participant.track_ref!r} has no turn detector.")
                 detector_key = (relationship_ref, participant.track_ref)
                 turn_ref = turn_refs[participant.track_ref]
-                content = _content_for_detector(data, source_id)
+                opening, images = _content_for_detector(data, source_id)
                 start = turn_detector.TurnStartData(
                     conversation_ref=relationship_ref,
                     turn_ref=turn_ref,
                     self_participant_ref=participant.track_ref,
                     source_participant_ref=source_id,
-                    content=content,
+                    content=opening,
                 )
                 active_turn_detector_keys.add(detector_key)
                 with span.operation(
@@ -1530,9 +1613,10 @@ class Conversation(ability.Ability[TurnData, Messages]):
                     component="communication.conversation",
                     stage="turn_detector",
                     context=telemetry.event_context(event),
-                ):
-                    # One start/end exchange with one detector. A trace that stops here says the
-                    # product reached the detector and no turn ever came back.
+                ) as exchange:
+                    # One start/update/end exchange with one detector. A trace that stops here says
+                    # the product reached the detector and no turn ever came back.
+                    exchange.set_attribute("bot.turn.image.count", len(data.attachments))
                     child_operation_id = turn_ref
                     try:
                         await hsm.dispatch(
@@ -1546,6 +1630,25 @@ class Conversation(ability.Ability[TurnData, Messages]):
                                 metadata=dict(event.metadata),
                             ),
                         )
+                        for image in images:
+                            _ = await hsm.dispatch(
+                                ctx,
+                                detector,
+                                dataclasses.replace(
+                                    turn_detector.TurnUpdateEvent.with_data(
+                                        turn_detector.TurnUpdateData(
+                                            conversation_ref=relationship_ref,
+                                            turn_ref=turn_ref,
+                                            source_participant_ref=source_id,
+                                            content=image,
+                                        )
+                                    ),
+                                    id=child_operation_id,
+                                    source=hsm.id(instance),
+                                    target=hsm.id(detector),
+                                    metadata=dict(event.metadata),
+                                ),
+                            )
                         terminal = await ability.run_terminal_operation(
                             ctx,
                             child=detector,
@@ -1850,10 +1953,12 @@ class Conversation(ability.Ability[TurnData, Messages]):
             input_data,
             content=_model_safe_content(product_content),
             content_type=product_type,
+            attachments=tuple(image for turn in data.turns for image in turn.images),
             sequence=len(instance._history),
             provenance=provenance,
         )
         instance._history.append(inbound)
+        Conversation._retain_history_images(instance._history, instance._image_retention)
         instance._history_parent = parent
         _terminal_output(
             ctx,
@@ -1864,6 +1969,29 @@ class Conversation(ability.Ability[TurnData, Messages]):
                 parent.source if parent is not None and parent.target == hsm.id(instance) and parent.source else None
             ),
         )
+
+    @staticmethod
+    def _retain_history_images(history: list[Message], retention: media.ImageRetention) -> None:
+        """Bound the image bytes history keeps, newest first, releasing older ones to metadata only.
+
+        The newest message is always kept intact: it is the turn just sent, already bounded by
+        ``media.MAX_TURN_IMAGES``. Every older attachment passes through ``retention``; a message
+        whose attachments change is replaced with its ``sequence`` and ``provenance`` unchanged.
+        """
+
+        older = range(len(history) - 2, -1, -1)
+        retained = iter(
+            retention.retain([attachment for index in older for attachment in reversed(history[index].attachments)])
+        )
+        for index in older:
+            message = history[index]
+            kept = tuple(reversed([next(retained) for _ in message.attachments]))
+            if all(after is before for before, after in zip(message.attachments, kept, strict=True)):
+                continue
+            for before, after in zip(message.attachments, kept, strict=True):
+                if isinstance(before, media.Image) and isinstance(after, media.ReleasedImage):
+                    _HISTORY_IMAGE_RELEASED.add(1, {"media_type": before.media_type})
+            history[index] = message.model_copy(update={"attachments": kept})
 
     @staticmethod
     def _fail_turn(ctx: hsm.Context, instance: "Conversation", event: hsm.Event[typing.Any]) -> None:
