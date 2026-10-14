@@ -187,9 +187,5 @@ def phone_closed_call_ids(firmware: phone_device.Firmware) -> frozenset[str]:
     return typing.cast(frozenset[str], object.__getattribute__(firmware, "_closed_call_ids"))
 
 
-def phone_service(firmware: phone_device.Firmware) -> phone_device.Service:
-    return typing.cast(phone_device.Service, object.__getattribute__(firmware, "_service"))
-
-
 def behavior_spec(instance: object) -> behavior.source.Source:
     return typing.cast(behavior.source.Source, object.__getattribute__(instance, "_spec"))

@@ -350,8 +350,9 @@ def test_build_processing_input_renders_a_ringing_phones_display_caller_id() -> 
         _ = await mosfet.started(environment, owner, typing.cast(hsm.Model, owner.model))
 
         assert isinstance(firmware, phone_device.Firmware)
-        await firmware.event_recorder().receive(
+        await hsm.dispatch(
             phone.context(),
+            firmware,
             phone_device.IncomingCallEvent.with_data(
                 phone_device.IncomingCallData(call_id="call-123", caller="Front desk")
             ),

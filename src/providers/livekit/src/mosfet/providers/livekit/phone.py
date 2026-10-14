@@ -18,8 +18,8 @@ import mosfet.device
 from livekit import rtc
 
 import mosfet.lifecycle
+from mosfet.protocols import attachment
 from mosfet.telemetry import inject_context, observer, span
-from mosfet.environment import Environment, require_environment_scope
 
 from . import signaling
 from .audio import AudioBridge, create_audio_bridge
@@ -29,7 +29,9 @@ from .room_audio import (
     LocalAudioTrackFactory,
     LocalParticipant,
     RoomAudioConnectData,
+    RoomAudioConnectEvent,
     RoomAudioConnectedData,
+    RoomAudioDisconnectEvent,
     RoomAudioTrackPath,
     RoomHandle,
 )
@@ -43,45 +45,9 @@ _DEFAULT_TRANSFER_TIMEOUT = datetime.timedelta(seconds=30)
 # the ring that follows it. Ring time belongs to phone firmware: how long to let it ring before
 # giving up is the caller's patience, not the exchange's.
 _DEFAULT_SETUP_TIMEOUT = datetime.timedelta(seconds=5)
-_PHONE_SERVICE_TARGET_DESCRIPTION = (
-    "Process-local phone event target attached by the owning phone service lifecycle. This target has no JSON "
-    "representation and is not a provider configuration field."
-)
-_PHONE_SERVICE_TARGET_JSON_SCHEMA: pydantic.json_schema.JsonSchemaValue = {
-    "not": {},
-    "description": _PHONE_SERVICE_TARGET_DESCRIPTION,
-}
-
-
-def _phone_service_target_from_runtime_value(data: object) -> hsm.Instance:
-    if isinstance(data, hsm.Instance):
-        return data
-    raise ValueError("Phone service attachment target must be the phone-owned HSM event target.")
-
-
-_PhoneServiceTarget = typing.Annotated[
-    hsm.Instance,
-    pydantic.BeforeValidator(_phone_service_target_from_runtime_value),
-    pydantic.WithJsonSchema(_PHONE_SERVICE_TARGET_JSON_SCHEMA),
-]
-
-
 _LOG = logging.getLogger(__name__)
 _SCOPE = "mosfet.providers.livekit"
 _COMPONENT = "livekit.phone"
-
-
-class _PhoneServiceAttachmentData(pydantic.BaseModel):
-    """Private attachment payload connecting a LiveKit phone service to a phone event target."""
-
-    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
-        arbitrary_types_allowed=True,
-        frozen=True,
-    )
-
-    target: _PhoneServiceTarget = pydantic.Field(
-        description=_PHONE_SERVICE_TARGET_DESCRIPTION,
-    )
 
 
 _ACTIVE_OPERATION_ATTRIBUTE = "active_operation"
@@ -103,21 +69,6 @@ class _ActiveOperation:
 
     id: str
     data: _ActiveRequestData
-
-
-_ServiceAttachedEvent = hsm.Event[_PhoneServiceAttachmentData](
-    name="bot.provider.livekit.phone.attached",
-    schema=_PhoneServiceAttachmentData,
-)
-_ServiceDetachedEvent = hsm.Event[_PhoneServiceAttachmentData](
-    name="bot.provider.livekit.phone.detached",
-    schema=_PhoneServiceAttachmentData,
-)
-_ServiceAttachmentRejectedEvent = hsm.Event[_PhoneServiceAttachmentData](
-    name="bot.provider.livekit.phone.attachment.rejected",
-    kind=hsm.ErrorEventKind,
-    schema=_PhoneServiceAttachmentData,
-)
 
 
 class _LocalAudioPublishFailedData(pydantic.BaseModel):
@@ -991,8 +942,21 @@ class MediaSnapshot(pydantic.BaseModel):
     )
 
 
-class PhoneService(Traced):
-    """stateforward.mosfet-native LiveKit phone service that adapts LiveKit call control and room media to phone firmware events."""
+class PhoneService(Traced, attachment.Attachment):
+    """stateforward.mosfet-native LiveKit phone service that adapts LiveKit call control and room media to phone firmware events.
+
+    A phone reaches it by message only. It answers ``attachment.attach`` and ``attachment.detach``
+    for one phone firmware at a time (a second gets ``attach.failed{conflict}``), takes firmware
+    publishes as typed events, and answers them through ``phone.service.*`` events into the
+    attached firmware. It does not start itself: the phone that holds it does, and its room track
+    path starts and stops with it. An application connects or disconnects the room by dispatching
+    ``room_audio.RoomAudioConnectEvent`` or ``room_audio.RoomAudioDisconnectEvent`` to it.
+    """
+
+    _attachment_limit: typing.ClassVar[int | None] = 1
+    _attachments: list[hsm.Instance]
+    _attachment_timeout: datetime.timedelta
+    _attachment_request_id: str
 
     _operation_timeout: datetime.timedelta
     _uplink_sample_rate_hz: int
@@ -1017,7 +981,6 @@ class PhoneService(Traced):
     # exactly one far end — not a dictionary of everyone who happens to be in the room.
     _call_peer_identity: str | None
     _delivering_remote_audio: bool
-    _attached_phone_target_ref: weakref.ReferenceType[hsm.Instance] | None
     _setup_timeout: datetime.timedelta
     _presence_bound: bool
     _presence_left_callback: collections.abc.Callable[..., object] | None
@@ -1072,7 +1035,10 @@ class PhoneService(Traced):
         self._media_call_id = None
         self._call_peer_identity = None
         self._delivering_remote_audio = False
-        self._attached_phone_target_ref = None
+        # The attached phone firmware, at most one: the attachment is the phone event target.
+        self._attachments = []
+        self._attachment_timeout = datetime.timedelta(seconds=30)
+        self._attachment_request_id = ""
         self._presence_bound = False
         self._presence_left_callback = None
         self._signaling_participant = None
@@ -1102,7 +1068,7 @@ class PhoneService(Traced):
         ``instance.state()`` readiness sampling from SDK callbacks.
         """
 
-        return self._attached_phone_target_ref is not None
+        return bool(self._attachments)
 
     def _bind_room_presence(self, room: RoomHandle) -> None:
         """Transduce room presence: a participant vanishing is the line going dead.
@@ -1418,79 +1384,51 @@ class PhoneService(Traced):
         del request
         _raise_unavailable_call_control()
 
-    async def attach(self, environment: Environment, target: hsm.Instance) -> None:
-        """Attach this service to the phone-owned firmware target."""
-
-        require_environment_scope(environment, target, participant="Phone service target")
-        _, track_path = self._ensure_media()
-        # Start this service before room connect so its signaling handlers are registered by the
-        # time setup can arrive; an unattached phone answers RPC with RECIPIENT_NOT_FOUND.
-        if not mosfet.lifecycle.is_started(self):
-            _ = await mosfet.started(environment, self, self.model, owner=target)
-        if not mosfet.lifecycle.is_started(track_path):
-            _ = await mosfet.started(environment, track_path, track_path.model, owner=self)
-        require_environment_scope(environment, self, participant="PhoneService")
-        await self.dispatch(environment, _ServiceAttachedEvent.with_data(_PhoneServiceAttachmentData(target=target)))
-        target_ref = self._attached_phone_target_ref
-        current_target = None if target_ref is None else target_ref()
-        if current_target is not target:
-            raise PhoneServiceError(
-                "LiveKit phone service is already attached to another phone event target.",
-                failure_kind="provider_unavailable",
-            )
-        _ = mosfet.register(self, self.model, owner=target)
-        if self._room_connect is not None and self._local_track_sid is None:
-            await track_path.connect_room(track_path.context(), self._room_connect)
-
-    async def detach(self, environment: Environment, target: hsm.Instance) -> None:
-        """Detach this service from the phone-owned firmware target."""
-
-        # Idempotent when already stopped; no firmware reply channel on this API.
-        if not mosfet.lifecycle.is_started(self):
-            return
-        require_environment_scope(environment, target, participant="Phone service target")
-        require_environment_scope(environment, self, participant="PhoneService")
-        await self.dispatch(environment, _ServiceDetachedEvent.with_data(_PhoneServiceAttachmentData(target=target)))
-        target_ref = self._attached_phone_target_ref
-        current_target = None if target_ref is None else target_ref()
-        if current_target is None:
-            _ = mosfet.register(self, self.model, clear_owner=True)
-
-    async def connect_room(
+    @typing.override
+    def attach(
         self,
-        *,
-        url: str,
-        token: str,
-        track_name: str = "bot-audio",
-    ) -> None:
-        """Connect the privately owned LiveKit room audio path for this service."""
+        ctx: hsm.Context,
+        event: hsm.Event[attachment.AttachData],
+    ) -> collections.abc.Awaitable[bool]:
+        """Deliver one ``attachment.attach`` request; resolves to whether it was delivered.
+
+        The answer is an ``attachment.attach.complete`` or ``attachment.attach.failed`` sent to the
+        request's ``reply_to`` (else its ``actor``), never a return value.
+        """
+
+        return self.dispatch(ctx, event)
+
+    @typing.override
+    def detach(
+        self,
+        ctx: hsm.Context,
+        event: hsm.Event[attachment.DetachData],
+    ) -> collections.abc.Awaitable[bool]:
+        """Deliver one ``attachment.detach`` request; resolves to whether it was delivered."""
+
+        return self.dispatch(ctx, event)
+
+    @typing.override
+    async def start(self, ctx: hsm.Context, data: object = None) -> typing.Self:
+        """Start this service, then its private room track path under this service's own lifetime.
+
+        The track path is what ``stop`` tears down, so it is parented to this service's context
+        rather than the caller's (HSM-CONTEXT-001).
+        """
 
         _, track_path = self._ensure_media()
-        if not mosfet.lifecycle.is_started(track_path):
-            # Parent the track path under this service only while the service is live.
-            parent = self.context() if mosfet.lifecycle.is_started(self) else None
-            _ = await mosfet.started(parent, track_path, track_path.model, owner=self)
-        await track_path.connect_room(
-            track_path.context(),
-            RoomAudioConnectData(url=url, token=token, track_name=track_name),
-        )
-
-    async def disconnect_room(self) -> None:
-        """Disconnect room audio from the underlying LiveKit room."""
-
-        _, track_path = self._ensure_media()
-        self._unbind_room_presence()
-        self._unbind_room_signaling()
-        await track_path.disconnect_room(track_path.context())
+        instance = await super().start(ctx, data)
+        _ = await mosfet.started(self.context(), track_path, track_path.model, owner=self)
+        return instance
 
     @typing.override
     async def stop(self, ctx: hsm.Context) -> None:
         """Stop this service and its privately owned room track path if started."""
 
         track_path = self._track_path
-        # Ingress opens when attach holds a target ref; clear on stop so SDK callbacks
-        # cannot deliver after the service is stopped (only detach effect cleared it before).
-        self._attached_phone_target_ref = None
+        # Ingress opens while a firmware is attached; release it on stop so SDK callbacks
+        # cannot deliver after the service is stopped.
+        self._attachments.clear()
         self._unbind_room_presence()
         self._unbind_room_signaling()
         if mosfet.lifecycle.is_started(self):
@@ -1499,7 +1437,7 @@ class PhoneService(Traced):
             _ = mosfet.register(self, self.model, clear_owner=True)
         if track_path is None:
             return
-        # Track path is created by _ensure_media before start; only stop if started.
+        # Teardown only: the track path starts with this service, so stop it only if it did.
         if mosfet.lifecycle.is_started(track_path):
             await hsm.stop(track_path, ctx)
         if track_path.model is not None:
@@ -1544,56 +1482,65 @@ class PhoneService(Traced):
         return instance._setup_timeout
 
     @staticmethod
-    def _matches_service_attachment(
-        ctx: hsm.Context,
-        instance: "PhoneService",
-        event: hsm.Event[typing.Any],
-    ) -> bool:
-        del ctx
-        data = event.data
-        if not isinstance(data, _PhoneServiceAttachmentData):
-            return False
-        target_ref = instance._attached_phone_target_ref
-        return target_ref is not None and target_ref() is data.target
+    def _bind_signaling(ctx: hsm.Context, instance: "PhoneService", event: hsm.Event[typing.Any]) -> None:
+        """Put the attached phone back on a room that is already connected.
 
-    @staticmethod
-    def _has_conflicting_service_attachment(
-        ctx: hsm.Context,
-        instance: "PhoneService",
-        event: hsm.Event[typing.Any],
-    ) -> bool:
-        del ctx
-        data = event.data
-        if not isinstance(data, _PhoneServiceAttachmentData):
-            return False
-        target_ref = instance._attached_phone_target_ref
-        current_target = None if target_ref is None else target_ref()
-        return current_target is not None and current_target is not data.target
+        Detach takes the line down (``_unbind_signaling``); a phone attached to a service whose
+        room stayed connected gets it back here. A room not yet connected binds when it connects
+        (``_apply_room_audio_status``).
+        """
 
-    @staticmethod
-    def _has_attachable_service_target(
-        ctx: hsm.Context,
-        instance: "PhoneService",
-        event: hsm.Event[typing.Any],
-    ) -> bool:
-        del ctx
-        data = event.data
-        if not isinstance(data, _PhoneServiceAttachmentData):
-            return False
-        target_ref = instance._attached_phone_target_ref
-        return target_ref is None or target_ref() is None
-
-    @staticmethod
-    def _set_phone_event_target(ctx: hsm.Context, instance: "PhoneService", event: hsm.Event[typing.Any]) -> None:
-        del ctx
-        data = event.data
-        assert isinstance(data, _PhoneServiceAttachmentData)
-        instance._attached_phone_target_ref = weakref.ref(data.target)
-
-    @staticmethod
-    def _clear_phone_event_target(ctx: hsm.Context, instance: "PhoneService", event: hsm.Event[typing.Any]) -> None:
         del ctx, event
-        instance._attached_phone_target_ref = None
+        room = instance._room
+        if room is None or instance._local_track_sid is None:
+            return
+        instance._bind_room_presence(room)
+        instance._bind_room_signaling(room)
+
+    @staticmethod
+    def _connect_configured_room(
+        ctx: hsm.Context,
+        instance: "PhoneService",
+        event: hsm.Event[typing.Any],
+    ) -> None:
+        """Connect the room this service was configured with, once a phone is attached to take calls."""
+
+        connect = instance._room_connect
+        track_path = instance._track_path
+        if connect is None or track_path is None or instance._local_track_sid is not None:
+            return
+        _ = hsm.dispatch(
+            ctx,
+            track_path,
+            dataclasses.replace(
+                RoomAudioConnectEvent.with_data(connect),
+                id=event.id,
+                source=hsm.id(instance),
+                target=hsm.id(track_path),
+                metadata=dict(event.metadata),
+            ),
+        )
+
+    @staticmethod
+    def _forward_to_track_path(
+        ctx: hsm.Context,
+        instance: "PhoneService",
+        event: hsm.Event[typing.Any],
+    ) -> None:
+        """Hand an application's room connect or disconnect to the private track path."""
+
+        track_path = instance._track_path
+        assert track_path is not None
+        _ = hsm.dispatch(
+            ctx,
+            track_path,
+            dataclasses.replace(
+                event,
+                source=hsm.id(instance),
+                target=hsm.id(track_path),
+                metadata=dict(event.metadata),
+            ),
+        )
 
     @staticmethod
     def _apply_room_audio_status(
@@ -1605,7 +1552,12 @@ class PhoneService(Traced):
         assert isinstance(data, RoomAudioConnectedData)
         instance._local_track_sid = data.local_track_sid
         room = instance._room
-        if room is not None:
+        if data.local_track_sid is None:
+            # The room went down (or never came up), and the line goes down with it: nothing may
+            # ring a phone that is off the room.
+            instance._unbind_room_presence()
+            instance._unbind_room_signaling()
+        elif room is not None:
             instance._bind_room_presence(room)
             # The line goes live with the room: before connect there is no local participant to
             # register call setup on, and after it this phone can both ring and be rung.
@@ -1630,10 +1582,7 @@ class PhoneService(Traced):
 
     @staticmethod
     def _phone_event_target(instance: "PhoneService") -> hsm.Instance | None:
-        target_ref = instance._attached_phone_target_ref
-        if target_ref is None:
-            return None
-        return target_ref()
+        return instance._attachments[0] if instance._attachments else None
 
     @staticmethod
     def _can_deliver_remote_audio(ctx: hsm.Context, instance: "PhoneService", event: hsm.Event[typing.Any]) -> bool:
@@ -1778,57 +1727,13 @@ class PhoneService(Traced):
             _LOG.warning("livekit remote audio dropped reason=%s", kind)
 
     @staticmethod
-    def _consume_repeat_service_attachment(
-        ctx: hsm.Context,
-        instance: "PhoneService",
-        event: hsm.Event[typing.Any],
-    ) -> None:
-        """Consume an attach announcement for the phone target already attached.
-
-        ``unconnected`` is where an attachment binds a target and moves the service to
-        ``ready``. ``_matches_service_attachment`` makes this the same target arriving again —
-        a re-attach of an already attached phone — so the binding it asks for is the binding
-        in place, and re-running it would only rebind the service to itself.
-        """
-
-        del ctx, instance, event
-
-    @staticmethod
-    def _consume_attachment_rejection(
-        ctx: hsm.Context,
-        instance: "PhoneService",
-        event: hsm.Event[typing.Any],
-    ) -> None:
-        """Consume the rejection this service dispatched to itself for a conflicting attach.
-
-        ``_dispatch_attachment_rejected`` emits ``_ServiceAttachmentRejectedEvent`` so the
-        refusal is an observed event rather than a silent return. Refusing is the whole
-        outcome: the existing attachment stands untouched, so nothing further happens when the
-        record of it comes back round the queue.
-        """
-
-        del ctx, instance, event
-
-    @staticmethod
-    def _dispatch_attachment_rejected(
-        ctx: hsm.Context,
-        instance: "PhoneService",
-        event: hsm.Event[typing.Any],
-    ) -> None:
-        data = event.data
-        assert isinstance(data, _PhoneServiceAttachmentData)
-        _ = hsm.dispatch(ctx, instance, _ServiceAttachmentRejectedEvent.with_data(data))
-
-    @staticmethod
     def _emit_phone_event(
         ctx: hsm.Context,
         instance: "PhoneService",
         trigger: hsm.Event[typing.Any],
         event: hsm.Event[typing.Any],
     ) -> None:
-        target_ref = instance._attached_phone_target_ref
-        assert target_ref is not None
-        phone_event_target = target_ref()
+        phone_event_target = PhoneService._phone_event_target(instance)
         assert phone_event_target is not None
         emitted = dataclasses.replace(
             event,
@@ -2204,16 +2109,6 @@ class PhoneService(Traced):
         accepted = phone.TransferAcceptedData(call_id=data.call_id, transfer_id=data.transfer_id, target=data.target)
         _ = hsm.dispatch(ctx, instance, _with_trigger_correlation(_TransferAcceptedEvent.with_data(accepted), event))
 
-    def publish(self, ctx: hsm.Context, event: hsm.Event[typing.Any]) -> None:
-        """Firmware ingress: deliver into this service HSM.
-
-        Delivery is the gate (``dispatch`` / ``dispatch_to``). Do not re-check name, target, or
-        source here or in guards for routing — transitions match or they do not; payload guards
-        only express domain conditions (typed data, active call/transfer correlation).
-        """
-
-        _ = self.dispatch(ctx, event)
-
     def incoming_call(self, ctx: hsm.Context, data: phone.IncomingCallData) -> collections.abc.Awaitable[bool]:
         """Report an incoming LiveKit/SIP call to the provider-neutral phone firmware."""
 
@@ -2265,31 +2160,39 @@ class PhoneService(Traced):
         "PhoneService",
         hsm.attribute(_ACTIVE_OPERATION_ATTRIBUTE),
         hsm.initial(hsm.target("/PhoneService/unconnected")),
+        # One phone firmware at a time: the one attached is answered again, any other is refused.
         hsm.transition(
-            hsm.on(_ServiceAttachedEvent),
-            hsm.guard(_matches_service_attachment),
-            hsm.effect(_consume_repeat_service_attachment),
+            hsm.on(attachment.AttachEvent),
+            hsm.guard(attachment.Attachment._is_attached),
+            hsm.effect(attachment.Attachment._dispatch_attach_complete_existing),
         ),
         hsm.transition(
-            hsm.on(_ServiceAttachedEvent),
-            hsm.guard(_has_conflicting_service_attachment),
-            hsm.effect(_dispatch_attachment_rejected),
+            hsm.on(attachment.AttachEvent),
+            hsm.guard(attachment.Attachment._is_attach_request),
+            hsm.effect(attachment.Attachment._dispatch_attach_failed),
         ),
         hsm.transition(
-            hsm.on(_ServiceAttachmentRejectedEvent),
-            hsm.effect(_consume_attachment_rejection),
+            hsm.on(attachment.DetachEvent),
+            hsm.guard(attachment.Attachment._detach_last_attachment),
+            hsm.effect(
+                _clear_active_operation,
+                _unbind_signaling,
+                attachment.Attachment._detach,
+                attachment.Attachment._dispatch_detach_complete_removed,
+            ),
+            hsm.target("/PhoneService/unconnected"),
         ),
+        hsm.transition(
+            hsm.on(attachment.DetachEvent),
+            hsm.guard(attachment.Attachment._is_detach_request),
+            hsm.effect(attachment.Attachment._dispatch_detach_complete_absent),
+        ),
+        # The room is the application's to connect or disconnect; the track path does it.
+        hsm.transition(hsm.on(RoomAudioConnectEvent), hsm.effect(_forward_to_track_path)),
+        hsm.transition(hsm.on(RoomAudioDisconnectEvent), hsm.effect(_unbind_signaling, _forward_to_track_path)),
         hsm.transition(
             hsm.on(_RoomAudioStatusEvent),
             hsm.effect(_apply_room_audio_status),
-        ),
-        hsm.transition(
-            hsm.on(_ServiceDetachedEvent),
-            hsm.guard(_matches_service_attachment),
-            hsm.effect(_clear_active_operation),
-            hsm.effect(_unbind_signaling),
-            hsm.effect(_clear_phone_event_target),
-            hsm.target("/PhoneService/unconnected"),
         ),
         # A far end that vanished mid-call hung up: presence transduces, topology decides. Dialing
         # overrides this from its own substates, because a callee who leaves while ringing never
@@ -2324,9 +2227,14 @@ class PhoneService(Traced):
         hsm.state(
             "unconnected",
             hsm.transition(
-                hsm.on(_ServiceAttachedEvent),
-                hsm.guard(_has_attachable_service_target),
-                hsm.effect(_set_phone_event_target),
+                hsm.on(attachment.AttachEvent),
+                hsm.guard(attachment.Attachment._can_attach),
+                hsm.effect(
+                    attachment.Attachment._attach,
+                    _bind_signaling,
+                    _connect_configured_room,
+                    attachment.Attachment._dispatch_attach_complete_created,
+                ),
                 hsm.target("/PhoneService/ready"),
             ),
         ),

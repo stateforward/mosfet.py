@@ -111,6 +111,21 @@ mosfet-provider-llama-cpp`, not by a unit test.
 `tests/test_cli.py` runs them as `mosfet run` children with the repository root on the child's
 `PYTHONPATH` only.
 
+## Devices reached by message (phone and its carrier)
+
+| Test | Source under test |
+| --- | --- |
+| `tests/bot/abilities/test_ability.py::test_run_terminal_operation_names_its_reply_actor_to_a_request_factory`, `::test_run_terminal_operation_rejects_a_request_factory_without_an_id` | `src/mosfet/abilities/ability.py` (`run_terminal_operation` request built from the started reply actor, answered at `reply_to`; id required after the call) |
+| `tests/device/test_device.py::test_device_tells_every_holder_with_bot_input`, `::test_device_observation_hook_is_overridable`, `::test_device_takes_an_observation_while_its_firmware_is_still_coming_up`, `::test_device_observation_opens_no_ingress_span` | `src/mosfet/device/device.py`, `src/mosfet/device/events.py` (`device.firmware.observed` from firmware to its device in any shell state, shell only, no ingress span; `_observe` defaults to telling holders and is overridable) |
+| `tests/devices/phone/test_phone.py::test_phone_starts_attaches_detaches_and_stops_its_service`, `::test_phone_bring_up_fails_when_its_service_*`, `::test_phone_stop_counts_an_unreleased_service_and_still_stops`, `::test_phone_rejects_a_non_positive_service_timeout`, `::test_stopping_a_phone_twice_still_releases_once` | `src/mosfet/devices/phone/phone.py` (the phone owns its service: starts it, attaches and detaches its firmware by request and reply under `service_timeout`, counts an unreleased service on `bot.devices.phone.service.detach.count`, stops it last) |
+| `tests/devices/phone/test_phone.py::test_phone_without_a_carrier_records_each_dropped_publish` and every test that reads `published_names` / `uplinks` | `src/mosfet/devices/phone/phone.py` (no carrier: each publish dropped, counted on `bot.devices.phone.publish.dropped.count`, and recorded as a `bot.devices.phone.publish.dropped` span event naming only the event; tests read it from an in-memory OTEL exporter, `tests/devices/phone/handset.py::carrier_spans`) |
+| `src/providers/livekit/tests/test_phone_stop_reattach.py` | `livekit/phone.py` (`PhoneService` never starts itself, its track path starts and stops with it, answers `attachment.attach`/`attachment.detach` for one firmware with a `conflict` refusal, restarts after stop, owner published by the phone that started it) |
+| `src/providers/livekit/tests/test_phone.py::test_an_application_connects_and_disconnects_the_room_by_message` | `livekit/phone.py` (room connect and disconnect by `room_audio.RoomAudioConnectEvent` / `RoomAudioDisconnectEvent`; the line goes down with the room) |
+
+Inbound carrier traffic in phone tests is a typed service event dispatched straight to firmware;
+what a phone reports comes back through its own device paths (the holder told, the room hearing
+it), never through a stand-in carrier that records publishes.
+
 ## Intentional indirect coverage (do not "fix" by reaching in further)
 
 - `tests/bot/abilities/test_ability.py` subclasses `abilities.Ability` to

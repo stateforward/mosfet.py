@@ -32,7 +32,6 @@ _ALLOWED_NON_HSM_PROPERTIES = {
     "src/mosfet/protocols/yamux/frame.py:FrameData.is_syn",
     "src/mosfet/environment/environment.py:Environment.environment_id",
     "src/mosfet/environment/environment.py:Environment.scope_path",
-    "src/mosfet/devices/phone/phone.py:EventRecorder.events",
 }
 # HSM instances may own private runtime data, including mutable mappings.
 # This guard blocks public member surfaces that invite direct caller mutation

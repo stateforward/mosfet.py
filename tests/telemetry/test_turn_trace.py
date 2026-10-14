@@ -14,6 +14,7 @@ import asyncio
 import collections
 import collections.abc
 import dataclasses
+import datetime
 import json
 import pathlib
 import typing
@@ -26,6 +27,7 @@ from mosfet.abilities import cognition, memory, processing
 from mosfet.bot import Bot
 from mosfet.devices import phone, smart_phone
 from mosfet.environment import Environment
+from mosfet.protocols import attachment
 from opentelemetry import _logs
 
 from mosfet.telemetry.configure import logger_provider, tracer_provider
@@ -72,32 +74,87 @@ def _lines(path: str) -> list[dict[str, typing.Any]]:
     return [json.loads(line) for line in file.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
-class _Carrier:
-    """The phone's messaging service: reports every send to the visitor as sent."""
+class _Carrier(mosfet.telemetry.Traced, attachment.Attachment):
+    """The phone's messaging service: an HSM that takes the handset's firmware and answers every send as sent."""
+
+    _attachment_limit: typing.ClassVar[int | None] = 1
 
     def __init__(self) -> None:
-        self.target: hsm.Instance | None = None
-        self.sent: asyncio.Queue[str] = asyncio.Queue()
+        super().__init__()
+        self._attachments = []
+        self._attachment_timeout = datetime.timedelta(seconds=10)
+        self._attachment_request_id = ""
 
-    async def attach(self, environment: Environment, target: hsm.Instance) -> None:
-        del environment
-        self.target = target
+    @typing.override
+    def attach(self, ctx: hsm.Context, event: hsm.Event[attachment.AttachData]) -> collections.abc.Awaitable[bool]:
+        return self.dispatch(ctx, event)
 
-    async def detach(self, environment: Environment, target: hsm.Instance) -> None:
-        del environment
-        if self.target is target:
-            self.target = None
+    @typing.override
+    def detach(self, ctx: hsm.Context, event: hsm.Event[attachment.DetachData]) -> collections.abc.Awaitable[bool]:
+        return self.dispatch(ctx, event)
 
-    def publish(self, ctx: hsm.Context, event: hsm.Event[typing.Any]) -> None:
-        if event.name != smart_phone.ServiceTextMessageSendRequestedEvent.name or self.target is None:
-            return
+    @staticmethod
+    def _sent(ctx: hsm.Context, instance: "_Carrier", event: hsm.Event[typing.Any]) -> None:
         request = event.data
         assert isinstance(request, smart_phone.SendTextMessageData)
-        self.sent.put_nowait(request.text)
-        verdict = smart_phone.ServiceTextMessageSentEvent.with_data(
-            smart_phone.TextMessageSentData(to=request.to, text=request.text)
+        firmware = instance._attachments[0]
+        _ = hsm.dispatch(
+            ctx,
+            firmware,
+            dataclasses.replace(
+                smart_phone.ServiceTextMessageSentEvent.with_data(
+                    smart_phone.TextMessageSentData(to=request.to, text=request.text)
+                ),
+                id=event.id,
+                source=hsm.id(instance),
+                target=hsm.id(firmware),
+                metadata=dict(event.metadata),
+            ),
         )
-        _ = asyncio.ensure_future(self.target.dispatch(ctx, dataclasses.replace(verdict, id=event.id)))
+
+    model: typing.ClassVar[hsm.Model] = mosfet.define(
+        "Carrier",
+        hsm.initial(hsm.target("line")),
+        hsm.state(
+            "line",
+            hsm.transition(
+                hsm.on(attachment.AttachEvent),
+                hsm.guard(attachment.Attachment._can_attach),
+                hsm.effect(attachment.Attachment._attach, attachment.Attachment._dispatch_attach_complete_created),
+            ),
+            hsm.transition(
+                hsm.on(attachment.DetachEvent),
+                hsm.guard(attachment.Attachment._detach_last_attachment),
+                hsm.effect(attachment.Attachment._detach, attachment.Attachment._dispatch_detach_complete_removed),
+            ),
+            hsm.transition(
+                hsm.on(smart_phone.ServiceTextMessageSendRequestedEvent),
+                hsm.guard(attachment.Attachment._has_attachments),
+                hsm.effect(_sent),
+            ),
+        ),
+        hsm.observe(mosfet.telemetry.observer),
+    )
+
+
+async def _verdict(event_name: str, limit: float = 10.0) -> dict[str, typing.Any]:
+    """The data of the first ``event_name`` the handset's firmware took, read from the captured telemetry."""
+
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + limit
+    while loop.time() < deadline:
+        _flush()
+        for record in _lines("otel-logs.jsonl"):
+            body = record["body"]
+            if (
+                isinstance(body, dict)
+                and body.get("occurrence") == "event"
+                and body.get("component") == "Firmware"
+                and body["event"]["name"] == event_name
+            ):
+                return typing.cast(dict[str, typing.Any], body["event"]["data"])
+        await asyncio.sleep(0.05)
+    raise AssertionError(f"the handset never took {event_name}")
 
 
 class _Unhandled(processing.Processor):
@@ -183,9 +240,9 @@ def _run_turn() -> tuple[str, list[dict[str, typing.Any]], list[dict[str, typing
                 id=message_id,
             ),
         )
-        reply = await asyncio.wait_for(carrier.sent.get(), timeout=10)
+        verdict = await _verdict(smart_phone.ServiceTextMessageSentEvent.name)
         await _idle()
-        return reply, logs_before, spans_before
+        return str(verdict["text"]), logs_before, spans_before
 
     reply, logs_before, spans_before = asyncio.run(run())
     _flush()

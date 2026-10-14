@@ -21,6 +21,8 @@ from mosfet.device.events import (
     FirmwareInitializingDoneEvent,
     FirmwareInitializingDoneEventData,
     FirmwareInitializingFailedEventData,
+    ObservedData,
+    ObservedEvent,
 )
 from mosfet.telemetry import observer
 from mosfet.environment import Environment, require_environment_scope, space
@@ -357,6 +359,9 @@ class Device(Traced, attachment.Attachment):
         ``bot.device.ingress`` span under its ``_ingress_scope`` and routes the event (see
         ``_route``).
 
+        Either way, a ``device.firmware.observed`` payload (``ObservedData``) stays on the shell and
+        opens no span: it is the device's own firmware reporting, not a stimulus entering the bot.
+
         Resolves to whether the routed machine accepted the event.
         """
 
@@ -367,14 +372,19 @@ class Device(Traced, attachment.Attachment):
                 firmware = self._firmware
                 if firmware is None:
                     return shell_delivered
-                # Shell-only lifecycle (typed payload, not event.name).
-                if isinstance(event.data, (attachment.AttachData, attachment.DetachData)):
+                # Shell-only lifecycle and firmware observations (typed payload, not event.name).
+                if isinstance(event.data, (attachment.AttachData, attachment.DetachData, ObservedData)):
                     return shell_delivered
                 firmware_delivered = await firmware.dispatch(ctx, event)
                 return shell_delivered or firmware_delivered
 
             # Match hsm.Instance.dispatch: eager Task so fire-and-forget effect paths still run.
             return asyncio.Task(_deliver(), loop=asyncio.get_running_loop(), eager_start=True)
+
+        if isinstance(event.data, ObservedData):
+            # What this device's own firmware observed is not a stimulus entering the bot: shell
+            # only, and no ingress span.
+            return deliver(self, ctx, event)
 
         async def _ingress() -> bool:
             # An event that arrives carrying no trace (a carrier, a test, a browser) starts the
@@ -444,6 +454,22 @@ class Device(Traced, attachment.Attachment):
         if not isinstance(validated, command_schemas):
             return None
         return dataclasses.replace(event, data=validated)
+
+    @staticmethod
+    def _observed(ctx: hsm.Context, instance: "Device", event: hsm.Event[typing.Any]) -> None:
+        data = event.data
+        assert isinstance(data, ObservedData)
+        instance._observe(ctx, data.observation)
+
+    def _observe(self, ctx: hsm.Context, event: hsm.Event[typing.Any]) -> None:
+        """Surface one committed firmware observation; by default, tell every holder.
+
+        The hook a device overrides to decide which of its own paths an observation takes — a
+        handset makes a ring heard in the room and tells the hand that a call ended. Runs inside
+        the shell's ``device.firmware.observed`` effect, in any shell state.
+        """
+
+        self._tell_holders(ctx, event)
 
     def _tell_holders(self, ctx: hsm.Context, event: hsm.Event[typing.Any]) -> None:
         """Dispatch ``bot.input`` carrying ``event`` to every bot holding this device."""
@@ -717,6 +743,9 @@ class Device(Traced, attachment.Attachment):
     model: typing.ClassVar[hsm.Model | None] = mosfet.define(
         "Device",
         hsm.initial(hsm.target("initializing")),
+        # Firmware can observe while the shell is still initializing (a phone's service attach
+        # happens during bring-up), so the shell takes an observation in any state.
+        hsm.transition(hsm.on(ObservedEvent), hsm.effect(_observed)),
         hsm.state(
             "initializing",
             hsm.activity(_initialize_firmware_activity),

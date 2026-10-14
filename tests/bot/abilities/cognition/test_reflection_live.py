@@ -35,6 +35,7 @@ from mosfet.behavior import storage as behavior_storage
 from mosfet.environment import SoundData, SoundEvent, Environment
 from tests.bot.abilities.memory.memory_fixtures import execute_on
 from tests.bot.abilities.support import dispatch_ability_for_test, shared_hsm_context, start_abilities_for_test
+from tests.devices.phone.handset import carrier_spans, published_names
 from tests.hsm_instance_state import phone_firmware
 
 # Optional provider packages — skip collection when not installed in this env.
@@ -308,8 +309,11 @@ def _live_behavior_answers_phone_call(
     *,
     label: str,
     reflection_processor: _ProcessorFactory,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Generate behavior via Reflection processor, run Autonomy, assert phone answers."""
+
+    spans = carrier_spans(monkeypatch)
 
     async def generate_behavior() -> behavior_events.Instance:
         errors: list[str] = []
@@ -393,8 +397,11 @@ def _live_behavior_answers_phone_call(
 
         firmware = phone_firmware(phone)
         assert firmware is not None
-        await firmware.event_recorder().receive(
+        while phone.state() != "/Device/detached":
+            await asyncio.sleep(0.01)
+        await hsm.dispatch(
             phone.context(),
+            firmware,
             phone_device.IncomingCallEvent.with_data(phone_device.IncomingCallData(call_id=call_id, caller="caller")),
         )
         deadline = asyncio.get_running_loop().time() + 2.0
@@ -435,7 +442,7 @@ def _live_behavior_answers_phone_call(
             timeout=_LIVE_TIMEOUT_S + 5.0,
         )
         await asyncio.sleep(0.3)
-        published = tuple(event.name for event in firmware.event_recorder().events)
+        published = tuple(published_names(spans))
         return output, published, firmware.state()
 
     output, published, phone_state = asyncio.run(run_behavior_and_answer())
@@ -463,7 +470,7 @@ def _live_behavior_answers_phone_call(
 
 @requires_openai
 @pytest.mark.live
-def test_live_openai_terra_behavior_answers_phone_call() -> None:
+def test_live_openai_terra_behavior_answers_phone_call(monkeypatch: pytest.MonkeyPatch) -> None:
     """Real OpenAI Terra: generate behavior from associations, Autonomy answers phone."""
 
     api_key = _openai_api_key()
@@ -473,6 +480,7 @@ def test_live_openai_terra_behavior_answers_phone_call() -> None:
     _live_behavior_answers_phone_call(
         label=f"OpenAI/{model}",
         reflection_processor=_openai_reflection_processor,
+        monkeypatch=monkeypatch,
     )
 
 
@@ -565,8 +573,9 @@ def test_live_behavior_forms_after_n_natural_calls_without_preload() -> None:
             assert firmware is not None
             # Prefer a clean phone when possible; ignore if still mid-call from prior answer.
             try:
-                await firmware.event_recorder().receive(
+                await hsm.dispatch(
                     phone.context(),
+                    firmware,
                     phone_device.IncomingCallEvent.with_data(
                         phone_device.IncomingCallData(call_id=call_id, caller="caller")
                     ),

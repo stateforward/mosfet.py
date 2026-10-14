@@ -2,6 +2,7 @@ import typing
 
 import hsm
 import pydantic
+from pydantic.json_schema import SkipJsonSchema
 
 
 class FirmwareInitializingDoneEventData(pydantic.BaseModel):
@@ -53,3 +54,33 @@ FirmwareInitializingFailedEvent = hsm.Event[FirmwareInitializingFailedEventData]
     kind=hsm.ErrorEventKind,
     schema=FirmwareInitializingFailedEventData,
 )
+
+
+class ObservedData(pydantic.BaseModel):
+    """A committed firmware observation, handed to the device the firmware is installed in.
+
+    Runtime-only, like ``attachment.AttachData.reply_to``: the observation is a live typed event,
+    never serialized, and the device decides which of its own paths surfaces it (see
+    ``Device._observe``).
+    """
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
+        frozen=True,
+        arbitrary_types_allowed=True,
+    )
+
+    observation: SkipJsonSchema[pydantic.SkipValidation[hsm.Event[typing.Any]]] = pydantic.Field(
+        description=(
+            "A committed firmware observation the device surfaces on its own paths: for example a "
+            "phone's ringing, which the handset makes heard in the room, or a call ending, which it "
+            "tells whoever is holding it."
+        ),
+    )
+
+
+ObservedEvent = hsm.Event[ObservedData](name="device.firmware.observed", schema=ObservedData)
+"""Firmware to its owning device, one way: something firmware committed that the device surfaces.
+
+Firmware addresses it to the device it was built for (``source`` = the firmware, ``target`` = the
+device). Every ``Device`` takes it in any state and hands the observation to ``Device._observe``.
+"""

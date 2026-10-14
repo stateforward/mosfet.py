@@ -16,6 +16,7 @@ import pydantic
 import pytest
 from opentelemetry import _logs, trace
 
+import mosfet.device
 import mosfet.device.device as device_module
 
 import mosfet.lifecycle
@@ -796,22 +797,32 @@ COMMAND_EVENT = hsm.Event[_CommandData](name="test.device.command", schema=_Comm
 
 
 class CommandFirmware(hsm.Instance):
-    """Firmware that obeys owner commands and reports each one to the device's holders."""
+    """Firmware that obeys owner commands and reports each one to the device it is installed in."""
 
     commands: list[hsm.Event[typing.Any]]
     probes: list[hsm.Event[typing.Any]]
-    _notify: collections.abc.Callable[[hsm.Context, hsm.Event[typing.Any]], None]
+    _device: hsm.Instance
 
-    def __init__(self, *, notify: collections.abc.Callable[[hsm.Context, hsm.Event[typing.Any]], None]) -> None:
+    def __init__(self, *, device: hsm.Instance) -> None:
         super().__init__()
         self.commands = []
         self.probes = []
-        self._notify = notify
+        self._device = device
 
     @staticmethod
     def _obey(ctx: hsm.Context, instance: "CommandFirmware", event: hsm.Event[typing.Any]) -> None:
         instance.commands.append(event)
-        instance._notify(ctx, event)
+        _ = hsm.dispatch(
+            ctx,
+            instance._device,
+            dataclasses.replace(
+                mosfet.device.ObservedEvent.with_data(mosfet.device.ObservedData(observation=event)),
+                id=event.id,
+                source=hsm.id(instance),
+                target=hsm.id(instance._device),
+                metadata=dict(event.metadata),
+            ),
+        )
 
     @staticmethod
     def _probe(ctx: hsm.Context, instance: "CommandFirmware", event: hsm.Event[typing.Any]) -> None:
@@ -824,13 +835,13 @@ class CommandFirmware(hsm.Instance):
         hsm.state(
             "idle",
             hsm.transition(hsm.on(COMMAND_EVENT), hsm.effect(_obey)),
-            hsm.transition(hsm.on(FIRMWARE_PROBE_EVENT), hsm.effect(_probe)),
+            hsm.transition(hsm.on(FIRMWARE_PROBE_EVENT, mosfet.device.ObservedEvent), hsm.effect(_probe)),
         ),
     )
 
 
 class CommandedDevice(Device):
-    """A device with owner commands; its firmware tells holders through the injected Device method."""
+    """A device with owner commands; its firmware reports observations to it by message."""
 
     _command_schemas: typing.ClassVar[tuple[type[pydantic.BaseModel], ...]] = (_CommandData,)
     firmware_model: typing.ClassVar[hsm.Model] = CommandFirmware.model
@@ -838,7 +849,22 @@ class CommandedDevice(Device):
     @override
     def _create_firmware_instance(self, ctx: hsm.Context, event: hsm.Event) -> hsm.Instance:
         del ctx, event
-        return CommandFirmware(notify=self._tell_holders)
+        return CommandFirmware(device=self)
+
+
+class SelfObservingDevice(CommandedDevice):
+    """Overrides the observation hook: keeps what its firmware observed instead of telling holders."""
+
+    observed: list[hsm.Event[typing.Any]]
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.observed = []
+
+    @override
+    def _observe(self, ctx: hsm.Context, event: hsm.Event[typing.Any]) -> None:
+        del ctx
+        self.observed.append(event)
 
 
 class Holder(hsm.Instance):
@@ -993,6 +1019,97 @@ def test_device_tells_every_holder_with_bot_input() -> None:
         observation = event.data.observation
         assert observation is not None
         assert (observation.event, observation.data) == (COMMAND_EVENT.name, _CommandData(word="hello"))
+
+
+def test_device_observation_hook_is_overridable() -> None:
+    """``device.firmware.observed`` reaches the device's own ``_observe``; an override replaces telling holders."""
+
+    async def run() -> tuple[list[hsm.Event[typing.Any]], list[hsm.Event[typing.Any]], list[hsm.Event[typing.Any]]]:
+        device = SelfObservingDevice()
+        environment = await start_device_in_environment(device)
+        await wait_until(lambda: device.state() == "/Device/detached")
+        holder = Holder()
+        _ = await mosfet.started(environment, holder, holder.model)
+        _ = await device.attach(environment, attach_event(holder))
+        await wait_until(lambda: device_bots(device) == (holder,))
+        _ = await device.dispatch(device.context(), COMMAND_EVENT.with_data(_CommandData(word="kept")))
+        await wait_until(lambda: bool(device.observed))
+        for _ in range(5):
+            await asyncio.sleep(0)
+        return device.observed, holder.told, command_firmware(device).probes
+
+    observed, told, probes = asyncio.run(run())
+
+    assert [(event.name, event.data) for event in observed] == [(COMMAND_EVENT.name, _CommandData(word="kept"))]
+    assert told == []
+    # Shell only: the observation is never dual-delivered back into the firmware that made it.
+    assert probes == []
+
+
+class BringUpObservingDevice(SelfObservingDevice):
+    """Holds bring-up open after its firmware started, the way a phone waits on its service attach."""
+
+    release: asyncio.Event
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.release = asyncio.Event()
+
+    @override
+    async def _after_firmware_started(self, ctx: hsm.Context, event: hsm.Event) -> None:
+        del ctx, event
+        _ = await self.release.wait()
+
+
+def test_device_takes_an_observation_while_its_firmware_is_still_coming_up() -> None:
+    """Firmware can observe before the shell finishes initializing; the shell takes it in any state."""
+
+    async def run() -> tuple[str, list[hsm.Event[typing.Any]], str]:
+        device = BringUpObservingDevice()
+        _ = await start_device_in_environment(device)
+        await wait_until(lambda: device_firmware(device) is not None)
+        shell_state = device.state()
+        _ = await device.dispatch(
+            device.context(),
+            mosfet.device.ObservedEvent.with_data(
+                mosfet.device.ObservedData(observation=COMMAND_EVENT.with_data(_CommandData(word="early")))
+            ),
+        )
+        await wait_until(lambda: bool(device.observed))
+        device.release.set()
+        await wait_until(lambda: device.state() == "/Device/detached")
+        return shell_state, device.observed, device.state()
+
+    shell_state, observed, settled = asyncio.run(run())
+
+    assert shell_state == "/Device/initializing"
+    assert [event.data for event in observed] == [_CommandData(word="early")]
+    assert settled == "/Device/detached"
+
+
+@pytest.mark.usefixtures("telemetry_files")
+def test_device_observation_opens_no_ingress_span() -> None:
+    """A firmware observation is not a stimulus entering the bot, so it opens no ``bot.device.ingress`` span."""
+
+    async def run() -> None:
+        device, _ = await started_commanded_device()
+        _ = await device.dispatch(
+            device.context(),
+            mosfet.device.ObservedEvent.with_data(
+                mosfet.device.ObservedData(observation=COMMAND_EVENT.with_data(_CommandData(word="seen")))
+            ),
+        )
+        for _ in range(5):
+            await asyncio.sleep(0)
+
+    asyncio.run(run())
+    spans, _ = exported_records()
+    # Bring-up's own completion still enters through ingress; the observation never does.
+    handed_off = [
+        record["attributes"].get("bot.handoff.event") for record in spans if record["name"] == "bot.device.ingress"
+    ]
+    assert mosfet.device.ObservedEvent.name not in handed_off
+    assert handed_off == [FirmwareInitializingDoneEvent.name]
 
 
 @pytest.mark.usefixtures("telemetry_files")

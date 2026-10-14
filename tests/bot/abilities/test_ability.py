@@ -816,6 +816,95 @@ def test_run_terminal_operation_accepts_plain_hsm_child() -> None:
     assert result.data == TerminalOperationOutputData(value="INPUT")
 
 
+class AttachmentReplier(mosfet.telemetry.Traced, attachment.Attachment):
+    """A plain attachment replier: it answers ``data.reply_to``, never the envelope source."""
+
+    _attachment_limit: typing.ClassVar[int | None] = 1
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._attachments = []
+        self._attachment_timeout = datetime.timedelta(seconds=1)
+        self._attachment_request_id = ""
+
+    @override
+    def attach(self, ctx: hsm.Context, event: hsm.Event[attachment.AttachData]) -> collections.abc.Awaitable[bool]:
+        return self.dispatch(ctx, event)
+
+    @override
+    def detach(self, ctx: hsm.Context, event: hsm.Event[attachment.DetachData]) -> collections.abc.Awaitable[bool]:
+        return self.dispatch(ctx, event)
+
+    model: typing.ClassVar[hsm.Model] = mosfet.define(
+        "AttachmentReplier",
+        hsm.initial(hsm.target("ready")),
+        hsm.state(
+            "ready",
+            hsm.transition(
+                hsm.on(attachment.AttachEvent),
+                hsm.guard(attachment.Attachment._can_attach),
+                hsm.effect(attachment.Attachment._attach, attachment.Attachment._dispatch_attach_complete_created),
+            ),
+        ),
+    )
+
+
+def test_run_terminal_operation_names_its_reply_actor_to_a_request_factory() -> None:
+    """A request built from the reply actor can name it in ``reply_to``; the replier answers there."""
+
+    async def run() -> tuple[hsm.Event[typing.Any], list[str], str]:
+        ctx = environment.Environment()
+        child = AttachmentReplier()
+        _ = await mosfet.started(ctx, child, AttachmentReplier.model)
+        actor = AttachmentReplier()
+        _ = await mosfet.started(ctx, actor, AttachmentReplier.model)
+        named: list[str] = []
+
+        def request(reply: hsm.Instance) -> hsm.Event[typing.Any]:
+            # Called once, with the reply actor already started and addressable.
+            named.append(hsm.id(reply))
+            return dataclasses.replace(
+                attachment.AttachEvent.with_data(attachment.AttachData(actor=actor, reply_to=reply)),
+                id="factory",
+            )
+
+        result = await ability_module.run_terminal_operation(
+            ctx,
+            child=child,
+            request=request,
+            terminals=(attachment.AttachCompleteEvent, attachment.AttachFailedEvent),
+            timeout=datetime.timedelta(seconds=1),
+        )
+        return result, named, hsm.id(child)
+
+    result, named, child_id = asyncio.run(run())
+
+    assert len(named) == 1
+    assert result.name == attachment.AttachCompleteEvent.name
+    assert result.id == "factory"
+    assert result.source == child_id
+    assert result.target == named[0]
+
+
+def test_run_terminal_operation_rejects_a_request_factory_without_an_id() -> None:
+    async def run() -> None:
+        ctx = environment.Environment()
+        child = AttachmentReplier()
+        _ = await mosfet.started(ctx, child, AttachmentReplier.model)
+        await ability_module.run_terminal_operation(
+            ctx,
+            child=child,
+            request=lambda reply: attachment.AttachEvent.with_data(
+                attachment.AttachData(actor=hsm.Instance(), reply_to=reply)
+            ),
+            terminals=(attachment.AttachCompleteEvent,),
+            timeout=datetime.timedelta(seconds=1),
+        )
+
+    with pytest.raises(ValueError, match="request.id"):
+        asyncio.run(run())
+
+
 def test_targeted_terminal_is_delivered_once_without_owner_fallback() -> None:
     """Ability terminal emission: a set target is delivered once and never also to the owner."""
 

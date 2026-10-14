@@ -8,12 +8,22 @@ import datetime
 import typing
 
 import hsm
+import pytest
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
 import mosfet
 from mosfet.devices import phone as phone_device
 from mosfet.environment import Environment, SoundEvent
 from mosfet.protocols import attachment
+from mosfet.telemetry import span
 from tests.hsm_instance_state import device_bots, phone_firmware
+
+PUBLISH_SPAN = "bot.devices.phone.publish"
+"""The span a phone with no carrier opens for each publish it drops."""
+PUBLISH_DROPPED = "bot.devices.phone.publish.dropped"
+"""The span event naming the dropped publish (``hsm.event.name``, the only attribute)."""
 
 
 def firmware_of(phone: phone_device.Phone) -> phone_device.Firmware:
@@ -31,8 +41,42 @@ async def wait_until(predicate: collections.abc.Callable[[], bool], *, timeout: 
     raise AssertionError("Timed out waiting for phone firmware condition.")
 
 
-def event_names(recorder: phone_device.EventRecorder) -> list[str]:
-    return [event.name for event in recorder.events]
+def carrier_spans(monkeypatch: pytest.MonkeyPatch) -> InMemorySpanExporter:
+    """Trace into memory, so a test reads what a phone with no carrier published (and dropped)."""
+
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    monkeypatch.setattr(span, "tracer_provider", lambda: provider)
+    return exporter
+
+
+def _dropped_names(exporter: InMemorySpanExporter) -> list[str]:
+    names: list[str] = []
+    for recorded in exporter.get_finished_spans():
+        if recorded.name != PUBLISH_SPAN:
+            continue
+        for event in recorded.events:
+            name = (event.attributes or {}).get("hsm.event.name")
+            if event.name == PUBLISH_DROPPED and isinstance(name, str):
+                names.append(name)
+    return names
+
+
+def published_names(exporter: InMemorySpanExporter) -> list[str]:
+    """Every call-control event a carrierless phone published, in order, read from its dropped publishes.
+
+    The mouthpiece uplink is left out (see :func:`uplinks`): what a phone says on the wire is audio,
+    not a call-control fact.
+    """
+
+    return [name for name in _dropped_names(exporter) if name != audio_device.OutputEvent.name]
+
+
+def uplinks(exporter: InMemorySpanExporter) -> int:
+    """How many mouthpiece captures carrierless phones put on the wire."""
+
+    return _dropped_names(exporter).count(audio_device.OutputEvent.name)
 
 
 def _record_phone_observation(ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event) -> None:
@@ -66,7 +110,9 @@ class PhoneObservationRecorder(hsm.Instance):
 
 
 async def emit_service_event(phone: phone_device.Phone, event: hsm.Event[typing.Any]) -> None:
-    await firmware_of(phone).event_recorder().receive(phone.context(), event)
+    """What a carrier would put on the line: a typed service event dispatched straight to firmware."""
+
+    await hsm.dispatch(phone.context(), firmware_of(phone), event)
 
 
 async def answer_call(phone: phone_device.Phone, call_id: str) -> None:

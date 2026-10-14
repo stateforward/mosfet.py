@@ -13,6 +13,8 @@ import pytest
 from livekit import rtc
 
 import mosfet.providers.livekit.phone as phone_module
+from mosfet import abilities
+from mosfet.protocols import attachment
 from mosfet.devices import audio as audio_device
 from mosfet.devices import phone as phone_device
 from mosfet.providers.livekit import signaling
@@ -32,10 +34,14 @@ from mosfet.providers.livekit import (
 from mosfet.providers.livekit.room_audio import (
     AudioStreamFactory,
     LocalAudioTrackFactory,
+    RoomAudioConnectData,
+    RoomAudioConnectEvent,
+    RoomAudioDisconnectEvent,
     RoomHandle,
 )
-from mosfet.environment import Environment
-from tests.hsm_instance_state import device_firmware, phone_display
+from mosfet.environment import Environment, SoundData, SoundEvent
+from tests.devices.phone.handset import PhoneHolder, RoomOccupant, carrier_spans, phone_in_a_hand
+from tests.hsm_instance_state import device_firmware, phone_current_call_id, phone_display
 from tests.livekit_room_fakes import (
     FakeLocalParticipant,
     FakeRemoteParticipant,
@@ -46,22 +52,6 @@ from tests.livekit_room_fakes import (
     fake_pcm_stream,
     rtc_pcm_frame,
 )
-
-_FORWARDED_PHONE_EVENT_NAMES = frozenset(
-    {
-        phone_device.CallConnectedEvent.name,
-        phone_device.CallFailedEvent.name,
-        phone_device.ServiceDialFailedEvent.name,
-        phone_device.IncomingCallEvent.name,
-        phone_device.ServiceMediaReadyEvent.name,
-        phone_device.ServiceAudioReceivedEvent.name,
-        phone_device.RemoteHangUpEvent.name,
-        phone_device.TransferAcceptedEvent.name,
-        phone_device.ServiceTransferCompletedEvent.name,
-        phone_device.ServiceTransferFailedEvent.name,
-    }
-)
-
 
 ALICE_NUMBER = "5550141"
 DIAL_NUMBER = "5550142"
@@ -172,64 +162,79 @@ class FakePhoneService(PhoneService):
         await self._block_if_requested("transfer")
 
 
-class RecordingPhoneEventTarget(hsm.Instance):
-    target: hsm.Instance
-    events: list[hsm.Event[typing.Any]]
+Hand = tuple[PhoneHolder, RoomOccupant]
+"""Whoever holds the phone, and somebody standing in the room with it.
 
-    def __init__(self, *, target: hsm.Instance, events: list[hsm.Event[typing.Any]]) -> None:
-        super().__init__()
-        self.target = target
-        self.events = events
+The holder is told what the handset makes plain to the hand (a call came up, the line went dead);
+the bystander hears what it makes a sound about (a ring, a busy tone, the far end's voice). Both
+are the phone's own device paths, so what they get is what a bot gets.
+"""
 
-    @typing.override
-    def dispatch(self, ctx: hsm.Context, event: hsm.Event[typing.Any]) -> collections.abc.Awaitable[bool]:
-        if event.name in _FORWARDED_PHONE_EVENT_NAMES:
-            self.events.append(event)
-        return self.target.dispatch(ctx, event)
 
-    model: typing.ClassVar[hsm.Model] = mosfet.define(
-        "RecordingPhoneEventTarget",
-        hsm.initial(hsm.target("active")),
-        hsm.state("active"),
+async def _held(phone: phone_device.Phone) -> Hand:
+    """Start ``phone`` in a room, in a hand, and return the hand once its carrier is attached."""
+
+    _, _, holder, bystander = await phone_in_a_hand(Environment(), phone)
+    return holder, bystander
+
+
+def _told(hand: Hand) -> list[mosfet.StimulusData[typing.Any]]:
+    """What the holder has been told, oldest first: each observation's event name, data, and id."""
+
+    holder, _ = hand
+    return [
+        occasion.data.observation
+        for occasion in holder.occasions
+        if isinstance(occasion.data, mosfet.InputEventData) and occasion.data.observation is not None
+    ]
+
+
+def _last_told(hand: Hand) -> str | None:
+    told = _told(hand)
+    return told[-1].event if told else None
+
+
+def _heard(hand: Hand) -> list[phone_device.SoundData]:
+    """What the bystander heard from the handset, oldest first."""
+
+    _, bystander = hand
+    return [event.data for event in bystander.received if isinstance(event.data, phone_device.SoundData)]
+
+
+def _heard_audio(hand: Hand) -> list[bytes]:
+    """Raw audio the bystander heard out of the earpiece (the far end's voice), oldest first."""
+
+    _, bystander = hand
+    return [
+        bytes(event.data.audio)
+        for event in bystander.received
+        if event.name == SoundEvent.name
+        and isinstance(event.data, SoundData)
+        and not isinstance(event.data, phone_device.SoundData)
+    ]
+
+
+async def _connect_room(
+    service: PhoneService,
+    *,
+    url: str = "wss://livekit.example.com",
+    token: str = "token",
+    track_name: str = "bot-audio",
+) -> None:
+    """Connect the service's room the way an application does: by message."""
+
+    await hsm.dispatch(
+        service.context(),
+        service,
+        RoomAudioConnectEvent.with_data(RoomAudioConnectData(url=url, token=token, track_name=track_name)),
     )
-
-
-@dataclasses.dataclass
-class RecordingPhoneService:
-    service: PhoneService
-    events: list[hsm.Event[typing.Any]] = dataclasses.field(default_factory=list)
-    forwarded_events: list[hsm.Event[typing.Any]] | None = None
-    forwarding_target: RecordingPhoneEventTarget | None = None
-
-    async def attach(self, environment: Environment, target: hsm.Instance) -> None:
-        if self.forwarded_events is None:
-            await self.service.attach(environment, target)
-            return
-        forwarding_target = RecordingPhoneEventTarget(target=target, events=self.forwarded_events)
-        _ = await mosfet.started(environment, forwarding_target, forwarding_target.model)
-        self.forwarding_target = forwarding_target
-        await self.service.attach(environment, forwarding_target)
-
-    async def detach(self, environment: Environment, target: hsm.Instance) -> None:
-        attached_target: hsm.Instance = self.forwarding_target if self.forwarding_target is not None else target
-        await self.service.detach(environment, attached_target)
-        self.forwarding_target = None
-
-    def publish(self, ctx: hsm.Context, event: hsm.Event[typing.Any]) -> None:
-        self.events.append(event)
-        published_event = dataclasses.replace(event, target=hsm.id(self.service))
-        if self.forwarding_target is None:
-            self.service.publish(ctx, published_event)
-            return
-        self.service.publish(ctx, dataclasses.replace(published_event, source=hsm.id(self.forwarding_target)))
 
 
 async def _start_livekit_phone_service(
     *,
     service: FakePhoneService | None = None,
     operation_timeout: datetime.timedelta | None = None,
-    forwarded_events: list[hsm.Event[typing.Any]] | None = None,
-) -> tuple[phone_device.Phone, FakePhoneService, RecordingPhoneService]:
+) -> tuple[phone_device.Phone, FakePhoneService, Hand]:
     resolved = (
         service
         if service is not None
@@ -241,11 +246,10 @@ async def _start_livekit_phone_service(
         resolved._operation_timeout = operation_timeout
         # Call setup gets the same budget in tests: both are "how long before the provider gives up".
         resolved._setup_timeout = operation_timeout
-    recording_service = RecordingPhoneService(resolved, forwarded_events=forwarded_events)
-    phone = phone_device.Phone(service=recording_service)
-    _ = await mosfet.started(None, phone, typing.cast(hsm.Model, phone.model))
+    phone = phone_device.Phone(service=resolved)
+    hand = await _held(phone)
     await _wait_until(lambda: resolved.state() == "/PhoneService/ready")
-    return phone, resolved, recording_service
+    return phone, resolved, hand
 
 
 def _endpoint_in_room(sfu: FakeSfu, identity: str) -> FakeLocalParticipant:
@@ -267,9 +271,8 @@ async def _start_phone_on_room(
     *,
     setup_timeout: datetime.timedelta = datetime.timedelta(seconds=1),
     dial_plan: signaling.DialPlan | None = None,
-    forwarded_events: list[hsm.Event[typing.Any]] | None = None,
     connect_room: bool = True,
-) -> tuple[phone_device.Phone, PhoneService, FakeRoom, RecordingPhoneService]:
+) -> tuple[phone_device.Phone, PhoneService, FakeRoom, Hand]:
     """A real PhoneService answering to ``identity`` on ``sfu``, connected, call-setup wire live.
 
     Default ``dial_plan=None``: setup is addressed to the dialled number (identity = number).
@@ -288,21 +291,19 @@ async def _start_phone_on_room(
         local_track_factory=fake_local_track_factory,
         dial_plan=dial_plan,
     )
-    recording_service = RecordingPhoneService(service, forwarded_events=forwarded_events)
-    phone = phone_device.Phone(service=recording_service)
-    _ = await mosfet.started(None, phone, typing.cast(hsm.Model, phone.model))
+    phone = phone_device.Phone(service=service)
+    hand = await _held(phone)
     await _wait_until(lambda: service.state() == "/PhoneService/ready")
     if connect_room:
-        await service.connect_room(url="wss://livekit.example.com", token="token")
+        await _connect_room(service)
         await _wait_until(lambda: signaling.SetupMethod in room.local_participant.rpc_handlers)
-    return phone, service, room, recording_service
+    return phone, service, room, hand
 
 
 async def _start_signalling_livekit_phone(
     *,
     setup_timeout: datetime.timedelta = datetime.timedelta(seconds=1),
-    forwarded_events: list[hsm.Event[typing.Any]] | None = None,
-) -> tuple[phone_device.Phone, PhoneService, FakeRoom, RecordingPhoneService]:
+) -> tuple[phone_device.Phone, PhoneService, FakeRoom, Hand]:
     """One phone under test, in a room that already holds the endpoints these tests talk to.
 
     Both are there because a message only reaches an endpoint that is: the line the dialled number
@@ -315,7 +316,6 @@ async def _start_signalling_livekit_phone(
         ALICE_IDENTITY,
         sfu,
         setup_timeout=setup_timeout,
-        forwarded_events=forwarded_events,
     )
     _ = _endpoint_in_room(sfu, BOB_IDENTITY)
     _ = _endpoint_in_room(sfu, CALLER_IDENTITY)
@@ -339,10 +339,6 @@ async def _wait_until(predicate: collections.abc.Callable[[], bool], *, timeout:
     raise AssertionError("Timed out waiting for LiveKit phone service condition.")
 
 
-def _phone_events(recording_service: RecordingPhoneService) -> tuple[hsm.Event[typing.Any], ...]:
-    return tuple(recording_service.events)
-
-
 def _is_answered(phone: phone_device.Phone) -> bool:
     firmware = device_firmware(phone)
     state = None if firmware is None else firmware.state()
@@ -363,14 +359,15 @@ def _require_firmware(phone: phone_device.Phone) -> hsm.Instance:
 
 
 async def _assert_stale_provider_observations_are_consumed(
+    phone: phone_device.Phone,
     service: PhoneService,
-    recording_service: RecordingPhoneService,
+    hand: Hand,
 ) -> None:
+    """Observations about another call change nothing the handset shows, says, or does."""
+
     target = phone_device.TransferTarget(kind="address", value="sip:stale@example.com")
-    committed_events = _phone_events(recording_service)
-    committed_forwarded_events = (
-        tuple(recording_service.forwarded_events) if recording_service.forwarded_events is not None else None
-    )
+    firmware = typing.cast(phone_device.Firmware, _require_firmware(phone))
+    before = (_told(hand), _heard(hand), firmware.state(), phone_current_call_id(firmware))
 
     await service.dispatch(
         service.context(),
@@ -407,17 +404,17 @@ async def _assert_stale_provider_observations_are_consumed(
             )
         ),
     )
-    service.publish(
+    await service.dispatch(
         service.context(),
         phone_device.HungUpEvent.with_data(phone_device.HungUpData(call_id="wrong-call", outcome="remote_hang_up")),
     )
-    service.publish(
+    await service.dispatch(
         service.context(),
         phone_device.CallTransferCompletedEvent.with_data(
             phone_device.TransferData(call_id="wrong-call", transfer_id="stale-transfer", target=target)
         ),
     )
-    service.publish(
+    await service.dispatch(
         service.context(),
         phone_device.CallTransferFailedEvent.with_data(
             phone_device.CallTransferFailedData(
@@ -429,11 +426,10 @@ async def _assert_stale_provider_observations_are_consumed(
         ),
     )
 
-    await asyncio.sleep(0)
+    for _ in range(5):
+        await asyncio.sleep(0)
 
-    assert _phone_events(recording_service) == committed_events
-    if committed_forwarded_events is not None:
-        assert tuple(recording_service.forwarded_events or ()) == committed_forwarded_events
+    assert (_told(hand), _heard(hand), firmware.state(), phone_current_call_id(firmware)) == before
 
 
 def test_livekit_phone_service_model_tracks_provider_request_operations() -> None:
@@ -498,7 +494,7 @@ def test_livekit_phone_dials_the_number_it_was_given() -> None:
     """
 
     async def run() -> None:
-        phone, service, room, recording_service = await _start_signalling_livekit_phone()
+        phone, service, room, hand = await _start_signalling_livekit_phone()
         participant = room.local_participant
 
         await phone.dispatch(
@@ -518,10 +514,9 @@ def test_livekit_phone_dials_the_number_it_was_given() -> None:
 
         _ = participant.invoke(signaling.AcceptMethod, caller_identity=BOB_IDENTITY, call_id=call_id)
         await _wait_until(lambda: _is_answered(phone))
+        await _wait_until(lambda: phone_device.AnsweredEvent.name in [event.event for event in _told(hand)])
 
-        answered = [
-            event for event in _phone_events(recording_service) if event.name == phone_device.AnsweredEvent.name
-        ]
+        answered = [event for event in _told(hand) if event.event == phone_device.AnsweredEvent.name]
         # Both phones name the call the caller minted; nobody invented a second handle.
         assert [event.data for event in answered] == [phone_device.CallData(call_id=call_id)]
 
@@ -532,8 +527,7 @@ def test_livekit_phone_reports_a_declined_dial_as_a_refusal_not_an_absence() -> 
     """Somebody answered and said no. Reporting that as remote_unavailable would be a lie."""
 
     async def run() -> None:
-        forwarded: list[hsm.Event[typing.Any]] = []
-        phone, service, room, _recording = await _start_signalling_livekit_phone(forwarded_events=forwarded)
+        phone, service, room, hand = await _start_signalling_livekit_phone()
         await phone.dispatch(
             phone.context(),
             phone_device.DialEvent.with_data(phone_device.DialData(number=DIAL_NUMBER)),
@@ -547,9 +541,9 @@ def test_livekit_phone_reports_a_declined_dial_as_a_refusal_not_an_absence() -> 
         )
         await _wait_until(lambda: _require_firmware(phone).state() == "/Phone/hung_up")
 
-        failures = [event for event in forwarded if event.name == phone_device.ServiceDialFailedEvent.name]
-        assert len(failures) == 1
-        assert failures[0].data == phone_device.DialFailedData(failure_kind="call_declined")
+        # Refused is busy; an absent line would have been reorder.
+        await _wait_until(lambda: bool(_heard(hand)))
+        assert [sound.kind for sound in _heard(hand)] == ["phone.busy"]
 
     asyncio.run(run())
 
@@ -564,7 +558,7 @@ def test_a_number_reaches_the_same_phone_however_it_was_written_down() -> None:
     async def run() -> None:
         for written in ("5550142", "555-0142", "555 0142", "(555) 0142", "555.0142"):
             sfu = FakeSfu()
-            phone, service, room, _recording = await _start_phone_on_room(
+            phone, service, room, _hand = await _start_phone_on_room(
                 ALICE_IDENTITY,
                 sfu,
                 dial_plan=None,
@@ -589,8 +583,7 @@ def test_livekit_phone_reports_a_line_that_is_not_there_as_remote_unavailable() 
     """
 
     async def run() -> None:
-        forwarded: list[hsm.Event[typing.Any]] = []
-        phone, _service, room, _recording = await _start_signalling_livekit_phone(forwarded_events=forwarded)
+        phone, _service, room, hand = await _start_signalling_livekit_phone()
 
         await phone.dispatch(
             phone.context(),
@@ -599,8 +592,9 @@ def test_livekit_phone_reports_a_line_that_is_not_there_as_remote_unavailable() 
         await _wait_until(lambda: _require_firmware(phone).state() == "/Phone/hung_up")
 
         assert room.local_participant.rpc_calls[0].destination_identity == ABSENT_NUMBER
-        failures = [event for event in forwarded if event.name == phone_device.ServiceDialFailedEvent.name]
-        assert failures[-1].data == phone_device.DialFailedData(failure_kind="remote_unavailable")
+        # Nobody home is the network failing to complete the call: reorder, not busy.
+        await _wait_until(lambda: bool(_heard(hand)))
+        assert [sound.kind for sound in _heard(hand)] == ["phone.reorder"]
 
     asyncio.run(run())
 
@@ -609,13 +603,11 @@ def test_an_optional_dial_plan_miss_is_a_wrong_number_with_nothing_on_the_wire()
     """When a MappingDialPlan is present and omits the number, the exchange answers and setup is not sent."""
 
     async def run() -> None:
-        forwarded: list[hsm.Event[typing.Any]] = []
         sfu = FakeSfu()
-        phone, _service, room, _recording = await _start_phone_on_room(
+        phone, _service, room, hand = await _start_phone_on_room(
             ALICE_IDENTITY,
             sfu,
             dial_plan=signaling.MappingDialPlan({DIAL_NUMBER: BOB_IDENTITY}),
-            forwarded_events=forwarded,
         )
         _ = _endpoint_in_room(sfu, BOB_IDENTITY)
 
@@ -626,8 +618,8 @@ def test_an_optional_dial_plan_miss_is_a_wrong_number_with_nothing_on_the_wire()
         await _wait_until(lambda: _require_firmware(phone).state() == "/Phone/hung_up")
 
         assert room.local_participant.rpc_calls == []
-        failures = [event for event in forwarded if event.name == phone_device.ServiceDialFailedEvent.name]
-        assert failures[-1].data == phone_device.DialFailedData(failure_kind="remote_unavailable")
+        await _wait_until(lambda: bool(_heard(hand)))
+        assert [sound.kind for sound in _heard(hand)] == ["phone.reorder"]
 
     asyncio.run(run())
 
@@ -637,7 +629,7 @@ def test_dial_with_no_plan_addresses_the_number_as_identity() -> None:
 
     async def run() -> None:
         sfu = FakeSfu()
-        phone, service, room, _recording = await _start_phone_on_room(
+        phone, service, room, _hand = await _start_phone_on_room(
             ALICE_IDENTITY,
             sfu,
             dial_plan=None,
@@ -660,7 +652,7 @@ def test_optional_dial_plan_can_remap_a_number_to_a_different_identity() -> None
 
     async def run() -> None:
         sfu = FakeSfu()
-        phone, service, room, _recording = await _start_phone_on_room(
+        phone, service, room, _hand = await _start_phone_on_room(
             ALICE_IDENTITY,
             sfu,
             dial_plan=signaling.MappingDialPlan({DIAL_NUMBER: ALIAS_IDENTITY}),
@@ -695,7 +687,7 @@ def test_a_dial_plan_only_registers_numbers_a_handset_could_dial() -> None:
 
 def test_livekit_phone_answer_tells_the_caller_so_their_phone_stops_ringing() -> None:
     async def run() -> None:
-        phone, _service, room, _recording = await _start_signalling_livekit_phone()
+        phone, _service, room, _hand = await _start_signalling_livekit_phone()
         participant = room.local_participant
 
         _ = participant.invoke(signaling.SetupMethod, caller_identity=CALLER_IDENTITY, call_id="livekit:human-1")
@@ -716,7 +708,7 @@ def test_livekit_phone_answer_tells_the_caller_so_their_phone_stops_ringing() ->
 
 def test_livekit_phone_decline_tells_the_caller_they_were_refused() -> None:
     async def run() -> None:
-        phone, _service, room, _recording = await _start_signalling_livekit_phone()
+        phone, _service, room, _hand = await _start_signalling_livekit_phone()
         participant = room.local_participant
 
         _ = participant.invoke(signaling.SetupMethod, caller_identity=CALLER_IDENTITY, call_id="livekit:human-1")
@@ -738,7 +730,7 @@ def test_livekit_phone_hang_up_is_signalled_because_the_bot_stays_in_the_room() 
     """The bug presence could not see: a bot that hangs up does not leave, so only a BYE reports it."""
 
     async def run() -> None:
-        phone, _service, room, _recording = await _start_signalling_livekit_phone()
+        phone, _service, room, _hand = await _start_signalling_livekit_phone()
         participant = room.local_participant
 
         _ = participant.invoke(signaling.SetupMethod, caller_identity=CALLER_IDENTITY, call_id="livekit:human-1")
@@ -764,7 +756,7 @@ def test_livekit_phone_hang_up_is_signalled_because_the_bot_stays_in_the_room() 
 
 def test_livekit_phone_bye_from_the_far_end_ends_the_call() -> None:
     async def run() -> None:
-        phone, _service, room, _recording = await _start_signalling_livekit_phone()
+        phone, _service, room, _hand = await _start_signalling_livekit_phone()
         participant = room.local_participant
 
         _ = participant.invoke(signaling.SetupMethod, caller_identity=CALLER_IDENTITY, call_id="livekit:human-1")
@@ -785,7 +777,7 @@ def test_a_far_end_that_leaves_the_room_mid_call_is_a_dead_line() -> None:
     """Departure is the only way to notice a peer that crashed rather than hanging up."""
 
     async def run() -> None:
-        phone, _service, room, recording_service = await _start_signalling_livekit_phone()
+        phone, _service, room, hand = await _start_signalling_livekit_phone()
         participant = room.local_participant
 
         _ = participant.invoke(signaling.SetupMethod, caller_identity=CALLER_IDENTITY, call_id="livekit:human-1")
@@ -798,12 +790,13 @@ def test_a_far_end_that_leaves_the_room_mid_call_is_a_dead_line() -> None:
 
         room.emit("participant_disconnected", FakeRemoteParticipant(identity=CALLER_IDENTITY))
         await _wait_until(lambda: _require_firmware(phone).state() == "/Phone/hung_up")
+        await _wait_until(lambda: _last_told(hand) == phone_device.HungUpEvent.name)
 
         assert any(
-            event.name == phone_device.HungUpEvent.name
+            event.event == phone_device.HungUpEvent.name
             and isinstance(event.data, phone_device.HungUpData)
             and event.data.outcome == "remote_hang_up"
-            for event in _phone_events(recording_service)
+            for event in _told(hand)
         )
 
     asyncio.run(run())
@@ -813,7 +806,7 @@ def test_a_stranger_leaving_the_room_is_not_a_hang_up() -> None:
     """A departure only means something when it is the far end of this phone's call."""
 
     async def run() -> None:
-        phone, _service, room, _recording = await _start_signalling_livekit_phone()
+        phone, _service, room, _hand = await _start_signalling_livekit_phone()
         participant = room.local_participant
 
         _ = participant.invoke(signaling.SetupMethod, caller_identity=CALLER_IDENTITY, call_id="livekit:human-1")
@@ -834,8 +827,7 @@ def test_a_stranger_leaving_the_room_is_not_a_hang_up() -> None:
 
 def test_a_callee_that_leaves_while_ringing_cannot_answer() -> None:
     async def run() -> None:
-        forwarded: list[hsm.Event[typing.Any]] = []
-        phone, service, room, _recording = await _start_signalling_livekit_phone(forwarded_events=forwarded)
+        phone, service, room, hand = await _start_signalling_livekit_phone()
 
         await phone.dispatch(
             phone.context(),
@@ -846,8 +838,8 @@ def test_a_callee_that_leaves_while_ringing_cannot_answer() -> None:
         room.emit("participant_disconnected", FakeRemoteParticipant(identity=BOB_IDENTITY))
         await _wait_until(lambda: _require_firmware(phone).state() == "/Phone/hung_up")
 
-        failures = [event for event in forwarded if event.name == phone_device.ServiceDialFailedEvent.name]
-        assert failures[-1].data == phone_device.DialFailedData(failure_kind="remote_unavailable")
+        await _wait_until(lambda: bool(_heard(hand)))
+        assert [sound.kind for sound in _heard(hand)] == ["phone.reorder"]
 
     asyncio.run(run())
 
@@ -855,28 +847,27 @@ def test_a_callee_that_leaves_while_ringing_cannot_answer() -> None:
 def test_livekit_phone_service_default_gateway_emits_provider_unavailable_failure() -> None:
     async def run() -> None:
         service = PhoneService(operation_timeout=datetime.timedelta(seconds=1))
-        recording_service = RecordingPhoneService(service)
-        phone = phone_device.Phone(service=recording_service)
-        _ = await mosfet.started(None, phone, typing.cast(hsm.Model, phone.model))
-        await _wait_until(lambda: service.state() == "/PhoneService/ready", timeout=0.05)
+        phone = phone_device.Phone(service=service)
+        hand = await _held(phone)
+        await _wait_until(lambda: service.state() == "/PhoneService/ready")
 
         await service.incoming_call(service.context(), phone_device.IncomingCallData(call_id="call-123"))
         await phone.dispatch(phone.context(), phone_device.AnswerCallEvent.with_data(phone_device.AnswerCallData()))
         await _wait_until(
             lambda: any(
-                event.name == phone_device.HungUpEvent.name
+                event.event == phone_device.HungUpEvent.name
                 and isinstance(event.data, phone_device.HungUpData)
                 and event.data.outcome == "failed"
-                for event in _phone_events(recording_service)
+                for event in _told(hand)
             )
         )
 
         assert any(
-            event.name == phone_device.HungUpEvent.name
+            event.event == phone_device.HungUpEvent.name
             and isinstance(event.data, phone_device.HungUpData)
             and event.data.call_id == "call-123"
             and event.data.outcome == "failed"
-            for event in _phone_events(recording_service)
+            for event in _told(hand)
         )
 
     asyncio.run(run())
@@ -885,32 +876,21 @@ def test_livekit_phone_service_default_gateway_emits_provider_unavailable_failur
 def test_livekit_phone_service_default_gateway_fails_outbound_dial() -> None:
     async def run() -> None:
         service = PhoneService(operation_timeout=datetime.timedelta(seconds=1))
-        recording_service = RecordingPhoneService(service)
-        phone = phone_device.Phone(service=recording_service)
-        _ = await mosfet.started(None, phone, typing.cast(hsm.Model, phone.model))
-        await _wait_until(lambda: service.state() == "/PhoneService/ready", timeout=0.05)
+        phone = phone_device.Phone(service=service)
+        hand = await _held(phone)
+        await _wait_until(lambda: service.state() == "/PhoneService/ready")
 
         await phone.dispatch(
             phone.context(),
             phone_device.DialEvent.with_data(phone_device.DialData(number=DIAL_NUMBER)),
         )
-        await _wait_until(
-            lambda: any(
-                event.name == phone_device.NoCallEvent.name
-                and isinstance(event.data, phone_device.NoCallData)
-                and event.data.reason == "dial_failed"
-                for event in _phone_events(recording_service)
-            )
-        )
+        await _wait_until(lambda: bool(_heard(hand)))
 
+        # The gateway could not place it: the network's reorder tone, and the handset back on hook.
+        assert [sound.kind for sound in _heard(hand)] == ["phone.reorder"]
+        await _wait_until(lambda: _require_firmware(phone).state() == "/Phone/hung_up")
         # A dial the gateway cannot place never becomes a call, so there is no call to hang up.
-        assert any(
-            event.name == phone_device.NoCallEvent.name
-            and isinstance(event.data, phone_device.NoCallData)
-            and event.data.reason == "dial_failed"
-            for event in _phone_events(recording_service)
-        )
-        assert not any(event.name == phone_device.HungUpEvent.name for event in _phone_events(recording_service))
+        assert not any(event.event == phone_device.HungUpEvent.name for event in _told(hand))
 
     asyncio.run(run())
 
@@ -947,51 +927,24 @@ def test_livekit_phone_service_stays_unconnected_without_attachment() -> None:
     asyncio.run(run())
 
 
-def test_livekit_phone_service_attach_starts_fresh_service() -> None:
-    async def run() -> None:
-        environment = Environment()
-        service = FakePhoneService()
-        target = hsm.Instance()
-        target_model = mosfet.define(
-            "PhoneServiceTarget",
-            hsm.initial(hsm.target("active")),
-            hsm.state("active"),
-        )
-
-        _ = await mosfet.started(environment, target, target_model, hsm.Config(id="phone-service-target"))
-        await service.attach(environment, target)
-
-        assert service.state() == "/PhoneService/ready"
-
-    asyncio.run(run())
-
-
 def test_livekit_phone_service_is_connected_by_phone_service_di() -> None:
     async def run() -> None:
-        service = FakePhoneService()
-        recording_service = RecordingPhoneService(service)
-        phone = phone_device.Phone(service=recording_service)
-
-        _ = await mosfet.started(None, phone, typing.cast(hsm.Model, phone.model))
-        await _wait_until(lambda: service.state() == "/PhoneService/ready", timeout=0.05)
+        _, service, hand = await _start_livekit_phone_service()
         await service.incoming_call(
             service.context(),
             phone_device.IncomingCallData(call_id="call-123", caller="Front desk"),
         )
-        await _wait_until(lambda: _require_firmware(phone).state() == "/Phone/ringing")
+        await _wait_until(lambda: bool(_heard(hand)))
 
-        assert _phone_events(recording_service)[-1].name == phone_device.RingingEvent.name
+        ring = _heard(hand)[-1]
+        assert (ring.kind, ring.caller) == ("phone.ringing", "Front desk")
 
     asyncio.run(run())
 
 
 def test_livekit_phone_rejects_forged_service_originating_phone_event() -> None:
     async def run() -> None:
-        service = FakePhoneService()
-        phone = phone_device.Phone(service=service)
-
-        _ = await mosfet.started(None, phone, typing.cast(hsm.Model, phone.model))
-        await _wait_until(lambda: service.state() == "/PhoneService/ready", timeout=0.05)
+        phone, _service, _hand = await _start_livekit_phone_service()
         assert _require_firmware(phone).state() == "/Phone/hung_up"
         forged = dataclasses.replace(
             phone_device.IncomingCallEvent.with_data(phone_device.IncomingCallData(call_id="forged-call")),
@@ -1007,26 +960,26 @@ def test_livekit_phone_rejects_forged_service_originating_phone_event() -> None:
 
 
 def test_livekit_phone_service_ingress_is_topology_not_envelope_admission() -> None:
-    """publish dispatches into HSM; envelope target/source are not re-checked at the door.
+    """Firmware publishes are delivered into the HSM; envelope target/source are not re-checked at the door.
 
     Delivery is the gate. Payload-typed transitions fire when data matches; envelope fields
     are for correlation/telemetry, not imperative admission.
     """
 
     async def run() -> None:
-        phone, service, _recording_service = await _start_livekit_phone_service()
+        phone, service, _hand = await _start_livekit_phone_service()
         assert device_firmware(phone) is not None
 
         # Unstamped answer request: typed payload matches → transition runs.
-        service.publish(
+        await service.dispatch(
             service.context(),
             phone_device.ServiceAnswerRequestedEvent.with_data(phone_device.AnswerRequestData(call_id="call-123")),
         )
         await _wait_until(lambda: service.answer_requests == [phone_device.AnswerRequestData(call_id="call-123")])
         await _wait_until(lambda: service.state() == "/PhoneService/ready")
 
-        # Mistargeted envelope still delivers via publish→dispatch; HSM does not re-check target.
-        service.publish(
+        # A mistargeted envelope still delivers; the HSM does not re-check target.
+        await service.dispatch(
             service.context(),
             dataclasses.replace(
                 phone_device.ServiceAnswerRequestedEvent.with_data(phone_device.AnswerRequestData(call_id="call-123")),
@@ -1044,7 +997,7 @@ def test_livekit_phone_service_ingress_is_topology_not_envelope_admission() -> N
         await _wait_until(lambda: service.state() == "/PhoneService/ready")
 
         # Hung-up without an active request: provider-terminal hang-up guard fails (call correlation).
-        service.publish(
+        await service.dispatch(
             service.context(),
             phone_device.HungUpEvent.with_data(
                 phone_device.HungUpData(call_id="no-active-op", outcome="remote_hang_up")
@@ -1055,13 +1008,13 @@ def test_livekit_phone_service_ingress_is_topology_not_envelope_admission() -> N
 
         # Transfer terminals without active transfer: correlation guard fails → no state change.
         target = phone_device.TransferTarget(kind="address", value="sip:operator@example.com")
-        service.publish(
+        await service.dispatch(
             service.context(),
             phone_device.CallTransferCompletedEvent.with_data(
                 phone_device.TransferData(call_id="call-123", transfer_id="transfer-123", target=target)
             ),
         )
-        service.publish(
+        await service.dispatch(
             service.context(),
             phone_device.CallTransferFailedEvent.with_data(
                 phone_device.CallTransferFailedData(
@@ -1080,16 +1033,13 @@ def test_livekit_phone_service_ingress_is_topology_not_envelope_admission() -> N
 
 def test_livekit_phone_service_detaches_from_phone_service_target() -> None:
     async def run() -> None:
-        service = FakePhoneService()
-        recording_service = RecordingPhoneService(service)
-        phone = phone_device.Phone(service=recording_service)
+        phone, service, _hand = await _start_livekit_phone_service()
 
-        _ = await mosfet.started(None, phone, typing.cast(hsm.Model, phone.model))
-        await _wait_until(lambda: service.state() == "/PhoneService/ready", timeout=0.05)
-        assert device_firmware(phone) is not None
-
-        await service.detach(Environment.from_context(phone.context()), _require_firmware(phone))
-        await _wait_until(lambda: service.state() == "/PhoneService/unconnected", timeout=0.05)
+        await service.dispatch(
+            service.context(),
+            attachment.DetachEvent.with_data(attachment.DetachData(actor=_require_firmware(phone))),
+        )
+        await _wait_until(lambda: service.state() == "/PhoneService/unconnected")
         await service.incoming_call(service.context(), phone_device.IncomingCallData(call_id="call-123"))
         await asyncio.sleep(0)
 
@@ -1098,92 +1048,59 @@ def test_livekit_phone_service_detaches_from_phone_service_target() -> None:
     asyncio.run(run())
 
 
-def test_livekit_phone_service_keeps_first_phone_attachment_when_second_phone_attaches() -> None:
+def test_livekit_phone_service_keeps_first_phone_attachment_when_another_actor_attaches() -> None:
+    """One firmware at a time: another attach is refused as a conflict and the first keeps the line."""
+
     async def run() -> None:
-        service = FakePhoneService()
-        first = phone_device.Phone(service=service)
-        second = phone_device.Phone(service=service)
+        first, service, _hand = await _start_livekit_phone_service()
+        other = await mosfet.started(
+            first.context(),
+            hsm.Instance(),
+            mosfet.define("OtherFirmware", hsm.initial(hsm.target("s")), hsm.state("s")),
+        )
 
-        _ = await mosfet.started(None, first, typing.cast(hsm.Model, first.model), hsm.Config(id="first-phone"))
-        await _wait_until(lambda: service.state() == "/PhoneService/ready", timeout=0.05)
-        assert device_firmware(first) is not None
+        refused = await abilities.run_terminal_operation(
+            first.context(),
+            child=service,
+            request=lambda reply: dataclasses.replace(
+                attachment.AttachEvent.with_data(attachment.AttachData(actor=other, reply_to=reply)),
+                id="second-attach",
+            ),
+            terminals=(attachment.AttachCompleteEvent, attachment.AttachFailedEvent),
+            timeout=datetime.timedelta(seconds=1),
+        )
 
-        other_target = RecordingPhoneEventTarget(target=_require_firmware(first), events=[])
-        _ = await mosfet.started(first.context(), other_target, other_target.model, hsm.Config(id="other-target"))
-        with pytest.raises(PhoneServiceError, match="already attached"):
-            await service.attach(Environment.from_context(first.context()), other_target)
-        await asyncio.sleep(0)
-
+        assert isinstance(refused.data, attachment.FailedData)
+        assert refused.data.kind is attachment.FailureKind.CONFLICT
         assert service.state() == "/PhoneService/ready"
 
-        _ = await mosfet.started(
-            first.context(), second, typing.cast(hsm.Model, second.model), hsm.Config(id="second-phone")
-        )
-        await _wait_until(lambda: second.state() == "/Device/failed")
+        await service.incoming_call(service.context(), phone_device.IncomingCallData(call_id="call-123"))
+        await _wait_until(lambda: _require_firmware(first).state() == "/Phone/ringing")
 
+    asyncio.run(run())
+
+
+def test_a_second_phone_cannot_take_a_service_another_phone_is_running() -> None:
+    """A phone owns the service it is given; one already running elsewhere fails the second phone's bring-up."""
+
+    async def run() -> None:
+        first, service, _hand = await _start_livekit_phone_service()
+        second = phone_device.Phone(service=service)
+
+        _ = await mosfet.started(first.context(), second, typing.cast(hsm.Model, second.model))
+        await _wait_until(lambda: second.state() == "/Device/failed")
         await second.dispatch(
             second.context(),
             phone_device.DialEvent.with_data(phone_device.DialData(number=DIAL_NUMBER)),
         )
         await asyncio.sleep(0)
+
         assert second.state() == "/Device/failed"
         assert service.dial_requests == []
-
+        assert service.state() == "/PhoneService/ready"
         await service.incoming_call(service.context(), phone_device.IncomingCallData(call_id="call-123"))
         await _wait_until(lambda: _require_firmware(first).state() == "/Phone/ringing")
         assert device_firmware(second) is None
-        await asyncio.sleep(0)
-        assert second.state() == "/Device/failed"
-
-    asyncio.run(run())
-
-
-def test_livekit_phone_service_conflicting_attach_event_dispatches_rejection() -> None:
-    async def run() -> None:
-        recorded_events: list[hsm.Event[typing.Any]] = []
-
-        class RecordingPhoneServiceInstance(PhoneService):
-            @typing.override
-            def dispatch(self, ctx: hsm.Context, event: hsm.Event[typing.Any]) -> collections.abc.Awaitable[bool]:
-                recorded_events.append(event)
-                return super().dispatch(ctx, event)
-
-        service = RecordingPhoneServiceInstance()
-        environment = Environment()
-        terminal_model = mosfet.define(
-            "PhoneServiceTerminal",
-            hsm.initial(hsm.target("active")),
-            hsm.state("active"),
-        )
-        first_terminal = hsm.Instance()
-        second_terminal = hsm.Instance()
-        first_events: list[hsm.Event[typing.Any]] = []
-        second_events: list[hsm.Event[typing.Any]] = []
-        first_target = RecordingPhoneEventTarget(target=first_terminal, events=first_events)
-        second_target = RecordingPhoneEventTarget(target=second_terminal, events=second_events)
-        attachment_data = typing.cast(
-            collections.abc.Callable[..., object], getattr(phone_module, "_PhoneServiceAttachmentData")
-        )
-        attached_event = typing.cast(hsm.Event[typing.Any], getattr(phone_module, "_ServiceAttachedEvent"))
-        rejected_event = typing.cast(hsm.Event[typing.Any], getattr(phone_module, "_ServiceAttachmentRejectedEvent"))
-
-        _ = await mosfet.started(environment, first_terminal, terminal_model, hsm.Config(id="first-terminal"))
-        _ = await mosfet.started(environment, second_terminal, terminal_model, hsm.Config(id="second-terminal"))
-        _ = await mosfet.started(environment, first_target, first_target.model, hsm.Config(id="first-target"))
-        _ = await mosfet.started(environment, second_target, second_target.model, hsm.Config(id="second-target"))
-        await service.attach(environment, first_target)
-
-        recorded_events.clear()
-        await service.dispatch(service.context(), attached_event.with_data(attachment_data(target=second_target)))
-        assert [event.name for event in recorded_events] == [attached_event.name, rejected_event.name]
-
-        recorded_events.clear()
-        await service.incoming_call(service.context(), phone_device.IncomingCallData(call_id="call-123"))
-        await _wait_until(lambda: bool(first_events))
-
-        assert first_events[-1].name == phone_device.IncomingCallEvent.name
-        assert second_events == []
-        assert service.state() == "/PhoneService/ready"
 
     asyncio.run(run())
 
@@ -1210,7 +1127,7 @@ def test_livekit_phone_sugar_requires_url_and_token_together() -> None:
 
 def test_livekit_phone_service_answers_current_phone_call_through_gateway() -> None:
     async def run() -> None:
-        phone, service, recording_service = await _start_livekit_phone_service()
+        phone, service, hand = await _start_livekit_phone_service()
 
         await service.dispatch(
             service.context(),
@@ -1222,19 +1139,19 @@ def test_livekit_phone_service_answers_current_phone_call_through_gateway() -> N
 
         assert device_firmware(phone) is not None
         assert _is_answered(phone)
-        assert [event.name for event in _phone_events(recording_service)] == [
-            phone_device.RingingEvent.name,
-            phone_device.ServiceAnswerRequestedEvent.name,
-            phone_device.AnsweredEvent.name,
+        await _wait_until(lambda: _last_told(hand) == phone_device.AnsweredEvent.name)
+        # It rang in the room, the service was asked to answer (above), and the hand was told it came up.
+        assert [sound.kind for sound in _heard(hand)] == ["phone.ringing"]
+        assert [(event.event, event.data) for event in _told(hand)] == [
+            (phone_device.AnsweredEvent.name, phone_device.CallData(call_id="call-123"))
         ]
-        assert _phone_events(recording_service)[-1].data == phone_device.CallData(call_id="call-123")
 
     asyncio.run(run())
 
 
 def test_livekit_phone_service_declines_current_phone_call_through_gateway() -> None:
     async def run() -> None:
-        phone, service, recording_service = await _start_livekit_phone_service()
+        phone, service, hand = await _start_livekit_phone_service()
 
         await service.dispatch(
             service.context(),
@@ -1245,17 +1162,15 @@ def test_livekit_phone_service_declines_current_phone_call_through_gateway() -> 
         await _wait_until(lambda: service.state() == "/PhoneService/ready")
 
         assert _require_firmware(phone).state() == "/Phone/hung_up"
-        assert [event.name for event in _phone_events(recording_service)][-2:] == [
-            phone_device.ServiceDeclineRequestedEvent.name,
-            phone_device.HungUpEvent.name,
-        ]
+        await _wait_until(lambda: _last_told(hand) == phone_device.HungUpEvent.name)
+        assert _told(hand)[-1].data == phone_device.HungUpData(call_id="call-123", outcome="declined")
 
     asyncio.run(run())
 
 
 def test_livekit_phone_service_hangs_up_current_phone_call_through_gateway() -> None:
     async def run() -> None:
-        phone, service, recording_service = await _start_livekit_phone_service()
+        phone, service, hand = await _start_livekit_phone_service()
 
         await service.dispatch(
             service.context(),
@@ -1268,10 +1183,8 @@ def test_livekit_phone_service_hangs_up_current_phone_call_through_gateway() -> 
         await _wait_until(lambda: service.state() == "/PhoneService/ready")
 
         assert _require_firmware(phone).state() == "/Phone/hung_up"
-        assert [event.name for event in _phone_events(recording_service)][-2:] == [
-            phone_device.ServiceHangUpRequestedEvent.name,
-            phone_device.HungUpEvent.name,
-        ]
+        await _wait_until(lambda: _last_told(hand) == phone_device.HungUpEvent.name)
+        assert _told(hand)[-1].data == phone_device.HungUpData(call_id="call-123", outcome="local_hang_up")
 
     asyncio.run(run())
 
@@ -1289,8 +1202,8 @@ def test_dialling_one_phones_number_makes_that_phone_ring() -> None:
 
     async def run() -> None:
         sfu = FakeSfu()
-        alice_phone, _alice_service, alice_room, alice_recording = await _start_phone_on_room(ALICE_IDENTITY, sfu)
-        bob_phone, _bob_service, _bob_room, bob_recording = await _start_phone_on_room(BOB_IDENTITY, sfu)
+        alice_phone, _alice_service, alice_room, alice_hand = await _start_phone_on_room(ALICE_IDENTITY, sfu)
+        bob_phone, _bob_service, _bob_room, bob_hand = await _start_phone_on_room(BOB_IDENTITY, sfu)
 
         await alice_phone.dispatch(
             alice_phone.context(),
@@ -1299,8 +1212,9 @@ def test_dialling_one_phones_number_makes_that_phone_ring() -> None:
         await _wait_until(lambda: _require_firmware(bob_phone).state() == "/Phone/ringing")
 
         # Bob's phone shows the caller the SFU authenticated, not a name the message claimed.
-        ringing = [event for event in _phone_events(bob_recording) if event.name == phone_device.RingingEvent.name]
-        assert ringing[-1].data == phone_device.RingingData(caller=ALICE_IDENTITY)
+        await _wait_until(lambda: bool(_heard(bob_hand)))
+        ringing = [sound for sound in _heard(bob_hand) if sound.kind == "phone.ringing"]
+        assert ringing[-1].caller == ALICE_IDENTITY
         # Alice is dialling, not connected: acked setup only means the far end is ringing.
         assert _require_firmware(alice_phone).state() == "/Phone/dialing"
 
@@ -1313,8 +1227,9 @@ def test_dialling_one_phones_number_makes_that_phone_ring() -> None:
         await _wait_until(lambda: _is_answered(bob_phone))
 
         # One call, one name for it, minted by the caller and adopted by the callee.
-        for recording in (alice_recording, bob_recording):
-            answered = [event for event in _phone_events(recording) if event.name == phone_device.AnsweredEvent.name]
+        for hand in (alice_hand, bob_hand):
+            await _wait_until(lambda: phone_device.AnsweredEvent.name in [event.event for event in _told(hand)])
+            answered = [event for event in _told(hand) if event.event == phone_device.AnsweredEvent.name]
             assert answered[-1].data == phone_device.CallData(call_id=call_id)
 
         await bob_phone.dispatch(
@@ -1324,12 +1239,13 @@ def test_dialling_one_phones_number_makes_that_phone_ring() -> None:
         await _wait_until(lambda: _require_firmware(bob_phone).state() == "/Phone/hung_up")
         # Bob stays in the room after hanging up, so only the bye can tell Alice the call ended.
         await _wait_until(lambda: _require_firmware(alice_phone).state() == "/Phone/hung_up")
+        await _wait_until(lambda: _last_told(alice_hand) == phone_device.HungUpEvent.name)
 
         assert any(
-            event.name == phone_device.HungUpEvent.name
+            event.event == phone_device.HungUpEvent.name
             and isinstance(event.data, phone_device.HungUpData)
             and event.data.outcome == "remote_hang_up"
-            for event in _phone_events(alice_recording)
+            for event in _told(alice_hand)
         )
 
     asyncio.run(run())
@@ -1348,8 +1264,8 @@ def test_an_accepted_dial_opens_the_callers_line_too() -> None:
 
     async def run() -> None:
         sfu = FakeSfu()
-        alice_phone, _alice_service, alice_room, alice_recording = await _start_phone_on_room(ALICE_IDENTITY, sfu)
-        bob_phone, _bob_service, _bob_room, _bob_recording = await _start_phone_on_room(BOB_IDENTITY, sfu)
+        alice_phone, _alice_service, alice_room, alice_hand = await _start_phone_on_room(ALICE_IDENTITY, sfu)
+        bob_phone, _bob_service, _bob_room, _bob_hand = await _start_phone_on_room(BOB_IDENTITY, sfu)
 
         await alice_phone.dispatch(
             alice_phone.context(),
@@ -1366,11 +1282,12 @@ def test_an_accepted_dial_opens_the_callers_line_too() -> None:
         # Both ends of one call, both able to talk on it.
         await _wait_until(lambda: _require_firmware(bob_phone).state() == "/Phone/answered/media_ready")
         await _wait_until(lambda: _require_firmware(alice_phone).state() == "/Phone/answered/media_ready")
+        await _wait_until(lambda: _last_told(alice_hand) == phone_device.MediaReadyEvent.name)
+        for _ in range(5):
+            await asyncio.sleep(0)
 
         # And the caller says so once — a line does not open twice for one call.
-        media_ready = [
-            event for event in _phone_events(alice_recording) if event.name == phone_device.MediaReadyEvent.name
-        ]
+        media_ready = [event for event in _told(alice_hand) if event.event == phone_device.MediaReadyEvent.name]
         assert [event.data for event in media_ready] == [phone_device.CallData(call_id=call_id)]
 
     asyncio.run(run())
@@ -1404,8 +1321,8 @@ def test_a_connected_call_names_who_is_on_the_line_on_the_display() -> None:
 
     async def run() -> None:
         sfu = FakeSfu()
-        alice_phone, _alice_service, alice_room, _alice_recording = await _start_phone_on_room(ALICE_IDENTITY, sfu)
-        bob_phone, _bob_service, _bob_room, _bob_recording = await _start_phone_on_room(BOB_IDENTITY, sfu)
+        alice_phone, _alice_service, alice_room, _alice_hand = await _start_phone_on_room(ALICE_IDENTITY, sfu)
+        bob_phone, _bob_service, _bob_room, _bob_hand = await _start_phone_on_room(BOB_IDENTITY, sfu)
 
         await alice_phone.dispatch(
             alice_phone.context(),
@@ -1438,7 +1355,7 @@ def test_a_call_with_a_withheld_caller_shows_nobody() -> None:
     """
 
     async def run() -> None:
-        phone, service, _room, _recording = await _start_signalling_livekit_phone()
+        phone, service, _room, _hand = await _start_signalling_livekit_phone()
 
         await service.incoming_call(service.context(), phone_device.IncomingCallData(call_id="call-123"))
         await _wait_until(lambda: _require_firmware(phone).state() == "/Phone/ringing")
@@ -1463,8 +1380,8 @@ def test_a_caller_cannot_open_its_line_on_a_phone_that_is_only_ringing() -> None
 
     async def run() -> None:
         sfu = FakeSfu()
-        alice_phone, _alice_service, _alice_room, alice_recording = await _start_phone_on_room(ALICE_IDENTITY, sfu)
-        bob_phone, _bob_service, _bob_room, _bob_recording = await _start_phone_on_room(BOB_IDENTITY, sfu)
+        alice_phone, _alice_service, _alice_room, alice_hand = await _start_phone_on_room(ALICE_IDENTITY, sfu)
+        bob_phone, _bob_service, _bob_room, _bob_hand = await _start_phone_on_room(BOB_IDENTITY, sfu)
 
         await alice_phone.dispatch(
             alice_phone.context(),
@@ -1477,9 +1394,7 @@ def test_a_caller_cannot_open_its_line_on_a_phone_that_is_only_ringing() -> None
 
         assert _require_firmware(alice_phone).state() == "/Phone/dialing"
         assert _require_firmware(bob_phone).state() == "/Phone/ringing"
-        assert not [
-            event for event in _phone_events(alice_recording) if event.name == phone_device.MediaReadyEvent.name
-        ]
+        assert not [event for event in _told(alice_hand) if event.event == phone_device.MediaReadyEvent.name]
 
     asyncio.run(run())
 
@@ -1494,7 +1409,7 @@ def test_a_call_connected_before_the_line_is_up_opens_when_it_comes_up() -> None
     """
 
     async def run() -> None:
-        phone, service, _room, recording_service = await _start_phone_on_room(
+        phone, service, _room, hand = await _start_phone_on_room(
             ALICE_IDENTITY,
             FakeSfu(),
             connect_room=False,
@@ -1507,12 +1422,11 @@ def test_a_call_connected_before_the_line_is_up_opens_when_it_comes_up() -> None
         # Connected, and with nothing to talk over yet.
         await _wait_until(lambda: _require_firmware(phone).state() == "/Phone/answered/media_connecting")
 
-        await service.connect_room(url="wss://livekit.example.com", token="token")
+        await _connect_room(service)
 
         await _wait_until(lambda: _require_firmware(phone).state() == "/Phone/answered/media_ready")
-        media_ready = [
-            event for event in _phone_events(recording_service) if event.name == phone_device.MediaReadyEvent.name
-        ]
+        await _wait_until(lambda: _last_told(hand) == phone_device.MediaReadyEvent.name)
+        media_ready = [event for event in _told(hand) if event.event == phone_device.MediaReadyEvent.name]
         assert [event.data for event in media_ready] == [phone_device.CallData(call_id="call-123")]
 
     asyncio.run(run())
@@ -1520,7 +1434,7 @@ def test_a_call_connected_before_the_line_is_up_opens_when_it_comes_up() -> None
 
 def test_livekit_phone_service_maps_provider_media_ready_to_phone_firmware() -> None:
     async def run() -> None:
-        phone, service, recording_service = await _start_livekit_phone_service()
+        phone, service, hand = await _start_livekit_phone_service()
 
         await service.dispatch(
             service.context(),
@@ -1533,15 +1447,15 @@ def test_livekit_phone_service_maps_provider_media_ready_to_phone_firmware() -> 
             ServiceMediaReadyEvent.with_data(phone_device.MediaReadyData(call_id="call-123")),
         )
 
-        assert _phone_events(recording_service)[-1].name == phone_device.MediaReadyEvent.name
-        assert _phone_events(recording_service)[-1].data == phone_device.CallData(call_id="call-123")
+        await _wait_until(lambda: _last_told(hand) == phone_device.MediaReadyEvent.name)
+        assert _told(hand)[-1].data == phone_device.CallData(call_id="call-123")
 
     asyncio.run(run())
 
 
 def test_livekit_phone_service_maps_provider_remote_hang_up_to_phone_firmware() -> None:
     async def run() -> None:
-        phone, service, recording_service = await _start_livekit_phone_service()
+        phone, service, hand = await _start_livekit_phone_service()
 
         await service.dispatch(
             service.context(),
@@ -1553,14 +1467,14 @@ def test_livekit_phone_service_maps_provider_remote_hang_up_to_phone_firmware() 
         )
         await _wait_until(lambda: _require_firmware(phone).state() == "/Phone/hung_up")
 
-        assert _phone_events(recording_service)[-1].name == phone_device.HungUpEvent.name
+        await _wait_until(lambda: _last_told(hand) == phone_device.HungUpEvent.name)
 
     asyncio.run(run())
 
 
 def test_livekit_phone_service_maps_provider_call_failure_to_phone_firmware() -> None:
     async def run() -> None:
-        phone, service, recording_service = await _start_livekit_phone_service()
+        phone, service, hand = await _start_livekit_phone_service()
 
         await service.dispatch(
             service.context(),
@@ -1574,14 +1488,14 @@ def test_livekit_phone_service_maps_provider_call_failure_to_phone_firmware() ->
         )
         await _wait_until(lambda: _require_firmware(phone).state() == "/Phone/hung_up")
 
-        assert _phone_events(recording_service)[-1].name == phone_device.HungUpEvent.name
+        await _wait_until(lambda: _last_told(hand) == phone_device.HungUpEvent.name)
 
     asyncio.run(run())
 
 
 def test_livekit_phone_service_transfer_request_is_accepted_by_gateway() -> None:
     async def run() -> None:
-        phone, service, recording_service = await _start_livekit_phone_service()
+        phone, service, hand = await _start_livekit_phone_service()
         target = phone_device.TransferTarget(kind="address", value="sip:operator@example.com")
         request = phone_device.TransferCallData(transfer_id="transfer-123", target=target)
         stamped = phone_device.TransferRequestData(call_id="call-123", transfer_id="transfer-123", target=target)
@@ -1597,17 +1511,17 @@ def test_livekit_phone_service_transfer_request_is_accepted_by_gateway() -> None
         await _wait_until(lambda: service.transfer_requests == [stamped])
 
         assert _require_firmware(phone).state() == "/Phone/transferring"
-        assert [event.name for event in _phone_events(recording_service)][-2:] == [
-            phone_device.ServiceTransferRequestedEvent.name,
-            phone_device.TransferStartedEvent.name,
-        ]
+        await _wait_until(lambda: _last_told(hand) == phone_device.TransferStartedEvent.name)
+        assert _told(hand)[-1].data == phone_device.TransferData(
+            call_id="call-123", transfer_id="transfer-123", target=target
+        )
 
     asyncio.run(run())
 
 
 def test_livekit_phone_service_maps_provider_transfer_completion_to_phone_firmware() -> None:
     async def run() -> None:
-        phone, service, recording_service = await _start_livekit_phone_service()
+        phone, service, hand = await _start_livekit_phone_service()
         target = phone_device.TransferTarget(kind="address", value="sip:operator@example.com")
         request = phone_device.TransferCallData(transfer_id="transfer-123", target=target)
         completion = phone_device.TransferCompletedData(call_id="call-123", transfer_id="transfer-123", target=target)
@@ -1624,7 +1538,8 @@ def test_livekit_phone_service_maps_provider_transfer_completion_to_phone_firmwa
         await service.dispatch(service.context(), ServiceTransferCompletedEvent.with_data(completion))
         await _wait_until(lambda: _require_firmware(phone).state() == "/Phone/hung_up")
 
-        assert [event.name for event in _phone_events(recording_service)][-2:] == [
+        await _wait_until(lambda: _last_told(hand) == phone_device.HungUpEvent.name)
+        assert [event.event for event in _told(hand)][-2:] == [
             phone_device.CallTransferCompletedEvent.name,
             phone_device.HungUpEvent.name,
         ]
@@ -1635,7 +1550,7 @@ def test_livekit_phone_service_maps_provider_transfer_completion_to_phone_firmwa
 def test_livekit_phone_service_resolves_in_flight_answer_when_remote_hangs_up() -> None:
     async def run() -> None:
         gateway = FakePhoneService(blocked_operations=frozenset({"answer"}))
-        phone, service, recording_service = await _start_livekit_phone_service(
+        phone, service, hand = await _start_livekit_phone_service(
             service=gateway, operation_timeout=datetime.timedelta(milliseconds=20)
         )
 
@@ -1653,9 +1568,9 @@ def test_livekit_phone_service_resolves_in_flight_answer_when_remote_hangs_up() 
         await _wait_until(lambda: _require_firmware(phone).state() == "/Phone/hung_up")
 
         assert _require_firmware(phone).state() == "/Phone/hung_up"
-        assert _phone_events(recording_service)[-1].name == phone_device.HungUpEvent.name
+        await _wait_until(lambda: _last_told(hand) == phone_device.HungUpEvent.name)
         await asyncio.sleep(0.03)
-        assert _phone_events(recording_service)[-1].name == phone_device.HungUpEvent.name
+        await _wait_until(lambda: _last_told(hand) == phone_device.HungUpEvent.name)
 
     asyncio.run(run())
 
@@ -1663,11 +1578,9 @@ def test_livekit_phone_service_resolves_in_flight_answer_when_remote_hangs_up() 
 def test_livekit_phone_service_consumes_stale_provider_observations_while_answering() -> None:
     async def run() -> None:
         gateway = FakePhoneService(blocked_operations=frozenset({"answer"}))
-        forwarded_events: list[hsm.Event[typing.Any]] = []
-        phone, service, recording_service = await _start_livekit_phone_service(
+        phone, service, hand = await _start_livekit_phone_service(
             service=gateway,
             operation_timeout=datetime.timedelta(milliseconds=200),
-            forwarded_events=forwarded_events,
         )
 
         await service.dispatch(
@@ -1676,7 +1589,7 @@ def test_livekit_phone_service_consumes_stale_provider_observations_while_answer
         )
         await phone.dispatch(phone.context(), phone_device.AnswerCallEvent.with_data(phone_device.AnswerCallData()))
         await _wait_until(lambda: service.state() == "/PhoneService/answering")
-        await _assert_stale_provider_observations_are_consumed(service, recording_service)
+        await _assert_stale_provider_observations_are_consumed(phone, service, hand)
 
         assert service.state() == "/PhoneService/answering"
         assert gateway.answer_requests == [phone_device.AnswerRequestData(call_id="call-123")]
@@ -1688,7 +1601,7 @@ def test_livekit_phone_service_consumes_stale_provider_observations_while_answer
 def test_livekit_phone_service_declines_gateway_when_phone_declines_during_answer() -> None:
     async def run() -> None:
         gateway = FakePhoneService(blocked_operations=frozenset({"answer", "decline"}))
-        phone, service, recording_service = await _start_livekit_phone_service(
+        phone, service, hand = await _start_livekit_phone_service(
             service=gateway, operation_timeout=datetime.timedelta(milliseconds=200)
         )
 
@@ -1705,7 +1618,7 @@ def test_livekit_phone_service_declines_gateway_when_phone_declines_during_answe
         assert service.state() == "/PhoneService/ready"
         assert gateway.answer_requests == [phone_device.AnswerRequestData(call_id="call-123")]
         assert _require_firmware(phone).state() == "/Phone/hung_up"
-        assert _phone_events(recording_service)[-1].name == phone_device.HungUpEvent.name
+        await _wait_until(lambda: _last_told(hand) == phone_device.HungUpEvent.name)
 
     asyncio.run(run())
 
@@ -1713,7 +1626,7 @@ def test_livekit_phone_service_declines_gateway_when_phone_declines_during_answe
 def test_livekit_phone_service_resolves_in_flight_transfer_when_provider_fails_transfer() -> None:
     async def run() -> None:
         gateway = FakePhoneService(blocked_operations=frozenset({"transfer"}))
-        phone, service, recording_service = await _start_livekit_phone_service(
+        phone, service, hand = await _start_livekit_phone_service(
             service=gateway, operation_timeout=datetime.timedelta(milliseconds=20)
         )
         target = phone_device.TransferTarget(kind="address", value="sip:operator@example.com")
@@ -1740,14 +1653,14 @@ def test_livekit_phone_service_resolves_in_flight_transfer_when_provider_fails_t
 
         assert device_firmware(phone) is not None
         assert _is_answered(phone)
-        assert _phone_events(recording_service)[-1].data == phone_device.CallTransferFailedData(
+        assert _told(hand)[-1].data == phone_device.CallTransferFailedData(
             call_id="call-123",
             transfer_id="transfer-123",
             target=target,
             failure_kind="transfer_rejected",
         )
         await asyncio.sleep(0.03)
-        assert _phone_events(recording_service)[-1].data == phone_device.CallTransferFailedData(
+        assert _told(hand)[-1].data == phone_device.CallTransferFailedData(
             call_id="call-123",
             transfer_id="transfer-123",
             target=target,
@@ -1760,11 +1673,9 @@ def test_livekit_phone_service_resolves_in_flight_transfer_when_provider_fails_t
 def test_livekit_phone_service_keeps_in_flight_transfer_for_stale_transfer_failure() -> None:
     async def run() -> None:
         gateway = FakePhoneService(blocked_operations=frozenset({"transfer"}))
-        forwarded_events: list[hsm.Event[typing.Any]] = []
-        phone, service, recording_service = await _start_livekit_phone_service(
+        phone, service, hand = await _start_livekit_phone_service(
             service=gateway,
             operation_timeout=datetime.timedelta(milliseconds=200),
-            forwarded_events=forwarded_events,
         )
         target = phone_device.TransferTarget(kind="address", value="sip:operator@example.com")
         stale_target = phone_device.TransferTarget(kind="address", value="sip:other@example.com")
@@ -1786,7 +1697,7 @@ def test_livekit_phone_service_keeps_in_flight_transfer_for_stale_transfer_failu
         await _mark_media_ready(phone, service)
         await phone.dispatch(phone.context(), phone_device.TransferCallEvent.with_data(request))
         await _wait_until(lambda: service.state() == "/PhoneService/transferring")
-        committed_count = len(_phone_events(recording_service))
+        committed_count = len(_told(hand))
         await service.dispatch(service.context(), ServiceTransferFailedEvent.with_data(failure))
         await service.dispatch(
             service.context(),
@@ -1796,11 +1707,11 @@ def test_livekit_phone_service_keeps_in_flight_transfer_for_stale_transfer_failu
                 )
             ),
         )
-        await _assert_stale_provider_observations_are_consumed(service, recording_service)
+        await _assert_stale_provider_observations_are_consumed(phone, service, hand)
 
         assert service.state() == "/PhoneService/transferring"
         assert gateway.transfer_requests == [stamped]
-        assert len(_phone_events(recording_service)) == committed_count
+        assert len(_told(hand)) == committed_count
         assert _require_firmware(phone).state() == "/Phone/transferring"
 
     asyncio.run(run())
@@ -1809,7 +1720,7 @@ def test_livekit_phone_service_keeps_in_flight_transfer_for_stale_transfer_failu
 def test_livekit_phone_service_ignores_stale_private_gateway_results() -> None:
     async def run_dial() -> None:
         gateway = FakePhoneService(blocked_operations=frozenset({"dial"}))
-        phone, service, _recording_service = await _start_livekit_phone_service(
+        phone, service, _hand = await _start_livekit_phone_service(
             service=gateway, operation_timeout=datetime.timedelta(milliseconds=200)
         )
         setup_delivered = typing.cast(hsm.Event[None], getattr(phone_module, "_SetupDeliveredEvent"))
@@ -1837,7 +1748,7 @@ def test_livekit_phone_service_ignores_stale_private_gateway_results() -> None:
 
     async def run_answer() -> None:
         gateway = FakePhoneService(blocked_operations=frozenset({"answer"}))
-        phone, service, _recording_service = await _start_livekit_phone_service(
+        phone, service, _hand = await _start_livekit_phone_service(
             service=gateway, operation_timeout=datetime.timedelta(milliseconds=200)
         )
         answer_completed = typing.cast(
@@ -1870,7 +1781,7 @@ def test_livekit_phone_service_ignores_stale_private_gateway_results() -> None:
 
     async def run_transfer() -> None:
         gateway = FakePhoneService(blocked_operations=frozenset({"transfer"}))
-        phone, service, _recording_service = await _start_livekit_phone_service(
+        phone, service, _hand = await _start_livekit_phone_service(
             service=gateway, operation_timeout=datetime.timedelta(milliseconds=200)
         )
         transfer_accepted = typing.cast(
@@ -1925,10 +1836,7 @@ def test_livekit_phone_service_ignores_stale_private_gateway_results() -> None:
 
 def test_livekit_phone_service_rejects_stale_transfer_terminal_after_acceptance() -> None:
     async def run() -> None:
-        forwarded_events: list[hsm.Event[typing.Any]] = []
-        phone, service, _recording_service = await _start_livekit_phone_service(
-            forwarded_events=forwarded_events,
-        )
+        phone, service, hand = await _start_livekit_phone_service()
         target = phone_device.TransferTarget(kind="address", value="sip:operator@example.com")
         stale_target = phone_device.TransferTarget(kind="address", value="sip:other@example.com")
         request = phone_device.TransferCallData(transfer_id="transfer-123", target=target)
@@ -1943,7 +1851,7 @@ def test_livekit_phone_service_rejects_stale_transfer_terminal_after_acceptance(
         await phone.dispatch(phone.context(), phone_device.TransferCallEvent.with_data(request))
         await _wait_until(lambda: service.state() == "/PhoneService/ready")
         await _wait_until(lambda: _require_firmware(phone).state() == "/Phone/transferring")
-        committed_forwarded_events = tuple(forwarded_events)
+        before = (_told(hand), _heard(hand))
 
         await service.dispatch(
             service.context(),
@@ -1964,9 +1872,10 @@ def test_livekit_phone_service_rejects_stale_transfer_terminal_after_acceptance(
                 )
             ),
         )
-        await asyncio.sleep(0)
+        for _ in range(5):
+            await asyncio.sleep(0)
 
-        assert tuple(forwarded_events) == committed_forwarded_events
+        assert (_told(hand), _heard(hand)) == before
         assert service.state() == "/PhoneService/ready"
         assert _require_firmware(phone).state() == "/Phone/transferring"
 
@@ -1975,10 +1884,7 @@ def test_livekit_phone_service_rejects_stale_transfer_terminal_after_acceptance(
 
 def test_livekit_phone_service_keeps_accepted_transfer_for_uncorrelated_transferred_hang_up() -> None:
     async def run() -> None:
-        forwarded_events: list[hsm.Event[typing.Any]] = []
-        phone, service, recording_service = await _start_livekit_phone_service(
-            forwarded_events=forwarded_events,
-        )
+        phone, service, hand = await _start_livekit_phone_service()
         target = phone_device.TransferTarget(kind="address", value="sip:operator@example.com")
         stale_target = phone_device.TransferTarget(kind="address", value="sip:other@example.com")
         request = phone_device.TransferCallData(transfer_id="transfer-123", target=target)
@@ -1999,30 +1905,28 @@ def test_livekit_phone_service_keeps_accepted_transfer_for_uncorrelated_transfer
         await phone.dispatch(phone.context(), phone_device.TransferCallEvent.with_data(request))
         await _wait_until(lambda: service.state() == "/PhoneService/ready")
         await _wait_until(lambda: _require_firmware(phone).state() == "/Phone/transferring")
-        committed_forwarded_events = tuple(forwarded_events)
-        committed_phone_events = _phone_events(recording_service)
+        committed_phone_events = _told(hand)
 
-        service.publish(
+        await service.dispatch(
             service.context(),
             phone_device.HungUpEvent.with_data(phone_device.HungUpData(call_id="call-123", outcome="transferred")),
         )
         await service.dispatch(service.context(), ServiceTransferCompletedEvent.with_data(stale_completion))
-        await asyncio.sleep(0)
+        for _ in range(5):
+            await asyncio.sleep(0)
 
-        assert tuple(forwarded_events) == committed_forwarded_events
-        assert _phone_events(recording_service) == committed_phone_events
+        assert _told(hand) == committed_phone_events
         assert service.state() == "/PhoneService/ready"
         assert _require_firmware(phone).state() == "/Phone/transferring"
         await service.dispatch(service.context(), ServiceTransferCompletedEvent.with_data(completion))
         await _wait_until(lambda: _require_firmware(phone).state() == "/Phone/hung_up")
 
-        assert forwarded_events[-1].name == phone_device.ServiceTransferCompletedEvent.name
-        assert forwarded_events[-1].data == phone_device.TransferCompletedData(
-            call_id="call-123",
-            transfer_id="transfer-123",
-            target=target,
-        )
-        assert _phone_events(recording_service)[-1].name == phone_device.HungUpEvent.name
+        # The correlated completion reached firmware, which reports the transfer it completed.
+        await _wait_until(lambda: _last_told(hand) == phone_device.HungUpEvent.name)
+        completed = [event for event in _told(hand) if event.event == phone_device.CallTransferCompletedEvent.name]
+        assert [event.data for event in completed] == [
+            phone_device.TransferData(call_id="call-123", transfer_id="transfer-123", target=target)
+        ]
 
     asyncio.run(run())
 
@@ -2030,7 +1934,7 @@ def test_livekit_phone_service_keeps_accepted_transfer_for_uncorrelated_transfer
 def test_livekit_phone_service_hangs_up_gateway_when_phone_hangs_up_during_answer() -> None:
     async def run() -> None:
         gateway = FakePhoneService(blocked_operations=frozenset({"answer", "hang_up"}))
-        phone, service, recording_service = await _start_livekit_phone_service(
+        phone, service, hand = await _start_livekit_phone_service(
             service=gateway, operation_timeout=datetime.timedelta(milliseconds=200)
         )
 
@@ -2047,11 +1951,11 @@ def test_livekit_phone_service_hangs_up_gateway_when_phone_hangs_up_during_answe
         assert service.state() == "/PhoneService/ready"
         assert gateway.answer_requests == [phone_device.AnswerRequestData(call_id="call-123")]
         assert _require_firmware(phone).state() == "/Phone/hung_up"
-        assert _phone_events(recording_service)[-1].name == phone_device.HungUpEvent.name
+        await _wait_until(lambda: _last_told(hand) == phone_device.HungUpEvent.name)
 
         await asyncio.sleep(0.03)
         assert gateway.hang_up_requests == [phone_device.HangUpRequestData(call_id="call-123")]
-        assert _phone_events(recording_service)[-1].name == phone_device.HungUpEvent.name
+        await _wait_until(lambda: _last_told(hand) == phone_device.HungUpEvent.name)
 
     asyncio.run(run())
 
@@ -2059,7 +1963,7 @@ def test_livekit_phone_service_hangs_up_gateway_when_phone_hangs_up_during_answe
 def test_livekit_phone_service_hangs_up_gateway_when_phone_hangs_up_during_transfer() -> None:
     async def run() -> None:
         gateway = FakePhoneService(blocked_operations=frozenset({"hang_up", "transfer"}))
-        phone, service, recording_service = await _start_livekit_phone_service(
+        phone, service, hand = await _start_livekit_phone_service(
             service=gateway, operation_timeout=datetime.timedelta(milliseconds=200)
         )
         target = phone_device.TransferTarget(kind="address", value="sip:operator@example.com")
@@ -2082,7 +1986,7 @@ def test_livekit_phone_service_hangs_up_gateway_when_phone_hangs_up_during_trans
         assert service.state() == "/PhoneService/ready"
         assert gateway.transfer_requests == [stamped]
         assert _require_firmware(phone).state() == "/Phone/hung_up"
-        assert _phone_events(recording_service)[-1].name == phone_device.HungUpEvent.name
+        await _wait_until(lambda: _last_told(hand) == phone_device.HungUpEvent.name)
 
     asyncio.run(run())
 
@@ -2090,11 +1994,9 @@ def test_livekit_phone_service_hangs_up_gateway_when_phone_hangs_up_during_trans
 def test_livekit_phone_service_consumes_stale_provider_observations_while_hanging_up() -> None:
     async def run() -> None:
         gateway = FakePhoneService(blocked_operations=frozenset({"hang_up"}))
-        forwarded_events: list[hsm.Event[typing.Any]] = []
-        phone, service, recording_service = await _start_livekit_phone_service(
+        phone, service, hand = await _start_livekit_phone_service(
             service=gateway,
             operation_timeout=datetime.timedelta(milliseconds=200),
-            forwarded_events=forwarded_events,
         )
 
         await service.dispatch(
@@ -2103,17 +2005,16 @@ def test_livekit_phone_service_consumes_stale_provider_observations_while_hangin
         )
         await phone.dispatch(phone.context(), phone_device.AnswerCallEvent.with_data(phone_device.AnswerCallData()))
         await _wait_until(lambda: _is_answered(phone))
-        assert recording_service.forwarding_target is not None
-        service.publish(
+        await service.dispatch(
             service.context(),
             dataclasses.replace(
                 phone_device.ServiceHangUpRequestedEvent.with_data(phone_device.HangUpRequestData(call_id="call-123")),
-                source=hsm.id(recording_service.forwarding_target),
+                source=hsm.id(_require_firmware(phone)),
                 target=hsm.id(service),
             ),
         )
         await _wait_until(lambda: service.state() == "/PhoneService/hanging_up")
-        await _assert_stale_provider_observations_are_consumed(service, recording_service)
+        await _assert_stale_provider_observations_are_consumed(phone, service, hand)
 
         assert service.state() == "/PhoneService/hanging_up"
         assert gateway.hang_up_requests == [phone_device.HangUpRequestData(call_id="call-123")]
@@ -2126,7 +2027,7 @@ def test_livekit_phone_service_consumes_stale_provider_observations_while_hangin
 def test_livekit_phone_service_does_not_swallow_new_call_request_while_busy() -> None:
     async def run() -> None:
         gateway = FakePhoneService(blocked_operations=frozenset({"answer"}))
-        phone, service, recording_service = await _start_livekit_phone_service(
+        phone, service, hand = await _start_livekit_phone_service(
             service=gateway, operation_timeout=datetime.timedelta(milliseconds=200)
         )
 
@@ -2145,14 +2046,15 @@ def test_livekit_phone_service_does_not_swallow_new_call_request_while_busy() ->
 
         assert service.state() == "/PhoneService/answering"
         assert gateway.answer_requests == [phone_device.AnswerRequestData(call_id="call-1")]
-        assert phone_device.RingingEvent.name not in [event.name for event in _phone_events(recording_service)[2:]]
+        # The second call never rang over the first: one ring, for call-1.
+        assert [sound.kind for sound in _heard(hand)] == ["phone.ringing"]
 
     asyncio.run(run())
 
 
 def test_livekit_phone_service_maps_provider_transfer_failure_to_phone_firmware() -> None:
     async def run() -> None:
-        phone, service, recording_service = await _start_livekit_phone_service()
+        phone, service, hand = await _start_livekit_phone_service()
         target = phone_device.TransferTarget(kind="address", value="sip:operator@example.com")
         request = phone_device.TransferCallData(transfer_id="transfer-123", target=target)
         failure = phone_device.TransferFailedData(
@@ -2176,8 +2078,8 @@ def test_livekit_phone_service_maps_provider_transfer_failure_to_phone_firmware(
 
         assert device_firmware(phone) is not None
         assert _is_answered(phone)
-        assert _phone_events(recording_service)[-1].name == phone_device.CallTransferFailedEvent.name
-        assert _phone_events(recording_service)[-1].data == phone_device.CallTransferFailedData(
+        await _wait_until(lambda: _last_told(hand) == phone_device.CallTransferFailedEvent.name)
+        assert _told(hand)[-1].data == phone_device.CallTransferFailedData(
             call_id="call-123",
             transfer_id="transfer-123",
             target=target,
@@ -2190,7 +2092,7 @@ def test_livekit_phone_service_maps_provider_transfer_failure_to_phone_firmware(
 def test_livekit_phone_service_maps_gateway_answer_failure_to_phone_failure() -> None:
     async def run() -> None:
         gateway = FakePhoneService(fail_answer=True)
-        phone, service, recording_service = await _start_livekit_phone_service(
+        phone, service, hand = await _start_livekit_phone_service(
             service=gateway,
         )
 
@@ -2201,20 +2103,40 @@ def test_livekit_phone_service_maps_gateway_answer_failure_to_phone_failure() ->
         await phone.dispatch(phone.context(), phone_device.AnswerCallEvent.with_data(phone_device.AnswerCallData()))
         await _wait_until(lambda: _require_firmware(phone).state() == "/Phone/hung_up")
 
-        assert _phone_events(recording_service)[-1].name == "phone.hung_up"
+        await _wait_until(lambda: _last_told(hand) == phone_device.HungUpEvent.name)
+        assert _told(hand)[-1].data == phone_device.HungUpData(call_id="call-123", outcome="failed")
 
     asyncio.run(run())
 
 
-def test_livekit_phone_service_preserves_operation_metadata_on_gateway_failures() -> None:
+def test_livekit_phone_service_preserves_operation_metadata_on_gateway_failures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The provider failure firmware receives carries the command's trace: its observation joins that trace."""
+
+    spans = carrier_spans(monkeypatch)
+    trace_ids = {
+        operation: f"{index + 1:032x}"
+        for index, operation in enumerate(("dial", "answer", "decline", "hang_up", "transfer"))
+    }
+
+    def observed_in(trace_id: str, component: str, name: str) -> bool:
+        return any(
+            recorded.name == "bot.hsm.observe"
+            and (recorded.attributes or {}).get("bot.component.name") == component
+            and (recorded.attributes or {}).get("hsm.event.name") == name
+            and recorded.context is not None
+            and recorded.context.trace_id == int(trace_id, 16)
+            for recorded in spans.get_finished_spans()
+        )
+
     async def assert_failure_metadata(operation: str) -> None:
         gateway = FakePhoneService(failed_operations=frozenset({operation}))
-        forwarded_events: list[hsm.Event[typing.Any]] = []
-        phone, service, _recording_service = await _start_livekit_phone_service(
+        phone, service, _hand = await _start_livekit_phone_service(
             service=gateway,
-            forwarded_events=forwarded_events,
         )
-        metadata = {"traceparent": f"00-{operation}"}
+        trace_id = trace_ids[operation]
+        metadata = {"traceparent": f"00-{trace_id}-{'1' * 16}-01"}
 
         if operation == "dial":
             command = dataclasses.replace(
@@ -2223,7 +2145,7 @@ def test_livekit_phone_service_preserves_operation_metadata_on_gateway_failures(
             )
             await phone.dispatch(phone.context(), command)
             # A dial that fails has no call to report failed against.
-            expected_name = phone_device.ServiceDialFailedEvent.name
+            expected = ("Firmware", phone_device.ServiceDialFailedEvent.name)
         elif operation == "answer":
             await service.dispatch(
                 service.context(),
@@ -2234,7 +2156,7 @@ def test_livekit_phone_service_preserves_operation_metadata_on_gateway_failures(
                 metadata=metadata,
             )
             await phone.dispatch(phone.context(), command)
-            expected_name = phone_device.CallFailedEvent.name
+            expected = ("Firmware", phone_device.CallFailedEvent.name)
         elif operation == "decline":
             await service.dispatch(
                 service.context(),
@@ -2245,7 +2167,9 @@ def test_livekit_phone_service_preserves_operation_metadata_on_gateway_failures(
                 metadata=metadata,
             )
             await phone.dispatch(phone.context(), command)
-            expected_name = phone_device.CallFailedEvent.name
+            # Declining hangs the handset up at once, so firmware has no call left to fail; the
+            # failure the service answers with is observed where it is made.
+            expected = ("FakePhoneService", "bot.provider.livekit.phone.decline.failed")
         elif operation == "hang_up":
             await service.dispatch(
                 service.context(),
@@ -2258,7 +2182,8 @@ def test_livekit_phone_service_preserves_operation_metadata_on_gateway_failures(
                 metadata=metadata,
             )
             await phone.dispatch(phone.context(), command)
-            expected_name = phone_device.CallFailedEvent.name
+            # Hanging up is local too: the failure is observed where the service makes it.
+            expected = ("FakePhoneService", "bot.provider.livekit.phone.hang_up.failed")
         else:
             await service.dispatch(
                 service.context(),
@@ -2275,11 +2200,9 @@ def test_livekit_phone_service_preserves_operation_metadata_on_gateway_failures(
                 metadata=metadata,
             )
             await phone.dispatch(phone.context(), command)
-            expected_name = phone_device.ServiceTransferFailedEvent.name
+            expected = ("Firmware", phone_device.ServiceTransferFailedEvent.name)
 
-        await _wait_until(
-            lambda: any(event.name == expected_name and event.metadata == metadata for event in forwarded_events)
-        )
+        await _wait_until(lambda: observed_in(trace_id, *expected))
 
     async def run() -> None:
         for operation in ("dial", "answer", "decline", "hang_up", "transfer"):
@@ -2291,7 +2214,7 @@ def test_livekit_phone_service_preserves_operation_metadata_on_gateway_failures(
 def test_livekit_phone_service_times_out_blocked_answer_operation() -> None:
     async def run() -> None:
         gateway = FakePhoneService(blocked_operations=frozenset({"answer"}))
-        phone, service, recording_service = await _start_livekit_phone_service(
+        phone, service, hand = await _start_livekit_phone_service(
             service=gateway, operation_timeout=datetime.timedelta(milliseconds=5)
         )
 
@@ -2303,7 +2226,7 @@ def test_livekit_phone_service_times_out_blocked_answer_operation() -> None:
         await _wait_until(lambda: _require_firmware(phone).state() == "/Phone/hung_up")
 
         assert service.state() == "/PhoneService/ready"
-        assert _phone_events(recording_service)[-1].name == phone_device.HungUpEvent.name
+        await _wait_until(lambda: _last_told(hand) == phone_device.HungUpEvent.name)
 
     asyncio.run(run())
 
@@ -2311,7 +2234,7 @@ def test_livekit_phone_service_times_out_blocked_answer_operation() -> None:
 def test_livekit_phone_service_times_out_blocked_dial_operation() -> None:
     async def run() -> None:
         gateway = FakePhoneService(blocked_operations=frozenset({"dial"}))
-        phone, service, recording_service = await _start_livekit_phone_service(
+        phone, service, hand = await _start_livekit_phone_service(
             service=gateway, operation_timeout=datetime.timedelta(milliseconds=5)
         )
         await phone.dispatch(
@@ -2321,12 +2244,10 @@ def test_livekit_phone_service_times_out_blocked_dial_operation() -> None:
 
         assert service.state() == "/PhoneService/ready"
         assert gateway.dial_requests == [phone_device.DialData(number=DIAL_NUMBER)]
-        assert _phone_events(recording_service)[-1].name == phone_device.NoCallEvent.name
-        # The provider's verdict survives the trip: firmware reports which way the dial failed,
-        # not just that it did.
-        assert _phone_events(recording_service)[-1].data == phone_device.NoCallData(
-            reason="dial_failed", failure_kind="timeout"
-        )
+        # The provider's verdict survives the trip: a timed-out dial is the network failing to
+        # complete the call, which is heard as reorder.
+        await _wait_until(lambda: bool(_heard(hand)))
+        assert [sound.kind for sound in _heard(hand)] == ["phone.reorder"]
 
     asyncio.run(run())
 
@@ -2334,7 +2255,7 @@ def test_livekit_phone_service_times_out_blocked_dial_operation() -> None:
 def test_livekit_phone_service_times_out_blocked_transfer_operation() -> None:
     async def run() -> None:
         gateway = FakePhoneService(blocked_operations=frozenset({"transfer"}))
-        phone, service, recording_service = await _start_livekit_phone_service(
+        phone, service, hand = await _start_livekit_phone_service(
             service=gateway, operation_timeout=datetime.timedelta(milliseconds=5)
         )
         target = phone_device.TransferTarget(kind="address", value="sip:operator@example.com")
@@ -2351,8 +2272,8 @@ def test_livekit_phone_service_times_out_blocked_transfer_operation() -> None:
         await _wait_until(lambda: _is_answered(phone))
 
         assert service.state() == "/PhoneService/ready"
-        assert _phone_events(recording_service)[-1].name == phone_device.CallTransferFailedEvent.name
-        assert _phone_events(recording_service)[-1].data == phone_device.CallTransferFailedData(
+        await _wait_until(lambda: _last_told(hand) == phone_device.CallTransferFailedEvent.name)
+        assert _told(hand)[-1].data == phone_device.CallTransferFailedData(
             call_id="call-123",
             transfer_id="transfer-123",
             target=target,
@@ -2365,7 +2286,7 @@ def test_livekit_phone_service_times_out_blocked_transfer_operation() -> None:
 def test_livekit_phone_service_clears_timed_out_terminal_operations() -> None:
     async def run_decline() -> None:
         gateway = FakePhoneService(blocked_operations=frozenset({"decline"}))
-        phone, service, _recording_service = await _start_livekit_phone_service(
+        phone, service, _hand = await _start_livekit_phone_service(
             service=gateway, operation_timeout=datetime.timedelta(milliseconds=5)
         )
 
@@ -2378,7 +2299,7 @@ def test_livekit_phone_service_clears_timed_out_terminal_operations() -> None:
 
     async def run_hang_up() -> None:
         gateway = FakePhoneService(blocked_operations=frozenset({"hang_up"}))
-        phone, service, _recording_service = await _start_livekit_phone_service(
+        phone, service, _hand = await _start_livekit_phone_service(
             service=gateway, operation_timeout=datetime.timedelta(milliseconds=5)
         )
 
@@ -2397,12 +2318,14 @@ def test_livekit_phone_service_clears_timed_out_terminal_operations() -> None:
 
 def test_livekit_phone_service_ignores_malformed_provider_observations() -> None:
     async def run() -> None:
-        _phone, service, recording_service = await _start_livekit_phone_service()
+        _phone, service, hand = await _start_livekit_phone_service()
         malformed = ServiceCallFailedEvent.with_data(object())
 
         await service.dispatch(service.context(), malformed)
 
-        assert _phone_events(recording_service) == ()
+        for _ in range(5):
+            await asyncio.sleep(0)
+        assert _told(hand) == []
 
     asyncio.run(run())
 
@@ -2420,7 +2343,7 @@ def test_livekit_phone_service_drops_remote_audio_without_media_call_id() -> Non
     """Remote PCM without an active media call id is dropped observably by HSM guards."""
 
     async def run() -> None:
-        _phone, service, _recording_service = await _start_livekit_phone_service()
+        _phone, service, _hand = await _start_livekit_phone_service()
         chunk = _pcm_chunk(b"\xaa\xbb")
 
         await service.receive_remote_audio(service.context(), chunk)
@@ -2438,7 +2361,7 @@ def test_livekit_phone_service_clears_media_on_any_hung_up_including_transferred
     """HungUp with any outcome (including transferred) clears media session even if op already retired."""
 
     async def run() -> str | None:
-        phone, service, _recording = await _start_livekit_phone_service()
+        phone, service, _hand = await _start_livekit_phone_service()
         await service.dispatch(
             service.context(),
             ServiceIncomingCallEvent.with_data(phone_device.IncomingCallData(call_id="call-123")),
@@ -2451,7 +2374,7 @@ def test_livekit_phone_service_clears_media_on_any_hung_up_including_transferred
         await _mark_media_ready(phone, service)
         assert service._media_call_id == "call-123"
         # Simulate active-op already cleared (e.g. transfer completion path) then hang-up arrives.
-        service.publish(
+        await service.dispatch(
             service.context(),
             phone_device.HungUpEvent.with_data(phone_device.HungUpData(call_id="call-123", outcome="transferred")),
         )
@@ -2465,7 +2388,7 @@ def test_livekit_phone_service_clears_media_on_hung_up_while_answering() -> None
     """Active-op states must clear _media_call_id on terminal HungUp (not only ready)."""
 
     async def run() -> tuple[str | None, str | None]:
-        phone, service, _recording = await _start_livekit_phone_service()
+        phone, service, _hand = await _start_livekit_phone_service()
         await service.dispatch(
             service.context(),
             ServiceIncomingCallEvent.with_data(phone_device.IncomingCallData(call_id="call-123")),
@@ -2478,7 +2401,7 @@ def test_livekit_phone_service_clears_media_on_hung_up_while_answering() -> None
         )
         await _wait_until(lambda: service.state() == "/PhoneService/answering")
         assert service._media_call_id == "call-123"
-        service.publish(
+        await service.dispatch(
             service.context(),
             phone_device.HungUpEvent.with_data(phone_device.HungUpData(call_id="call-123", outcome="remote_hang_up")),
         )
@@ -2494,12 +2417,15 @@ def test_livekit_phone_service_drops_remote_audio_without_phone_target() -> None
     """Remote PCM with a media call id but no attached phone target is dropped."""
 
     async def run() -> None:
-        phone, service, _recording_service = await _start_livekit_phone_service()
+        phone, service, _hand = await _start_livekit_phone_service()
         await service.dispatch(
             service.context(),
             ServiceIncomingCallEvent.with_data(phone_device.IncomingCallData(call_id="call-123")),
         )
-        await service.detach(Environment.from_context(phone.context()), _require_firmware(phone))
+        await service.dispatch(
+            service.context(),
+            attachment.DetachEvent.with_data(attachment.DetachData(actor=_require_firmware(phone))),
+        )
         await _wait_until(lambda: service.state() == "/PhoneService/unconnected")
         chunk = _pcm_chunk(b"\x01\x02\x03")
 
@@ -2517,7 +2443,7 @@ def test_livekit_phone_service_delivers_remote_audio_when_media_ready() -> None:
     """Remote PCM with media call id + attached phone is delivered as ServiceAudioReceived."""
 
     async def run() -> None:
-        phone, service, _recording_service = await _start_livekit_phone_service()
+        phone, service, _hand = await _start_livekit_phone_service()
         await service.dispatch(
             service.context(),
             ServiceIncomingCallEvent.with_data(phone_device.IncomingCallData(call_id="call-123")),
@@ -2545,7 +2471,7 @@ def test_livekit_phone_service_drops_remote_audio_after_remote_hang_up() -> None
     """Hang-up clears media call id so subsequent remote PCM is dropped by guards."""
 
     async def run() -> None:
-        phone, service, _recording_service = await _start_livekit_phone_service()
+        phone, service, _hand = await _start_livekit_phone_service()
         await service.dispatch(
             service.context(),
             ServiceIncomingCallEvent.with_data(phone_device.IncomingCallData(call_id="call-123")),
@@ -2576,9 +2502,8 @@ def test_livekit_phone_service_drops_remote_audio_after_remote_hang_up() -> None
 async def _start_phone_with_fake_room(
     *,
     payload: bytes = b"\x01\x00\x02\x00",
-    forwarded_events: list[hsm.Event[typing.Any]] | None = None,
-) -> tuple[phone_device.Phone, FakePhoneService, FakeRoom, RecordingPhoneService]:
-    """Phone + FakeRoom wired so connect_room streams remote PCM into PhoneService guards."""
+) -> tuple[phone_device.Phone, FakePhoneService, FakeRoom, Hand]:
+    """Phone + FakeRoom wired so a room connect streams remote PCM into PhoneService guards."""
 
     room = FakeRoom(tracks_to_emit_on_connect=[FakeRemoteTrack()])
     service = FakePhoneService(
@@ -2586,11 +2511,8 @@ async def _start_phone_with_fake_room(
         stream_factory=fake_pcm_stream(rtc_pcm_frame(payload)),
         local_track_factory=fake_local_track_factory,
     )
-    phone, resolved, recording_service = await _start_livekit_phone_service(
-        service=service,
-        forwarded_events=forwarded_events,
-    )
-    return phone, resolved, room, recording_service
+    phone, resolved, hand = await _start_livekit_phone_service(service=service)
+    return phone, resolved, room, hand
 
 
 def test_livekit_phone_service_call_setup_rings_phone_without_auto_answer() -> None:
@@ -2602,7 +2524,7 @@ def test_livekit_phone_service_call_setup_rings_phone_without_auto_answer() -> N
     """
 
     async def run() -> None:
-        phone, resolved, room, _recording = await _start_signalling_livekit_phone()
+        phone, resolved, room, _hand = await _start_signalling_livekit_phone()
 
         _ = room.local_participant.invoke(
             signaling.SetupMethod,
@@ -2620,11 +2542,33 @@ def test_livekit_phone_service_call_setup_rings_phone_without_auto_answer() -> N
     asyncio.run(run())
 
 
+def test_an_application_connects_and_disconnects_the_room_by_message() -> None:
+    """The room is the application's to bring up and take down, by dispatching the room-audio events.
+
+    Connecting puts the line up (call setup answers); disconnecting takes it down and leaves the room.
+    """
+
+    async def run() -> tuple[bool, bool, bool]:
+        _phone, service, room, _hand = await _start_signalling_livekit_phone()
+        line_up = signaling.SetupMethod in room.local_participant.rpc_handlers
+
+        await hsm.dispatch(service.context(), service, RoomAudioDisconnectEvent)
+        await _wait_until(lambda: room.disconnected)
+
+        return line_up, signaling.SetupMethod in room.local_participant.rpc_handlers, room.disconnected
+
+    line_up, line_after, disconnected = asyncio.run(run())
+
+    assert line_up is True
+    assert line_after is False
+    assert disconnected is True
+
+
 def test_livekit_phone_service_does_not_ring_for_a_participant_that_merely_joins() -> None:
     """Arrival is not a call. Two robots in a room are neighbours until one of them dials."""
 
     async def run() -> None:
-        phone, _service, room, _recording = await _start_signalling_livekit_phone()
+        phone, _service, room, _hand = await _start_signalling_livekit_phone()
 
         room.emit("participant_connected", FakeRemoteParticipant(identity=CALLER_IDENTITY))
         await asyncio.sleep(0.01)
@@ -2645,11 +2589,10 @@ def test_livekit_phone_service_room_media_answer_is_local_and_reaches_media_read
             stream_factory=fake_pcm_stream(rtc_pcm_frame(b"\x01\x00")),
             local_track_factory=fake_local_track_factory,
         )
-        recording_service = RecordingPhoneService(service)
-        phone = phone_device.Phone(service=recording_service)
-        _ = await mosfet.started(None, phone, typing.cast(hsm.Model, phone.model))
+        phone = phone_device.Phone(service=service)
+        _ = await _held(phone)
         await _wait_until(lambda: service.state() == "/PhoneService/ready")
-        await service.connect_room(url="wss://livekit.example.com", token="token")
+        await _connect_room(service)
         await _wait_until(lambda: service.media_snapshot().local_track_sid == "TR_local")
 
         await service.dispatch(
@@ -2672,9 +2615,9 @@ def test_livekit_phone_service_room_path_drops_remote_audio_without_media_call()
 
     async def run() -> None:
         payload = b"\xaa\xbb\xcc\xdd"
-        _phone, service, room, _recording = await _start_phone_with_fake_room(payload=payload)
+        _phone, service, room, _hand = await _start_phone_with_fake_room(payload=payload)
 
-        await service.connect_room(url="wss://livekit.example.com", token="token", track_name="bot-audio")
+        await _connect_room(service)
         await _wait_until(lambda: service.media_snapshot().remote_audio_dropped_chunks == 1)
 
         snapshot = service.media_snapshot()
@@ -2693,7 +2636,7 @@ def test_livekit_phone_service_room_path_delivers_remote_audio_when_media_ready(
 
     async def run() -> None:
         payload = b"\x01\x00\x02\x00\x03\x00"
-        phone, service, room, _recording = await _start_phone_with_fake_room(payload=payload)
+        phone, service, room, _hand = await _start_phone_with_fake_room(payload=payload)
         await service.dispatch(
             service.context(),
             ServiceIncomingCallEvent.with_data(phone_device.IncomingCallData(call_id="call-123")),
@@ -2705,7 +2648,7 @@ def test_livekit_phone_service_room_path_delivers_remote_audio_when_media_ready(
         await _wait_until(lambda: _is_answered(phone))
         await _mark_media_ready(phone, service, call_id="call-123")
 
-        await service.connect_room(url="wss://livekit.example.com", token="token", track_name="bot-audio")
+        await _connect_room(service)
         await _wait_until(lambda: service.media_snapshot().remote_audio_chunks == 1)
 
         snapshot = service.media_snapshot()
@@ -2724,11 +2667,7 @@ def test_livekit_phone_service_room_path_forwards_service_audio_to_phone_firmwar
 
     async def run() -> None:
         payload = b"\x10\x20\x30\x40"
-        forwarded: list[hsm.Event[typing.Any]] = []
-        phone, service, _room, _recording = await _start_phone_with_fake_room(
-            payload=payload,
-            forwarded_events=forwarded,
-        )
+        phone, service, _room, hand = await _start_phone_with_fake_room(payload=payload)
         await service.dispatch(
             service.context(),
             ServiceIncomingCallEvent.with_data(phone_device.IncomingCallData(call_id="call-123")),
@@ -2740,15 +2679,11 @@ def test_livekit_phone_service_room_path_forwards_service_audio_to_phone_firmwar
         await _wait_until(lambda: _is_answered(phone))
         await _mark_media_ready(phone, service, call_id="call-123")
 
-        await service.connect_room(url="wss://livekit.example.com", token="token")
-        await _wait_until(lambda: any(event.name == phone_device.ServiceAudioReceivedEvent.name for event in forwarded))
+        await _connect_room(service)
+        await _wait_until(lambda: bool(_heard_audio(hand)))
 
-        audio_events = [event for event in forwarded if event.name == phone_device.ServiceAudioReceivedEvent.name]
-        assert len(audio_events) == 1
-        assert isinstance(audio_events[0].data, phone_device.ServiceAudioData)
-        assert audio_events[0].data.call_id == "call-123"
-        assert audio_events[0].data.audio == payload
-        assert audio_events[0].data.media_type == "audio/pcm"
+        # Firmware took it as this call's service audio and played it out of the earpiece.
+        assert _heard_audio(hand) == [payload]
         assert service.media_snapshot().remote_audio_chunks == 1
 
     asyncio.run(run())

@@ -59,6 +59,7 @@ from tests.hsm_instance_state import (
     start_ability_tree,
 )
 from tests import metric_reader
+from tests.devices.phone.handset import carrier_spans, published_names
 from tests.bot.lifecycle_replies import LifecycleReplies, started_replies
 from tests.hsm_model import transition_map
 from tests.type_helpers import object_dict
@@ -1445,11 +1446,11 @@ async def answer_phone(phone: phone_device.Phone, call_id: str = "call-123") -> 
 
 
 async def emit_phone_service_event(phone: phone_device.Phone, event: hsm.Event[typing.Any]) -> None:
+    """What a carrier puts on the line: a typed service event, dispatched straight to firmware."""
+
     firmware = device_firmware(phone)
     assert isinstance(firmware, phone_device.Firmware)
-    recorder = firmware.event_recorder()
-    assert isinstance(recorder, phone_device.EventRecorder)
-    await recorder.receive(phone.context(), event)
+    await hsm.dispatch(phone.context(), firmware, event)
 
 
 async def answered_phone_in_environment() -> tuple[Environment, phone_device.Phone]:
@@ -2623,7 +2624,7 @@ def test_focused_agent_dispatches_operation_output_to_target_device() -> None:
     ]
 
 
-def test_focused_agent_stale_device_selection_drops_at_device() -> None:
+def test_focused_agent_stale_device_selection_drops_at_device(monkeypatch: pytest.MonkeyPatch) -> None:
     """Stale device selections dispatch; the device drops them per its own topology.
 
     Delivery validation resolves against declared events (HSM-CONTEXT-001: no probed peer
@@ -2632,6 +2633,8 @@ def test_focused_agent_stale_device_selection_drops_at_device() -> None:
     transition: the device drops it as unmatched and reports nothing. The turn completes, and
     the remote hang-up is observed as the next stimulus — the only one.
     """
+
+    spans = carrier_spans(monkeypatch)
 
     async def run() -> tuple[
         str,
@@ -2678,7 +2681,7 @@ def test_focused_agent_stale_device_selection_drops_at_device() -> None:
             active_bot.actions,
             active_bot.failures,
             list(ability.calls),
-            [event.name for event in firmware.event_recorder().events],
+            published_names(spans),
         )
 
     state, phone_state, focused_device, actions, failures, calls, published = asyncio.run(run())

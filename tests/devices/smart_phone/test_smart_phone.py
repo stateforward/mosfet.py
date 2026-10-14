@@ -26,11 +26,11 @@ from tests.devices.phone.handset import (
     PhoneObservationRecorder,
     RoomOccupant,
     answer_call,
+    carrier_spans,
     emit_service_event,
-    event_names,
-    firmware_of,
     occasion_sources,
     phone_in_a_hand,
+    published_names,
     wait_until,
 )
 from tests.hsm_instance_state import device_bots, phone_display
@@ -170,17 +170,20 @@ def test_a_phone_hands_whoever_holds_it_the_new_message_notification() -> None:
     assert [event.name for event in received] == ["environment.sound"]
 
 
-def test_smart_phone_send_text_message_asks_the_service_and_commits_its_verdict() -> None:
+def test_smart_phone_send_text_message_asks_the_service_and_commits_its_verdict(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Pressing send hands the text to the service; the service's verdict is the outcome.
 
     The verdict is correlated to its request by envelope id. A failed send reaches the holder;
     a successful one is published but is not an occasion for the holder.
     """
 
-    async def run() -> tuple[list[hsm.Event[typing.Any]], list[str], list[smart_phone.TextMessageSendFailedData]]:
+    spans = carrier_spans(monkeypatch)
+
+    async def run() -> tuple[list[str], list[str], list[tuple[str, smart_phone.TextMessageSendFailedData]]]:
         environment = Environment()
-        phone, firmware, holder, bystander = await _smart_phone_in_a_hand(environment)
-        recorder = firmware.event_recorder()
+        phone, _, holder, bystander = await _smart_phone_in_a_hand(environment)
         for request_id, text in (("send-1", "See you at 10:15."), ("send-2", "Still there?")):
             await phone.dispatch(
                 phone.context(),
@@ -192,10 +195,10 @@ def test_smart_phone_send_text_message_asks_the_service_and_commits_its_verdict(
                 ),
             )
         await wait_until(
-            lambda: event_names(recorder).count(smart_phone.ServiceTextMessageSendRequestedEvent.name) == 2
+            lambda: published_names(spans).count(smart_phone.ServiceTextMessageSendRequestedEvent.name) == 2
         )
-        await recorder.receive(
-            phone.context(),
+        await emit_service_event(
+            phone,
             dataclasses.replace(
                 smart_phone.ServiceTextMessageSentEvent.with_data(
                     smart_phone.TextMessageSentData(to="+15555550101", text="See you at 10:15.")
@@ -203,8 +206,8 @@ def test_smart_phone_send_text_message_asks_the_service_and_commits_its_verdict(
                 id="send-1",
             ),
         )
-        await recorder.receive(
-            phone.context(),
+        await emit_service_event(
+            phone,
             dataclasses.replace(
                 smart_phone.ServiceTextMessageSendFailedEvent.with_data(
                     smart_phone.TextMessageSendFailedData(
@@ -214,7 +217,7 @@ def test_smart_phone_send_text_message_asks_the_service_and_commits_its_verdict(
                 id="send-2",
             ),
         )
-        await wait_until(lambda: smart_phone.TextMessageSendFailedEvent.name in event_names(recorder))
+        await wait_until(lambda: smart_phone.TextMessageSendFailedEvent.name in published_names(spans))
         for _ in range(10):
             await asyncio.sleep(0)
         observed = [
@@ -223,28 +226,25 @@ def test_smart_phone_send_text_message_asks_the_service_and_commits_its_verdict(
             if isinstance(occasion.data, mosfet.InputEventData) and occasion.data.observation is not None
         ]
         failures = [
-            typing.cast(smart_phone.TextMessageSendFailedData, occasion.data.observation.data)
+            (occasion.id, typing.cast(smart_phone.TextMessageSendFailedData, occasion.data.observation.data))
             for occasion in holder.occasions
             if isinstance(occasion.data, mosfet.InputEventData)
             and occasion.data.observation is not None
             and occasion.data.observation.event == smart_phone.TextMessageSendFailedEvent.name
         ]
         assert bystander.received == []
-        return list(recorder.events), observed, failures
+        return published_names(spans), observed, failures
 
     published, observed, failures = asyncio.run(run())
 
-    def payloads(name: str) -> list[tuple[str | None, typing.Any]]:
-        return [(event.id, event.data) for event in published if event.name == name]
-
-    assert payloads(smart_phone.ServiceTextMessageSendRequestedEvent.name) == [
-        ("send-1", smart_phone.SendTextMessageData(to="+15555550101", text="See you at 10:15.")),
-        ("send-2", smart_phone.SendTextMessageData(to="+15555550101", text="Still there?")),
+    assert published == [
+        smart_phone.ServiceTextMessageSendRequestedEvent.name,
+        smart_phone.ServiceTextMessageSendRequestedEvent.name,
+        smart_phone.TextMessageSentEvent.name,
+        smart_phone.TextMessageSendFailedEvent.name,
     ]
-    assert payloads(smart_phone.TextMessageSentEvent.name) == [
-        ("send-1", smart_phone.TextMessageSentData(to="+15555550101", text="See you at 10:15.")),
-    ]
-    assert payloads(smart_phone.TextMessageSendFailedEvent.name) == [
+    # The failed verdict reaches the hand, still correlated to the request it answers.
+    assert failures == [
         (
             "send-2",
             smart_phone.TextMessageSendFailedData(
@@ -252,7 +252,6 @@ def test_smart_phone_send_text_message_asks_the_service_and_commits_its_verdict(
             ),
         ),
     ]
-    assert [failure.text for failure in failures] == ["Still there?"]
     assert smart_phone.TextMessageSentEvent.name not in observed
 
 
@@ -578,10 +577,13 @@ def test_a_smart_phone_answers_only_while_ringing() -> None:
     ]
 
 
-def test_a_smart_phone_takes_messaging_commands_and_a_phone_does_not() -> None:
+def test_a_smart_phone_takes_messaging_commands_and_a_phone_does_not(monkeypatch: pytest.MonkeyPatch) -> None:
     """A JSON send-text command enters a smart phone's firmware; a basic phone has nowhere to put it."""
 
+    spans = carrier_spans(monkeypatch)
+
     async def run(phone: phone_device.Phone) -> tuple[bool, list[str]]:
+        spans.clear()
         _ = await mosfet.started(None, phone, typing.cast(hsm.Model, phone.model))
         await wait_until(lambda: phone.state() == "/Device/detached")
         accepted = await phone.dispatch(
@@ -590,7 +592,7 @@ def test_a_smart_phone_takes_messaging_commands_and_a_phone_does_not() -> None:
         )
         for _ in range(10):
             await asyncio.sleep(0)
-        return accepted, event_names(firmware_of(phone).event_recorder())
+        return accepted, published_names(spans)
 
     smart_accepted, smart_published = asyncio.run(run(smart_phone.SmartPhone()))
     _, basic_published = asyncio.run(run(phone_device.Phone()))

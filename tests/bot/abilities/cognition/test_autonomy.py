@@ -28,6 +28,7 @@ from mosfet.environment import SoundData, SoundEvent, Environment
 from tests.bot.abilities.support import dispatch_ability_for_test, shared_hsm_context, start_abilities_for_test
 from tests.bot.abilities.cognition.metadata_contract import assert_metadata_is_not_coordination
 from tests.hsm_model import choice_transitions, transition_map
+from tests.devices.phone.handset import carrier_spans, published_names
 from tests.hsm_instance_state import phone_firmware
 
 
@@ -796,10 +797,11 @@ behavior = hsm.define(
 """.strip()
 
 
-def test_autonomy_installed_behavior_answers_phone_ring() -> None:
+def test_autonomy_installed_behavior_answers_phone_ring(monkeypatch: pytest.MonkeyPatch) -> None:
     """Pre-installed ACTIVE behavior matches environment.sound ring and dispatches phone.answer_call."""
 
     call_id = "call-answer-behavior"
+    spans = carrier_spans(monkeypatch)
 
     async def run() -> tuple[object, tuple[str, ...], str]:
         installed = behavior.start(
@@ -819,8 +821,10 @@ def test_autonomy_installed_behavior_answers_phone_ring() -> None:
 
         firmware = phone_firmware(phone)
         assert firmware is not None
-        await firmware.event_recorder().receive(
+        await _wait_until(lambda: phone.state() == "/Device/detached", timeout=2.0)
+        await hsm.dispatch(
             phone.context(),
+            firmware,
             phone_device.IncomingCallEvent.with_data(phone_device.IncomingCallData(call_id=call_id, caller="caller")),
         )
         await _wait_until(lambda: "ringing" in (firmware.state() or ""), timeout=2.0)
@@ -864,8 +868,8 @@ def test_autonomy_installed_behavior_answers_phone_ring() -> None:
             generation="operation-token",
         )
         output = await dispatch_ability_for_test(autonomy, shared, turn, timeout=10.0)
-        await _wait_until(lambda: bool(firmware.event_recorder().events))
-        published = tuple(event.name for event in firmware.event_recorder().events)
+        await _wait_until(lambda: phone_device.ServiceAnswerRequestedEvent.name in published_names(spans))
+        published = tuple(published_names(spans))
         return output, published, firmware.state() or ""
 
     output, published, phone_state = asyncio.run(run())

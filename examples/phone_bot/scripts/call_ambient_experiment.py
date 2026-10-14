@@ -120,8 +120,9 @@ async def _hang_up_if_needed(phone: object, call_id: str | None) -> None:
     if "/hung_up" in state:
         return
     try:
-        await firmware.event_recorder().receive(
+        await hsm.dispatch(
             phone.context(),  # type: ignore[attr-defined]
+            firmware,
             phone_events.RemoteHangUpEvent.with_data(phone_events.RemoteHangUpData(call_id=call_id)),
         )
     except Exception as error:
@@ -132,8 +133,9 @@ async def _hang_up_if_needed(phone: object, call_id: str | None) -> None:
 async def _inject_call(environment: Environment, body: PhoneBot, *, call_id: str) -> None:
     phone = body.phone()
     firmware = _firmware(phone)
-    await firmware.event_recorder().receive(
+    await hsm.dispatch(
         phone.context(),
+        firmware,
         phone_events.IncomingCallEvent.with_data(
             phone_events.IncomingCallData(call_id=call_id, caller="experiment-caller")
         ),

@@ -41,6 +41,7 @@ from mosfet.providers.mlx_audio import VoiceActivityClassifier as SileroVoiceAct
 from mosfet.providers.openai_compat import ChatClient as OpenAIChatClient
 from mosfet.providers.openai_compat import Processor as OpenAIProcessor
 from mosfet.providers.livekit import PhoneService
+from mosfet.providers.livekit import room_audio
 from mosfet.providers.livekit import signaling
 from mosfet.providers.livekit.audio import PcmWavDecoder
 from mosfet.providers.pyannote import Classifier as PyannoteVoiceClassifier
@@ -744,7 +745,7 @@ def _mouthpiece() -> audio.Microphone:
     return audio.Microphone(placement=space.Placement(position=_MOUTH, threshold_db=_MOUTHPIECE_THRESHOLD_DB))
 
 
-def _handset(*, service: phone_device.Service | None = None) -> phone_device.Phone:
+def _handset(*, service: hsm.Instance | None = None) -> phone_device.Phone:
     """A handset held to the robot's ear, with its own transducers placed on it."""
 
     return phone_device.Phone(
@@ -1125,10 +1126,17 @@ async def start_bot(
             raise RuntimeError("connect_livekit requires an explicit LiveKit PhoneService reference.")
         assert app_config.livekit.url is not None
         assert app_config.livekit.token is not None
-        await phone_service.connect_room(
-            url=app_config.livekit.url,
-            token=app_config.livekit.token,
-            track_name=app_config.livekit.track_name,
+        # The room is the application's to bring up: it asks the service by message.
+        await hsm.dispatch(
+            phone_service.context(),
+            phone_service,
+            room_audio.RoomAudioConnectEvent.with_data(
+                room_audio.RoomAudioConnectData(
+                    url=app_config.livekit.url,
+                    token=app_config.livekit.token,
+                    track_name=app_config.livekit.track_name,
+                )
+            ),
         )
         await _wait_for_livekit_room_audio_result(phone_service)
     return body

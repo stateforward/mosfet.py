@@ -53,35 +53,29 @@ def test_receiver_forwards_only_current_call_service_audio() -> None:
     async def run() -> tuple[int, int, int]:
         environment = Environment()
         speaker = _RecordingSpeaker()
-        phone = phone_device.Phone(speaker=speaker, service=phone_device.EventRecorder())
+        phone = phone_device.Phone(speaker=speaker)
         firmware = phone_firmware(phone)
 
+        async def receive(event: hsm.Event[typing.Any]) -> None:
+            # What a carrier puts on the line: typed service events, dispatched straight to firmware.
+            await hsm.dispatch(phone.context(), firmware, event)
+
         async def forwarded_count(call_id: str) -> int:
-            await firmware.event_recorder().receive(phone.context(), _service_audio(call_id))
+            await receive(_service_audio(call_id))
             await asyncio.sleep(0)
             return len(speaker.received)
 
-        # No call yet: service audio for an unknown call goes nowhere.
-        before_call = await forwarded_count("call-1")
-
         _ = await mosfet.started(environment, phone, typing.cast(hsm.Model, phone_device.Phone.model))
         assert mosfet.lifecycle.is_started(speaker)
-        await firmware.event_recorder().receive(
-            phone.context(),
-            phone_device.IncomingCallEvent.with_data(phone_device.IncomingCallData(call_id="call-1")),
-        )
+        # No call yet: service audio for an unknown call goes nowhere.
+        before_call = await forwarded_count("call-1")
+        await receive(phone_device.IncomingCallEvent.with_data(phone_device.IncomingCallData(call_id="call-1")))
         await phone.dispatch(
             phone.context(),
             phone_device.AnswerCallEvent.with_data(phone_device.AnswerCallData()),
         )
-        await firmware.event_recorder().receive(
-            phone.context(),
-            phone_device.CallConnectedEvent.with_data(phone_device.CallConnectedData(call_id="call-1")),
-        )
-        await firmware.event_recorder().receive(
-            phone.context(),
-            phone_device.ServiceMediaReadyEvent.with_data(phone_device.MediaReadyData(call_id="call-1")),
-        )
+        await receive(phone_device.CallConnectedEvent.with_data(phone_device.CallConnectedData(call_id="call-1")))
+        await receive(phone_device.ServiceMediaReadyEvent.with_data(phone_device.MediaReadyData(call_id="call-1")))
 
         # Current call on a started same-environment speaker: audio is forwarded.
         ready = await forwarded_count("call-1")

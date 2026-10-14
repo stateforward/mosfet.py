@@ -70,9 +70,7 @@ from mosfet.devices.phone.phone import (
     RINGER_DB,
     RING_SOUND_WAV,
     Phone,
-    EventRecorder,
     Firmware,
-    Service,
 )
 
 __all__ = [
@@ -114,11 +112,9 @@ __all__ = [
     "NoCallEvent",
     "Phone",
     "CallData",
-    "EventRecorder",
     "Firmware",
     "HungUpData",
     "Number",
-    "Service",
     "SoundData",
     "TransferData",
     "CallTransferFailedData",

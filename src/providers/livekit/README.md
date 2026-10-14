@@ -24,10 +24,18 @@ from bot.providers.livekit import Phone
 
 phone = Phone(url="wss://livekit.example.com", token="livekit-jwt", track_name="alice-audio")
 _ = await hsm.started(None, phone, phone.model)
-# room connect runs when PhoneService attaches during phone bring-up
+# the phone starts its PhoneService and attaches its firmware; with room
+# credentials configured, the service connects the room when that attach lands
 ```
 
 ## PhoneService
+
+`PhoneService` is a state machine reached only by message. Hand it to a phone
+unstarted: the phone owns it, starts it at bring-up, attaches its firmware with
+`attachment.attach`, detaches with `attachment.detach` at stop, and stops it.
+It serves one phone firmware at a time; another attach is answered with
+`attachment.attach.failed` (`conflict`). Its room track path starts and stops
+with it.
 
 ```python
 from bot.devices import phone as phone_device
@@ -35,6 +43,24 @@ from bot.providers.livekit import PhoneService
 
 service = PhoneService(url="wss://livekit.example.com", token="livekit-jwt")
 phone = phone_device.Phone(service=service)
+```
+
+An application that connects the room itself (no credentials at construction)
+dispatches the room-audio events to the service:
+
+```python
+import hsm
+
+from bot.providers.livekit import room_audio
+
+await hsm.dispatch(
+    service.context(),
+    service,
+    room_audio.RoomAudioConnectEvent.with_data(
+        room_audio.RoomAudioConnectData(url="wss://livekit.example.com", token="livekit-jwt", track_name="bot-audio")
+    ),
+)
+await hsm.dispatch(service.context(), service, room_audio.RoomAudioDisconnectEvent)
 ```
 
 ## Call setup

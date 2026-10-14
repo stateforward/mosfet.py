@@ -1090,7 +1090,7 @@ async def run_terminal_operation(
     ctx: hsm.Context,
     *,
     child: hsm.Instance,
-    request: hsm.Event[typing.Any],
+    request: hsm.Event[typing.Any] | collections.abc.Callable[[hsm.Instance], hsm.Event[typing.Any]],
     terminals: tuple[hsm.Event[typing.Any], ...],
     timeout: datetime.timedelta,
     on_terminal: collections.abc.Callable[[hsm.Event[typing.Any]], None] | None = None,
@@ -1101,6 +1101,11 @@ async def run_terminal_operation(
     the operation actor becomes ``source``, ``child`` becomes ``target``, and ``request.id`` is
     preserved for correlation. The child must return one of ``terminals`` with the same id,
     ``source=hsm.id(child)``, and ``target`` set to the operation actor.
+
+    ``request`` may instead be a function of the operation actor, for a request that has to name
+    its reply address in its own payload (an ``attachment.AttachData.reply_to``, which every
+    attachment replier answers). It is called exactly once, with the started operation actor,
+    before the request is dispatched; the event it returns is the request.
 
     ``child`` is any started, addressable HSM actor: an Ability, or a provider actor that is not
     one. The caller must supply it started with an HSM addressing scope. The operation actor
@@ -1125,8 +1130,7 @@ async def run_terminal_operation(
         TimeoutError: If no correlated terminal arrives before the modeled HSM timeout.
     """
 
-    operation_id = request.id
-    if not operation_id:
+    if isinstance(request, hsm.Event) and not request.id:
         raise ValueError("Terminal operation request.id is required.")
     if not terminals:
         raise ValueError("Terminal operation requires at least one terminal event.")
@@ -1143,6 +1147,8 @@ async def run_terminal_operation(
         values={hsm.Keys.Instances: instance_map},
     )
     result: asyncio.Future[hsm.Event[typing.Any]] = asyncio.get_running_loop().create_future()
+    # Fixed once the request exists; the operation only correlates after it has been dispatched.
+    operation_id = ""
 
     def correlated(
         operation_ctx: hsm.Context,
@@ -1204,14 +1210,18 @@ async def run_terminal_operation(
     operation = _TerminalOperation()
     try:
         _ = await mosfet.started(operation_scope, operation, operation_model)
+        requested = request if isinstance(request, hsm.Event) else request(operation)
+        operation_id = requested.id
+        if not operation_id:
+            raise ValueError("Terminal operation request.id is required.")
         await hsm.dispatch(
             ctx,
             child,
             dataclasses.replace(
-                request,
+                requested,
                 source=hsm.id(operation),
                 target=child_id,
-                metadata=dict(request.metadata),
+                metadata=dict(requested.metadata),
             ),
         )
         return await result

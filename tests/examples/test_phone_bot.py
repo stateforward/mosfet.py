@@ -105,7 +105,9 @@ def test_phone_bot_example_is_provider_package_example() -> None:
     assert "class GeminiVoiceDecoder" in source
     assert "abilities.VoiceDecoder" in source
     assert "RoomAudioEndpoint" not in source
-    assert "RoomAudioConnectData" not in source
+    # The room is connected by message to the service, never by a call into it.
+    assert "room_audio.RoomAudioConnectEvent.with_data(" in source
+    assert ".connect_room(" not in source
     assert "create_audio_bridge" not in source
     assert "from mosfet.providers.sqlite_memory import" not in source
     assert 'DEFAULT_MERCURY_MODEL = "mercury-2"' in source
@@ -133,6 +135,37 @@ def test_phone_bot_example_is_provider_package_example() -> None:
     assert "_mercury_intuition_client" in source
     assert "mercury2_intuition" in source
     assert "openai_terra_reasoning" in source
+
+
+def test_every_annotation_in_the_example_names_something_that_exists() -> None:
+    """A hard cutover leaves no annotation naming a deleted contract.
+
+    ``from __future__ import annotations`` keeps a stale name like ``phone.Service`` from
+    failing at import, so resolve every annotation the example module defines.
+    """
+
+    code = """
+import inspect
+import typing
+
+import phone_bot_example as example
+
+unresolved = []
+for name, value in vars(example).items():
+    if getattr(value, "__module__", None) != example.__name__:
+        continue
+    functions = [(name, value)] if inspect.isfunction(value) else []
+    if inspect.isclass(value):
+        functions = [(f"{name}.{attr}", fn) for attr, fn in vars(value).items() if inspect.isfunction(fn)]
+    for qualified, function in functions:
+        try:
+            typing.get_type_hints(function)
+        except Exception as error:
+            unresolved.append(f"{qualified}: {error!r}")
+print("\\n".join(unresolved))
+"""
+
+    assert _run_phone_bot_python(code) == ""
 
 
 def test_phone_bot_startup_does_not_poll_machine_snapshots() -> None:
@@ -788,18 +821,21 @@ def test_phone_bot_example_does_not_connect_livekit_on_plain_run(tmp_path: pathl
     code = "\n".join(
         [
             "import asyncio, pathlib, phone_bot_example",
-            "async def fail_connect(self, **kwargs):",
+            "from mosfet.providers.livekit import room_audio",
+            "attempts = []",
+            "async def fail_connect(self, data):",
+            "    attempts.append(data)",
             "    raise RuntimeError('LiveKit should not be connected during plain run')",
-            "phone_bot_example.PhoneService.connect_room = fail_connect",
+            "room_audio.RoomAudioTrackPath._connect_room_audio = fail_connect",
             "async def main():",
             f"    config = phone_bot_example.AppConfig.from_env_file(pathlib.Path({str(env_path)!r}))",
             "    summary = await phone_bot_example.run(config)",
-            "    print(summary['livekit_room_audio_attempted'], summary['livekit_room_audio_connected'])",
+            "    print(summary['livekit_room_audio_attempted'], summary['livekit_room_audio_connected'], len(attempts))",
             "asyncio.run(main())",
         ]
     )
 
-    assert _run_phone_bot_python(code) == "False False"
+    assert _run_phone_bot_python(code) == "False False 0"
 
 
 def test_phone_bot_example_can_attempt_fake_livekit_room_audio_when_opted_in() -> None:
@@ -807,17 +843,15 @@ def test_phone_bot_example_can_attempt_fake_livekit_room_audio_when_opted_in() -
         [
             "import asyncio, phone_bot_example",
             "from mosfet.providers.livekit import PhoneService, MediaSnapshot",
-            "_orig_attach = PhoneService.attach",
-            "async def _attach(self, environment, target):",
-            "    connect = self._room_connect",
-            "    self._room_connect = None",
-            "    try:",
-            "        await _orig_attach(self, environment, target)",
-            "    finally:",
-            "        self._room_connect = connect",
-            "        if connect is not None:",
-            "            self._local_track_sid = 'TR_fake'",
-            "PhoneService.attach = _attach",
+            "from mosfet.providers.livekit import room_audio",
+            "async def _fake_connect(self, data):",
+            "    return room_audio.RoomAudioConnectedData(local_track_sid='TR_fake')",
+            "async def _offline(self):",
+            "    return None",
+            "room_audio.RoomAudioTrackPath._connect_room_audio = _fake_connect",
+            "room_audio.RoomAudioTrackPath._unpublish_local_track = _offline",
+            "room_audio.RoomAudioTrackPath._disconnect_room = _offline",
+            "PhoneService._bind_room_signaling = lambda self, room: None",
             "async def main():",
             "    config = phone_bot_example.AppConfig(",
             "        livekit=phone_bot_example.LiveKitConfig(url='wss://livekit.example.test', token='secret-token'),",
@@ -837,17 +871,15 @@ def test_phone_bot_example_does_not_report_ready_without_cognition_credentials()
         [
             "import asyncio, phone_bot_example",
             "from mosfet.providers.livekit import PhoneService",
-            "_orig_attach = PhoneService.attach",
-            "async def _attach(self, environment, target):",
-            "    connect = self._room_connect",
-            "    self._room_connect = None",
-            "    try:",
-            "        await _orig_attach(self, environment, target)",
-            "    finally:",
-            "        self._room_connect = connect",
-            "        if connect is not None:",
-            "            self._local_track_sid = 'TR_fake'",
-            "PhoneService.attach = _attach",
+            "from mosfet.providers.livekit import room_audio",
+            "async def _fake_connect(self, data):",
+            "    return room_audio.RoomAudioConnectedData(local_track_sid='TR_fake')",
+            "async def _offline(self):",
+            "    return None",
+            "room_audio.RoomAudioTrackPath._connect_room_audio = _fake_connect",
+            "room_audio.RoomAudioTrackPath._unpublish_local_track = _offline",
+            "room_audio.RoomAudioTrackPath._disconnect_room = _offline",
+            "PhoneService._bind_room_signaling = lambda self, room: None",
             "async def main():",
             "    config = phone_bot_example.AppConfig(",
             "        livekit=phone_bot_example.LiveKitConfig(url='wss://livekit.example.test', token='secret-token'),",
@@ -866,17 +898,15 @@ def test_phone_bot_example_reports_room_ready_without_remote_chunks() -> None:
         [
             "import asyncio, phone_bot_example",
             "from mosfet.providers.livekit import PhoneService",
-            "_orig_attach = PhoneService.attach",
-            "async def _attach(self, environment, target):",
-            "    connect = self._room_connect",
-            "    self._room_connect = None",
-            "    try:",
-            "        await _orig_attach(self, environment, target)",
-            "    finally:",
-            "        self._room_connect = connect",
-            "        if connect is not None:",
-            "            self._local_track_sid = 'TR_fake'",
-            "PhoneService.attach = _attach",
+            "from mosfet.providers.livekit import room_audio",
+            "async def _fake_connect(self, data):",
+            "    return room_audio.RoomAudioConnectedData(local_track_sid='TR_fake')",
+            "async def _offline(self):",
+            "    return None",
+            "room_audio.RoomAudioTrackPath._connect_room_audio = _fake_connect",
+            "room_audio.RoomAudioTrackPath._unpublish_local_track = _offline",
+            "room_audio.RoomAudioTrackPath._disconnect_room = _offline",
+            "PhoneService._bind_room_signaling = lambda self, room: None",
             "async def main():",
             "    config = phone_bot_example.AppConfig(",
             "        livekit=phone_bot_example.LiveKitConfig(url='wss://livekit.example.test', token='secret-token'),",

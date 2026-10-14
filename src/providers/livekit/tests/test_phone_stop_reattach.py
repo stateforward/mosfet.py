@@ -1,19 +1,26 @@
-"""PhoneService production stop then attach restarts HSM (hsm 1.3.2 stop semantics)."""
+"""PhoneService lifecycle: the phone holding it starts and stops it, and attaches by message."""
 
 from __future__ import annotations
 
 import asyncio
+import dataclasses
+import datetime
 import importlib
+import typing
+import uuid
 
 import hsm
 import pytest
 
 import mosfet.lifecycle
-from mosfet.providers.livekit.phone import PhoneService, PhoneServiceError
-from mosfet.providers.livekit.room_audio import RoomAudioTrackPath
+from mosfet import abilities
 from mosfet.environment import Environment
+from mosfet.protocols import attachment
+from mosfet.providers.livekit.phone import PhoneService
+from mosfet.providers.livekit.room_audio import RoomAudioTrackPath
 
 _DEFINE = importlib.import_module("mosfet.define")
+_TIMEOUT = datetime.timedelta(seconds=1)
 
 
 class _InspectablePhoneService(PhoneService):
@@ -24,27 +31,109 @@ class _InspectablePhoneService(PhoneService):
         return track_path
 
 
-def test_phone_service_production_stop_unstarts_machine() -> None:
-    """``hsm.stop(service)`` makes ``hsm.id`` fail without any process-side hold."""
+async def _actor(environment: Environment, name: str) -> hsm.Instance:
+    return await mosfet.started(
+        environment, hsm.Instance(), mosfet.define(name, hsm.initial(hsm.target("s")), hsm.state("s"))
+    )
 
-    async def run() -> tuple[bool, bool]:
+
+async def _attach(environment: Environment, service: PhoneService, actor: hsm.Instance) -> hsm.Event[typing.Any]:
+    return await abilities.run_terminal_operation(
+        environment,
+        child=service,
+        request=lambda reply: dataclasses.replace(
+            attachment.AttachEvent.with_data(attachment.AttachData(actor=actor, reply_to=reply, timeout=_TIMEOUT)),
+            id=uuid.uuid4().hex,
+        ),
+        terminals=(attachment.AttachCompleteEvent, attachment.AttachFailedEvent),
+        timeout=_TIMEOUT,
+    )
+
+
+async def _detach(environment: Environment, service: PhoneService, actor: hsm.Instance) -> hsm.Event[typing.Any]:
+    return await abilities.run_terminal_operation(
+        environment,
+        child=service,
+        request=lambda reply: dataclasses.replace(
+            attachment.DetachEvent.with_data(attachment.DetachData(actor=actor, reply_to=reply, timeout=_TIMEOUT)),
+            id=uuid.uuid4().hex,
+        ),
+        terminals=(attachment.DetachedEvent, attachment.DetachFailedEvent),
+        timeout=_TIMEOUT,
+    )
+
+
+def test_phone_service_does_not_start_itself_and_its_track_path_starts_and_stops_with_it() -> None:
+    async def run() -> tuple[bool, bool, bool, bool]:
+        environment = Environment()
+        service = _InspectablePhoneService()
+        unstarted = mosfet.lifecycle.is_started(service)
+        _ = await mosfet.started(environment, service, PhoneService.model)
+        track_path = service.track_path()
+        track_started = mosfet.lifecycle.is_started(track_path)
+        await hsm.stop(service)
+        return unstarted, track_started, mosfet.lifecycle.is_started(service), mosfet.lifecycle.is_started(track_path)
+
+    unstarted, track_started, service_after_stop, track_after_stop = asyncio.run(run())
+    assert unstarted is False
+    assert track_started is True
+    assert service_after_stop is False
+    assert track_after_stop is False
+
+
+def test_phone_service_answers_attach_and_detach_by_message() -> None:
+    """One firmware at a time: the attached one is answered again, another is refused as a conflict."""
+
+    async def run() -> list[tuple[str, object]]:
         environment = Environment()
         service = PhoneService()
-        target = hsm.Instance()
-        await mosfet.started(
-            environment,
-            target,
-            mosfet.define("T", hsm.initial(hsm.target("s")), hsm.state("s")),
-        )
-        await service.attach(environment, target)
-        after_attach = mosfet.lifecycle.is_started(service)
+        _ = await mosfet.started(environment, service, PhoneService.model)
+        first = await _actor(environment, "FirstFirmware")
+        second = await _actor(environment, "SecondFirmware")
+        answers = [
+            await _attach(environment, service, first),
+            await _attach(environment, service, first),
+            await _attach(environment, service, second),
+            await _detach(environment, service, first),
+            await _detach(environment, service, first),
+            await _attach(environment, service, second),
+        ]
         await hsm.stop(service)
-        after_stop = mosfet.lifecycle.is_started(service)
-        return after_attach, after_stop
+        return [
+            (
+                answer.name,
+                answer.data.kind
+                if isinstance(answer.data, attachment.FailedData)
+                else getattr(answer.data, "created", getattr(answer.data, "removed", None)),
+            )
+            for answer in answers
+        ]
 
-    after_attach, after_stop = asyncio.run(run())
-    assert after_attach is True
-    assert after_stop is False
+    assert asyncio.run(run()) == [
+        (attachment.AttachCompleteEvent.name, True),
+        (attachment.AttachCompleteEvent.name, False),
+        (attachment.AttachFailedEvent.name, attachment.FailureKind.CONFLICT),
+        (attachment.DetachedEvent.name, True),
+        (attachment.DetachedEvent.name, False),
+        (attachment.AttachCompleteEvent.name, True),
+    ]
+
+
+def test_phone_service_restarts_after_stop_and_attaches_again() -> None:
+    async def run() -> tuple[str, str]:
+        environment = Environment()
+        service = PhoneService()
+        target = await _actor(environment, "RestartTarget")
+        _ = await mosfet.started(environment, service, PhoneService.model)
+        first = await _attach(environment, service, target)
+        await hsm.stop(service)
+        assert mosfet.lifecycle.is_started(service) is False
+        _ = await mosfet.started(environment, service, PhoneService.model)
+        again = await _attach(environment, service, target)
+        await hsm.stop(service)
+        return first.name, again.name
+
+    assert asyncio.run(run()) == (attachment.AttachCompleteEvent.name, attachment.AttachCompleteEvent.name)
 
 
 def test_phone_service_direct_stop_clears_owner(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -59,10 +148,8 @@ def test_phone_service_direct_stop_clears_owner(monkeypatch: pytest.MonkeyPatch)
     async def run() -> None:
         environment = Environment()
         service = PhoneService()
-        target = hsm.Instance()
-        target_model = mosfet.define("StopTarget", hsm.initial(hsm.target("s")), hsm.state("s"))
-        await mosfet.started(environment, target, target_model)
-        await service.attach(environment, target)
+        _ = await mosfet.started(environment, service, PhoneService.model, owner="/Phone")
+        _ = await _attach(environment, service, await _actor(environment, "StopTarget"))
         calls.clear()
 
         await service.stop(environment)
@@ -90,10 +177,7 @@ def test_phone_service_stop_clears_owner_for_an_independently_stopped_track(
     async def run() -> None:
         environment = Environment()
         service = _InspectablePhoneService()
-        target = hsm.Instance()
-        target_model = mosfet.define("StoppedTrackTarget", hsm.initial(hsm.target("s")), hsm.state("s"))
-        await mosfet.started(environment, target, target_model)
-        await service.attach(environment, target)
+        _ = await mosfet.started(environment, service, PhoneService.model, owner="/Phone")
         track_path = service.track_path()
         await hsm.stop(track_path, environment)
         assert not mosfet.lifecycle.is_started(track_path)
@@ -112,96 +196,33 @@ def test_phone_service_stop_clears_owner_for_an_independently_stopped_track(
     assert live_payloads[-1].get("owner") is None
 
 
-def test_phone_service_attach_after_stop_restarts_machine() -> None:
-    """Stop via production API, then re-attach must restart without RuntimeError."""
+def test_phone_service_attach_and_conflict_do_not_republish_owner(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The phone that started the service owns it; attaching firmware never changes that."""
 
-    async def run() -> None:
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://127.0.0.1:4317")
+    calls: list[tuple[dict[str, object], str]] = []
+
+    def _record(payload: dict[str, object], url: str) -> None:
+        calls.append((payload, url))
+
+    monkeypatch.setattr(_DEFINE, "post_model", _record)
+
+    async def run() -> str:
         environment = Environment()
         service = PhoneService()
-        target = hsm.Instance()
-        await mosfet.started(
-            environment,
-            target,
-            mosfet.define("T", hsm.initial(hsm.target("s")), hsm.state("s")),
-        )
-        await service.attach(environment, target)
-        assert mosfet.lifecycle.is_started(service) is True
-
+        first_target = await _actor(environment, "FirstTarget")
+        second_target = await _actor(environment, "SecondTarget")
+        _ = await mosfet.started(environment, service, PhoneService.model, owner="/Phone")
+        calls.clear()
+        _ = await _attach(environment, service, first_target)
+        refused = await _attach(environment, service, second_target)
         await hsm.stop(service)
-        assert mosfet.lifecycle.is_started(service) is False
+        return refused.name
 
-        await service.attach(environment, target)
-        assert mosfet.lifecycle.is_started(service) is True
-        await service.detach(environment, target)
-
-    asyncio.run(run())
-
-
-def test_phone_service_reattach_refreshes_owner_without_restart(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://127.0.0.1:4317")
-    calls: list[tuple[dict[str, object], str]] = []
-
-    def _record(payload: dict[str, object], url: str) -> None:
-        calls.append((payload, url))
-
-    monkeypatch.setattr(_DEFINE, "post_model", _record)
-
-    async def run() -> tuple[str, str]:
-        environment = Environment()
-        service = PhoneService()
-        target_model = mosfet.define("FirstTarget", hsm.initial(hsm.target("s")), hsm.state("s"))
-        replacement_model = mosfet.define("ReplacementTarget", hsm.initial(hsm.target("s")), hsm.state("s"))
-        first_target = await mosfet.started(environment, hsm.Instance(), target_model)
-        replacement_target = await mosfet.started(environment, hsm.Instance(), replacement_model)
-        await service.attach(environment, first_target)
-        await service.detach(environment, first_target)
-        detached_live_payloads = [
-            payload
-            for payload, url in calls
-            if url.endswith("/v1/models/live") and payload.get("name") == "/PhoneService"
-        ]
-        assert detached_live_payloads
-        detached_live_payload = detached_live_payloads[-1]
-        assert "owner" in detached_live_payload
-        assert detached_live_payload["owner"] is None
-        calls.clear()
-        before = hsm.id(service)
-        await service.attach(environment, replacement_target)
-        return before, hsm.id(service)
-
-    before, after = asyncio.run(run())
-    live_payloads = [payload for payload, url in calls if url.endswith("/v1/models/live")]
-    assert before == after
-    assert len(live_payloads) == 1
-    live_payload = live_payloads[0]
-    owner = live_payload.get("owner")
-    assert isinstance(owner, str)
-    assert owner == "/ReplacementTarget"
-
-
-def test_phone_service_conflicting_attach_does_not_republish_owner(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://127.0.0.1:4317")
-    calls: list[tuple[dict[str, object], str]] = []
-
-    def _record(payload: dict[str, object], url: str) -> None:
-        calls.append((payload, url))
-
-    monkeypatch.setattr(_DEFINE, "post_model", _record)
-
-    async def run() -> None:
-        environment = Environment()
-        service = PhoneService()
-        first_model = mosfet.define("FirstTarget", hsm.initial(hsm.target("s")), hsm.state("s"))
-        second_model = mosfet.define("SecondTarget", hsm.initial(hsm.target("s")), hsm.state("s"))
-        first_target = await mosfet.started(environment, hsm.Instance(), first_model)
-        second_target = await mosfet.started(environment, hsm.Instance(), second_model)
-        await service.attach(environment, first_target)
-        calls.clear()
-
-        with pytest.raises(PhoneServiceError, match="already attached"):
-            await service.attach(environment, second_target)
-
-    asyncio.run(run())
-    assert calls == []
+    assert asyncio.run(run()) == attachment.AttachFailedEvent.name
+    republished = [
+        payload
+        for payload, url in calls
+        if url.endswith("/v1/models/live") and payload.get("name") == "/PhoneService" and payload.get("live")
+    ]
+    assert republished == []

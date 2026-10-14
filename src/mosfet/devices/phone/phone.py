@@ -1,21 +1,24 @@
 from mosfet.devices import audio
 
-import asyncio
 import collections.abc
 import dataclasses
 import datetime
 import importlib.resources
 import logging
 import typing
+import uuid
 
 import hsm
 import pydantic
 import mosfet.device
+from opentelemetry import metrics
 
+from mosfet import abilities
 from mosfet import lifecycle
+from mosfet import telemetry
 from mosfet.protocols import attachment
 from mosfet.telemetry import observer
-from mosfet.environment import SoundEvent, Environment, require_environment_scope, space
+from mosfet.environment import SoundEvent, Environment, space
 
 # Flat symbol imports (not `from . import display`): both Phone and Firmware accept a
 # `display` constructor parameter, which would shadow a `display` module import.
@@ -116,8 +119,24 @@ position is — a device cannot know that.
 
 _DEFAULT_ANSWER_TIMEOUT = datetime.timedelta(seconds=30)
 _DEFAULT_TRANSFER_TIMEOUT = datetime.timedelta(seconds=30)
+_DEFAULT_SERVICE_TIMEOUT = datetime.timedelta(seconds=10)
 
 _LOG = logging.getLogger(__name__)
+_SCOPE = "bot.devices.phone"
+_PUBLISH_SPAN = "bot.devices.phone.publish"
+_PUBLISH_DROPPED = "bot.devices.phone.publish.dropped"
+# Attributes are closed sets from code: the canonical name of a phone event firmware publishes, and
+# the outcome of releasing the service at stop.
+_PUBLISH_DROPPED_COUNT = metrics.get_meter(_SCOPE).create_counter(
+    "bot.devices.phone.publish.dropped.count",
+    unit="{event}",
+    description="Events phone firmware published with no carrier to take them, by event name.",
+)
+_SERVICE_DETACH_COUNT = metrics.get_meter(_SCOPE).create_counter(
+    "bot.devices.phone.service.detach.count",
+    unit="{request}",
+    description="Service releases a phone asked for at stop, by outcome: detached, failed, or timed_out.",
+)
 
 
 def _load_sound_wav(name: str) -> bytes:
@@ -170,102 +189,6 @@ _TransferFailedCommittedEvent = hsm.Event[CallTransferFailedData](
     kind=hsm.CompletionEventKind,
     schema=CallTransferFailedData,
 )
-
-
-def _undelivered_phone_service_event() -> asyncio.Future[bool]:
-    future: asyncio.Future[bool] = asyncio.get_running_loop().create_future()
-    future.set_result(False)
-    return future
-
-
-@dataclasses.dataclass
-class _PhoneObservationService:
-    owner: "Phone"
-    service: "Service"
-    # Injected by the phone that owns this service: elevating a committed observation into an environment
-    # stimulus is the phone's behaviour, not the transport's, and the phone is what knows where it
-    # is standing.
-    elevate: collections.abc.Callable[[hsm.Context, hsm.Event[typing.Any]], None]
-    target: hsm.Instance | None = dataclasses.field(default=None, init=False)
-
-    async def attach(self, environment: Environment, target: hsm.Instance) -> None:
-        await self.service.attach(environment, target)
-        self.target = target
-
-    async def detach(self, environment: Environment, target: hsm.Instance) -> None:
-        await self.service.detach(environment, target)
-        if self.target is target:
-            self.target = None
-
-    def publish(self, ctx: hsm.Context, event: hsm.Event[typing.Any]) -> None:
-        # Transport only: forward to the provider service. Direction is decided by which firmware
-        # transition fired, never by sniffing the payload type here — a shared channel that infers
-        # direction from `type(data)` is what let receiver audio take the uplink path (echo).
-        service_id = hsm.id(self.service) if isinstance(self.service, hsm.Instance) else ""
-        self.service.publish(
-            ctx,
-            dataclasses.replace(
-                event,
-                source=hsm.id(self.target) if self.target is not None else hsm.id(self.owner),
-                target=service_id,
-                metadata=dict(event.metadata),
-            ),
-        )
-        self.elevate(ctx, event)
-
-
-class Service(typing.Protocol):
-    """Service that receives provider requests and committed public phone events."""
-
-    def attach(self, environment: Environment, target: hsm.Instance) -> collections.abc.Awaitable[None]:
-        """Attach this phone service to a phone-owned firmware instance."""
-        ...
-
-    def detach(self, environment: Environment, target: hsm.Instance) -> collections.abc.Awaitable[None]:
-        """Detach this phone service from a phone-owned firmware instance."""
-        ...
-
-    def publish(self, ctx: hsm.Context, event: hsm.Event[typing.Any]) -> None:
-        """Publish one phone event emitted by firmware."""
-
-
-class EventRecorder:
-    """In-memory phone service for tests and embedders without a provider yet."""
-
-    _events: list[hsm.Event[typing.Any]]
-    _target: hsm.Instance | None
-
-    def __init__(self) -> None:
-        self._events = []
-        self._target = None
-
-    @property
-    def events(self) -> tuple[hsm.Event[typing.Any], ...]:
-        return tuple(self._events)
-
-    async def attach(self, environment: Environment, target: hsm.Instance) -> None:
-        require_environment_scope(environment, target, participant="Phone service target")
-        self._target = target
-
-    async def detach(self, environment: Environment, target: hsm.Instance) -> None:
-        require_environment_scope(environment, target, participant="Phone service target")
-        if self._target is target:
-            self._target = None
-
-    def receive(self, ctx: hsm.Context, event: hsm.Event[typing.Any]) -> collections.abc.Awaitable[bool]:
-        """Emit one provider-originating event into the attached phone firmware; resolves to whether it was delivered."""
-
-        if self._target is None:
-            return _undelivered_phone_service_event()
-        # Delivery is the gate; firmware topology ignores unmatched triggers.
-        return self._target.dispatch(ctx, event)
-
-    def publish(self, ctx: hsm.Context, event: hsm.Event[typing.Any]) -> None:
-        del ctx
-        # Ignore local speaker uplink offers only (exact OutputData; ServiceAudioData records).
-        if type(event.data) is audio.OutputData:
-            return
-        self._events.append(event)
 
 
 def _environment_observation_event(owner: "Phone", event: hsm.Event[typing.Any]) -> hsm.Event[typing.Any] | None:
@@ -343,7 +266,10 @@ def _environment_observation_event(owner: "Phone", event: hsm.Event[typing.Any])
 class Firmware(Traced):
     """Phone-owned firmware state for a single active call."""
 
-    _service: Service
+    # The carrier this firmware publishes to, or None for a handset with no line: an address,
+    # dispatched to and never read. So is the device it is installed in.
+    _service: hsm.Instance | None
+    _device: hsm.Instance
     # Firmware owns transducer routing: the speaker transmits service audio into the environment
     # (receiver), the microphone carries local speech to the service (mouthpiece), the display
     # shows who the call is with. The service knows about none of them.
@@ -360,19 +286,28 @@ class Firmware(Traced):
     def __init__(
         self,
         *,
-        service: Service | None = None,
+        device: hsm.Instance,
+        service: hsm.Instance | None = None,
         speaker: audio.Speaker | None = None,
         microphone: audio.Microphone | None = None,
         display: Display | None = None,
         answer_timeout: datetime.timedelta = _DEFAULT_ANSWER_TIMEOUT,
         transfer_timeout: datetime.timedelta = _DEFAULT_TRANSFER_TIMEOUT,
     ) -> None:
+        """Build call firmware for the device it is installed in.
+
+        ``device`` receives every committed observation as ``device.firmware.observed``.
+        ``service`` is the started carrier firmware publishes to; ``None`` means no line, and every
+        publish is dropped, counted, and recorded as an OTEL span event.
+        """
+
         super().__init__()
         if answer_timeout <= datetime.timedelta():
             raise ValueError("answer_timeout must be a positive duration.")
         if transfer_timeout <= datetime.timedelta():
             raise ValueError("transfer_timeout must be a positive duration.")
-        self._service = service if service is not None else EventRecorder()
+        self._device = device
+        self._service = service
         self._speaker = speaker if speaker is not None else audio.Speaker()
         self._microphone = microphone if microphone is not None else audio.Microphone()
         self._display = display if display is not None else Display()
@@ -383,27 +318,68 @@ class Firmware(Traced):
         self._current_transfer_id = None
         self._current_transfer_target = None
 
-    def event_recorder(self) -> EventRecorder:
-        service = self._service
-        if isinstance(service, _PhoneObservationService):
-            service = service.service
-        assert isinstance(service, EventRecorder)
-        return service
-
     @staticmethod
     def _publish(
         ctx: hsm.Context,
         instance: "Firmware",
         trigger: hsm.Event,
         event: hsm.Event[typing.Any],
+    ) -> hsm.Event[typing.Any]:
+        """Put ``event`` on the line, one way, and return it as published.
+
+        The request envelope id is preserved end to end for HSM completion correlation; metadata is
+        telemetry only. The carrier answers through its own ``phone.service.*`` events into this
+        firmware, never through a reply here. With no carrier the publish is dropped, and the drop
+        is counted and recorded as a span event naming the event — nothing else, so the record
+        stays low-cardinality.
+        """
+
+        service = instance._service
+        published = dataclasses.replace(
+            event,
+            id=trigger.id if trigger.id else event.id,
+            source=hsm.id(instance),
+            target="" if service is None else hsm.id(service),
+            metadata=dict(trigger.metadata),
+        )
+        if service is None:
+            _PUBLISH_DROPPED_COUNT.add(1, {"hsm.event.name": published.name})
+            with telemetry.span.operation(
+                _PUBLISH_SPAN,
+                scope=_SCOPE,
+                component="phone.firmware",
+                stage="publish",
+                context=telemetry.event_context(published),
+            ) as active:
+                active.add_event(_PUBLISH_DROPPED, {"hsm.event.name": published.name})
+            return published
+        _ = hsm.dispatch(ctx, service, published)
+        return published
+
+    @staticmethod
+    def _report(
+        ctx: hsm.Context,
+        instance: "Firmware",
+        trigger: hsm.Event,
+        event: hsm.Event[typing.Any],
     ) -> None:
-        # Preserve request envelope id end-to-end for HSM completion correlation; metadata is telemetry only.
-        instance._service.publish(
+        """Publish a committed fact, then hand the same event to the device as its observation.
+
+        Only committed facts are reported. Service requests and uplink audio are published and
+        nothing more, so per-frame audio never reaches the device shell.
+        """
+
+        observation = Firmware._publish(ctx, instance, trigger, event)
+        device = instance._device
+        _ = hsm.dispatch(
             ctx,
+            device,
             dataclasses.replace(
-                event,
-                id=trigger.id if trigger.id else event.id,
-                metadata=dict(trigger.metadata),
+                mosfet.device.ObservedEvent.with_data(mosfet.device.ObservedData(observation=observation)),
+                id=observation.id or uuid.uuid4().hex,
+                source=hsm.id(instance),
+                target=hsm.id(device),
+                metadata=dict(observation.metadata),
             ),
         )
 
@@ -575,7 +551,7 @@ class Firmware(Traced):
     @staticmethod
     def _publish_answer_requested(ctx: hsm.Context, instance: "Firmware", event: hsm.Event) -> None:
         # The command names no call; firmware stamps the line it is answering for the exchange.
-        Firmware._publish(
+        _ = Firmware._publish(
             ctx,
             instance,
             event,
@@ -586,11 +562,11 @@ class Firmware(Traced):
     def _publish_dial_requested(ctx: hsm.Context, instance: "Firmware", event: hsm.Event) -> None:
         data = event.data
         assert isinstance(data, DialData)
-        Firmware._publish(ctx, instance, event, ServiceDialRequestedEvent.with_data(data))
+        _ = Firmware._publish(ctx, instance, event, ServiceDialRequestedEvent.with_data(data))
 
     @staticmethod
     def _publish_decline_requested(ctx: hsm.Context, instance: "Firmware", event: hsm.Event) -> None:
-        Firmware._publish(
+        _ = Firmware._publish(
             ctx,
             instance,
             event,
@@ -599,7 +575,7 @@ class Firmware(Traced):
 
     @staticmethod
     def _publish_hang_up_requested(ctx: hsm.Context, instance: "Firmware", event: hsm.Event) -> None:
-        Firmware._publish(
+        _ = Firmware._publish(
             ctx,
             instance,
             event,
@@ -610,7 +586,7 @@ class Firmware(Traced):
     def _publish_transfer_requested(ctx: hsm.Context, instance: "Firmware", event: hsm.Event) -> None:
         data = event.data
         assert isinstance(data, TransferCallData)
-        Firmware._publish(
+        _ = Firmware._publish(
             ctx,
             instance,
             event,
@@ -673,7 +649,7 @@ class Firmware(Traced):
             sample_rate_hz=data.sample_rate_hz,
             channels=data.channels,
         )
-        Firmware._publish(ctx, instance, event, audio.OutputEvent.with_data(uplink))
+        _ = Firmware._publish(ctx, instance, event, audio.OutputEvent.with_data(uplink))
 
     @staticmethod
     def _receive_service_audio(ctx: hsm.Context, instance: "Firmware", event: hsm.Event) -> None:
@@ -716,11 +692,11 @@ class Firmware(Traced):
 
     @staticmethod
     def _publish_dial_not_answered(ctx: hsm.Context, instance: "Firmware", event: hsm.Event) -> None:
-        Firmware._publish(ctx, instance, event, NoCallEvent.with_data(NoCallData(reason="dial_not_answered")))
+        Firmware._report(ctx, instance, event, NoCallEvent.with_data(NoCallData(reason="dial_not_answered")))
 
     @staticmethod
     def _publish_dial_abandoned(ctx: hsm.Context, instance: "Firmware", event: hsm.Event) -> None:
-        Firmware._publish(ctx, instance, event, NoCallEvent.with_data(NoCallData(reason="dial_abandoned")))
+        Firmware._report(ctx, instance, event, NoCallEvent.with_data(NoCallData(reason="dial_abandoned")))
 
     @staticmethod
     def _publish_dial_failed(ctx: hsm.Context, instance: "Firmware", event: hsm.Event) -> None:
@@ -729,7 +705,7 @@ class Firmware(Traced):
         # left the phone unable to say whether the line refused or the network gave up.
         data = event.data
         assert isinstance(data, DialFailedData)
-        Firmware._publish(
+        Firmware._report(
             ctx,
             instance,
             event,
@@ -854,43 +830,43 @@ class Firmware(Traced):
     def _publish_committed_ringing(ctx: hsm.Context, instance: "Firmware", event: hsm.Event) -> None:
         data = event.data
         assert isinstance(data, RingingData)
-        Firmware._publish(ctx, instance, event, RingingEvent.with_data(data))
+        Firmware._report(ctx, instance, event, RingingEvent.with_data(data))
 
     @staticmethod
     def _publish_committed_answered(ctx: hsm.Context, instance: "Firmware", event: hsm.Event) -> None:
         data = event.data
         assert isinstance(data, CallData)
-        Firmware._publish(ctx, instance, event, AnsweredEvent.with_data(data))
+        Firmware._report(ctx, instance, event, AnsweredEvent.with_data(data))
 
     @staticmethod
     def _publish_committed_media_ready(ctx: hsm.Context, instance: "Firmware", event: hsm.Event) -> None:
         data = event.data
         assert isinstance(data, CallData)
-        Firmware._publish(ctx, instance, event, MediaReadyEvent.with_data(data))
+        Firmware._report(ctx, instance, event, MediaReadyEvent.with_data(data))
 
     @staticmethod
     def _publish_committed_hung_up(ctx: hsm.Context, instance: "Firmware", event: hsm.Event) -> None:
         data = event.data
         assert isinstance(data, HungUpData)
-        Firmware._publish(ctx, instance, event, HungUpEvent.with_data(data))
+        Firmware._report(ctx, instance, event, HungUpEvent.with_data(data))
 
     @staticmethod
     def _publish_committed_transfer_started(ctx: hsm.Context, instance: "Firmware", event: hsm.Event) -> None:
         data = event.data
         assert isinstance(data, TransferData)
-        Firmware._publish(ctx, instance, event, TransferStartedEvent.with_data(data))
+        Firmware._report(ctx, instance, event, TransferStartedEvent.with_data(data))
 
     @staticmethod
     def _publish_committed_transfer_completed(ctx: hsm.Context, instance: "Firmware", event: hsm.Event) -> None:
         data = event.data
         assert isinstance(data, TransferData)
-        Firmware._publish(ctx, instance, event, CallTransferCompletedEvent.with_data(data))
+        Firmware._report(ctx, instance, event, CallTransferCompletedEvent.with_data(data))
 
     @staticmethod
     def _publish_committed_transfer_failed(ctx: hsm.Context, instance: "Firmware", event: hsm.Event) -> None:
         data = event.data
         assert isinstance(data, CallTransferFailedData)
-        Firmware._publish(ctx, instance, event, CallTransferFailedEvent.with_data(data))
+        Firmware._report(ctx, instance, event, CallTransferFailedEvent.with_data(data))
 
     @staticmethod
     def _set_current_call(ctx: hsm.Context, instance: "Firmware", event: hsm.Event) -> None:
@@ -912,7 +888,7 @@ class Firmware(Traced):
         event rather than reaching into the display's attribute directly. The production path
         (``Phone``) starts every peripheral before firmware exists, so a live display is the
         supported contract. Firmware built and driven standalone with no started display — e.g.
-        constructing ``Firmware()`` directly, outside a ``Phone`` — has nowhere to put a
+        constructing ``Firmware(device=...)`` directly, outside a ``Phone`` — has nowhere to put a
         caller id; this makes that visible instead of dispatching to a peripheral that can never
         receive it.
         """
@@ -1353,7 +1329,10 @@ class Phone(mosfet.device.Device):
     _microphone: audio.Microphone
     _speaker: audio.Speaker
     _display: Display
-    _service: Service
+    # The carrier this handset owns, unstarted until bring-up, or None for no line at all.
+    _service: hsm.Instance | None
+    _service_model: hsm.Model | None
+    _service_timeout: datetime.timedelta
     _firmware_instance: Firmware
     firmware_model: typing.ClassVar[hsm.Model] = Firmware.model
     # What this handset is built from. A phone that does more than calls swaps in its own
@@ -1379,10 +1358,28 @@ class Phone(mosfet.device.Device):
         display: Display | None = None,
         peripherals: collections.abc.Iterable[mosfet.device.Device] = (),
         placement: space.Placement | None = None,
-        service: Service | None = None,
+        service: hsm.Instance | None = None,
+        service_timeout: datetime.timedelta = _DEFAULT_SERVICE_TIMEOUT,
         answer_timeout: datetime.timedelta = _DEFAULT_ANSWER_TIMEOUT,
         transfer_timeout: datetime.timedelta = _DEFAULT_TRANSFER_TIMEOUT,
     ) -> None:
+        """Build a handset.
+
+        ``service`` is the carrier: an unstarted HSM this phone owns. The phone starts it at
+        bring-up, attaches its firmware with ``attachment.attach``, detaches it with
+        ``attachment.detach`` at stop, then stops it; ``service_timeout`` bounds each request.
+        ``None`` is a handset with no line: firmware drops what it publishes and records each drop.
+
+        Raises:
+            ValueError: If ``service_timeout`` is not positive.
+            TypeError: If ``service`` is not an HSM instance whose class declares its ``model``.
+        """
+
+        if service_timeout <= datetime.timedelta():
+            raise ValueError("service_timeout must be a positive duration.")
+        service_model = None if service is None else getattr(type(service), "model", None)
+        if service is not None and not isinstance(service_model, hsm.Model):
+            raise TypeError("Phone service must be an HSM instance whose class declares its model.")
         resolved_microphone = microphone if microphone is not None else audio.Microphone()
         resolved_speaker = speaker if speaker is not None else audio.Speaker()
         resolved_display = display if display is not None else self._display_type()
@@ -1397,14 +1394,12 @@ class Phone(mosfet.device.Device):
         self._microphone = resolved_microphone
         self._speaker = resolved_speaker
         self._display = resolved_display
-        observation_service = _PhoneObservationService(
-            owner=self,
-            service=service if service is not None else EventRecorder(),
-            elevate=self._observe,
-        )
-        self._service = observation_service
+        self._service = service
+        self._service_model = service_model
+        self._service_timeout = service_timeout
         self._firmware_instance = self._firmware_type(
-            service=observation_service,
+            device=self,
+            service=service,
             speaker=resolved_speaker,
             microphone=resolved_microphone,
             display=resolved_display,
@@ -1414,20 +1409,67 @@ class Phone(mosfet.device.Device):
 
     @typing.override
     async def stop(self, ctx: hsm.Context) -> None:
-        """Release the service this phone acquired, then power down.
+        """Release the service this phone acquired, power down, then stop the service.
 
         Paired with the acquire in ``_after_firmware_started``, and ordered before it: the
         service is attached *to* the firmware, so it has to be let go while that firmware is
-        still there — the same reason firmware goes down before the transducers it holds.
-        Held past teardown it keeps a stopped machine alive, and a replacement phone can never
-        attach to the same service.
+        still there — the same reason firmware goes down before the transducers it holds. The
+        release is a request bounded by ``service_timeout``; a refusal or no answer is counted
+        and logged and never stops the teardown. The service itself goes down last, after the
+        firmware that publishes to it.
         """
 
+        service = self._service
         firmware = self._firmware
-        if firmware is not None:
-            await self._service.detach(Environment.from_context(self.context()), firmware)
+        # Teardown only: whether there is anything to release or stop (the device.py precedent).
+        if service is not None and firmware is not None and lifecycle.is_started(service):
+            outcome = "detached"
+            try:
+                # The one-shot reply actor lives only for this request, under a scope of its own: the
+                # phone's context may already be cancelled by whoever started it (HSM-CONTEXT-001),
+                # and the release must still be bounded by its own timer.
+                terminal = await abilities.run_terminal_operation(
+                    hsm.Context(),
+                    child=service,
+                    request=lambda reply: dataclasses.replace(
+                        attachment.DetachEvent.with_data(
+                            attachment.DetachData(actor=firmware, reply_to=reply, timeout=self._service_timeout)
+                        ),
+                        id=uuid.uuid4().hex,
+                    ),
+                    terminals=(attachment.DetachedEvent, attachment.DetachFailedEvent),
+                    timeout=self._service_timeout,
+                )
+            except TimeoutError:
+                outcome = "timed_out"
+            else:
+                if isinstance(terminal.data, attachment.FailedData):
+                    outcome = "failed"
+                    _LOG.warning("phone service refused release kind=%s", terminal.data.kind)
+            if outcome == "timed_out":
+                _LOG.warning("phone service release unanswered after %ss", self._service_timeout.total_seconds())
+            _SERVICE_DETACH_COUNT.add(1, {"bot.outcome": outcome})
         await super().stop(ctx)
+        if service is not None and lifecycle.is_started(service):
+            await hsm.stop(service)
 
+    @typing.override
+    async def _initialize_firmware(self, ctx: hsm.Context, event: hsm.Event) -> None:
+        # The service is live before firmware can publish to it, and outlives this activity: it
+        # is started under the device lifetime context (HSM-CONTEXT-001).
+        service = self._service
+        service_model = self._service_model
+        if service is not None and service_model is not None:
+            owner_model = type(self).model
+            _ = await mosfet.started(
+                self.context(),
+                service,
+                service_model,
+                owner=owner_model.qualified_name if owner_model is not None else None,
+            )
+        await super()._initialize_firmware(ctx, event)
+
+    @typing.override
     def _observe(self, ctx: hsm.Context, event: hsm.Event[typing.Any]) -> None:
         """Surface a committed observation on both of the paths a real handset has.
 
@@ -1468,18 +1510,40 @@ class Phone(mosfet.device.Device):
     @typing.override
     async def _after_firmware_started(self, ctx: hsm.Context, event: hsm.Event) -> None:
         await super()._after_firmware_started(ctx, event)
-        if self._firmware is None:
+        firmware = self._firmware
+        if firmware is None:
             return
-        # Service/media outlive firmware-init activity; attach under device lifetime context (HSM-CONTEXT-001).
+        service = self._service
+        if service is not None:
+            # Attach the firmware to its carrier by request and reply, under the device lifetime
+            # context (HSM-CONTEXT-001). A refusal or no answer fails bring-up, so the device ends
+            # failed instead of looking ready with no line.
+            try:
+                terminal = await abilities.run_terminal_operation(
+                    ctx,
+                    child=service,
+                    request=lambda reply: dataclasses.replace(
+                        attachment.AttachEvent.with_data(
+                            attachment.AttachData(actor=firmware, reply_to=reply, timeout=self._service_timeout)
+                        ),
+                        id=uuid.uuid4().hex,
+                        metadata=dict(event.metadata),
+                    ),
+                    terminals=(attachment.AttachCompleteEvent, attachment.AttachFailedEvent),
+                    timeout=self._service_timeout,
+                )
+            except TimeoutError as error:
+                raise RuntimeError("phone service attach failed: timeout") from error
+            if isinstance(terminal.data, attachment.FailedData):
+                raise RuntimeError(f"phone service attach failed: {terminal.data.kind}")
         environment = Environment.from_context(self.context())
-        await self._service.attach(environment, self._firmware)
         # Firmware is the controller, so it wires itself to its own transducers. Wiring, not
         # gating: this attach happens once at bring-up and nothing in src ever detaches, so the
         # microphone transduces on EVERY environment.sound for the phone's whole life — a per-broadcast
         # hot path that runs whether or not a call is up — and firmware discards what arrives
         # outside /Phone/answered/media_ready. Call state is gated by that transition's scope, not
         # by the attachment. Anything changing what the mouthpiece costs when idle changes it here.
-        wired = attachment.AttachEvent.with_data(attachment.AttachData(actor=self._firmware))
+        wired = attachment.AttachEvent.with_data(attachment.AttachData(actor=firmware))
         await self._microphone.attach(environment, wired)
         await self._speaker.attach(environment, wired)
         # The display is attached the same way, for the same reason: firmware wires every

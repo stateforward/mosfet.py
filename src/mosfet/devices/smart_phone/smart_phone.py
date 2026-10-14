@@ -65,20 +65,20 @@ class Firmware(phone.Firmware):
     def _publish_text_message_send_requested(ctx: hsm.Context, instance: "Firmware", event: hsm.Event) -> None:
         data = event.data
         assert isinstance(data, SendTextMessageData)
-        Firmware._publish(ctx, instance, event, ServiceTextMessageSendRequestedEvent.with_data(data))
+        _ = Firmware._publish(ctx, instance, event, ServiceTextMessageSendRequestedEvent.with_data(data))
 
     @staticmethod
     def _publish_text_message_sent(ctx: hsm.Context, instance: "Firmware", event: hsm.Event) -> None:
         data = event.data
         assert isinstance(data, TextMessageSentData)
-        Firmware._publish(ctx, instance, event, TextMessageSentEvent.with_data(data))
+        Firmware._report(ctx, instance, event, TextMessageSentEvent.with_data(data))
 
     @staticmethod
     def _publish_text_message_send_failed(ctx: hsm.Context, instance: "Firmware", event: hsm.Event) -> None:
         # The service's verdict travels with the fact it explains, as for a failed dial.
         data = event.data
         assert isinstance(data, TextMessageSendFailedData)
-        Firmware._publish(ctx, instance, event, TextMessageSendFailedEvent.with_data(data))
+        Firmware._report(ctx, instance, event, TextMessageSendFailedEvent.with_data(data))
 
     @staticmethod
     def _show_notifications(ctx: hsm.Context, instance: "Firmware", trigger: hsm.Event) -> None:
@@ -123,7 +123,7 @@ class Firmware(phone.Firmware):
         assert isinstance(data, ReadNotificationData | DismissNotificationData)
         # The command is the trigger itself, so its canonical name is what the failure names.
         not_found = NotificationNotFoundData.model_validate({"id": data.id, "command": event.name})
-        Firmware._publish(ctx, instance, event, NotificationNotFoundEvent.with_data(not_found))
+        Firmware._report(ctx, instance, event, NotificationNotFoundEvent.with_data(not_found))
 
     # A redefine of the phone's own firmware model: its call topology, observation, and trace
     # binding all carry over, and apply to the transitions added here as well.
