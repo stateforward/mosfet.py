@@ -13,6 +13,7 @@ import pytest
 from opentelemetry import _logs
 
 from mosfet import media
+from mosfet.abilities import embedding
 from mosfet.abilities.language import text
 from mosfet.telemetry import capture
 from mosfet.telemetry.configure import logger_provider, tracer_provider
@@ -201,6 +202,19 @@ def test_jsonable_redacts_images_at_every_depth() -> None:
         "tool_selection": "auto",
     }
     assert _PNG_BASE64 not in json.dumps(tree)
+
+
+def test_jsonable_redacts_images_inside_embedding_requests() -> None:
+    image = media.Image(content=_PNG, media_type="image/png")
+    request = embedding.InputData(
+        role=embedding.Role.DOCUMENT,
+        items=(embedding.Item(parts=(text.TextPart(text="logo"), text.ImagePart(image=image))),),
+    )
+
+    tree = capture.jsonable(request)
+
+    assert _PNG_BASE64 not in json.dumps(tree)
+    assert f"<image:image/png:{len(_PNG)} bytes>" in json.dumps(tree)
 
 
 def test_full_capture_never_exports_image_bytes_from_event_payloads(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -37,11 +37,16 @@ failed, not which library raised:
 | `subscribe_failed` | attaching to an inbound stream failed |
 | `decode_failed` | transforming received bytes into a product failed |
 | `encode_failed` | transforming a product into bytes failed |
+| `embed_failed` | an embedder failed for a reason no narrower kind names |
 | `timeout` | a modeled deadline elapsed before completion |
 | `cancelled` | the operation was cancelled, not broken |
 | `unauthorized` | credentials/permissions rejected |
 | `unavailable` | dependency reachable-but-not-serving |
 | `invalid_response` | a peer answered in a shape the contract does not allow |
+| `invalid_input` | the request itself is malformed (for example an undecodable image) |
+| `unsupported_input` | the request is well formed but outside the provider's declared capacity |
+| `too_long` | an input exceeds the model's token bound and was not truncated; split it |
+| `overloaded` | a bounded admission queue was full; retry later or shed load |
 | `unknown` | derivation produced nothing usable — a bug in the call site |
 
 Add a kind only when an operator would act differently on it. Two kinds that

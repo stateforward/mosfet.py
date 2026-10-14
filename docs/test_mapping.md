@@ -35,6 +35,14 @@ and `turn_detector/turn_detector.py`
 (`.../turn_detector/test_turn_detector.py`); the files above close the
 remaining gaps without duplicating them.
 
+## Embedding ability
+
+| Test | Source under test |
+| --- | --- |
+| `tests/bot/abilities/embedding/test_payload.py` | `src/mosfet/abilities/embedding/payload.py` (item, request, unit-vector and space bounds, closed failure kinds, schema descriptions, image base64 round trip) |
+| `tests/bot/abilities/embedding/test_embedder.py` | `src/mosfet/abilities/embedding/embedder.py` (`Instructions.render` prefixes, `EMBEDDING_GEMMA_2`, `Capacity` bounds, `Error.failure_kind`, plain-attribute `Embedder` satisfied by a frozen dataclass) |
+| `tests/bot/abilities/embedding/test_embedding.py` | `src/mosfet/abilities/embedding/embedding.py` (HSM runtime: admission, FIFO queue, overload, `hsm.after` timeout with a late result ignored, invalid responses, composite attach/detach of the embedder's attachments, `UNAVAILABLE` while not serving, metric attribute sets) |
+
 ## Process runtime and `mosfet run`
 
 | Test | Source under test |
