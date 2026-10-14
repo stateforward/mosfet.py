@@ -13,7 +13,9 @@ from mosfet.abilities.language import text
 import dataclasses
 import importlib
 
+import hsm
 import pydantic
+import pytest
 
 from tests.type_helpers import object_dict
 
@@ -45,6 +47,45 @@ def test_bot_completion_events_use_pydantic_schemas() -> None:
     assert activating_failed_schema == mosfet.ActivatingFailedEventData.model_json_schema()
     assert activating_failed_schema["description"]
     assert activating_failed_schema["examples"] == [{}]
+
+
+def test_bot_lifecycle_requests_carry_a_runtime_only_reply_target() -> None:
+    target = hsm.Instance()
+
+    for data_type in (mosfet.ActivateEventData, mosfet.DeactivateEventData):
+        data = data_type(reply_to=target)
+        schema = object_dict(data_type.model_json_schema())
+
+        assert data.reply_to is target
+        assert data.model_dump() == {}
+        assert data.model_dump_json() == "{}"
+        assert data_type.model_validate_json(data.model_dump_json()) == data_type()
+        assert "reply_to" not in object_dict(schema.get("properties", {}))
+        assert "reply_to=" not in repr(data)
+        assert schema["examples"] == [{}]
+
+
+def test_bot_degraded_is_an_error_terminal_with_a_closed_stage_and_never_a_tool() -> None:
+    schema = object_dict(mosfet.DegradedEvent.schema)
+    stage = object_dict(object_dict(schema["properties"])["stage"])
+
+    assert mosfet.DegradedEvent.name == "bot.degraded"
+    assert mosfet.DegradedEvent.kind == hsm.ErrorEventKind
+    assert mosfet.DegradedEvent.kind != event.EventKind
+    assert schema == mosfet.DegradedEventData.model_json_schema()
+    assert schema["examples"] == [{"stage": "deactivation_cleanup"}]
+    assert stage["enum"] == [
+        "activation_cleanup",
+        "activation_cancel",
+        "deactivation_cleanup",
+        "reboot_cleanup",
+        "processing_cancel",
+        "degraded",
+    ]
+    data = mosfet.DegradedEventData(stage="reboot_cleanup")
+    assert mosfet.DegradedEventData.model_validate_json(data.model_dump_json()) == data
+    with pytest.raises(pydantic.ValidationError):
+        _ = mosfet.DegradedEventData.model_validate({"stage": "unknown"})
 
 
 def test_messages_memories_are_excluded_from_model_facing_content() -> None:

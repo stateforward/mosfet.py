@@ -58,6 +58,8 @@ from tests.hsm_instance_state import (
     phone_speaker,
     start_ability_tree,
 )
+from tests import metric_reader
+from tests.bot.lifecycle_replies import LifecycleReplies, started_replies
 from tests.hsm_model import transition_map
 from tests.type_helpers import object_dict
 
@@ -1543,6 +1545,14 @@ def test_bot_events_use_pydantic_schemas() -> None:
     assert deactivating_done_schema == mosfet.DeactivatingDoneEventData.model_json_schema()
     assert deactivating_done_schema["description"]
     assert deactivating_done_schema["examples"] == [{}]
+    degraded_schema = object_dict(mosfet.DegradedEvent.schema)
+    assert mosfet.DegradedEvent.name == "bot.degraded"
+    assert degraded_schema == mosfet.DegradedEventData.model_json_schema()
+    assert degraded_schema["description"]
+    assert degraded_schema["required"] == ["stage"]
+    # Lifecycle requests carry their reply target at runtime only; it is never schema or wire data.
+    assert "properties" not in activate_schema or "reply_to" not in object_dict(activate_schema["properties"])
+    assert "properties" not in deactivate_schema or "reply_to" not in object_dict(deactivate_schema["properties"])
 
 
 def test_bot_input_priority_is_bounded() -> None:
@@ -1580,6 +1590,7 @@ def test_bot_model_tracks_activation_focus_and_processing_state() -> None:
     assert "/Bot/inactive" in model.members
     assert "/Bot/activating" in model.members
     assert "/Bot/activation_cleanup" in model.members
+    assert "/Bot/activation_cancelling" in model.members
     assert "/Bot/deactivating" in model.members
     assert "/Bot/deactivation_cleanup" in model.members
     assert "/Bot/reboot_deactivating" in model.members
@@ -1612,8 +1623,40 @@ def test_bot_model_tracks_activation_focus_and_processing_state() -> None:
     assert "bot.reboot" in transitions["/Bot/active"]
     assert "bot.reboot" in transitions["/Bot/activating"]
     assert "bot.reboot" in transitions["/Bot/activation_cleanup"]
-    assert "bot.reboot" in transitions["/Bot/deactivating"]
-    assert "bot.reboot" in transitions["/Bot/deactivation_cleanup"]
+    # A stop the bot accepted is never turned back into an activation by a cognition reboot.
+    assert "bot.reboot" not in transitions["/Bot/activation_cancelling"]
+    assert "bot.reboot" not in transitions["/Bot/deactivating"]
+    assert "bot.reboot" not in transitions["/Bot/deactivation_cleanup"]
+    assert "bot.lifecycle.cleanup.done" in transitions["/Bot/activation_cancelling"]
+    # Every lifecycle state answers, supersedes, or defers a deactivation request.
+    for answering in ("/Bot/inactive", "/Bot/activating", "/Bot/degraded", "/Bot/active"):
+        assert "bot.deactivate" in transitions[answering]
+    for superseding in ("/Bot/activation_cancelling", "/Bot/deactivating", "/Bot/deactivation_cleanup"):
+        assert "bot.deactivate" in transitions[superseding]
+    for deferring in (
+        "/Bot/activation_cleanup",
+        "/Bot/reboot_deactivating",
+        "/Bot/reboot_cleanup_preserve",
+        "/Bot/reboot_cleanup_reset",
+    ):
+        assert "bot.deactivate" in deferred_map[deferring]
+    # Each transition into degraded announces its own constant stage from its effect.
+    for state, effect in (
+        ("/Bot/activation_cleanup", "_dispatch_degraded_activation_cleanup"),
+        ("/Bot/activation_cancelling", "_dispatch_degraded_activation_cancel"),
+        ("/Bot/deactivation_cleanup", "_dispatch_degraded_deactivation_cleanup"),
+        ("/Bot/reboot_cleanup_preserve", "_dispatch_degraded_reboot_cleanup"),
+        ("/Bot/reboot_cleanup_reset", "_dispatch_degraded_reboot_cleanup"),
+    ):
+        timers = [
+            transition
+            for event_name, candidates in transitions[state].items()
+            if "_bot_deactivation_timeout" in event_name
+            for transition in candidates
+        ]
+        assert timers and all(any(effect in name for name in timer.effect) for timer in timers)
+    cancel_timeout = transitions["/Bot/active/cancelling_processing"]["bot.processing.cancel.timed_out"]
+    assert any("_dispatch_degraded_processing_cancel" in name for name in cancel_timeout[0].effect)
     assert "bot.input" in transitions["/Bot/active/unfocused"]
     assert "bot.ability.cognition.input" in transitions["/Bot/active/unfocused"]
     assert "*" not in transitions["/Bot/active/unfocused"]
@@ -5155,3 +5198,553 @@ def test_model_publish_opt_in_defaults_off(monkeypatch: pytest.MonkeyPatch) -> N
     assert model_publish_enabled() is True
     monkeypatch.setenv("BOT_MODEL_PUBLISH", "0")
     assert model_publish_enabled() is False
+
+
+# --- Lifecycle requests reach their activator ---------------------------------------------------
+#
+# Every accepted bot.activate / bot.deactivate is answered with exactly one public terminal that
+# carries the request's operation id and is delivered to the bot and its reply target. Each test
+# asserts the complete reply ledger, so an accepted request answered twice or not at all fails.
+
+_FAST_TEARDOWN = datetime.timedelta(milliseconds=20)
+
+
+class LifecycleAgent(Bot):
+    """Bot double with injectable devices, abilities and lifecycle bound."""
+
+    def __init__(
+        self,
+        devices: collections.abc.Mapping[str, Device] | None = None,
+        *,
+        cognition: abilities.Ability[typing.Any, typing.Any] | None = None,
+        deactivation_timeout: datetime.timedelta | None = None,
+    ) -> None:
+        super().__init__(
+            devices=devices or {},
+            cognition=cognition or as_cognition(IgnoreAbility()),
+            deactivation_timeout=deactivation_timeout,
+        )
+
+
+class LifecycleGates:
+    """Holds or fails one bot's own attachment-group operations so a lifecycle state stays observable."""
+
+    groups: list[attachment.Group]
+    held: list[str]
+    hold_attach: bool
+    fail_attach: bool
+    hold_detach: bool
+    fail_detach: bool
+    hold_stop: bool
+    release: asyncio.Event
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch, active_bot: Bot) -> None:
+        self.groups = []
+        self.held = []
+        self.hold_attach = False
+        self.fail_attach = False
+        self.hold_detach = False
+        self.fail_detach = False
+        self.hold_stop = False
+        self.release = asyncio.Event()
+        original_attach = attachment.Group.attach
+        original_detach = attachment.Group.detach
+        original_stop = hsm.stop
+
+        async def attach(group: attachment.Group, ctx: hsm.Context, event: hsm.Event[attachment.AttachData]) -> None:
+            if isinstance(event.data, attachment.AttachData) and event.data.actor is active_bot:
+                if not any(known is group for known in self.groups):
+                    self.groups.append(group)
+                if self.fail_attach:
+                    raise RuntimeError("bot attach dispatch failed")
+                if self.hold_attach:
+                    self.held.append("attach")
+                    _ = await self.release.wait()
+            await original_attach(group, ctx, event)
+
+        async def detach(group: attachment.Group, ctx: hsm.Context, event: hsm.Event[attachment.DetachData]) -> None:
+            if isinstance(event.data, attachment.DetachData) and event.data.actor is active_bot:
+                if self.fail_detach:
+                    raise RuntimeError("bot detach dispatch failed")
+                if self.hold_detach:
+                    self.held.append("detach")
+                    _ = await self.release.wait()
+            await original_detach(group, ctx, event)
+
+        async def stop(instance: hsm.Instance, ctx: hsm.Context | None = None) -> None:
+            if self.hold_stop and any(known is instance for known in self.groups):
+                self.held.append("stop")
+                _ = await self.release.wait()
+            await original_stop(instance, ctx)
+
+        monkeypatch.setattr(attachment.Group, "attach", attach)
+        monkeypatch.setattr(attachment.Group, "detach", detach)
+        monkeypatch.setattr(hsm, "stop", stop)
+
+
+async def request_cognition_reboot(
+    environment: Environment,
+    active_bot: Bot,
+    cognition_ability: abilities.Ability[typing.Any, typing.Any],
+) -> None:
+    _ = await hsm.dispatch(
+        environment,
+        active_bot,
+        dataclasses.replace(
+            mosfet.RebootEvent.with_data(mosfet.RebootEventData(reason="cognition_child_teardown_failed")),
+            id=f"reboot-{uuid.uuid4().hex}",
+            source=hsm.id(cognition_ability),
+            target=hsm.id(active_bot),
+        ),
+    )
+
+
+async def settle() -> None:
+    """Give a duplicate or late terminal the chance to arrive before the ledger is read."""
+
+    await asyncio.sleep(0.02)
+
+
+async def wait_for_state(active_bot: Bot, state: str) -> None:
+    await wait_until(lambda: active_bot.state() == state)
+
+
+async def hold_stop_in(
+    state: str,
+    gates: LifecycleGates,
+    active_bot: Bot,
+    environment: Environment,
+    replies: LifecycleReplies,
+    operation_id: str,
+) -> list[tuple[str, str]]:
+    """Accept stop ``operation_id`` and hold the bot in ``state``; return the ledger before the stop."""
+
+    if state == "activation_cancelling":
+        gates.hold_attach = True
+        gates.hold_stop = True
+        _ = await active_bot.attach(environment, reply_to=replies, operation_id="op-a")
+        await wait_until(lambda: gates.held == ["attach"])
+        before: list[tuple[str, str]] = []
+        expected_hold = "stop"
+    else:
+        gates.hold_detach = state == "deactivating"
+        gates.hold_stop = state == "deactivation_cleanup"
+        _ = await active_bot.attach(environment, reply_to=replies, operation_id="op-a")
+        await wait_for_state(active_bot, "/Bot/active/unfocused")
+        before = [("bot.activated", "op-a")]
+        expected_hold = "detach" if state == "deactivating" else "stop"
+    _ = await active_bot.detach(environment, reply_to=replies, operation_id=operation_id)
+    await wait_until(lambda: active_bot.state() == f"/Bot/{state}" and gates.held[-1:] == [expected_hold])
+    return before
+
+
+def test_bot_answers_activation_and_deactivation_to_the_reply_target_under_the_operation_id() -> None:
+    async def run() -> tuple[list[hsm.Event[typing.Any]], str, str, str]:
+        replies = await started_replies()
+        active_bot = LifecycleAgent(configured_devices("phone"))
+        environment = Environment()
+        _ = await active_bot.attach(environment, reply_to=replies, operation_id="op-1")
+        await wait_until(lambda: len(replies.terminals) == 1)
+        _ = await active_bot.detach(environment, reply_to=replies, operation_id="op-2")
+        await wait_until(lambda: active_bot.state() == "/Bot/inactive" and len(replies.terminals) == 2)
+        await settle()
+        return replies.terminals, hsm.id(active_bot), hsm.id(replies), active_bot.state()
+
+    terminals, bot_id, replies_id, state = asyncio.run(run())
+
+    assert [(terminal.name, terminal.id) for terminal in terminals] == [
+        ("bot.activated", "op-1"),
+        ("bot.deactivated", "op-2"),
+    ]
+    assert all(terminal.source == bot_id and terminal.target == replies_id for terminal in terminals)
+    assert state == "/Bot/inactive"
+
+
+def test_bot_answers_failed_activation_to_the_reply_target_under_the_operation_id() -> None:
+    async def run() -> tuple[list[tuple[str, str]], str]:
+        replies = await started_replies()
+        active_bot = LifecycleAgent({"failing": ImmediatelyFailingInitializingDevice()})
+        _ = await active_bot.attach(Environment(), reply_to=replies, operation_id="op-1")
+        await wait_until(lambda: active_bot.state() == "/Bot/inactive" and len(replies.terminals) == 1)
+        await settle()
+        return replies.ledger(), active_bot.state()
+
+    ledger, state = asyncio.run(run())
+
+    assert ledger == [("bot.activating.failed", "op-1")]
+    assert state == "/Bot/inactive"
+
+
+def test_bot_mints_an_operation_id_when_the_activator_names_none() -> None:
+    async def run() -> list[tuple[str, str]]:
+        replies = await started_replies()
+        active_bot = LifecycleAgent()
+        environment = Environment()
+        _ = await active_bot.attach(environment, reply_to=replies)
+        await wait_for_state(active_bot, "/Bot/active/unfocused")
+        _ = await active_bot.detach(environment, reply_to=replies)
+        await wait_until(lambda: active_bot.state() == "/Bot/inactive" and len(replies.terminals) == 2)
+        return replies.ledger()
+
+    ledger = asyncio.run(run())
+
+    assert [name for name, _ in ledger] == ["bot.activated", "bot.deactivated"]
+    assert all(operation_id for _, operation_id in ledger)
+    assert ledger[0][1] != ledger[1][1]
+
+
+def test_bot_answers_a_deactivation_requested_while_activating(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def run() -> tuple[list[tuple[str, str]], str]:
+        replies = await started_replies()
+        active_bot = LifecycleAgent(configured_devices("phone"))
+        gates = LifecycleGates(monkeypatch, active_bot)
+        gates.hold_attach = True
+        environment = Environment()
+        _ = await active_bot.attach(environment, reply_to=replies, operation_id="op-a")
+        await wait_until(lambda: gates.held == ["attach"])
+        _ = await active_bot.detach(environment, reply_to=replies, operation_id="op-stop")
+        await wait_until(lambda: active_bot.state() == "/Bot/inactive" and len(replies.terminals) == 1)
+        await settle()
+        return replies.ledger(), active_bot.state()
+
+    ledger, state = asyncio.run(run())
+
+    assert ledger == [("bot.deactivated", "op-stop")]
+    assert state == "/Bot/inactive"
+
+
+def test_bot_answers_a_deactivation_deferred_through_reboot_deactivation_and_preserve_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def run() -> tuple[str, list[tuple[str, str]], str]:
+        replies = await started_replies()
+        cognition_ability = as_cognition(IgnoreAbility())
+        active_bot = LifecycleAgent(cognition=cognition_ability)
+        gates = LifecycleGates(monkeypatch, active_bot)
+        environment = Environment()
+        _ = await active_bot.attach(environment, reply_to=replies, operation_id="op-a")
+        await wait_for_state(active_bot, "/Bot/active/unfocused")
+        gates.hold_detach = True
+        await request_cognition_reboot(environment, active_bot, cognition_ability)
+        await wait_until(lambda: gates.held == ["detach"])
+        _ = await active_bot.detach(environment, reply_to=replies, operation_id="op-stop")
+        state_while_rebooting = active_bot.state()
+        _ = gates.release.set()
+        await wait_until(lambda: active_bot.state() == "/Bot/inactive" and len(replies.terminals) == 2)
+        await settle()
+        return state_while_rebooting, replies.ledger(), active_bot.state()
+
+    state_while_rebooting, ledger, state = asyncio.run(run())
+
+    assert state_while_rebooting == "/Bot/reboot_deactivating"
+    # Re-offered in reboot_cleanup_preserve, then accepted on the reboot's activating entry.
+    assert ledger == [("bot.activated", "op-a"), ("bot.deactivated", "op-stop")]
+    assert state == "/Bot/inactive"
+
+
+def test_bot_answers_a_deactivation_deferred_through_reboot_reset_cleanup(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def run() -> tuple[str, list[tuple[str, str]], str]:
+        replies = await started_replies()
+        cognition_ability = as_cognition(IgnoreAbility())
+        active_bot = LifecycleAgent(cognition=cognition_ability)
+        gates = LifecycleGates(monkeypatch, active_bot)
+        environment = Environment()
+        _ = await active_bot.attach(environment, reply_to=replies, operation_id="op-a")
+        await wait_for_state(active_bot, "/Bot/active/unfocused")
+        gates.fail_detach = True
+        gates.hold_stop = True
+        await request_cognition_reboot(environment, active_bot, cognition_ability)
+        await wait_until(lambda: gates.held == ["stop"])
+        _ = await active_bot.detach(environment, reply_to=replies, operation_id="op-stop")
+        state_while_resetting = active_bot.state()
+        gates.fail_detach = False
+        _ = gates.release.set()
+        await wait_until(lambda: active_bot.state() == "/Bot/inactive" and len(replies.terminals) == 2)
+        await settle()
+        return state_while_resetting, replies.ledger(), active_bot.state()
+
+    state_while_resetting, ledger, state = asyncio.run(run())
+
+    assert state_while_resetting == "/Bot/reboot_cleanup_reset"
+    assert ledger == [("bot.activated", "op-a"), ("bot.deactivated", "op-stop")]
+    assert state == "/Bot/inactive"
+
+
+def test_bot_answers_a_deactivation_deferred_through_activation_cleanup_and_a_reboot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def run() -> tuple[str, list[tuple[str, str]], list[str], str]:
+        replies = await started_replies()
+        cognition_ability = as_cognition(IgnoreAbility())
+        active_bot = LifecycleAgent(cognition=cognition_ability)
+        gates = LifecycleGates(monkeypatch, active_bot)
+        gates.fail_attach = True
+        gates.hold_stop = True
+        environment = Environment()
+        _ = await active_bot.attach(environment, reply_to=replies, operation_id="op-a")
+        await wait_until(lambda: gates.held == ["stop"])
+        _ = await active_bot.detach(environment, reply_to=replies, operation_id="op-stop")
+        state_while_cleaning = active_bot.state()
+        # The reboot's activation now holds its attach, so only the deferred stop can end it.
+        gates.fail_attach = False
+        gates.hold_stop = False
+        gates.hold_attach = True
+        gates.release = asyncio.Event()
+        await request_cognition_reboot(environment, active_bot, cognition_ability)
+        await wait_until(lambda: active_bot.state() == "/Bot/inactive" and len(replies.terminals) == 2)
+        await settle()
+        return state_while_cleaning, replies.ledger(), gates.held, active_bot.state()
+
+    state_while_cleaning, ledger, held, state = asyncio.run(run())
+
+    assert state_while_cleaning == "/Bot/activation_cleanup"
+    # Deferred through the reboot states and accepted on the reboot's activating entry.
+    assert held == ["stop", "attach"]
+    assert ledger == [("bot.activating.failed", "op-a"), ("bot.deactivated", "op-stop")]
+    assert state == "/Bot/inactive"
+
+
+def test_bot_answers_a_deactivation_while_inactive() -> None:
+    async def run() -> tuple[list[tuple[str, str]], str]:
+        replies = await started_replies()
+        active_bot = LifecycleAgent()
+        environment = Environment()
+        _ = await active_bot.attach(environment, reply_to=replies, operation_id="op-a")
+        await wait_for_state(active_bot, "/Bot/active/unfocused")
+        _ = await active_bot.detach(environment, reply_to=replies, operation_id="op-b")
+        await wait_until(lambda: active_bot.state() == "/Bot/inactive" and len(replies.terminals) == 2)
+        _ = await active_bot.detach(environment, reply_to=replies, operation_id="op-c")
+        await wait_until(lambda: len(replies.terminals) == 3)
+        await settle()
+        return replies.ledger(), active_bot.state()
+
+    ledger, state = asyncio.run(run())
+
+    assert ledger == [("bot.activated", "op-a"), ("bot.deactivated", "op-b"), ("bot.deactivated", "op-c")]
+    assert state == "/Bot/inactive"
+
+
+def test_bot_degrades_when_deactivation_cleanup_times_out_and_answers_later_stops_degraded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def run() -> tuple[list[tuple[str, str]], list[str], str]:
+        replies = await started_replies()
+        active_bot = LifecycleAgent(deactivation_timeout=_FAST_TEARDOWN)
+        gates = LifecycleGates(monkeypatch, active_bot)
+        environment = Environment()
+        _ = await active_bot.attach(environment, reply_to=replies, operation_id="op-a")
+        await wait_for_state(active_bot, "/Bot/active/unfocused")
+        gates.hold_stop = True
+        _ = await active_bot.detach(environment, reply_to=replies, operation_id="op-stop")
+        await wait_until(lambda: active_bot.state() == "/Bot/degraded" and len(replies.terminals) == 2)
+        _ = await active_bot.detach(environment, reply_to=replies, operation_id="op-again")
+        await wait_until(lambda: len(replies.terminals) == 3)
+        await settle()
+        return replies.ledger(), replies.stages(), active_bot.state()
+
+    ledger, stages, state = asyncio.run(run())
+
+    assert ledger == [("bot.activated", "op-a"), ("bot.degraded", "op-stop"), ("bot.degraded", "op-again")]
+    assert stages == ["deactivation_cleanup", "degraded"]
+    assert state == "/Bot/degraded"
+
+
+def test_bot_degrades_when_activation_rollback_cleanup_times_out(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def run() -> tuple[list[tuple[str, str]], list[str], str]:
+        replies = await started_replies()
+        active_bot = LifecycleAgent(deactivation_timeout=_FAST_TEARDOWN)
+        gates = LifecycleGates(monkeypatch, active_bot)
+        gates.fail_attach = True
+        gates.hold_stop = True
+        _ = await active_bot.attach(Environment(), reply_to=replies, operation_id="op-a")
+        await wait_until(lambda: active_bot.state() == "/Bot/degraded" and len(replies.terminals) == 2)
+        await settle()
+        return replies.ledger(), replies.stages(), active_bot.state()
+
+    ledger, stages, state = asyncio.run(run())
+
+    assert ledger == [("bot.activating.failed", "op-a"), ("bot.degraded", "op-a")]
+    assert stages == ["activation_cleanup"]
+    assert state == "/Bot/degraded"
+
+
+def test_bot_degrades_when_cancelling_an_activation_times_out(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def run() -> tuple[list[tuple[str, str]], list[str], str]:
+        replies = await started_replies()
+        active_bot = LifecycleAgent(deactivation_timeout=_FAST_TEARDOWN)
+        gates = LifecycleGates(monkeypatch, active_bot)
+        gates.hold_attach = True
+        gates.hold_stop = True
+        environment = Environment()
+        _ = await active_bot.attach(environment, reply_to=replies, operation_id="op-a")
+        await wait_until(lambda: gates.held == ["attach"])
+        _ = await active_bot.detach(environment, reply_to=replies, operation_id="op-stop")
+        await wait_until(lambda: active_bot.state() == "/Bot/degraded" and len(replies.terminals) == 1)
+        await settle()
+        return replies.ledger(), replies.stages(), active_bot.state()
+
+    ledger, stages, state = asyncio.run(run())
+
+    assert ledger == [("bot.degraded", "op-stop")]
+    assert stages == ["activation_cancel"]
+    assert state == "/Bot/degraded"
+
+
+def test_bot_degrades_when_reboot_cleanup_times_out_under_the_last_activation_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def run() -> tuple[list[tuple[str, str]], list[str], str]:
+        replies = await started_replies()
+        cognition_ability = as_cognition(IgnoreAbility())
+        active_bot = LifecycleAgent(cognition=cognition_ability, deactivation_timeout=_FAST_TEARDOWN)
+        gates = LifecycleGates(monkeypatch, active_bot)
+        environment = Environment()
+        _ = await active_bot.attach(environment, reply_to=replies, operation_id="op-a")
+        await wait_for_state(active_bot, "/Bot/active/unfocused")
+        gates.fail_detach = True
+        gates.hold_stop = True
+        await request_cognition_reboot(environment, active_bot, cognition_ability)
+        await wait_until(lambda: active_bot.state() == "/Bot/degraded" and len(replies.terminals) == 2)
+        await settle()
+        return replies.ledger(), replies.stages(), active_bot.state()
+
+    ledger, stages, state = asyncio.run(run())
+
+    assert ledger == [("bot.activated", "op-a"), ("bot.degraded", "op-a")]
+    assert stages == ["reboot_cleanup"]
+    assert state == "/Bot/degraded"
+
+
+def test_bot_degrades_when_processing_cancellation_times_out_under_the_last_activation_id() -> None:
+    async def run() -> tuple[list[tuple[str, str]], list[str], str]:
+        replies = await started_replies()
+        processor = CancellableHangingProcessor()
+        active_bot = TimeoutAbilityAgent(
+            devices=configured_devices("phone"),
+            cognition=CapturingCognition(processor, swallow_cancel=True),
+        )
+        environment = Environment()
+        _ = await active_bot.attach(environment, reply_to=replies, operation_id="op-a")
+        await wait_for_state(active_bot, "/Bot/active/unfocused")
+        await active_bot.dispatch(
+            active_bot.context(),
+            mosfet.InputEvent.with_data(mosfet.InputEventData(target_device="phone", priority=3)),
+        )
+        await wait_until(lambda: active_bot.state() == "/Bot/degraded" and len(replies.terminals) == 2)
+        await settle()
+        return replies.ledger(), replies.stages(), active_bot.state()
+
+    ledger, stages, state = asyncio.run(run())
+
+    assert ledger == [("bot.activated", "op-a"), ("bot.degraded", "op-a")]
+    assert stages == ["processing_cancel"]
+    assert state == "/Bot/degraded"
+
+
+def test_bot_keeps_the_operation_id_when_the_detach_answer_times_out() -> None:
+    class NeverDetachingDevice(Device):
+        @typing.override
+        def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[bool]:
+            if event.name == attachment.DetachEvent.name:
+
+                async def hang() -> bool:
+                    return await asyncio.Event().wait()
+
+                return hang()
+            return super().dispatch(ctx, event)
+
+    async def run() -> tuple[list[tuple[str, str]], str]:
+        replies = await started_replies()
+        # Long enough for the cleanup that follows the detach timer to finish inside its own bound.
+        active_bot = LifecycleAgent(
+            {"stuck": NeverDetachingDevice()},
+            deactivation_timeout=datetime.timedelta(milliseconds=200),
+        )
+        environment = Environment()
+        _ = await active_bot.attach(environment, reply_to=replies, operation_id="op-a")
+        await wait_for_state(active_bot, "/Bot/active/unfocused")
+        _ = await active_bot.detach(environment, reply_to=replies, operation_id="op-3")
+        await wait_until(lambda: active_bot.state() == "/Bot/inactive" and len(replies.terminals) == 2)
+        await settle()
+        return replies.ledger(), active_bot.state()
+
+    ledger, state = asyncio.run(run())
+
+    # deactivating -after-> deactivation_cleanup: the timer event's own id never reaches the answer.
+    assert ledger == [("bot.activated", "op-a"), ("bot.deactivated", "op-3")]
+    assert state == "/Bot/inactive"
+
+
+@pytest.mark.parametrize("stopping_state", ["activation_cancelling", "deactivating", "deactivation_cleanup"])
+def test_cognition_reboot_never_turns_an_accepted_stop_back_into_an_activation(
+    monkeypatch: pytest.MonkeyPatch,
+    stopping_state: str,
+) -> None:
+    async def run() -> tuple[list[tuple[str, str]], list[tuple[str, str]], str]:
+        replies = await started_replies()
+        cognition_ability = as_cognition(IgnoreAbility())
+        active_bot = LifecycleAgent(configured_devices("phone"), cognition=cognition_ability)
+        gates = LifecycleGates(monkeypatch, active_bot)
+        environment = Environment()
+        before = await hold_stop_in(stopping_state, gates, active_bot, environment, replies, "op-stop")
+        await request_cognition_reboot(environment, active_bot, cognition_ability)
+        _ = gates.release.set()
+        await wait_until(lambda: active_bot.state() == "/Bot/inactive" and len(replies.terminals) == len(before) + 1)
+        await settle()
+        return before, replies.ledger(), active_bot.state()
+
+    before, ledger, state = asyncio.run(run())
+
+    assert ledger == [*before, ("bot.deactivated", "op-stop")]
+    assert state == "/Bot/inactive"
+
+
+@pytest.mark.parametrize("stopping_state", ["activation_cancelling", "deactivating", "deactivation_cleanup"])
+def test_a_superseding_deactivation_is_answered_by_the_running_stop_without_a_timer(
+    monkeypatch: pytest.MonkeyPatch,
+    stopping_state: str,
+) -> None:
+    async def run() -> tuple[list[tuple[str, str]], list[tuple[str, str]], str]:
+        replies = await started_replies()
+        # The default teardown bound is minutes: only the running step's own terminal can end
+        # this stop inside wait_until's deadline.
+        active_bot = LifecycleAgent(configured_devices("phone"))
+        gates = LifecycleGates(monkeypatch, active_bot)
+        environment = Environment()
+        before = await hold_stop_in(stopping_state, gates, active_bot, environment, replies, "op-4")
+        _ = await active_bot.detach(environment, reply_to=replies, operation_id="op-5")
+        _ = gates.release.set()
+        await wait_until(lambda: active_bot.state() == "/Bot/inactive" and len(replies.terminals) == len(before) + 1)
+        await settle()
+        return before, replies.ledger(), active_bot.state()
+
+    before, ledger, state = asyncio.run(run())
+
+    assert ledger == [*before, ("bot.deactivated", "op-5")]
+    assert state == "/Bot/inactive"
+
+
+def _degraded_count(metrics: metric_reader.Reader, stage: str) -> float:
+    return sum(
+        point.value for point in metrics.points("bot.lifecycle.degraded.count") if point.attributes == {"stage": stage}
+    )
+
+
+def test_bot_counts_degraded_transitions_by_stage(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    async def run() -> None:
+        replies = await started_replies()
+        active_bot = LifecycleAgent(deactivation_timeout=_FAST_TEARDOWN)
+        gates = LifecycleGates(monkeypatch, active_bot)
+        environment = Environment()
+        _ = await active_bot.attach(environment, reply_to=replies, operation_id="op-a")
+        await wait_for_state(active_bot, "/Bot/active/unfocused")
+        gates.hold_stop = True
+        _ = await active_bot.detach(environment, reply_to=replies, operation_id="op-stop")
+        await wait_until(lambda: active_bot.state() == "/Bot/degraded" and len(replies.terminals) == 2)
+
+    with metric_reader.recording(tmp_path, monkeypatch) as metrics:
+        before = _degraded_count(metrics, "deactivation_cleanup")
+        asyncio.run(run())
+        after = _degraded_count(metrics, "deactivation_cleanup")
+
+    assert after - before == 1

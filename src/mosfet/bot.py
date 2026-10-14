@@ -16,6 +16,7 @@ import weakref
 import hsm
 import mosfet
 import pydantic
+from opentelemetry import metrics
 
 from mosfet import abilities
 from mosfet import lifecycle
@@ -38,6 +39,12 @@ _DEFAULT_BOT_ATTACHMENT_TIMEOUT = datetime.timedelta(seconds=30)
 _MIN_BOT_CANCELLATION_TIMEOUT = datetime.timedelta(milliseconds=100)
 _MAX_BOT_CANCELLATION_TIMEOUT = datetime.timedelta(seconds=5)
 _OWNED_DEVICES_ATTRIBUTE = "owned_devices"
+_LIFECYCLE_SCOPE = "bot.lifecycle"
+_DEGRADED = metrics.get_meter(_LIFECYCLE_SCOPE).create_counter(
+    "bot.lifecycle.degraded.count",
+    unit="{transition}",
+    description="Count of Bot transitions into the degraded lifecycle state, by the stage whose bound expired.",
+)
 
 # Lifecycle idempotency predicates live in mosfet.lifecycle (single prose allowlist that may
 # only shrink); call sites below use lifecycle.is_already_running_error /
@@ -58,6 +65,19 @@ _CleanupDoneEvent = hsm.Event[_CleanupData](
     kind=hsm.CompletionEventKind,
     schema=_CleanupData,
 )
+
+
+@dataclasses.dataclass(frozen=True)
+class _LifecycleRequest:
+    """The accepted activate/deactivate request the Bot's lifecycle is currently answering.
+
+    Durable lifecycle ownership (same shape as ``Attachment._attachments``), not step scratch:
+    written only when ``bot.activate`` / ``bot.deactivate`` is accepted, and read by every
+    public lifecycle terminal, so timer paths answer under the request's id too.
+    """
+
+    operation_id: str
+    reply_to: hsm.Instance | None
 
 
 class _AttachmentOperation(Traced):
@@ -324,6 +344,14 @@ class Bot(Traced, abc.ABC):
     _input: tuple[abilities.Ability[typing.Any, typing.Any], ...]
     _output: tuple[abilities.Ability[typing.Any, typing.Any], ...]
     _attachments: attachment.Group
+    # The request every public lifecycle terminal answers; None until the first is accepted.
+    _lifecycle: _LifecycleRequest | None
+    # Monotonic count of lifecycle step entries and the private correlation id frozen on the
+    # latest entry. Step activities stamp it on their attachment requests and cleanup terminal,
+    # and the step guards accept only it, so a stale terminal from an earlier step never
+    # completes a later one and superseding the request never re-keys the running step.
+    _lifecycle_step: int
+    _lifecycle_step_id: str
 
     @abc.abstractmethod
     def __init__(
@@ -367,8 +395,25 @@ class Bot(Traced, abc.ABC):
         self._acquired_abilities = tuple(acquired_abilities)
         self._stm_memory: memory.StmMemory | None = stm_memory
         self._attachments = attachment.Group(*Bot._lifecycle_attachment_members(self))
+        self._lifecycle = None
+        self._lifecycle_step = 0
+        self._lifecycle_step_id = ""
 
-    async def attach(self, environment: Environment, *, placement: space.Placement | None = None) -> typing.Self:
+    async def attach(
+        self,
+        environment: Environment,
+        *,
+        placement: space.Placement | None = None,
+        reply_to: hsm.Instance | None = None,
+        operation_id: str | None = None,
+    ) -> typing.Self:
+        """Start the bot in ``environment`` if needed, join it, and request activation.
+
+        ``operation_id`` (a fresh id when omitted) is the id of the one public terminal that
+        answers this request: ``bot.activated`` or ``bot.activating.failed``. The terminal is
+        delivered to the bot and, when given, to ``reply_to``.
+        """
+
         require_environment_scope(environment, self, participant="Bot")
         try:
             _ = await mosfet.started(environment, self, self._model_for_instance())
@@ -378,7 +423,13 @@ class Bot(Traced, abc.ABC):
         # A Bot is not a Device: its presence is an attach-time decision, and detach ends it.
         # Unconditional: the already-running branch above swallows its error, and join is idempotent.
         environment.join(self, placement=placement)
-        await self.dispatch(environment, events.ActivateEvent.with_data(events.ActivateEventData()))
+        await self.dispatch(
+            environment,
+            events.ActivateEvent.with_data_and_id(
+                events.ActivateEventData(reply_to=reply_to),
+                operation_id or uuid.uuid4().hex,
+            ),
+        )
         return self
 
     def _model_for_instance(self) -> hsm.Model:
@@ -391,12 +442,29 @@ class Bot(Traced, abc.ABC):
 
         return device.model
 
-    async def detach(self, environment: Environment) -> typing.Self:
+    async def detach(
+        self,
+        environment: Environment,
+        *,
+        reply_to: hsm.Instance | None = None,
+        operation_id: str | None = None,
+    ) -> typing.Self:
+        """Request deactivation and leave ``environment``.
+
+        A started bot answers the request from every lifecycle state with exactly one public
+        terminal carrying ``operation_id`` (a fresh id when omitted): ``bot.deactivated``, or
+        ``bot.degraded`` when teardown cannot finish. It is delivered to the bot and, when given,
+        to ``reply_to``. An unstarted bot is already detached and answers nothing.
+        """
+
         require_environment_scope(environment, self, participant="Bot")
         try:
             await self.dispatch(
                 environment,
-                events.DeactivateEvent.with_data_and_id(events.DeactivateEventData(), uuid.uuid4().hex),
+                events.DeactivateEvent.with_data_and_id(
+                    events.DeactivateEventData(reply_to=reply_to),
+                    operation_id or uuid.uuid4().hex,
+                ),
             )
         except Exception as error:
             # An unstarted or stopped bot is already detached; deactivation is idempotent.
@@ -451,16 +519,17 @@ class Bot(Traced, abc.ABC):
         instance: "Bot",
         event: hsm.Event,
         *,
+        step_id: str,
         kind: typing.Literal["attach", "detach"],
     ) -> None:
-        """Address one correlated attachment request whose typed terminal returns to Bot."""
+        """Address one attachment request, correlated by lifecycle step, whose typed terminal returns to Bot."""
 
         lifetime = instance.context()
         operation = await mosfet.started(
             _private_scope(ctx),
-            _AttachmentOperation(instance, event.id),
+            _AttachmentOperation(instance, step_id),
             _AttachmentOperation.model,
-            hsm.Config(id=event.id),
+            hsm.Config(id=step_id),
         )
         request: hsm.Event[typing.Any]
         if kind == "attach":
@@ -473,7 +542,7 @@ class Bot(Traced, abc.ABC):
             )
         request = dataclasses.replace(
             request,
-            id=event.id,
+            id=step_id,
             source=hsm.id(instance),
             target=hsm.id(instance._attachments),
             metadata=dict(event.metadata),
@@ -502,8 +571,8 @@ class Bot(Traced, abc.ABC):
                     instance,
                     dataclasses.replace(
                         failed_event,
-                        id=event.id,
-                        source=event.id,
+                        id=step_id,
+                        source=step_id,
                         target=hsm.id(instance),
                         metadata=dict(event.metadata),
                     ),
@@ -514,7 +583,7 @@ class Bot(Traced, abc.ABC):
 
     @staticmethod
     async def _deactivate_activity(ctx: hsm.Context, instance: "Bot", event: hsm.Event) -> None:
-        await Bot._request_attachment(ctx, instance, event, kind="detach")
+        await Bot._request_attachment(ctx, instance, event, step_id=instance._lifecycle_step_id, kind="detach")
 
     @staticmethod
     async def _deactivation_cleanup(
@@ -524,6 +593,7 @@ class Bot(Traced, abc.ABC):
         *,
         cleanup: typing.Literal["preserve", "reset"] | None,
     ) -> None:
+        step_id = instance._lifecycle_step_id
         lifetime = instance.context()
         environment = Environment.from_context(lifetime)
         if cleanup == "reset":
@@ -535,7 +605,7 @@ class Bot(Traced, abc.ABC):
                         attachment.DetachEvent.with_data(
                             attachment.DetachData(actor=instance, timeout=instance._attachment_timeout)
                         ),
-                        id=event.id,
+                        id=step_id,
                         source=hsm.id(instance),
                         target=hsm.id(member),
                         metadata=dict(event.metadata),
@@ -557,7 +627,7 @@ class Bot(Traced, abc.ABC):
         instance._processing_focus_candidates = ()
         # Ownership map is only valid while active; rebuild happens on next active entry.
         Bot._clear_owned_device_sources(ctx, instance, event)
-        terminal = _CleanupData(request_id=event.id, kind="deactivation")
+        terminal = _CleanupData(request_id=step_id, kind="deactivation")
         _ = hsm.dispatch(
             ctx,
             instance,
@@ -1111,6 +1181,7 @@ class Bot(Traced, abc.ABC):
 
     @staticmethod
     async def _activate_activity(ctx: hsm.Context, instance: "Bot", event: hsm.Event) -> None:
+        step_id = instance._lifecycle_step_id
         lifetime = instance.context()
         environment = Environment.from_context(lifetime)
         try:
@@ -1157,7 +1228,7 @@ class Bot(Traced, abc.ABC):
             # guard correlates against. Recorded before the attach request so a reboot
             # that lands mid-activation still attributes to this cognition.
             instance._cognition_id = hsm.id(instance._cognition)
-            await Bot._request_attachment(ctx, instance, event, kind="attach")
+            await Bot._request_attachment(ctx, instance, event, step_id=step_id, kind="attach")
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -1171,60 +1242,125 @@ class Bot(Traced, abc.ABC):
                 instance,
                 dataclasses.replace(
                     attachment.AttachFailedEvent.with_data(failure),
-                    id=event.id,
-                    source=event.id,
+                    id=step_id,
+                    source=step_id,
                     target=hsm.id(instance),
                     metadata=dict(event.metadata),
                 ),
             )
 
     @staticmethod
+    def _accept_activate(ctx: hsm.Context, instance: "Bot", event: hsm.Event[typing.Any]) -> None:
+        """Record the accepted activation as the request the lifecycle now answers."""
+
+        del ctx
+        data = event.data
+        assert isinstance(data, events.ActivateEventData)
+        instance._lifecycle = _LifecycleRequest(operation_id=event.id, reply_to=data.reply_to)
+
+    @staticmethod
+    def _accept_deactivate(ctx: hsm.Context, instance: "Bot", event: hsm.Event[typing.Any]) -> None:
+        """Record the accepted deactivation; a stop in progress then answers this newer request."""
+
+        del ctx
+        data = event.data
+        assert isinstance(data, events.DeactivateEventData)
+        instance._lifecycle = _LifecycleRequest(operation_id=event.id, reply_to=data.reply_to)
+
+    @staticmethod
+    def _enter_lifecycle_step(ctx: hsm.Context, instance: "Bot", event: hsm.Event[typing.Any]) -> None:
+        """Freeze a fresh private correlation id for the lifecycle step being entered."""
+
+        del ctx, event
+        instance._lifecycle_step += 1
+        instance._lifecycle_step_id = f"{hsm.id(instance)}:lifecycle:{instance._lifecycle_step}"
+
+    @staticmethod
+    def _announce(
+        ctx: hsm.Context,
+        instance: "Bot",
+        event: hsm.Event[typing.Any],
+        terminal: hsm.Event[typing.Any],
+    ) -> None:
+        """Answer the accepted lifecycle request with ``terminal``, to the bot and its reply target.
+
+        Stamped from the durable request, never from the triggering event: a timer or private
+        completion carries an id of its own, and the activator correlates by its operation id.
+        """
+
+        request = instance._lifecycle
+        assert request is not None, "every lifecycle step is entered by accepting a request"
+        answer = dataclasses.replace(
+            terminal,
+            id=request.operation_id,
+            source=hsm.id(instance),
+            target=hsm.id(instance),
+            metadata=dict(event.metadata),
+        )
+        _ = hsm.dispatch(ctx, instance, answer)
+        if request.reply_to is not None:
+            _ = hsm.dispatch(
+                ctx,
+                request.reply_to,
+                dataclasses.replace(answer, target=hsm.id(request.reply_to), metadata=dict(event.metadata)),
+            )
+
+    @staticmethod
     def _dispatch_activating_done(ctx: hsm.Context, instance: "Bot", event: hsm.Event) -> None:
         """Publish the public activation terminal after private attachment completion."""
 
-        _ = hsm.dispatch(
-            ctx,
-            instance,
-            dataclasses.replace(
-                events.ActivatingDoneEvent.with_data(events.ActivatingDoneEventData()),
-                id=event.id,
-                source=hsm.id(instance),
-                target=hsm.id(instance),
-                metadata=dict(event.metadata),
-            ),
-        )
+        Bot._announce(ctx, instance, event, events.ActivatingDoneEvent.with_data(events.ActivatingDoneEventData()))
 
     @staticmethod
     def _dispatch_activating_failed(ctx: hsm.Context, instance: "Bot", event: hsm.Event) -> None:
         """Publish the public activation failure after the private failure terminal."""
 
-        _ = hsm.dispatch(
-            ctx,
-            instance,
-            dataclasses.replace(
-                events.ActivatingFailedEvent.with_data(events.ActivatingFailedEventData()),
-                id=event.id,
-                source=hsm.id(instance),
-                target=hsm.id(instance),
-                metadata=dict(event.metadata),
-            ),
-        )
+        Bot._announce(ctx, instance, event, events.ActivatingFailedEvent.with_data(events.ActivatingFailedEventData()))
 
     @staticmethod
     def _dispatch_deactivating_done(ctx: hsm.Context, instance: "Bot", event: hsm.Event) -> None:
         """Publish the public deactivation terminal after private cleanup completion."""
 
-        _ = hsm.dispatch(
-            ctx,
-            instance,
-            dataclasses.replace(
-                events.DeactivatingDoneEvent.with_data(events.DeactivatingDoneEventData()),
-                id=event.id,
-                source=hsm.id(instance),
-                target=hsm.id(instance),
-                metadata=dict(event.metadata),
-            ),
-        )
+        Bot._announce(ctx, instance, event, events.DeactivatingDoneEvent.with_data(events.DeactivatingDoneEventData()))
+
+    @staticmethod
+    def _answer_degraded(ctx: hsm.Context, instance: "Bot", event: hsm.Event) -> None:
+        """Answer a deactivation of an already degraded bot: it stays degraded."""
+
+        Bot._announce(ctx, instance, event, events.DegradedEvent.with_data(events.DegradedEventData(stage="degraded")))
+
+    @staticmethod
+    def _degrade(
+        ctx: hsm.Context,
+        instance: "Bot",
+        event: hsm.Event[typing.Any],
+        stage: events.DegradedStage,
+    ) -> None:
+        """Announce a transition into degraded whose stage the calling effect names as a constant."""
+
+        _DEGRADED.add(1, {"stage": stage})
+        _LOG.warning("Bot degraded stage=%s", stage)
+        Bot._announce(ctx, instance, event, events.DegradedEvent.with_data(events.DegradedEventData(stage=stage)))
+
+    @staticmethod
+    def _dispatch_degraded_activation_cleanup(ctx: hsm.Context, instance: "Bot", event: hsm.Event) -> None:
+        Bot._degrade(ctx, instance, event, "activation_cleanup")
+
+    @staticmethod
+    def _dispatch_degraded_activation_cancel(ctx: hsm.Context, instance: "Bot", event: hsm.Event) -> None:
+        Bot._degrade(ctx, instance, event, "activation_cancel")
+
+    @staticmethod
+    def _dispatch_degraded_deactivation_cleanup(ctx: hsm.Context, instance: "Bot", event: hsm.Event) -> None:
+        Bot._degrade(ctx, instance, event, "deactivation_cleanup")
+
+    @staticmethod
+    def _dispatch_degraded_reboot_cleanup(ctx: hsm.Context, instance: "Bot", event: hsm.Event) -> None:
+        Bot._degrade(ctx, instance, event, "reboot_cleanup")
+
+    @staticmethod
+    def _dispatch_degraded_processing_cancel(ctx: hsm.Context, instance: "Bot", event: hsm.Event) -> None:
+        Bot._degrade(ctx, instance, event, "processing_cancel")
 
     @staticmethod
     def _matches_attachment_terminal(
@@ -1244,7 +1380,7 @@ class Bot(Traced, abc.ABC):
         return (
             isinstance(data, expected)
             and data.actor is instance
-            and bool(event.id)
+            and event.id == instance._lifecycle_step_id
             and event.source == event.id
             and event.target == hsm.id(instance)
         )
@@ -1270,6 +1406,7 @@ class Bot(Traced, abc.ABC):
             isinstance(data, _CleanupData)
             and data.kind == kind
             and event.id == data.request_id
+            and event.id == instance._lifecycle_step_id
             and event.source == hsm.id(instance)
             and event.target == hsm.id(instance)
         )
@@ -1284,6 +1421,7 @@ class Bot(Traced, abc.ABC):
 
     @staticmethod
     async def _activation_cleanup_activity(ctx: hsm.Context, instance: "Bot", event: hsm.Event) -> None:
+        step_id = instance._lifecycle_step_id
         lifetime = instance.context()
         environment = Environment.from_context(lifetime)
         # Deactivation may cancel activation before the activity can publish its
@@ -1297,7 +1435,7 @@ class Bot(Traced, abc.ABC):
         for device in reversed(list(instance._devices.values())):
             await device.stop(environment)
         Bot._clear_owned_device_sources(ctx, instance, event)
-        terminal = _CleanupData(request_id=event.id, kind="activation")
+        terminal = _CleanupData(request_id=step_id, kind="activation")
         _ = hsm.dispatch(
             ctx,
             instance,
@@ -1375,15 +1513,24 @@ class Bot(Traced, abc.ABC):
         "Bot",
         hsm.attribute(_OWNED_DEVICES_ATTRIBUTE),
         hsm.initial(hsm.target("inactive")),
+        # Every accepted bot.deactivate gets exactly one public terminal under its id: inactive
+        # and degraded answer it at once, the stop states supersede the request they are running
+        # for, and the activation-rollback and reboot states defer it to the state that can.
         hsm.state(
             "inactive",
             hsm.transition(
                 hsm.on(events.ActivateEvent),
+                hsm.effect(_accept_activate),
                 hsm.target("../activating"),
+            ),
+            hsm.transition(
+                hsm.on(events.DeactivateEvent),
+                hsm.effect(_accept_deactivate, _dispatch_deactivating_done),
             ),
         ),
         hsm.state(
             "activating",
+            hsm.entry(_enter_lifecycle_step),
             hsm.activity(_activate_activity),
             hsm.transition(
                 hsm.on(events.RebootEvent),
@@ -1393,8 +1540,8 @@ class Bot(Traced, abc.ABC):
             ),
             hsm.transition(
                 hsm.on(events.DeactivateEvent),
-                hsm.effect(_clear_focus),
-                hsm.target("../activation_cleanup"),
+                hsm.effect(_accept_deactivate, _clear_focus),
+                hsm.target("../activation_cancelling"),
             ),
             hsm.transition(
                 hsm.on(attachment.AttachCompleteEvent),
@@ -1409,9 +1556,35 @@ class Bot(Traced, abc.ABC):
                 hsm.target("../activation_cleanup"),
             ),
         ),
+        # A stop accepted during activation: roll back what activation started, then answer it.
+        # No bot.reboot transition: a cognition reboot never turns an accepted stop back into an
+        # activation.
+        hsm.state(
+            "activation_cancelling",
+            hsm.entry(_enter_lifecycle_step),
+            hsm.activity(_activation_cleanup_activity),
+            hsm.transition(
+                hsm.on(events.DeactivateEvent),
+                hsm.effect(_accept_deactivate),
+            ),
+            hsm.transition(
+                hsm.on(_CleanupDoneEvent),
+                hsm.guard(_matches_activation_cleanup_done),
+                hsm.effect(_dispatch_deactivating_done),
+                hsm.target("../inactive"),
+            ),
+            hsm.transition(
+                hsm.after(_bot_deactivation_timeout),
+                hsm.effect(_dispatch_degraded_activation_cancel),
+                hsm.target("../degraded"),
+            ),
+        ),
+        # Rollback after a failed activation; no stop is pending, so cognition may still reboot.
         hsm.state(
             "activation_cleanup",
+            hsm.entry(_enter_lifecycle_step),
             hsm.activity(_activation_cleanup_activity),
+            hsm.defer(events.DeactivateEvent),
             hsm.transition(
                 hsm.on(events.RebootEvent),
                 hsm.guard(_reboot_requested_by_cognition),
@@ -1425,17 +1598,17 @@ class Bot(Traced, abc.ABC):
             ),
             hsm.transition(
                 hsm.after(_bot_deactivation_timeout),
+                hsm.effect(_dispatch_degraded_activation_cleanup),
                 hsm.target("../degraded"),
             ),
         ),
         hsm.state(
             "deactivating",
+            hsm.entry(_enter_lifecycle_step),
             hsm.activity(_deactivate_activity),
             hsm.transition(
-                hsm.on(events.RebootEvent),
-                hsm.guard(_reboot_requested_by_cognition),
-                hsm.effect(_clear_focus),
-                hsm.target("../reboot_deactivating"),
+                hsm.on(events.DeactivateEvent),
+                hsm.effect(_accept_deactivate),
             ),
             hsm.transition(
                 hsm.on(attachment.DetachedEvent, attachment.DetachFailedEvent),
@@ -1449,12 +1622,11 @@ class Bot(Traced, abc.ABC):
         ),
         hsm.state(
             "deactivation_cleanup",
+            hsm.entry(_enter_lifecycle_step),
             hsm.activity(_deactivation_cleanup_activity),
             hsm.transition(
-                hsm.on(events.RebootEvent),
-                hsm.guard(_reboot_requested_by_cognition),
-                hsm.effect(_clear_focus),
-                hsm.target("../reboot_cleanup_reset"),
+                hsm.on(events.DeactivateEvent),
+                hsm.effect(_accept_deactivate),
             ),
             hsm.transition(
                 hsm.on(_CleanupDoneEvent),
@@ -1464,12 +1636,15 @@ class Bot(Traced, abc.ABC):
             ),
             hsm.transition(
                 hsm.after(_bot_deactivation_timeout),
+                hsm.effect(_dispatch_degraded_deactivation_cleanup),
                 hsm.target("../degraded"),
             ),
         ),
         hsm.state(
             "reboot_deactivating",
+            hsm.entry(_enter_lifecycle_step),
             hsm.activity(_deactivate_activity),
+            hsm.defer(events.DeactivateEvent),
             hsm.transition(
                 hsm.on(attachment.DetachedEvent),
                 hsm.guard(_matches_detach_terminal),
@@ -1487,7 +1662,9 @@ class Bot(Traced, abc.ABC):
         ),
         hsm.state(
             "reboot_cleanup_preserve",
+            hsm.entry(_enter_lifecycle_step),
             hsm.activity(_reboot_cleanup_preserve_activity),
+            hsm.defer(events.DeactivateEvent),
             hsm.transition(
                 hsm.on(_CleanupDoneEvent),
                 hsm.guard(_matches_deactivation_cleanup_done),
@@ -1495,12 +1672,15 @@ class Bot(Traced, abc.ABC):
             ),
             hsm.transition(
                 hsm.after(_bot_deactivation_timeout),
+                hsm.effect(_dispatch_degraded_reboot_cleanup),
                 hsm.target("../degraded"),
             ),
         ),
         hsm.state(
             "reboot_cleanup_reset",
+            hsm.entry(_enter_lifecycle_step),
             hsm.activity(_reboot_cleanup_reset_activity),
+            hsm.defer(events.DeactivateEvent),
             hsm.transition(
                 hsm.on(_CleanupDoneEvent),
                 hsm.guard(_matches_deactivation_cleanup_done),
@@ -1508,10 +1688,17 @@ class Bot(Traced, abc.ABC):
             ),
             hsm.transition(
                 hsm.after(_bot_deactivation_timeout),
+                hsm.effect(_dispatch_degraded_reboot_cleanup),
                 hsm.target("../degraded"),
             ),
         ),
-        hsm.state("degraded"),
+        hsm.state(
+            "degraded",
+            hsm.transition(
+                hsm.on(events.DeactivateEvent),
+                hsm.effect(_accept_deactivate, _answer_degraded),
+            ),
+        ),
         hsm.state(
             "active",
             hsm.initial(hsm.target("unfocused")),
@@ -1531,7 +1718,7 @@ class Bot(Traced, abc.ABC):
             ),
             hsm.transition(
                 hsm.on(events.DeactivateEvent),
-                hsm.effect(_clear_focus),
+                hsm.effect(_accept_deactivate, _clear_focus),
                 hsm.target("../deactivating"),
             ),
             # Focus lives on active so menus built during processing entry still see it:
@@ -1659,7 +1846,7 @@ class Bot(Traced, abc.ABC):
                 hsm.transition(
                     hsm.on(_ProcessingCancelTimedOutEvent),
                     hsm.guard(_matches_processing_timeout),
-                    hsm.effect(_dispatch_processing_timeout_failure),
+                    hsm.effect(_dispatch_processing_timeout_failure, _dispatch_degraded_processing_cancel),
                     # Relative so redefines (e.g. PhoneBot(Bot.model, ...)) keep a valid target.
                     hsm.target("../../degraded"),
                 ),

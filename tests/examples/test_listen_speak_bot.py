@@ -24,6 +24,8 @@ from typing import ClassVar, Protocol, TypeVar, override
 import hsm
 import pytest
 
+from tests.bot.lifecycle_replies import started_replies
+
 if typing.TYPE_CHECKING:
     from listen_speak_bot_example import ListenSpeakBot
 else:
@@ -1255,8 +1257,10 @@ def test_listen_speak_closes_owned_decoder_and_vad_when_attach_fails(
         environment: Environment,
         *,
         placement: object | None = None,
+        reply_to: object | None = None,
+        operation_id: str | None = None,
     ) -> object:
-        del instance, environment, placement
+        del instance, environment, placement, reply_to, operation_id
         raise RuntimeError("attach failed")
 
     monkeypatch.setattr(example.Bot, "attach", fail_attach)
@@ -1270,6 +1274,20 @@ def test_listen_speak_closes_owned_decoder_and_vad_when_attach_fails(
 
     assert _CloseTrackingDecoder.instances and _CloseTrackingDecoder.instances[0].closed
     assert _CloseTrackingVoiceActivityClassifier.instances and _CloseTrackingVoiceActivityClassifier.instances[0].closed
+
+
+def test_listen_speak_attach_and_detach_answer_the_activator_under_its_operation_ids(
+    tmp_path: pathlib.Path,
+) -> None:
+    async def run() -> list[tuple[str, str]]:
+        replies = await started_replies()
+        body = _test_bot(tmp_path)
+        environment = Environment()
+        _ = await body.attach(environment, reply_to=replies, operation_id="op-attach")
+        _ = await body.detach(environment, reply_to=replies, operation_id="op-detach")
+        return replies.ledger()
+
+    assert asyncio.run(run()) == [("bot.activated", "op-attach"), ("bot.deactivated", "op-detach")]
 
 
 def test_ci_runs_fatal_root_and_listen_speak_python_gates() -> None:

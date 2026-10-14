@@ -1236,10 +1236,22 @@ class ListenSpeakBot(Bot):
     )
 
     @override
-    async def attach(self, environment: Environment, *, placement: space.Placement | None = None) -> typing.Self:
+    async def attach(
+        self,
+        environment: Environment,
+        *,
+        placement: space.Placement | None = None,
+        reply_to: hsm.Instance | None = None,
+        operation_id: str | None = None,
+    ) -> typing.Self:
         _ = await mosfet.started(environment, self._run_progress, self._run_progress.model)
         try:
-            attached = await super().attach(environment, placement=placement)
+            attached = await super().attach(
+                environment,
+                placement=placement,
+                reply_to=reply_to,
+                operation_id=operation_id,
+            )
             await self.wait_for_activation()
             return attached
         except BaseException:
@@ -1248,9 +1260,15 @@ class ListenSpeakBot(Bot):
             raise
 
     @override
-    async def detach(self, environment: Environment) -> typing.Self:
+    async def detach(
+        self,
+        environment: Environment,
+        *,
+        reply_to: hsm.Instance | None = None,
+        operation_id: str | None = None,
+    ) -> typing.Self:
         try:
-            detached = await super().detach(environment)
+            detached = await super().detach(environment, reply_to=reply_to, operation_id=operation_id)
             try:
                 _ = await self._deactivation_terminals.receive(timeout=self._deactivation_timeout.total_seconds())
             except TimeoutError as error:

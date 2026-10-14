@@ -73,24 +73,55 @@ DeviceReference = typing.Annotated[
 
 
 class ActivateEventData(pydantic.BaseModel):
-    """No-payload command that activates a bot."""
+    """Command that activates a bot.
+
+    The envelope ``id`` is the lifecycle operation id: the bot stamps it on the one public
+    terminal that answers this request (``bot.activated`` or ``bot.activating.failed``).
+    """
 
     model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
+        arbitrary_types_allowed=True,
         frozen=True,
         json_schema_extra={
             "examples": [{}],
         },
     )
 
+    reply_to: SkipJsonSchema[pydantic.SkipValidation[hsm.Instance] | None] = pydantic.Field(
+        default=None,
+        exclude=True,
+        repr=False,
+        description=(
+            "Optional runtime-only actor that also receives the bot's lifecycle terminals for this request. "
+            "When omitted, only the bot itself receives them."
+        ),
+    )
+
 
 class DeactivateEventData(pydantic.BaseModel):
-    """No-payload command that deactivates a bot."""
+    """Command that deactivates a bot.
+
+    The bot answers every accepted request with exactly one public terminal carrying the
+    request's envelope ``id``: ``bot.deactivated``, or ``bot.degraded`` when teardown cannot
+    finish.
+    """
 
     model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
+        arbitrary_types_allowed=True,
         frozen=True,
         json_schema_extra={
             "examples": [{}],
         },
+    )
+
+    reply_to: SkipJsonSchema[pydantic.SkipValidation[hsm.Instance] | None] = pydantic.Field(
+        default=None,
+        exclude=True,
+        repr=False,
+        description=(
+            "Optional runtime-only actor that also receives the terminal answering this request. "
+            "When omitted, only the bot itself receives it."
+        ),
     )
 
 
@@ -322,6 +353,41 @@ class DeactivatingDoneEventData(pydantic.BaseModel):
     )
 
 
+DegradedStage = typing.Literal[
+    "activation_cleanup",
+    "activation_cancel",
+    "deactivation_cleanup",
+    "reboot_cleanup",
+    "processing_cancel",
+    "degraded",
+]
+
+
+class DegradedEventData(pydantic.BaseModel):
+    """Error signal that the bot entered, or already sits in, its degraded lifecycle state.
+
+    A bot is degraded when a lifecycle teardown could not finish inside its bound, so devices or
+    abilities may still be running. It answers the lifecycle request it was serving with this
+    terminal under that request's envelope ``id``.
+    """
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
+        frozen=True,
+        json_schema_extra={
+            "examples": [{"stage": "deactivation_cleanup"}],
+        },
+    )
+
+    stage: DegradedStage = pydantic.Field(
+        description=(
+            "Lifecycle stage whose bound expired: activation rollback cleanup, cancelling an activation, "
+            "deactivation cleanup, reboot cleanup, or cancelling a processing turn. ``degraded`` answers a "
+            "deactivation requested while the bot was already degraded."
+        ),
+        examples=["deactivation_cleanup", "degraded"],
+    )
+
+
 InputEventKind = hsm.EventKind
 
 ActivateEvent = hsm.Event[ActivateEventData](
@@ -378,4 +444,9 @@ DeactivatingDoneEvent = hsm.Event[DeactivatingDoneEventData](
     name="bot.deactivated",
     kind=hsm.CompletionEventKind,
     schema=DeactivatingDoneEventData,
+)
+DegradedEvent = hsm.Event[DegradedEventData](
+    name="bot.degraded",
+    kind=hsm.ErrorEventKind,
+    schema=DegradedEventData,
 )
