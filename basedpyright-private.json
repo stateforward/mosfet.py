@@ -12,7 +12,8 @@
     "src/providers/moonshine/src",
     "src/providers/openai_compat/src",
     "src/providers/pyannote/src",
-    "src/providers/sqlite_memory/src"
+    "src/providers/sqlite_memory/src",
+    "src/providers/websocket/src"
   ],
   "exclude": [
     "src/providers/sqlite_memory/vendor"
@@ -28,7 +29,8 @@
     "src/providers/moonshine/src",
     "src/providers/openai_compat/src",
     "src/providers/pyannote/src",
-    "src/providers/sqlite_memory/src"
+    "src/providers/sqlite_memory/src",
+    "src/providers/websocket/src"
   ],
   "pythonVersion": "3.13",
   "typeCheckingMode": "strict",
