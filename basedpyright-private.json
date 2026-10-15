@@ -13,6 +13,7 @@
     "src/providers/opencv/src",
     "src/providers/openai_compat/src",
     "src/providers/pyannote/src",
+    "src/providers/speech_server/src",
     "src/providers/sqlite_memory/src",
     "src/providers/websocket/src"
   ],
@@ -31,6 +32,7 @@
     "src/providers/opencv/src",
     "src/providers/openai_compat/src",
     "src/providers/pyannote/src",
+    "src/providers/speech_server/src",
     "src/providers/sqlite_memory/src",
     "src/providers/websocket/src"
   ],

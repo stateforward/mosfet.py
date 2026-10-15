@@ -249,6 +249,7 @@ studio (publishes topology into the `web/` studio for inspection) with `BOT_MODE
 | `mosfet-provider-opencv` | OpenCV YuNet faces with SFace prints, YOLOX-S objects, and cheap change measures (`FrameDiff`, `Downscaled`) for `seeing.Seeing` |
 | `mosfet-provider-llama-cpp` | in-process llama.cpp on a pinned `llama-cpp-python` build (Metal / CUDA / CPU) |
 | `mosfet-provider-pyannote` | voice diarization & speaker identification |
+| `mosfet-provider-speech-server` | speech-server clients: `Diarizer` (`/v1/diarize`) and `VoiceEmbedder` (`/v1/embed`) for `listening.Listening`, with stdlib 16 kHz mono resampling |
 | `mosfet-provider-sqlite-memory` | SQLite + sqlite-vec for `memory.Memory`: `open_engine` (vec0 loaded) and the `VecIndex` vector index |
 | `mosfet-provider-typesafe` | label-tier selection (system_one Choice/Score/Noul) |
 | `mosfet-provider-needle` | local Needle 3 tool calling for the Intuition reflex tier (Apache-2.0, on-device) |
