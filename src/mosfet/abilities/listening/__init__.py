@@ -2,7 +2,9 @@ from . import enrollment
 from . import interpretation
 from . import listening
 from . import overlap
+from . import recognition
 from . import sensitivity
+from . import transcription
 from .enrollment import EnrollData, EnrollEvent
 from .interpretation import (
     Interpretation,
@@ -15,6 +17,7 @@ from .interpretation import (
 from .listening import Listening
 from .overlap import OverlapData, OverlapEvent
 from .sensitivity import Sensitivity
+from .transcription import Transcription
 
 __all__ = [
     "EnrollData",
@@ -29,9 +32,12 @@ __all__ = [
     "Sensitivity",
     "SpeechData",
     "SpeechEvent",
+    "Transcription",
     "enrollment",
     "interpretation",
     "listening",
     "overlap",
+    "recognition",
     "sensitivity",
+    "transcription",
 ]

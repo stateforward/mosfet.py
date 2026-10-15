@@ -1844,6 +1844,7 @@ source = { editable = "src/providers/speech_server" }
 dependencies = [
     { name = "httpx" },
     { name = "stateforward-mosfet" },
+    { name = "websockets" },
 ]
 
 [package.dev-dependencies]
@@ -1856,6 +1857,7 @@ dev = [
 requires-dist = [
     { name = "httpx", specifier = ">=0.28,<1" },
     { name = "stateforward-mosfet", editable = "." },
+    { name = "websockets", specifier = ">=16.0,<17" },
 ]
 
 [package.metadata.requires-dev]

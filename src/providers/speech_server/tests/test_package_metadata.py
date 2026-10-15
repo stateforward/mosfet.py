@@ -24,8 +24,9 @@ def test_provider_has_package_owned_dependencies() -> None:
     provider = _project(PACKAGE_ROOT / "pyproject.toml")
 
     assert provider["name"] == "mosfet-provider-speech-server"
-    assert provider["dependencies"] == ["httpx>=0.28,<1", "stateforward.mosfet"]
+    assert provider["dependencies"] == ["httpx>=0.28,<1", "stateforward.mosfet", "websockets>=16.0,<17"]
     assert "httpx" not in str(_project(ROOT_PROJECT)["dependencies"])
+    assert "websockets" not in str(_project(ROOT_PROJECT)["dependencies"])
 
 
 def test_provider_version_is_dynamic() -> None:

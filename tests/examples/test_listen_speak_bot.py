@@ -869,6 +869,73 @@ def test_listen_speak_reads_pyannote_model_override_without_credentials(tmp_path
     assert config.voice_identity_model_id == "local/test-speaker-model"
 
 
+def test_listen_speak_reads_the_lab_speech_wiring_from_the_environment(tmp_path: pathlib.Path) -> None:
+    from listen_speak_bot_example import AppConfig, LabConfig
+
+    env_file = tmp_path / ".env"
+    _ = env_file.write_text(
+        "BOT_SPEECH_SERVER_STREAM_URL=ws://lab.test:8001\n"
+        "BOT_SPEECH_SERVER_URL=http://lab.test:8003\n"
+        "BOT_OPENAI_COMPAT_SPEECH_BASE_URL=http://lab.test:8002/v1\n",
+        encoding="utf-8",
+    )
+
+    config = AppConfig.from_env_file(env_file)
+
+    assert config.lab == LabConfig(
+        stream_url="ws://lab.test:8001",
+        speech_server_url="http://lab.test:8003",
+        speech_base_url="http://lab.test:8002/v1",
+    )
+
+
+def test_listen_speak_composes_served_speech_from_the_lab_wiring(tmp_path: pathlib.Path) -> None:
+    from listen_speak_bot_example import LabConfig, LabEncoder
+
+    body = ListenSpeakBot(
+        reply_wav=tmp_path / "reply.wav",
+        cognition=_empty_cognition(),
+        lab=LabConfig(
+            stream_url="ws://lab.test:8001",
+            speech_server_url="http://lab.test:8003",
+            speech_base_url="http://lab.test:8002/v1",
+        ),
+    )
+
+    # Nothing local is loaded for hearing, and speech goes through the served encoder.
+    assert isinstance(body.encoder(), LabEncoder)
+    assert body.encoder().format == vocal.speech.Format(sample_rate_hz=24_000, channels=1)
+
+
+def test_lab_encoder_streams_through_and_keeps_what_it_said(tmp_path: pathlib.Path) -> None:
+    from listen_speak_bot_example import LabEncoder
+
+    class Served(vocal.speech.SpeechEncoder):
+        def __init__(self) -> None:
+            self.format: vocal.speech.Format = vocal.speech.Format(sample_rate_hz=24_000, channels=1)
+
+        @typing.override
+        async def encode(
+            self, input: collections.abc.AsyncIterable[str]
+        ) -> collections.abc.AsyncIterator[vocal.speech.Audio]:
+            said = "".join([piece async for piece in input])
+            if not said.strip():
+                raise encoding.Error("invalid_input", "blank text")
+            yield vocal.speech.Audio(pcm=b"\x01\x00", text="")
+            yield vocal.speech.Audio(pcm=b"\x02\x00", text=said)
+
+    async def run() -> tuple[list[bytes], LabEncoder]:
+        encoder = LabEncoder(Served(), destination=tmp_path / "reply.wav")
+        chunks = [chunk.pcm for chunk in await contract.assert_speech_encoder(encoder, ["Hel", "lo."])]
+        return chunks, encoder
+
+    chunks, encoder = asyncio.run(run())
+    assert chunks == [b"\x01\x00", b"\x02\x00"]
+    assert encoder.calls == ["Hello."]
+    assert encoder.audio == b"\x01\x00\x02\x00"
+    assert (tmp_path / "reply.wav").read_bytes().startswith(b"RIFF")
+
+
 def test_listen_speak_injects_pyannote_classifier_and_emits_the_heard_voice_ref() -> None:
     async def run() -> tuple[object, _RecordingInference, list[str]]:
         inference = _RecordingInference()

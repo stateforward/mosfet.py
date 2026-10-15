@@ -2,8 +2,9 @@
 
 Two things happen to an arriving sound and they happen on very different timescales. Weighing it
 against what the body is currently doing is about a *moment* and costs nothing. Working out what
-it was — voice detection, direct voice identification, speech decoding — takes seconds and is somebody else's job
-(:class:`~mosfet.abilities.listening.interpretation.Interpretation`).
+it was — voice detection, direct voice identification, speech decoding — takes seconds and is somebody else's job:
+:class:`~mosfet.abilities.listening.interpretation.Interpretation` when the ear hears locally, or
+:class:`~mosfet.abilities.listening.transcription.Transcription` when it streams to speech-to-text sessions.
 
 Nothing sits between the ear and the prediction. That is the whole shape of this machine: a sound
 arrives, it is scored while the thing that produced it is still producing, and it leaves already
@@ -16,6 +17,7 @@ from __future__ import annotations
 from . import enrollment
 from . import interpretation
 from . import sensitivity
+from . import transcription as streaming
 from .. import ability
 from .. import classifying
 from ..hearing import sound
@@ -67,7 +69,7 @@ def _has_interpreted_product(ctx: hsm.Context, instance: "Listening", event: hsm
     return isinstance(event.data, cognition.InputData)
 
 
-def _has_interpretation_failure(ctx: hsm.Context, instance: "Listening", event: hsm.Event[typing.Any]) -> bool:
+def _has_hearing_failure(ctx: hsm.Context, instance: "Listening", event: hsm.Event[typing.Any]) -> bool:
     del ctx, instance
     return isinstance(event.data, interpretation.FailedEventData)
 
@@ -80,8 +82,9 @@ class Listening(ability.Ability[SoundData, cognition.InputData]):
     is the original sound or decoded speech. Scoring against the body's own predictions
     (:class:`~mosfet.abilities.listening.sensitivity.Sensitivity`) happens here, on arrival.
     Everything slower, including direct voice identification, is delegated to
-    :class:`~mosfet.abilities.listening.interpretation.Interpretation`,
-    whose products come back out through this ability's own terminals.
+    :class:`~mosfet.abilities.listening.interpretation.Interpretation` or, on the streaming path,
+    :class:`~mosfet.abilities.listening.transcription.Transcription`, whose products come back out
+    through this ability's own terminals.
     """
 
     input_event: typing.ClassVar[hsm.Event[SoundData]] = SoundEvent
@@ -89,7 +92,8 @@ class Listening(ability.Ability[SoundData, cognition.InputData]):
     failed_event: typing.ClassVar[hsm.Event[interpretation.FailedEventData]] = interpretation.ListeningFailedEvent
     _composite_attachment_lifecycle: typing.ClassVar[bool] = True
     _sensitivity: sensitivity.Sensitivity
-    _interpretation: interpretation.Interpretation
+    # The slow half: Interpretation (local voice detection and decoding) or Transcription (streaming sessions).
+    _hearing: ability.Ability[sensitivity.OutputData, cognition.InputData]
     # The voice registry this ear owns (its group starts, attaches and stops it), or None when it does not
     # identify voices.
     _registry: identification.Registry | None
@@ -97,7 +101,8 @@ class Listening(ability.Ability[SoundData, cognition.InputData]):
     def __init__(
         self,
         *,
-        voice_activity_classifier: voice.detection.VoiceActivityClassifier,
+        voice_activity_classifier: voice.detection.VoiceActivityClassifier | None = None,
+        transcription: streaming.SessionFactory | None = None,
         sound_classifier: sound.classification.SoundClassifier | None = None,
         speech_decoder: speech.SpeechDecoder | None = None,
         voice_diarizer: voice.diarization.VoiceDiarizer | None = None,
@@ -111,7 +116,13 @@ class Listening(ability.Ability[SoundData, cognition.InputData]):
         product_threshold_db: float = interpretation.DEFAULT_PRODUCT_THRESHOLD_DB,
         overlap_min_voiced: datetime.timedelta = interpretation.DEFAULT_OVERLAP_MIN_VOICED,
     ) -> None:
-        """Hear through the given classifiers.
+        """Hear through the given classifiers, or through streaming speech-to-text sessions.
+
+        Exactly one hearing path is composed: ``voice_activity_classifier`` hears locally (voice
+        detection, then the optional sound classifier, diarizer and speech decoder), or
+        ``transcription`` makes one unstarted streaming session (``hearing.speech.stream``) per sound
+        source and the hearing model's own end of turn makes each text speech product. The voice
+        identification arguments serve either path.
 
         ``voice_classifier`` and ``registry`` identify voices and come together: ``registry`` is an
         unstarted ``identification.Registry`` constructed with ``kind="voice"``, which this ear owns
@@ -121,26 +132,43 @@ class Listening(ability.Ability[SoundData, cognition.InputData]):
         ear states it as a ``listening.OverlapEvent`` fact.
 
         Raises:
-            ValueError: If only one of ``voice_classifier`` and ``registry`` is given, or as
-                ``Interpretation`` raises for its own arguments (including a non-positive
-                ``overlap_min_voiced``).
+            ValueError: If not exactly one of ``voice_activity_classifier`` and ``transcription`` is
+                given, ``transcription`` is combined with ``sound_classifier`` or ``speech_decoder``
+                (local stages), only one of ``voice_classifier`` and ``registry`` is given, or as
+                ``Interpretation`` or ``Transcription`` raises for its own arguments (including a
+                non-positive ``overlap_min_voiced``).
         """
 
         super().__init__()
+        if (voice_activity_classifier is None) == (transcription is None):
+            raise ValueError("exactly one of voice_activity_classifier and transcription is required.")
         self._sensitivity = sensitivity.Sensitivity()
-        self._interpretation = interpretation.Interpretation(
-            voice_activity_classifier=voice_activity_classifier,
-            sound_classifier=sound_classifier,
-            speech_decoder=speech_decoder,
-            voice_diarizer=voice_diarizer,
-            voice_classifier=voice_classifier,
-            registry=registry,
-            recognize_timeout=recognize_timeout,
-            product_threshold_db=product_threshold_db,
-            overlap_min_voiced=overlap_min_voiced,
-        )
+        if voice_activity_classifier is not None:
+            self._hearing = interpretation.Interpretation(
+                voice_activity_classifier=voice_activity_classifier,
+                sound_classifier=sound_classifier,
+                speech_decoder=speech_decoder,
+                voice_diarizer=voice_diarizer,
+                voice_classifier=voice_classifier,
+                registry=registry,
+                recognize_timeout=recognize_timeout,
+                product_threshold_db=product_threshold_db,
+                overlap_min_voiced=overlap_min_voiced,
+            )
+        else:
+            assert transcription is not None
+            if sound_classifier is not None or speech_decoder is not None:
+                raise ValueError("sound_classifier and speech_decoder hear locally; transcription streams instead.")
+            self._hearing = streaming.Transcription(
+                session=transcription,
+                voice_diarizer=voice_diarizer,
+                voice_classifier=voice_classifier,
+                registry=registry,
+                recognize_timeout=recognize_timeout,
+                product_threshold_db=product_threshold_db,
+            )
         self._registry = registry
-        owned = (self._sensitivity, self._interpretation, *(() if registry is None else (registry,)))
+        owned = (self._sensitivity, self._hearing, *(() if registry is None else (registry,)))
         self._attachment_group = attachment.Group(*owned)
 
     @staticmethod
@@ -200,7 +228,7 @@ class Listening(ability.Ability[SoundData, cognition.InputData]):
         A nerve like the efference copy: nothing here reads, ranks or decides anything about it.
         """
 
-        target = instance._interpretation
+        target = instance._hearing
         _ = hsm.dispatch(
             ctx,
             target,
@@ -304,7 +332,7 @@ class Listening(ability.Ability[SoundData, cognition.InputData]):
             )
 
     @staticmethod
-    def _hand_to_interpretation(
+    def _hand_to_hearing(
         ctx: hsm.Context,
         instance: "Listening",
         event: hsm.Event[typing.Any],
@@ -318,7 +346,7 @@ class Listening(ability.Ability[SoundData, cognition.InputData]):
 
         sensed = event.data
         assert isinstance(sensed, sensitivity.OutputData)
-        target = instance._interpretation
+        target = instance._hearing
         _ = hsm.dispatch(
             ctx,
             target,
@@ -349,7 +377,7 @@ class Listening(ability.Ability[SoundData, cognition.InputData]):
         )
 
     @staticmethod
-    def _emit_interpretation_failure(
+    def _emit_hearing_failure(
         ctx: hsm.Context,
         instance: "Listening",
         event: hsm.Event[typing.Any],
@@ -400,8 +428,8 @@ class Listening(ability.Ability[SoundData, cognition.InputData]):
             ),
             hsm.transition(
                 hsm.on(interpretation.ListeningFailedEvent),
-                hsm.guard(_has_interpretation_failure),
-                hsm.effect(_emit_interpretation_failure),
+                hsm.guard(_has_hearing_failure),
+                hsm.effect(_emit_hearing_failure),
             ),
             hsm.state(
                 "Listening",
@@ -421,7 +449,7 @@ class Listening(ability.Ability[SoundData, cognition.InputData]):
                 hsm.transition(
                     hsm.on(_SensitivityCompletedEvent),
                     hsm.guard(_has_sensed_sound),
-                    hsm.effect(_hand_to_interpretation),
+                    hsm.effect(_hand_to_hearing),
                     hsm.target("/Listening/Perceiving/Listening"),
                 ),
                 hsm.transition(

@@ -1,12 +1,13 @@
 [project]
 name = "mosfet-provider-speech-server"
 dynamic = ["version"]
-description = "Speech-server diarization and voice-embedding clients for stateforward.mosfet hearing."
+description = "Speech-server streaming transcription, diarization and voice-embedding clients for stateforward.mosfet hearing."
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
   "httpx>=0.28,<1",
   "stateforward.mosfet",
+  "websockets>=16.0,<17",
 ]
 
 [dependency-groups]

@@ -8,8 +8,9 @@ ones, through the same `hearing.voice` ability contracts. The OpenAI-compatible 
 | --- | --- | --- |
 | `speech_server.Diarizer` | `hearing.voice.VoiceDiarizer` | `POST /v1/diarize?sample_rate=16000` (for example Sortformer) |
 | `speech_server.VoiceEmbedder` | the voice-identification `Classifier` (`voice.identification`) | `POST /v1/embed` (for example WeSpeaker) |
+| `speech_server.Transcription` | a streaming session (`hearing.speech.stream`) for `listening.Listening(transcription=)` | WebSocket `/v1/audio/stream` (for example Nemotron with turn detection) |
 
-Both are plain collaborators, not state machines: an ability calls them directly. Each request carries raw s16le
+`Diarizer` and `VoiceEmbedder` are plain collaborators, not state machines: an ability calls them directly. Each request carries raw s16le
 mono 16 kHz; other audio is converted first by `speech_server.resample.to_mono` (channels averaged, linear
 interpolation, standard library only), in a worker thread.
 
@@ -45,6 +46,40 @@ The embedder's vectors stay inside Listening: the registry turns each into a voi
 `voice:<id>` refs. With a file memory database, `sqlite_memory.IdentityStore(engine=...)` replaces the in-process
 store and shares the memory engine.
 
+## Streaming transcription
+
+`speech_server.Transcription(url="ws://host:8001")` is one streaming speech-to-text session: a state machine that
+its controller attaches to and that hears one sound source. Listening makes one per source from a factory:
+
+```python
+ears = listening.Listening(
+    transcription=lambda: speech_server.Transcription(url=config.stream_url),
+    voice_classifier=speech_server.VoiceEmbedder(base_url=config.embed_url),
+    registry=voice_registry,
+)
+```
+
+While attached it stays connected to `/v1/audio/stream?sample_rate=16000&language=en&chunk=0.56&turns=1`,
+reconnecting after any loss with a backoff from 1 s doubling to 30 s. It sends audio resampled to s16le mono
+16 kHz in 50 ms frames (held, at most 2 s of it, until the server says `ready`), `{"type":"agent","speaking":…}`
+whenever the bot starts or stops producing, and `{"type":"end"}` on detach. Each server frame becomes one
+`hearing.speech.stream` output to the controller: `ready`, `speech_start`/`speech_end`, `partial`, `final`
+(transcript), `turn_end` (the server's end-of-turn perception) and `interrupt` (overlap); `eot`, `resumed` and
+`rejoin` are dropped and counted. Close 1013 is `overloaded`, 1003 `invalid_input`, a frame outside the protocol
+`invalid_response`, a server that does not connect or say `ready` within `connect_timeout` (5 s) `timeout`, and
+anything else (an `error` frame, a dropped socket) `unavailable`; each is a `stream.FailedEvent`, then the backoff.
+
+Every time the controller hears is in seconds of the audio this session has received, as the contract says. The
+server's own clock restarts at zero on each connection and never hears audio that was let go, so the session places
+each connection's clock at the first audio sent on it and moves it on past audio let go before `ready`, past a full
+send queue, or while detached.
+
+`bot.hearing.speech.stream.session.active`, `.event.count{kind}`, `.failed.count{kind}` and
+`.dropped.count{reason}` count sessions, outputs, failures and audio not sent; `bot.hearing.speech.stream.connect`
+spans each connection.
+
+## Requests
+
 Inject an `httpx.AsyncClient` as `client=` to share connections; otherwise each request opens and closes its own.
 `timeout_seconds` (3 s) bounds each request.
 
@@ -61,4 +96,5 @@ uv run --package mosfet-provider-speech-server --group dev python -m pytest src/
 ```
 
 `tests/test_live.py` checks served endpoints when `BOT_SPEECH_SERVER_URL` (or the per-endpoint
-`BOT_SPEECH_SERVER_EMBED_URL` / `BOT_SPEECH_SERVER_DIARIZE_URL`) is set (`-m live`).
+`BOT_SPEECH_SERVER_EMBED_URL` / `BOT_SPEECH_SERVER_DIARIZE_URL`) is set, and a streaming session when
+`BOT_SPEECH_SERVER_STREAM_URL` is set (`-m live`).

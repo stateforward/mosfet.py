@@ -82,3 +82,53 @@ def test_served_diarizer_returns_ordered_segments_of_the_input() -> None:
     assert [segment.start_seconds for segment in output.segments] == sorted(
         segment.start_seconds for segment in output.segments
     )
+
+
+def test_served_stream_session_says_ready() -> None:
+    """``BOT_SPEECH_SERVER_STREAM_URL`` (``ws://host:8001``): a session connects and the server says ready."""
+
+    import hsm
+
+    from mosfet.abilities.hearing.speech import stream
+    from mosfet.define import define
+    from mosfet.protocols import attachment
+    from mosfet.start import started
+
+    url = os.environ.get("BOT_SPEECH_SERVER_STREAM_URL")
+    if not url:
+        pytest.skip("BOT_SPEECH_SERVER_STREAM_URL not set")
+
+    class Listener(hsm.Instance):
+        ready: asyncio.Event
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.ready = asyncio.Event()
+
+        @staticmethod
+        def _hear(ctx: hsm.Context, instance: "Listener", event: hsm.Event[object]) -> None:
+            del ctx
+            print(f"session said {event.name}")
+            if event.name == stream.ReadyEvent.name:
+                instance.ready.set()
+
+        model: hsm.Model = define(
+            "Listener",
+            hsm.initial(hsm.target("/Listener/hearing")),
+            hsm.state("hearing", hsm.transition(hsm.on(hsm.AnyEvent), hsm.effect(_hear))),
+        )
+
+    async def run() -> None:
+        ctx = hsm.Context()
+        session = speech_server.Transcription(url=url)
+        _ = await started(ctx, session, session.model)
+        listener = Listener()
+        _ = await started(ctx, listener, listener.model)
+        _ = await session.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=listener)))
+        try:
+            _ = await asyncio.wait_for(listener.ready.wait(), timeout=10.0)
+        finally:
+            _ = await session.detach(ctx, attachment.DetachEvent.with_data(attachment.DetachData(actor=listener)))
+            await hsm.stop(session)
+
+    asyncio.run(run())

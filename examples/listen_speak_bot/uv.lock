@@ -188,6 +188,7 @@ dependencies = [
     { name = "mosfet-provider-mlx-audio" },
     { name = "mosfet-provider-openai-compat" },
     { name = "mosfet-provider-pyannote" },
+    { name = "mosfet-provider-speech-server" },
     { name = "stateforward-mosfet" },
 ]
 
@@ -203,6 +204,7 @@ requires-dist = [
     { name = "mosfet-provider-mlx-audio", editable = "../../src/providers/mlx_audio" },
     { name = "mosfet-provider-openai-compat", editable = "../../src/providers/openai_compat" },
     { name = "mosfet-provider-pyannote", editable = "../../src/providers/pyannote" },
+    { name = "mosfet-provider-speech-server", editable = "../../src/providers/speech_server" },
     { name = "stateforward-mosfet", editable = "../../" },
 ]
 
@@ -1414,6 +1416,28 @@ dependencies = [
 requires-dist = [
     { name = "pyannote-audio", specifier = ">=4.0.7,<5.0.0" },
     { name = "stateforward-mosfet", editable = "../../" },
+]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "pytest", specifier = ">=9.0.3,<10.0.0" },
+    { name = "ruff", specifier = "~=0.11.13" },
+]
+
+[[package]]
+name = "mosfet-provider-speech-server"
+source = { editable = "../../src/providers/speech_server" }
+dependencies = [
+    { name = "httpx" },
+    { name = "stateforward-mosfet" },
+    { name = "websockets" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "httpx", specifier = ">=0.28,<1" },
+    { name = "stateforward-mosfet", editable = "../../" },
+    { name = "websockets", specifier = ">=16.0,<17" },
 ]
 
 [package.metadata.requires-dev]

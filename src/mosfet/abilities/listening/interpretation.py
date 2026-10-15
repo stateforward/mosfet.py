@@ -43,6 +43,7 @@ from __future__ import annotations
 
 from . import enrollment
 from . import overlap
+from . import recognition
 from . import sensitivity
 from .. import ability
 from .. import classifying
@@ -77,9 +78,7 @@ from mosfet.telemetry import span
 _SCOPE = "bot.abilities.listening"
 _COMPONENT = "listening.interpretation"
 _STAGE_OPERATION_TIMEOUT = datetime.timedelta(seconds=30)
-_MAX_PARTICIPANTS = 32
 _MAX_VOICES = 8
-_MAX_PRINTS = 16
 _LOGGER = logging.getLogger(__name__)
 _METER = metrics.get_meter(_SCOPE)
 _OWN_VOICE = _METER.create_counter(
@@ -87,14 +86,6 @@ _OWN_VOICE = _METER.create_counter(
     unit="{utterance}",
     description="Heard speech products whose voice was recognized as the bot's own.",
 )
-# The same instrument identification's Registry records on; this ear adds only the prints it could not
-# have identified: an answer that did not come in time, or an embedding that could not be printed.
-_IDENTIFICATION = _METER.create_counter(
-    "bot.identification.count",
-    unit="{print}",
-    description="Prints identified or enrolled, by kind and outcome; failed requests count once.",
-)
-
 _OVERLAP = _METER.create_counter(
     "bot.listening.overlap.count",
     unit="{fact}",
@@ -365,7 +356,7 @@ class SpeechData(pydantic.BaseModel):
     )
     participants: tuple[mosfet.Participant, ...] = pydantic.Field(
         default=(),
-        max_length=_MAX_PARTICIPANTS,
+        max_length=recognition.MAX_PARTICIPANTS,
         description=(
             "Who produced the sound this speech was decoded from: what the device stamped on the admitted "
             "environment.sound chunks, then a voice:<id> source for every voice identified, the bot's own included."
@@ -675,29 +666,6 @@ def _sensed_with_pcm_sound(sensed: sensitivity.OutputData) -> sensitivity.Output
     return sensed.model_copy(update={"sound": pcm_sound})
 
 
-def _merged_participants(*groups: tuple[mosfet.Participant, ...]) -> tuple[mosfet.Participant, ...]:
-    """Ordered union of stamped participants: first occurrence wins, bounded like the payload field."""
-
-    return tuple(dict.fromkeys(participant for group in groups for participant in group))[:_MAX_PARTICIPANTS]
-
-
-def _voice_stamps(
-    voices: tuple[voice.HeardVoice, ...],
-) -> tuple[frozenset[str], tuple[mosfet.Participant, ...]]:
-    """What a product stamps for the voices heard in it, earliest first.
-
-    Every voice is a ``voice:<id>`` participant, the bot's own included, so hearing itself resolves
-    to itself; only the others are ``source_ids``, at most ``MAX_IDENTITY_SET_SIZE`` of them.
-    """
-
-    ordered = sorted(voices, key=lambda heard: heard.start_seconds)
-    others = dict.fromkeys(
-        identification.ref("voice", heard.recognition.id) for heard in ordered if not heard.recognition.own
-    )
-    participants = tuple(identification.participant("voice", heard.recognition.id) for heard in ordered)
-    return frozenset(tuple(others)[: value.MAX_IDENTITY_SET_SIZE]), participants
-
-
 def _speech_from_sensed(
     *,
     sensed: sensitivity.OutputData,
@@ -707,7 +675,7 @@ def _speech_from_sensed(
 ) -> SpeechData | None:
     """Build a public PCM speech product; unsupported or incomplete formats fail closed."""
 
-    source_ids, heard = _voice_stamps(voices)
+    source_ids, heard = recognition.stamps(voices)
     sound = sensed.sound
     sample_rate_hz = sound.sample_rate_hz
     channels = sound.channels if sound.channels is not None else 1
@@ -721,7 +689,7 @@ def _speech_from_sensed(
         media_type="audio/pcm",
         source_ids=source_ids,
         voices=voices,
-        participants=_merged_participants(participants, sound.participants, heard),
+        participants=recognition.merge(participants, sound.participants, heard),
         parent=sensed.parent,
     )
     return speech
@@ -741,7 +709,7 @@ def _speech_from_voice_segment(
     listening-stage failure instead of silently dropping a product.
     """
 
-    source_ids, heard = _voice_stamps(voices)
+    source_ids, heard = recognition.stamps(voices)
     sound = sensed.sound
     if sound.media_type != "audio/pcm" or sound.sample_rate_hz is None:
         raise ValueError("voice segment speech requires source audio/pcm with a sample rate.")
@@ -781,7 +749,7 @@ def _speech_from_voice_segment(
         confidence=diarization_confidence,
         source_ids=source_ids,
         voices=voices,
-        participants=_merged_participants(participants, sound.participants, heard),
+        participants=recognition.merge(participants, sound.participants, heard),
         parent=sensed.parent,
     )
 
@@ -865,7 +833,7 @@ def _dispatch_product_cognition_input_with_operation(
                     sample_rate_hz=sound.sample_rate_hz,
                     channels=sound.channels if sound.channels is not None else 1,
                     media_type="audio/pcm",
-                    participants=_merged_participants(
+                    participants=recognition.merge(
                         participants, completion.participants, completion.sensed.sound.participants
                     ),
                     parent=completion.sensed.parent,
@@ -1393,7 +1361,7 @@ class Interpretation(ability.Ability[sensitivity.OutputData, cognition.InputData
                 instance._open_speech_channels = sound.channels
         if sound.audio:
             instance._open_speech_audio.extend(sound.audio)
-        instance._active_participants = _merged_participants(instance._active_participants, sound.participants)
+        instance._active_participants = recognition.merge(instance._active_participants, sound.participants)
         confidences = tuple(
             segment.confidence for segment in voice_detection.segments if segment.confidence is not None
         )
@@ -1542,7 +1510,7 @@ class Interpretation(ability.Ability[sensitivity.OutputData, cognition.InputData
         else:
             # The opening span the identification was clipped from; it was clipped before anything was awaited.
             segments = (_voice_segment_from_detection(sensed=held.sensed, segment=held.voice_detection.segments[0]),)
-        Interpretation._unidentified(len(segments), identification.FailureKind.TIMEOUT)
+        recognition.unidentified(len(segments), identification.FailureKind.TIMEOUT)
         unidentified = _VoiceIdentificationCompletedEventData(
             sensed=Interpretation._open_speech_sensed_or(instance, held.sensed),
             voice_detection=held.voice_detection,
@@ -1672,11 +1640,11 @@ class Interpretation(ability.Ability[sensitivity.OutputData, cognition.InputData
         instance._overlap_stated = True
         if any(heard.recognition.own for heard in voices):
             return
-        _, heard = _voice_stamps(voices)
+        _, heard = recognition.stamps(voices)
         fact = overlap.OverlapData(
             voiced_seconds=Interpretation._open_voiced_seconds(instance),
             voices=voices,
-            participants=_merged_participants(instance._active_participants, heard),
+            participants=recognition.merge(instance._active_participants, heard),
         )
         _OVERLAP.add(1, {"bot.listening.overlap.path": "local"})
         Interpretation._dispatch_listening_cognition_input(ctx, instance, event, overlap.OverlapEvent.with_data(fact))
@@ -1694,7 +1662,7 @@ class Interpretation(ability.Ability[sensitivity.OutputData, cognition.InputData
     def _state_unrecognized_overlap(ctx: hsm.Context, instance: "Interpretation", event: hsm.Event[typing.Any]) -> None:
         """Nobody was recognized in time: the overlap is stated without voices."""
 
-        Interpretation._unidentified(1, identification.FailureKind.TIMEOUT)
+        recognition.unidentified(1, identification.FailureKind.TIMEOUT)
         Interpretation._state_overlap_as(ctx, instance, event, ())
 
     @staticmethod
@@ -1743,28 +1711,21 @@ class Interpretation(ability.Ability[sensitivity.OutputData, cognition.InputData
             start_seconds=0.0,
             end_seconds=Interpretation._open_voiced_seconds(instance),
         )
-        operation_id = instance._active_operation_id or event.id or uuid.uuid4().hex
         try:
-            embedded = await ability.run_terminal_operation(
+            embeddings = await recognition.embed(
                 instance.context(),
-                child=embedder,
-                request=dataclasses.replace(
-                    embedder.input_event.with_data_and_id(
-                        voice.identification.InputData(segments=(segment,)),
-                        f"{operation_id}:overlap_embedding:{uuid.uuid4().hex}",
-                    ),
-                    metadata=dict(event.metadata),
-                ),
-                terminals=(embedder.output_event, embedder.failed_event),
+                embedder,
+                (segment,),
                 timeout=instance._recognize_timeout,
+                operation_id=instance._active_operation_id or event.id or uuid.uuid4().hex,
+                metadata=event.metadata,
             )
         except TimeoutError:
-            Interpretation._unidentified(1, identification.FailureKind.TIMEOUT)
+            recognition.unidentified(1, identification.FailureKind.TIMEOUT)
             return None
-        output = embedded.data
-        if not isinstance(output, voice.identification.OutputData) or len(output.embeddings) != 1:
+        if embeddings is None:
             return None
-        (heard,) = await Interpretation._recognize(instance, event, (segment,), output.embeddings)
+        (heard,) = await Interpretation._recognize(instance, event, (segment,), embeddings)
         return heard
 
     @staticmethod
@@ -2163,89 +2124,25 @@ class Interpretation(ability.Ability[sensitivity.OutputData, cognition.InputData
             )
 
     @staticmethod
-    def _unidentified(count: int, failure: identification.FailureKind) -> None:
-        """Count prints this ear could not have identified; the registry counts the failures it answers."""
-
-        if count:
-            _IDENTIFICATION.add(
-                count,
-                {"bot.identification.kind": "voice", "bot.outcome": "failed", "bot.failure.kind": failure.value},
-            )
-
-    @staticmethod
-    def _skipped(count: int) -> None:
-        """Count segments the classifier gave no voiceprint: unidentified by design, not by failure."""
-
-        if count:
-            _IDENTIFICATION.add(
-                count, {"bot.identification.kind": "voice", "bot.outcome": "skipped", "bot.failure.kind": "none"}
-            )
-
-    @staticmethod
-    def _print(embedding: voice.identification.VoiceEmbedding) -> identification.Print | None:
-        """The print an embedding identifies by, or ``None`` when it has no model or no valid vector."""
-
-        if embedding.model is None:
-            return None
-        try:
-            return identification.Print(vector=embedding.embedding, model=embedding.model)
-        except pydantic.ValidationError:
-            return None
-
-    @staticmethod
     async def _recognize(
         instance: "Interpretation",
         event: hsm.Event[typing.Any],
         segments: tuple[voice.VoiceSegment, ...],
         embeddings: tuple[voice.identification.VoiceEmbedding | None, ...],
     ) -> tuple[voice.HeardVoice | None, ...]:
-        """Who was heard in each segment, in order: one identify request to the registry, bounded by
-        ``recognize_timeout``. A segment with no voiceprint, whose embedding cannot be printed, or that the
-        registry does not answer in time, is ``None``. The embeddings and prints stay here.
-        """
+        """Who was heard in each segment, in order, bounded by ``recognize_timeout``; the embeddings stay here."""
 
         registry = instance._registry
         assert registry is not None, "a voice classifier is always composed with a registry"
-        fingerprinted = [(index, embedding) for index, embedding in enumerate(embeddings) if embedding is not None]
-        Interpretation._skipped(len(embeddings) - len(fingerprinted))
-        printed = [(index, Interpretation._print(embedding)) for index, embedding in fingerprinted]
-        indexed = [(index, print_) for index, print_ in printed if print_ is not None][:_MAX_PRINTS]
-        Interpretation._unidentified(len(fingerprinted) - len(indexed), identification.FailureKind.INVALID_INPUT)
-        voices: list[voice.HeardVoice | None] = [None] * len(segments)
-        if not indexed:
-            return tuple(voices)
-        operation_id = f"{instance._active_operation_id or event.id or uuid.uuid4().hex}:recognize:{uuid.uuid4().hex}"
-        try:
-            terminal = await ability.run_terminal_operation(
-                instance.context(),
-                child=registry,
-                request=dataclasses.replace(
-                    identification.IdentifyEvent.with_data_and_id(
-                        identification.IdentifyData(prints=tuple(print_ for _, print_ in indexed)), operation_id
-                    ),
-                    metadata=dict(event.metadata),
-                ),
-                terminals=(identification.IdentifiedEvent, identification.FailedEvent),
-                timeout=instance._recognize_timeout,
-            )
-        except TimeoutError:
-            Interpretation._unidentified(len(indexed), identification.FailureKind.TIMEOUT)
-            return tuple(voices)
-        reply = terminal.data
-        if (
-            not isinstance(reply, identification.IdentifiedData)
-            or reply.kind != "voice"
-            or len(reply.recognitions) != len(indexed)
-        ):
-            # A FailedEvent was counted by the registry; a reply from a registry of another kind names nobody here.
-            return tuple(voices)
-        for (index, _), recognition in zip(indexed, reply.recognitions, strict=True):
-            if recognition is not None:
-                segment = segments[index]
-                voices[index] = voice.HeardVoice(
-                    recognition=recognition, start_seconds=segment.start_seconds, end_seconds=segment.end_seconds
-                )
-        return tuple(voices)
+        return await recognition.identify(
+            instance.context(),
+            registry,
+            segments,
+            embeddings,
+            timeout=instance._recognize_timeout,
+            operation_id=instance._active_operation_id or event.id or uuid.uuid4().hex,
+            metadata=event.metadata,
+        )
 
     @staticmethod
     def _has_enrollment(ctx: hsm.Context, instance: "Interpretation", event: hsm.Event[typing.Any]) -> bool:
@@ -2268,52 +2165,15 @@ class Interpretation(ability.Ability[sensitivity.OutputData, cognition.InputData
         registry = instance._registry
         embedder = instance._voice_identification
         assert registry is not None and embedder is not None, "a registry is always composed with a voice classifier"
-        operation_id = instance._active_operation_id or event.id or uuid.uuid4().hex
-        try:
-            embedded = await ability.run_terminal_operation(
-                instance.context(),
-                child=embedder,
-                request=dataclasses.replace(
-                    embedder.input_event.with_data_and_id(
-                        voice.identification.InputData(segments=(copy.segment,)),
-                        f"{operation_id}:enroll_embedding:{uuid.uuid4().hex}",
-                    ),
-                    metadata=dict(event.metadata),
-                ),
-                terminals=(embedder.output_event, embedder.failed_event),
-                timeout=_STAGE_OPERATION_TIMEOUT,
-            )
-        except TimeoutError:
-            return identification.FailureKind.TIMEOUT
-        output = embedded.data
-        embedding = (
-            output.embeddings[0]
-            if isinstance(output, voice.identification.OutputData) and len(output.embeddings) == 1
-            else None
+        return await recognition.enroll(
+            instance.context(),
+            embedder,
+            registry,
+            copy,
+            timeout=_STAGE_OPERATION_TIMEOUT,
+            operation_id=instance._active_operation_id or event.id or uuid.uuid4().hex,
+            metadata=event.metadata,
         )
-        print_ = None if embedding is None else Interpretation._print(embedding)
-        if print_ is None:
-            return identification.FailureKind.INVALID_INPUT
-        try:
-            enrolled = await ability.run_terminal_operation(
-                instance.context(),
-                child=registry,
-                request=dataclasses.replace(
-                    identification.EnrollEvent.with_data_and_id(
-                        identification.EnrollData(id=copy.voice_id, print=print_, own=True),
-                        f"{operation_id}:enroll:{uuid.uuid4().hex}",
-                    ),
-                    metadata=dict(event.metadata),
-                ),
-                terminals=(identification.EnrolledEvent, identification.FailedEvent),
-                timeout=_STAGE_OPERATION_TIMEOUT,
-            )
-        except TimeoutError:
-            return identification.FailureKind.TIMEOUT
-        reply = enrolled.data
-        if isinstance(reply, identification.FailureData):
-            return reply.kind
-        return None
 
     @staticmethod
     async def _run_enrollment(ctx: hsm.Context, instance: "Interpretation", event: hsm.Event[typing.Any]) -> None:

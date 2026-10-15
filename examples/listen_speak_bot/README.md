@@ -81,6 +81,12 @@ PyAnnote speaker-embedding model; when unset, `pyannote/wespeaker-voxceleb-resne
 Configure any required Hugging Face/pyannote model access in the provider runtime; credentials are
 never stored in this example's defaults.
 
+Lab wiring (each optional): `BOT_SPEECH_SERVER_STREAM_URL` (for example `ws://192.168.2.32:8001`) hears
+through a speech server's streaming transcription instead of Silero VAD, the server's end of turn making each text
+speech product; `BOT_SPEECH_SERVER_URL` (for example `http://192.168.2.32:8003`) embeds voices there instead of
+PyAnnote; `BOT_OPENAI_COMPAT_SPEECH_BASE_URL` (for example `http://192.168.2.32:8002/v1`) speaks through that
+OpenAI-compatible `/v1/audio/speech` (voice `warm`, own voice id `tts:warm`) instead of `say`.
+
 Keys defined in `--env` / default `.env` override the process environment (so a local
 example credential file wins over a stub key in the shell).
 

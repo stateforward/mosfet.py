@@ -11,6 +11,12 @@ Flow:
 5. Mercury 2 intuition (OpenAI-compatible) / Gemini reasoning produce cognition output.
 6. Cognition may select Communication's semantic response, which routes through the internal
    Speaking port and writes the reply WAV.
+
+Lab wiring (optional, from the environment): ``BOT_SPEECH_SERVER_STREAM_URL`` (``ws://host:8001``) hears
+through a speech server's streaming transcription instead of local VAD, its end of turn making each
+text speech product; ``BOT_SPEECH_SERVER_URL`` (``http://host:8003``) embeds voices there instead of
+PyAnnote; ``BOT_OPENAI_COMPAT_SPEECH_BASE_URL`` (``http://host:8002/v1``) speaks through an
+OpenAI-compatible ``/v1/audio/speech`` instead of ``say``.
 """
 
 from __future__ import annotations
@@ -60,6 +66,8 @@ from mosfet.providers.mlx_audio import VoiceDecoder as MlxVoiceDecoder
 from mosfet.providers.mlx_audio import VoiceActivityClassifier as SileroVoiceActivityClassifier
 from mosfet.providers.openai_compat import ChatClient as OpenAIChatClient
 from mosfet.providers.openai_compat import Processor as OpenAIProcessor
+from mosfet.providers.openai_compat import SpeechEncoder as OpenAISpeechEncoder
+from mosfet.providers import speech_server
 from mosfet.providers.pyannote import Classifier as PyannoteVoiceClassifier
 from mosfet.providers.pyannote import SpeakerEmbeddingInference
 from mosfet.providers.pyannote import SpeakerEmbeddingInferenceLoader
@@ -86,6 +94,9 @@ DEFAULT_MERCURY_MODEL = "mercury-2"
 DEFAULT_MERCURY_BASE_URL = "https://api.inceptionlabs.ai/v1"
 DEFAULT_SILERO_VAD_MODEL = "mlx-community/silero-vad"
 DEFAULT_PYANNOTE_VOICE_IDENTITY_MODEL = "pyannote/wespeaker-voxceleb-resnet34-LM"
+DEFAULT_LAB_SPEECH_MODEL = "tts"
+"""The model name sent to the lab's OpenAI-compatible speech endpoint (the reference server ignores it)."""
+DEFAULT_LAB_VOICE = "warm"
 _MAX_VOICE_IDS = 1000
 """Most voice ids this example remembers."""
 _VOICE_RETENTION = datetime.timedelta(days=30)
@@ -256,12 +267,30 @@ class CognitionConfig:
 
 
 @dataclasses.dataclass(frozen=True)
+class LabConfig:
+    """Served speech instead of local models, each optional: streaming STT, voice embeddings, TTS."""
+
+    stream_url: str | None = None
+    speech_server_url: str | None = None
+    speech_base_url: str | None = None
+
+    @classmethod
+    def from_env(cls, env: collections.abc.Mapping[str, str]) -> typing.Self:
+        return cls(
+            stream_url=_env_first(env, "BOT_SPEECH_SERVER_STREAM_URL"),
+            speech_server_url=_env_first(env, "BOT_SPEECH_SERVER_URL"),
+            speech_base_url=_env_first(env, "BOT_OPENAI_COMPAT_SPEECH_BASE_URL"),
+        )
+
+
+@dataclasses.dataclass(frozen=True)
 class AppConfig:
     env_path: pathlib.Path | None = None
     cognition: CognitionConfig = dataclasses.field(default_factory=CognitionConfig)
     vad_model_id: str = DEFAULT_SILERO_VAD_MODEL
     stt_model_id: str | None = None
     voice_identity_model_id: str = DEFAULT_PYANNOTE_VOICE_IDENTITY_MODEL
+    lab: LabConfig = dataclasses.field(default_factory=LabConfig)
 
     @classmethod
     def from_env_file(cls, path: pathlib.Path | None = None) -> typing.Self:
@@ -269,6 +298,7 @@ class AppConfig:
         return cls(
             env_path=path,
             cognition=CognitionConfig.from_env(env),
+            lab=LabConfig.from_env(env),
             vad_model_id=(
                 _env_first(env, "BOT_SILERO_VAD_MODEL", "BOT_VAD_MODEL", "SILERO_VAD_MODEL") or DEFAULT_SILERO_VAD_MODEL
             ),
@@ -436,6 +466,37 @@ class SayEncoder(vocal.speech.SpeechEncoder):
                 _pcm_wav(self.audio, sample_rate_hz=self.format.sample_rate_hz, channels=self.format.channels)
             )
         yield vocal.speech.Audio(pcm=pcm, text=said)
+
+
+class LabEncoder(vocal.speech.SpeechEncoder):
+    """A served encoder that also keeps what it said, as ``SayEncoder`` does, for the run summary.
+
+    What it said is the aligned text of the chunks it streamed through, which joins to exactly the text read.
+    """
+
+    def __init__(self, inner: vocal.speech.SpeechEncoder, *, destination: pathlib.Path | None = None) -> None:
+        self.format: vocal.speech.Format = inner.format
+        self.inner: vocal.speech.SpeechEncoder = inner
+        self.destination: pathlib.Path | None = destination
+        self.calls: list[str] = []
+        self.audio: bytes | None = None
+
+    @override
+    async def encode(
+        self, input: collections.abc.AsyncIterable[str]
+    ) -> collections.abc.AsyncIterator[vocal.speech.Audio]:
+        spoken = bytearray()
+        said: list[str] = []
+        async for chunk in self.inner.encode(input):
+            spoken.extend(chunk.pcm)
+            said.append(chunk.text)
+            yield chunk
+        self.audio = (self.audio or b"") + bytes(spoken)
+        self.calls.append("".join(said))
+        if self.destination is not None:
+            _ = self.destination.write_bytes(
+                _pcm_wav(self.audio, sample_rate_hz=self.format.sample_rate_hz, channels=self.format.channels)
+            )
 
 
 def _gemini_client(config: CognitionConfig, *, model: str | None = None) -> GeminiChatClient:
@@ -942,7 +1003,7 @@ class ListenSpeakBot(Bot):
     _speaker: audio.Speaker
     _decoder: SpeechDecoder
     _owned_voice_activity_classifier: SileroVoiceActivityClassifier | None
-    _encoder: SayEncoder
+    _encoder: SayEncoder | LabEncoder
     _cognition_config: CognitionConfig
     _conversation: conversation.Conversation
     _communication: _TrackedCommunication
@@ -968,44 +1029,67 @@ class ListenSpeakBot(Bot):
         | None = None,
         voice_identification_inference: SpeakerEmbeddingInference | None = None,
         voice_identification_loader: SpeakerEmbeddingInferenceLoader | None = None,
+        lab: LabConfig | None = None,
     ) -> None:
+        lab = lab if lab is not None else LabConfig()
         self._run_record = _RunRecord()
         self._run_progress = _RunProgress(self._run_record)
         self._decoder = SpeechDecoder() if stt_model_id is None else SpeechDecoder(model_id=stt_model_id)
-        self._encoder = SayEncoder(destination=reply_wav, sample_rate_hz=sample_rate_hz)
+        self._encoder = (
+            SayEncoder(destination=reply_wav, sample_rate_hz=sample_rate_hz)
+            if lab.speech_base_url is None
+            else LabEncoder(
+                OpenAISpeechEncoder(
+                    model=DEFAULT_LAB_SPEECH_MODEL, base_url=lab.speech_base_url, voice=DEFAULT_LAB_VOICE
+                ),
+                destination=reply_wav,
+            )
+        )
         classifier = (
             voice_classifier
             if voice_classifier is not None
+            else speech_server.VoiceEmbedder(base_url=lab.speech_server_url)
+            if lab.speech_server_url is not None
             else _pyannote_voice_classifier(
                 model_id=voice_identity_model_id,
                 inference=voice_identification_inference,
                 load_inference=voice_identification_loader,
             )
         )
-        if voice_activity_classifier is None:
-            owned_voice_activity_classifier = SileroVoiceActivityClassifier(
-                model_id=vad_model_id,
-                sample_rate_hz=sample_rate_hz,
-                channels=_DEFAULT_CHANNELS,
+        stream_url = lab.stream_url
+        if stream_url is not None:
+            self._owned_voice_activity_classifier = None
+            # One streaming session per sound source; the server's end of turn makes each text product.
+            self._listening = listening.Listening(
+                transcription=lambda: speech_server.Transcription(url=stream_url),
+                voice_classifier=classifier,
+                registry=_voice_registry(),
             )
-            selected_voice_activity_classifier = owned_voice_activity_classifier
         else:
-            owned_voice_activity_classifier = None
-            selected_voice_activity_classifier = voice_activity_classifier
-        self._owned_voice_activity_classifier = owned_voice_activity_classifier
-        self._listening = listening.Listening(
-            voice_activity_classifier=selected_voice_activity_classifier,
-            speech_decoder=None,
-            voice_classifier=classifier,
-            registry=_voice_registry(),
-        )
+            if voice_activity_classifier is None:
+                owned_voice_activity_classifier = SileroVoiceActivityClassifier(
+                    model_id=vad_model_id,
+                    sample_rate_hz=sample_rate_hz,
+                    channels=_DEFAULT_CHANNELS,
+                )
+                selected_voice_activity_classifier = owned_voice_activity_classifier
+            else:
+                owned_voice_activity_classifier = None
+                selected_voice_activity_classifier = voice_activity_classifier
+            self._owned_voice_activity_classifier = owned_voice_activity_classifier
+            self._listening = listening.Listening(
+                voice_activity_classifier=selected_voice_activity_classifier,
+                speech_decoder=None,
+                voice_classifier=classifier,
+                registry=_voice_registry(),
+            )
         self._conversation = _conversation(speech_decoder=self._decoder)
         # The bot's mouth: Speaking powers it, attaches to it, and streams the encoded PCM through it.
         self._speaker = audio.Speaker()
         self._speaking = speaking.Speaking(
             encoder=self._encoder,
             speaker=self._speaker,
-            voice_id="tts:say",
+            voice_id="tts:say" if lab.speech_base_url is None else f"tts:{DEFAULT_LAB_VOICE}",
             listening=(self._listening,),
             conversation=(self._conversation,),
         )
@@ -1349,7 +1433,7 @@ class ListenSpeakBot(Bot):
     def decoder(self) -> SpeechDecoder:
         return self._decoder
 
-    def encoder(self) -> SayEncoder:
+    def encoder(self) -> SayEncoder | LabEncoder:
         return self._encoder
 
     def cognition_config(self) -> CognitionConfig:
@@ -1427,20 +1511,33 @@ async def run(
         vad_model_id=app_config.vad_model_id,
         stt_model_id=app_config.stt_model_id,
         voice_identity_model_id=app_config.voice_identity_model_id,
+        lab=app_config.lab,
     )
     environment = Environment()
     _ = await body.attach(environment)
     _LOG.info("bot attached")
-    try:
-        sound = SoundEvent.with_data(
-            SoundData(
-                audio=heard_audio,
-                media_type="audio/wav",
+    # A streaming session hears raw PCM; local hearing takes the WAV as rendered.
+    streaming = app_config.lab.stream_url is not None
+
+    def heard(wav: bytes, *, kind: str) -> SoundData:
+        if streaming:
+            return SoundData(
+                audio=_wav_pcm(wav),
+                media_type="audio/pcm",
                 sample_rate_hz=_DEFAULT_SAMPLE_RATE_HZ,
                 channels=_DEFAULT_CHANNELS,
-                kind="speech",
+                kind=kind,
             )
+        return SoundData(
+            audio=wav,
+            media_type="audio/wav",
+            sample_rate_hz=_DEFAULT_SAMPLE_RATE_HZ,
+            channels=_DEFAULT_CHANNELS,
+            kind=kind,
         )
+
+    try:
+        sound = SoundEvent.with_data(heard(heard_audio, kind="speech"))
         _LOG.info(
             "dispatching environment.sound bytes=%s intuition_model=%s reasoning_model=%s",
             len(heard_audio),
@@ -1451,18 +1548,7 @@ async def run(
 
         silence_audio = _silence_wav(sample_rate_hz=_DEFAULT_SAMPLE_RATE_HZ, channels=_DEFAULT_CHANNELS)
         _LOG.info("dispatching environment.sound silence bytes=%s", len(silence_audio))
-        await body.dispatch(
-            environment,
-            SoundEvent.with_data(
-                SoundData(
-                    audio=silence_audio,
-                    media_type="audio/wav",
-                    sample_rate_hz=_DEFAULT_SAMPLE_RATE_HZ,
-                    channels=_DEFAULT_CHANNELS,
-                    kind="silence",
-                )
-            ),
-        )
+        await body.dispatch(environment, SoundEvent.with_data(heard(silence_audio, kind="silence")))
 
         await body.wait_for_conversation_processing()
         response_selections = body.response_selection_count()
@@ -1564,6 +1650,8 @@ __all__ = [
     "DEFAULT_GEMINI_MODEL",
     "DEFAULT_PYANNOTE_VOICE_IDENTITY_MODEL",
     "DEFAULT_SILERO_VAD_MODEL",
+    "LabConfig",
+    "LabEncoder",
     "ListenSpeakBot",
     "SayEncoder",
     "load_env",
