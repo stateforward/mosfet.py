@@ -1,8 +1,18 @@
+"""Typed events of a yamux session, its streams, and the connection that carries the session's bytes.
+
+The session and its streams talk only by message. The connection (the socket's owner) feeds the session
+``ReceiveXFrameEvent`` inputs and takes ``TransmitEvent`` frames, ``StreamAcceptedEvent`` and ``EndedEvent``
+from it. A stream's owner sends it the events its codec encodes, ``CloseEvent``, ``ResetEvent`` and
+``HandOverEvent``. Yamux carries bytes only: no event here names an encoding.
+"""
+
 import typing
 
 import hsm
 import pydantic
+from pydantic.json_schema import SkipJsonSchema
 
+from mosfet.protocols import transform
 from mosfet.protocols.yamux.frame import INITIAL_STREAM_WINDOW
 
 
@@ -22,15 +32,6 @@ Uint32 = typing.Annotated[
         le=(1 << 32) - 1,
         description="Unsigned 32-bit integer encoded in a Yamux length or stream identifier field.",
         examples=[0, 262144],
-    ),
-]
-PositiveUint32 = typing.Annotated[
-    int,
-    pydantic.Field(
-        ge=1,
-        le=(1 << 32) - 1,
-        description="Positive unsigned 32-bit integer used for Yamux byte counts and window deltas.",
-        examples=[1, 4096],
     ),
 ]
 InitialWindowSize = typing.Annotated[
@@ -73,9 +74,26 @@ SessionStage = typing.Literal[
     "go_away",
 ]
 
+_OWNER_DESCRIPTION = (
+    "Runtime-only address of the actor that owns the stream: every event decoded from the stream is dispatched "
+    "to it. It is never read and never serialized."
+)
+_CODEC_DESCRIPTION = (
+    "Runtime-only codec the stream applies between its length-framed messages and its owner's events. It is never "
+    "serialized."
+)
+_FRAME_DESCRIPTION = "One whole Yamux frame in wire encoding: the 12-byte big-endian header and its payload."
+
 
 class _FrozenModel(pydantic.BaseModel):
     model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(frozen=True)
+
+
+class _RuntimeModel(pydantic.BaseModel):
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
+        arbitrary_types_allowed=True,
+        frozen=True,
+    )
 
 
 class StreamIdData(_FrozenModel):
@@ -89,13 +107,12 @@ class StreamIdData(_FrozenModel):
     stream_id: StreamId
 
 
-class OpenStreamData(_FrozenModel):
-    """Command asking a Yamux session to open a locally initiated stream."""
+class OpenStreamData(_RuntimeModel):
+    """Ask a Yamux session to open a stream from this side, owned by ``owner`` and named ``channel``.
 
-    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
-        frozen=True,
-        json_schema_extra={"examples": [{"initial_window_size": INITIAL_STREAM_WINDOW}]},
-    )
+    The session answers the owner: the new stream tells it ``protocol.transform.owned`` when the codec encodes
+    anything, and a refused open is ``protocol.yamux.open_stream.failed`` carrying this request's ``id``.
+    """
 
     initial_window_size: InitialWindowSize = pydantic.Field(
         default=INITIAL_STREAM_WINDOW,
@@ -105,32 +122,36 @@ class OpenStreamData(_FrozenModel):
         ),
         examples=[INITIAL_STREAM_WINDOW],
     )
+    owner: SkipJsonSchema[pydantic.SkipValidation[hsm.Instance]] = pydantic.Field(
+        exclude=True,
+        repr=False,
+        description=_OWNER_DESCRIPTION,
+    )
+    codec: SkipJsonSchema[pydantic.SkipValidation[transform.Codec]] = pydantic.Field(
+        exclude=True,
+        repr=False,
+        description=_CODEC_DESCRIPTION,
+    )
+    channel: transform.ChannelName = pydantic.Field(
+        description="Channel the stream carries; the owner is told it in protocol.transform.owned.",
+    )
 
 
-class SendData(StreamIdData):
-    """Command asking a Yamux session to send bytes on a stream."""
+class OpenStreamFailedData(_FrozenModel):
+    """The session refused an open; nothing was sent to the peer."""
 
     model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
         frozen=True,
-        json_schema_extra={"examples": [{"stream_id": 1, "payload": "aGVsbG8=", "end_stream": False}]},
+        json_schema_extra={"examples": [{"kind": "session_draining"}]},
     )
 
-    payload: bytes = pydantic.Field(
-        description="Data bytes to frame on the selected Yamux stream.",
-        examples=[b"hello"],
+    kind: typing.Literal["session_draining", "stream_rejected"] = pydantic.Field(
+        description=(
+            "Why: the session no longer opens streams (it is going away, errored or ended), or its stream ids are "
+            "used up."
+        ),
+        examples=["session_draining", "stream_rejected"],
     )
-    end_stream: bool = pydantic.Field(
-        default=False,
-        description="When true, send FIN with this data frame to half-close local writes after the payload.",
-    )
-
-
-class CloseStreamData(StreamIdData):
-    """Command asking a Yamux session to send FIN for one stream."""
-
-
-class ResetStreamData(StreamIdData):
-    """Command asking a Yamux session to hard-reset one stream."""
 
 
 class PingData(_FrozenModel):
@@ -214,30 +235,122 @@ class SessionDrainedData(_FrozenModel):
     )
 
 
-OpenStreamEvent = hsm.Event[OpenStreamData](
-    name="protocol.yamux.open_stream",
-    schema=OpenStreamData,
+class TransmitData(_FrozenModel):
+    """A frame the session writes: the connection sends ``frame`` on its socket, in the order received."""
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
+        frozen=True,
+        json_schema_extra={"examples": [{"frame": "AAEAAQAAAAEAAAAA"}]},
+    )
+
+    frame: bytes = pydantic.Field(description=_FRAME_DESCRIPTION, examples=[b"\x00\x01\x00\x01\x00\x00\x00\x01"])
+
+
+class StreamAcceptedData(_RuntimeModel):
+    """The peer opened ``stream``; the connection owns it, with no codec, until it hands it over."""
+
+    stream_id: StreamId
+    stream: SkipJsonSchema[pydantic.SkipValidation[hsm.Instance]] = pydantic.Field(
+        exclude=True,
+        repr=False,
+        description=(
+            "Runtime-only address of the new stream actor. Its bytes stay unacknowledged until the connection "
+            "sends it protocol.yamux.stream.hand_over."
+        ),
+    )
+
+
+class EndedData(_FrozenModel):
+    """The session is over: the connection closes its socket after the frames it already received."""
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
+        frozen=True,
+        json_schema_extra={"examples": [{"reason": "drained"}]},
+    )
+
+    reason: typing.Literal["protocol_error", "ping_timeout", "drained"] = pydantic.Field(
+        description=(
+            "The peer broke the protocol (a GoAway with the protocol-error code was the last frame), a ping went "
+            "unanswered, or a GoAway was exchanged and every stream finished."
+        ),
+        examples=["protocol_error", "ping_timeout", "drained"],
+    )
+
+
+class CloseData(_FrozenModel):
+    """Half-close the stream: FIN after every message already sent; the owner sends nothing more."""
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
+        frozen=True,
+        extra="forbid",
+        json_schema_extra={"examples": [{}]},
+    )
+
+
+class ResetData(_FrozenModel):
+    """Hard-close the stream at once: RST, and every buffered byte either way is dropped."""
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
+        frozen=True,
+        extra="forbid",
+        json_schema_extra={"examples": [{}]},
+    )
+
+
+class HandOverData(_RuntimeModel):
+    """The stream's current owner gives it to ``owner``, which decodes with ``codec`` from the next message on."""
+
+    owner: SkipJsonSchema[pydantic.SkipValidation[hsm.Instance]] = pydantic.Field(
+        exclude=True,
+        repr=False,
+        description=_OWNER_DESCRIPTION,
+    )
+    codec: SkipJsonSchema[pydantic.SkipValidation[transform.Codec]] = pydantic.Field(
+        exclude=True,
+        repr=False,
+        description=_CODEC_DESCRIPTION,
+    )
+    channel: transform.ChannelName | None = pydantic.Field(
+        default=None,
+        description=(
+            "Channel the new owner is told it owns, or none while the stream is not yet named (a connection reading "
+            "the stream's first message itself)."
+        ),
+    )
+
+
+class FrameOutData(StreamIdData):
+    """A frame one stream writes; its session transmits it while the session is connected."""
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
+        frozen=True,
+        json_schema_extra={"examples": [{"stream_id": 1, "frame": "AAAAAAAAAAEAAAAA"}]},
+    )
+
+    frame: bytes = pydantic.Field(description=_FRAME_DESCRIPTION)
+
+
+class ViolationData(StreamIdData):
+    """The peer broke one stream's rules; the stream already reset itself and wrote RST."""
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
+        frozen=True,
+        json_schema_extra={"examples": [{"stream_id": 1, "stage": "receive_data", "kind": "protocol_error"}]},
+    )
+
+    stage: SessionStage = pydantic.Field(description="Which input broke the rule.")
+    kind: FailureKind = pydantic.Field(
+        description="What was broken. A protocol_error ends the session with GoAway; other kinds end only the stream.",
+    )
+
+
+OpenStreamEvent = hsm.Event[OpenStreamData](name="protocol.yamux.open_stream", schema=OpenStreamData)
+OpenStreamFailedEvent = hsm.Event[OpenStreamFailedData](
+    name="protocol.yamux.open_stream.failed",
+    schema=OpenStreamFailedData,
 )
-SendDataEvent = hsm.Event[SendData](
-    name="protocol.yamux.send_data",
-    schema=SendData,
-)
-CloseStreamEvent = hsm.Event[CloseStreamData](
-    name="protocol.yamux.close_stream",
-    schema=CloseStreamData,
-)
-ResetStreamEvent = hsm.Event[ResetStreamData](
-    name="protocol.yamux.reset_stream",
-    schema=ResetStreamData,
-)
-PingEvent = hsm.Event[PingData](
-    name="protocol.yamux.ping",
-    schema=PingData,
-)
-GoAwayEvent = hsm.Event[GoAwayData](
-    name="protocol.yamux.go_away",
-    schema=GoAwayData,
-)
+PingEvent = hsm.Event[PingData](name="protocol.yamux.ping", schema=PingData)
+GoAwayEvent = hsm.Event[GoAwayData](name="protocol.yamux.go_away", schema=GoAwayData)
 ReceiveDataFrameEvent = hsm.Event[ReceiveDataFrameData](
     name="protocol.yamux.frame.data.received",
     schema=ReceiveDataFrameData,
@@ -259,3 +372,15 @@ SessionDrainedEvent = hsm.Event[SessionDrainedData](
     kind=hsm.CompletionEventKind,
     schema=SessionDrainedData,
 )
+TransmitEvent = hsm.Event[TransmitData](name="protocol.yamux.transmit", schema=TransmitData)
+StreamAcceptedEvent = hsm.Event[StreamAcceptedData](
+    name="protocol.yamux.stream.accepted",
+    schema=StreamAcceptedData,
+)
+EndedEvent = hsm.Event[EndedData](name="protocol.yamux.session.ended", schema=EndedData)
+CloseEvent = hsm.Event[CloseData](name="protocol.yamux.stream.close", schema=CloseData)
+ResetEvent = hsm.Event[ResetData](name="protocol.yamux.stream.reset", schema=ResetData)
+HandOverEvent = hsm.Event[HandOverData](name="protocol.yamux.stream.hand_over", schema=HandOverData)
+FrameOutEvent = hsm.Event[FrameOutData](name="protocol.yamux.frame.out", schema=FrameOutData)
+StreamEndedEvent = hsm.Event[StreamIdData](name="protocol.yamux.stream.ended", schema=StreamIdData)
+ViolationEvent = hsm.Event[ViolationData](name="protocol.yamux.stream.violation", schema=ViolationData)

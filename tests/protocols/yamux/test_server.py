@@ -1,27 +1,29 @@
 import asyncio
 
-import mosfet
-
-from mosfet.protocols.yamux.events import OpenStreamEvent, OpenStreamData
-from mosfet.protocols.yamux.server import Server
-from mosfet.protocols.yamux.session import Session
+from mosfet.protocols import yamux
+from tests.protocols.yamux import wire
 
 
 def test_server_uses_session_state_model() -> None:
-    assert issubclass(Server, Session)
-    assert "model" not in Server.__dict__
-    assert Server.model is Session.model
+    assert issubclass(yamux.Server, yamux.Session)
+    assert "model" not in yamux.Server.__dict__
+    assert yamux.Server.model is yamux.Session.model
 
 
-def test_server_constructs_server_role_session() -> None:
+def test_server_opens_even_stream_ids_for_its_connection() -> None:
     async def run() -> None:
-        server = Server()
-        _ = await mosfet.started(None, server, server.model)
+        connection = await wire.start(wire.Recorder(), "connection")
+        owner = await wire.start(wire.Recorder(), "owner")
+        server = await wire.start(yamux.Server(connection=connection), "server")
 
         assert server.state() == "/Session/connected/open"
 
-        await server.dispatch(server.context(), OpenStreamEvent.with_data(OpenStreamData()))
+        _ = await server.dispatch(
+            server.context(),
+            yamux.OpenStreamEvent.with_data(yamux.OpenStreamData(owner=owner, codec=wire.codec(), channel="notes")),
+        )
 
         assert 2 in server.take_snapshot().streams
+        assert connection.frames() == [yamux.FrameData.window_update(stream_id=2, delta=0, flags=yamux.Flag.SYN)]
 
     asyncio.run(run())

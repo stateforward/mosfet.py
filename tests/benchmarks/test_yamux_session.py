@@ -31,8 +31,8 @@ def test_yamux_session_benchmark_cli_runs_small_workload() -> None:
     payload = typing.cast(list[dict[str, object]], json.loads(completed.stdout))
     assert {result["name"] for result in payload} == {
         "frame_encode_decode",
-        "session_receive_read",
-        "session_send_data",
+        "session_receive_deliver",
+        "session_send",
         "session_ping_round_trip",
     }
     assert all(result["iterations"] == 2 for result in payload)

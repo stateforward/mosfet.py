@@ -12,22 +12,25 @@ import time
 import typing
 
 import hsm
+import pydantic
 
+from mosfet.protocols import transform
 from mosfet.protocols.yamux import (
     INITIAL_STREAM_WINDOW,
-    OpenStreamEvent,
-    PingEvent,
-    SendDataEvent,
     Client,
     Flag,
     FrameData,
     FrameType,
+    HandOverData,
+    HandOverEvent,
     OpenStreamData,
+    OpenStreamEvent,
     PingData,
-    ReadStream,
-    SendData,
-    Session,
+    PingEvent,
+    StreamAcceptedData,
+    TransmitData,
     decode_frame,
+    event_from_frame,
 )
 
 _MAX_UINT32 = (1 << 32) - 1
@@ -136,81 +139,131 @@ async def _bench_frame_encode_decode(config: BenchmarkConfig) -> int:
     return config.iterations
 
 
-async def _bench_session_receive_read(config: BenchmarkConfig) -> int:
-    session = await _started_client()
-    await session.receive_frame(session.context(), FrameData.data(stream_id=2, flags=Flag.SYN))
-    _ = await _read_outbound(session, expected_type=FrameType.WINDOW_UPDATE)
-    stream = _require_stream(session, 2)
-    payload = b"x" * config.payload_size
+class _PayloadData(pydantic.BaseModel):
+    """One benchmark message."""
 
-    for _ in range(config.iterations):
-        await session.receive_frame(session.context(), FrameData.data(stream_id=2, payload=payload))
-        data = await stream.readexactly(config.payload_size)
-        if data != payload:
-            raise AssertionError("ReadStream returned unexpected payload")
-        _ = await _read_outbound(session, expected_type=FrameType.WINDOW_UPDATE)
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(frozen=True)
+
+    payload: str
+
+
+_PayloadEvent = hsm.Event[_PayloadData](name="benchmark.yamux.payload", schema=_PayloadData)
+
+
+class _Sink(hsm.Instance):
+    """Stands in for a connection or a stream owner: keeps the last frame, stream and payload it was told."""
+
+    frames: list[FrameData]
+    streams: list[hsm.Instance]
+    payloads: int
+    owned: list[hsm.Instance]
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.frames = []
+        self.streams = []
+        self.payloads = 0
+        self.owned = []
+
+    @staticmethod
+    def _keep(ctx: hsm.Context, instance: "_Sink", event: hsm.Event[typing.Any]) -> None:
+        del ctx
+        data = event.data
+        if isinstance(data, TransmitData):
+            instance.frames.append(decode_frame(data.frame)[0])
+        elif isinstance(data, StreamAcceptedData):
+            instance.streams.append(data.stream)
+        elif isinstance(data, transform.OwnedData):
+            instance.owned.append(data.stream)
+        elif isinstance(data, _PayloadData):
+            instance.payloads += 1
+
+    model: typing.ClassVar[hsm.Model] = hsm.define(
+        "Sink",
+        hsm.initial(hsm.target("keeping")),
+        hsm.state("keeping", hsm.transition(hsm.on(hsm.AnyEvent), hsm.effect(_keep))),
+    )
+
+    def take_frame(self, expected_type: FrameType) -> FrameData:
+        frame = self.frames.pop(0)
+        if frame.frame_type is not expected_type:
+            raise AssertionError(f"expected {expected_type.name} frame, got {frame.frame_type.name}")
+        return frame
+
+
+def _codec(config: BenchmarkConfig) -> transform.JsonCodec:
+    return transform.JsonCodec(_PayloadEvent, max_message_bytes=config.payload_size + 128)
+
+
+def _framed(codec: transform.JsonCodec, config: BenchmarkConfig) -> bytes:
+    message = codec.encode(_PayloadEvent.with_data(_PayloadData(payload="x" * config.payload_size)))
+    return len(message).to_bytes(4, "big") + message
+
+
+async def _bench_session_receive_deliver(config: BenchmarkConfig) -> int:
+    connection, client = await _started_client()
+    owner = await _started(_Sink())
+    codec = _codec(config)
+    _ = await client.dispatch(client.context(), event_from_frame(FrameData.data(stream_id=2, flags=Flag.SYN)))
+    _ = connection.take_frame(FrameType.WINDOW_UPDATE)
+    (stream,) = connection.streams
+    hand_over = HandOverEvent.with_data(HandOverData(owner=owner, codec=codec, channel="bench"))
+    _ = await stream.dispatch(stream.context(), dataclasses.replace(hand_over, source=hsm.id(connection)))
+    framed = _framed(codec, config)
+
+    for index in range(config.iterations):
+        _ = await client.dispatch(client.context(), event_from_frame(FrameData.data(stream_id=2, payload=framed)))
+        while owner.payloads <= index or not connection.frames:
+            await asyncio.sleep(0)
+        if connection.take_frame(FrameType.WINDOW_UPDATE).length != len(framed):
+            raise AssertionError("window credit did not match the delivered message")
     return config.iterations
 
 
-async def _bench_session_send_data(config: BenchmarkConfig) -> int:
-    session = await _started_client()
-    await session.dispatch(session.context(), OpenStreamEvent.with_data(OpenStreamData()))
-    _ = await _read_outbound(session, expected_type=FrameType.WINDOW_UPDATE)
-    await session.receive_frame(
-        session.context(),
-        FrameData.window_update(
-            stream_id=1,
-            delta=config.iterations * config.payload_size,
-            flags=Flag.ACK,
-        ),
+async def _bench_session_send(config: BenchmarkConfig) -> int:
+    connection, client = await _started_client()
+    owner = await _started(_Sink())
+    codec = _codec(config)
+    _ = await client.dispatch(
+        client.context(), OpenStreamEvent.with_data(OpenStreamData(owner=owner, codec=codec, channel="bench"))
     )
-    payload = b"x" * config.payload_size
+    _ = connection.take_frame(FrameType.WINDOW_UPDATE)
+    framed = _framed(codec, config)
+    grant = FrameData.window_update(stream_id=1, delta=config.iterations * len(framed), flags=Flag.ACK)
+    _ = await client.dispatch(client.context(), event_from_frame(grant))
+    (stream,) = owner.owned
+    sent = _PayloadEvent.with_data(_PayloadData(payload="x" * config.payload_size))
 
     for _ in range(config.iterations):
-        await session.dispatch(
-            session.context(),
-            SendDataEvent.with_data(SendData(stream_id=1, payload=payload)),
-        )
-        frame = await _read_outbound(session, expected_type=FrameType.DATA)
-        if frame.payload != payload:
-            raise AssertionError("outbound DATA frame carried unexpected payload")
+        _ = await stream.dispatch(stream.context(), sent)
+        if connection.take_frame(FrameType.DATA).payload != framed:
+            raise AssertionError("outbound DATA frame carried an unexpected message")
     return config.iterations
 
 
 async def _bench_session_ping_round_trip(config: BenchmarkConfig) -> int:
-    session = await _started_client()
+    connection, client = await _started_client()
     for index in range(config.iterations):
         opaque = index & _MAX_UINT32
-        await session.dispatch(session.context(), PingEvent.with_data(PingData(opaque=opaque)))
-        _ = await _read_outbound(session, expected_type=FrameType.PING)
-        await session.receive_frame(session.context(), FrameData.ping(opaque=opaque, ack=True))
+        _ = await client.dispatch(client.context(), PingEvent.with_data(PingData(opaque=opaque)))
+        _ = connection.take_frame(FrameType.PING)
+        _ = await client.dispatch(client.context(), event_from_frame(FrameData.ping(opaque=opaque, ack=True)))
     return config.iterations
 
 
-async def _started_client() -> Client:
-    session = Client()
-    _ = await hsm.started(None, session, session.model)
-    return session
+async def _started[T: hsm.Instance](instance: T) -> T:
+    return await hsm.started(None, instance, typing.cast(hsm.Model, getattr(type(instance), "model")))
 
 
-async def _read_outbound(session: Session, *, expected_type: FrameType) -> FrameData:
-    frame = await session.outbound().read()
-    if frame.frame_type is not expected_type:
-        raise AssertionError(f"expected {expected_type.name} frame, got {frame.frame_type.name}")
-    return frame
-
-
-def _require_stream(session: Session, stream_id: int) -> ReadStream:
-    stream = session.stream(stream_id)
-    if stream is None:
-        raise AssertionError(f"stream {stream_id} was not created")
-    return stream
+async def _started_client() -> tuple[_Sink, Client]:
+    connection = await _started(_Sink())
+    return connection, await _started(Client(connection=connection))
 
 
 _CASES: typing.Final[dict[str, Case]] = {
     "frame_encode_decode": _bench_frame_encode_decode,
-    "session_receive_read": _bench_session_receive_read,
-    "session_send_data": _bench_session_send_data,
+    "session_receive_deliver": _bench_session_receive_deliver,
+    "session_send": _bench_session_send,
     "session_ping_round_trip": _bench_session_ping_round_trip,
 }
 
