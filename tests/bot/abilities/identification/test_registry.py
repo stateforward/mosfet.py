@@ -426,6 +426,45 @@ def test_a_detached_registry_answers_every_request_unavailable_at_once() -> None
     assert calls == 0
 
 
+def test_a_registry_detached_while_busy_answers_its_in_flight_request_unavailable() -> None:
+    async def run() -> tuple[list[hsm.Event[typing.Any]], int]:
+        harness = await _harness()
+        harness.identifier.gated.add("identify")
+        await harness.identify("slow")
+        _ = await harness.registry.detach(
+            harness.ctx,
+            attachment.DetachEvent.with_data_and_id(attachment.DetachData(actor=harness.owner), "detach"),
+        )
+        # Answered at once, well inside the request's own timeout, which never comes.
+        _ = await harness.reply("slow")
+        harness.identifier.calls[0].released.set()
+        harness.identifier.gated.clear()
+        _ = await harness.registry.attach(
+            harness.ctx,
+            attachment.AttachEvent.with_data_and_id(attachment.AttachData(actor=harness.owner), "reattach"),
+        )
+        await harness.owner.until(
+            lambda: any(
+                event.id == "reattach" and event.name == attachment.AttachCompleteEvent.name
+                for event in harness.owner.events
+            )
+        )
+        await harness.identify("next")
+        _ = await harness.reply("next")
+        return harness.owner.replies(), len(harness.identifier.started("identify"))
+
+    replies, calls = asyncio.run(run())
+
+    assert [(event.id, event.name) for event in replies] == [
+        ("slow", identification.FailedEvent.name),
+        ("next", identification.IdentifiedEvent.name),
+    ]
+    failure = _failure(replies[0])
+    assert failure.kind is identification.FailureKind.UNAVAILABLE
+    assert failure.message == "identification registry is detached"
+    assert calls == 2
+
+
 def test_pruning_runs_every_prune_every_with_the_retention_cutoff() -> None:
     async def run() -> list[tuple[datetime.datetime, datetime.datetime, int]]:
         harness = await _harness(max_unlinked_age=datetime.timedelta(days=30), max_ids=250)

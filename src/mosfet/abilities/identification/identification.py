@@ -502,7 +502,8 @@ class Registry(ability.Ability[IdentifyData, IdentifiedData]):
     ``prune_every`` the registry prunes ids of its kind never linked to a person and last seen
     more than ``max_unlinked_age`` ago, then the least recently seen until at most ``max_ids``
     remain; the deadline is durable, so steady request traffic never starves it, and one prune is
-    bounded by ``prune_timeout``. A detached registry answers every request ``UNAVAILABLE``.
+    bounded by ``prune_timeout``. A detached registry answers every request ``UNAVAILABLE``, the
+    one in flight when it detaches included.
 
     A store call abandoned by a timeout still commits (a thread cannot be cancelled): a late mint
     is an orphan id nobody was told about, which retention prunes.
@@ -809,64 +810,88 @@ class Registry(ability.Ability[IdentifyData, IdentifiedData]):
         del ctx, event
         instance._next_prune_at = instance._clock() + instance._prune_every
 
+    @staticmethod
+    def _abandon(ctx: hsm.Context, instance: "Registry", event: hsm.Event[typing.Any]) -> None:
+        """Leaving service (detach or stop): a request still in flight is answered ``UNAVAILABLE``.
+
+        Its activity is already cancelled, so nothing else would answer it before its timeout.
+        """
+
+        if instance._in_flight is None:
+            return
+        failure = Registry.detached_failure(event)
+        assert isinstance(failure, FailureData)
+        Registry._fail(ctx, instance, failure)
+
     submodel: typing.ClassVar[hsm.Model | None] = mosfet.define(
         "IdentificationRegistry",
-        hsm.initial(hsm.target("/IdentificationRegistry/idle"), hsm.effect(_arm)),
+        hsm.initial(hsm.target("/IdentificationRegistry/serving")),
         hsm.state(
-            "idle",
-            hsm.transition(
-                hsm.on(IdentifyEvent), hsm.effect(_admitting("identify")), hsm.target("/IdentificationRegistry/busy")
+            "serving",
+            hsm.initial(hsm.target("/IdentificationRegistry/serving/idle"), hsm.effect(_arm)),
+            hsm.exit(_abandon),
+            hsm.state(
+                "idle",
+                hsm.transition(
+                    hsm.on(IdentifyEvent),
+                    hsm.effect(_admitting("identify")),
+                    hsm.target("/IdentificationRegistry/serving/busy"),
+                ),
+                hsm.transition(
+                    hsm.on(EnrollEvent),
+                    hsm.effect(_admitting("enroll")),
+                    hsm.target("/IdentificationRegistry/serving/busy"),
+                ),
+                hsm.transition(
+                    hsm.on(ForgetEvent),
+                    hsm.effect(_admitting("forget")),
+                    hsm.target("/IdentificationRegistry/serving/busy"),
+                ),
+                hsm.transition(hsm.after(_remaining), hsm.target("/IdentificationRegistry/serving/pruning")),
             ),
-            hsm.transition(
-                hsm.on(EnrollEvent), hsm.effect(_admitting("enroll")), hsm.target("/IdentificationRegistry/busy")
+            hsm.state(
+                "busy",
+                hsm.defer(*_REQUESTS),
+                hsm.activity(_serve),
+                hsm.transition(
+                    hsm.on(_DoneEvent),
+                    hsm.guard(_is_current),
+                    hsm.effect(_reply_done),
+                    hsm.target("/IdentificationRegistry/serving/after_busy"),
+                ),
+                hsm.transition(
+                    hsm.on(_FailedEvent),
+                    hsm.guard(_is_current),
+                    hsm.effect(_reply_failed),
+                    hsm.target("/IdentificationRegistry/serving/after_busy"),
+                ),
+                hsm.transition(
+                    hsm.after(_timeout_delay),
+                    hsm.effect(_reply_timeout),
+                    hsm.target("/IdentificationRegistry/serving/after_busy"),
+                ),
             ),
-            hsm.transition(
-                hsm.on(ForgetEvent), hsm.effect(_admitting("forget")), hsm.target("/IdentificationRegistry/busy")
+            hsm.choice(
+                "after_busy",
+                hsm.transition(hsm.guard(_is_prune_due), hsm.target("/IdentificationRegistry/serving/pruning")),
+                hsm.transition(hsm.target("/IdentificationRegistry/serving/idle")),
             ),
-            hsm.transition(hsm.after(_remaining), hsm.target("/IdentificationRegistry/pruning")),
-        ),
-        hsm.state(
-            "busy",
-            hsm.defer(*_REQUESTS),
-            hsm.activity(_serve),
-            hsm.transition(
-                hsm.on(_DoneEvent),
-                hsm.guard(_is_current),
-                hsm.effect(_reply_done),
-                hsm.target("/IdentificationRegistry/after_busy"),
-            ),
-            hsm.transition(
-                hsm.on(_FailedEvent),
-                hsm.guard(_is_current),
-                hsm.effect(_reply_failed),
-                hsm.target("/IdentificationRegistry/after_busy"),
-            ),
-            hsm.transition(
-                hsm.after(_timeout_delay),
-                hsm.effect(_reply_timeout),
-                hsm.target("/IdentificationRegistry/after_busy"),
-            ),
-        ),
-        hsm.choice(
-            "after_busy",
-            hsm.transition(hsm.guard(_is_prune_due), hsm.target("/IdentificationRegistry/pruning")),
-            hsm.transition(hsm.target("/IdentificationRegistry/idle")),
-        ),
-        hsm.state(
-            "pruning",
-            hsm.defer(*_REQUESTS),
-            hsm.activity(_prune),
-            hsm.exit(_rearm),
-            hsm.transition(
-                hsm.on(_PrunedEvent, _PruneFailedEvent),
-                hsm.guard(_is_this_prune),
-                hsm.effect(_count_pruned),
-                hsm.target("/IdentificationRegistry/idle"),
-            ),
-            hsm.transition(
-                hsm.after(_prune_timeout_delay),
-                hsm.effect(_count_prune_timeout),
-                hsm.target("/IdentificationRegistry/idle"),
+            hsm.state(
+                "pruning",
+                hsm.defer(*_REQUESTS),
+                hsm.activity(_prune),
+                hsm.exit(_rearm),
+                hsm.transition(
+                    hsm.on(_PrunedEvent, _PruneFailedEvent),
+                    hsm.guard(_is_this_prune),
+                    hsm.effect(_count_pruned),
+                    hsm.target("/IdentificationRegistry/serving/idle"),
+                ),
+                hsm.transition(
+                    hsm.after(_prune_timeout_delay),
+                    hsm.effect(_count_prune_timeout),
+                    hsm.target("/IdentificationRegistry/serving/idle"),
+                ),
             ),
         ),
     )
