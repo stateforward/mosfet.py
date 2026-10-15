@@ -8,8 +8,14 @@ The episodic graph lives beside it: ``node_table`` (episodes, persons, concepts)
 ``vector_table`` (the canonical vector of a node in one embedding space), and
 ``index_attempt_table`` (failed indexing attempts, so backfill never retries what cannot
 succeed in a space). No foreign key cascades are relied on: Memory deletes dependent rows
-explicitly inside the transaction that forgets a node. Provider-created vector index tables
-(``bot_memory_vec_*``) are not part of this metadata and are never managed by migrations.
+explicitly inside the transaction that forgets a node.
+
+``identity_table`` keeps the identities an ``identification.Store`` minted or enrolled (voices
+and faces), beside the memory they are referenced from as ``voice:<id>`` / ``face:<id>``
+participant refs. Their prints live only in provider vector tables.
+
+Provider-created vector tables (memory's ``bot_memory_vec_*`` index and the identity prints'
+``bot_identity_vec_*``) are not part of this metadata and are never managed by migrations.
 """
 
 from __future__ import annotations
@@ -39,8 +45,14 @@ EDGE_TABLE = "bot_memory_edge"
 VECTOR_TABLE = "bot_memory_vector"
 INDEX_ATTEMPT_TABLE = "bot_memory_index_attempt"
 
+# Identities (voices and faces) an identification store keeps.
+IDENTITY_TABLE = "bot_identity"
+
 # Prefix of provider-created vector index tables; migrations never manage these.
 VECTOR_INDEX_PREFIX = "bot_memory_vec_"
+
+# Prefix of provider-created identity print tables; disjoint from memory's, never managed by migrations.
+IDENTITY_VECTOR_PREFIX = "bot_identity_vec_"
 
 metadata = MetaData()
 
@@ -176,8 +188,32 @@ index_attempt_table = Table(
     Index("bot_memory_index_attempt_space_idx", "space_model", "dimensions", "permanent"),
 )
 
+# One identity of one kind. ``seq`` is SQLite's never-reused row number and the rowid of the
+# identity's print in its model's provider vector table; ``id`` is the public id (minted or
+# declared). ``seen_count`` is the running-mean weight of the print, capped by the match policy.
+# ``linked`` stays 0 until a person link is written; own and linked ids are never pruned. Times
+# are fixed-width UTC ISO text at microsecond resolution, so text order is chronological order.
+identity_table = Table(
+    IDENTITY_TABLE,
+    metadata,
+    Column("seq", Integer, primary_key=True, autoincrement=True),
+    Column("kind", Text, nullable=False),
+    Column("id", Text, nullable=False),
+    Column("model", Text, nullable=False),
+    Column("own", Integer, nullable=False),
+    Column("linked", Integer, nullable=False, server_default="0"),
+    Column("created_at", Text, nullable=False),
+    Column("seen_at", Text, nullable=False),
+    Column("seen_count", Integer, nullable=False),
+    UniqueConstraint("kind", "id", name="bot_identity_kind_id_key"),
+    Index("bot_identity_prune_idx", "kind", "own", "linked", "seen_at"),
+    sqlite_autoincrement=True,
+)
+
 __all__ = [
     "EDGE_TABLE",
+    "IDENTITY_TABLE",
+    "IDENTITY_VECTOR_PREFIX",
     "INDEX_ATTEMPT_TABLE",
     "MEMORY_TABLE",
     "NODE_TABLE",
@@ -186,6 +222,7 @@ __all__ = [
     "VECTOR_INDEX_PREFIX",
     "VECTOR_TABLE",
     "edge_table",
+    "identity_table",
     "index_attempt_table",
     "memory_table",
     "metadata",

@@ -21,10 +21,19 @@ if not isinstance(_connection, Connection):
 
 
 def _include_name(name: str | None, type_: str, parent_names: object) -> bool:
-    """Leave provider-created vector index tables (and their vec0 shadow tables) alone."""
+    """Leave provider-created vector tables (and their vec0 shadow tables) alone.
+
+    Both prefixes are the providers': memory's index (``schema.VECTOR_INDEX_PREFIX``,
+    ``bot_memory_vec_``) and the identity prints (``schema.IDENTITY_VECTOR_PREFIX``,
+    ``bot_identity_vec_``).
+    """
 
     del parent_names
-    return not (type_ == "table" and name is not None and name.startswith(schema.VECTOR_INDEX_PREFIX))
+    return not (
+        type_ == "table"
+        and name is not None
+        and name.startswith((schema.VECTOR_INDEX_PREFIX, schema.IDENTITY_VECTOR_PREFIX))
+    )
 
 
 context.configure(

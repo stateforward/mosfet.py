@@ -80,12 +80,13 @@ Memory storage schema (`src/mosfet/abilities/memory/schema.py` plus
 `src/mosfet/behavior/storage.py`, sharing one `metadata`) is brought up by Alembic
 revisions in `src/mosfet/abilities/memory/migrations/versions/` (package data, not an
 importable package). Revision `0001` is the one baseline: relational memory rows, behavior
-inventory, the short-term register, and the episodic graph (`bot_memory_node`, `_part`,
-`_edge`, `_vector`, `_index_attempt`). `open_sqlite_engine` and `MemoryStore(engine=...)` call
+inventory, the short-term register, the episodic graph (`bot_memory_node`, `_part`,
+`_edge`, `_vector`, `_index_attempt`), and the voice and face identities (`bot_identity`). `open_sqlite_engine` and `MemoryStore(engine=...)` call
 `store.migrate(engine)`, which upgrades to head; a database holding memory tables without an
 `alembic_version` table matches no revision and raises `store.MigrationError`. Provider vector
-index tables (`bot_memory_vec_*`, created by `sqlite_memory.VecIndex`) are excluded in
-`migrations/env.py` and never managed by Alembic. There is no `alembic.ini`;
+tables (`bot_memory_vec_*`, created by `sqlite_memory.VecIndex`, and `bot_identity_vec_*`,
+created by `sqlite_memory.IdentityStore`) are excluded in `migrations/env.py` and never managed
+by Alembic. There is no `alembic.ini`;
 `store.migration_config()` builds the config in code. To add a revision:
 
 1. Change the table definitions in `schema.py` / `behavior/storage.py`.

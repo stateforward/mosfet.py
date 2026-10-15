@@ -5,9 +5,10 @@ Revises:
 Create Date: 2026-10-14 16:30:00.000000
 
 The one baseline revision: relational memory rows, behavior inventory (with each behavior's
-``lifetime``), the short-term register, and the episodic graph (nodes, parts, edges,
-canonical vectors, index attempts). Provider-created vector index tables are not managed
-here. Schema changes after this baseline go in new revisions.
+``lifetime``), the short-term register, the episodic graph (nodes, parts, edges,
+canonical vectors, index attempts), and the identities (voices and faces) an identification
+store keeps. Provider-created vector tables (memory's index and identity prints) are not
+managed here. Schema changes after this baseline go in new revisions.
 """
 
 from __future__ import annotations
@@ -159,8 +160,27 @@ def upgrade() -> None:
         ["space_model", "dimensions", "permanent"],
     )
 
+    _ = op.create_table(
+        "bot_identity",
+        sa.Column("seq", sa.Integer(), autoincrement=True, nullable=False),
+        sa.Column("kind", sa.Text(), nullable=False),
+        sa.Column("id", sa.Text(), nullable=False),
+        sa.Column("model", sa.Text(), nullable=False),
+        sa.Column("own", sa.Integer(), nullable=False),
+        sa.Column("linked", sa.Integer(), server_default="0", nullable=False),
+        sa.Column("created_at", sa.Text(), nullable=False),
+        sa.Column("seen_at", sa.Text(), nullable=False),
+        sa.Column("seen_count", sa.Integer(), nullable=False),
+        sa.PrimaryKeyConstraint("seq"),
+        sa.UniqueConstraint("kind", "id", name="bot_identity_kind_id_key"),
+        sqlite_autoincrement=True,
+    )
+    op.create_index("bot_identity_prune_idx", "bot_identity", ["kind", "own", "linked", "seen_at"])
+
 
 def downgrade() -> None:
+    op.drop_index("bot_identity_prune_idx", table_name="bot_identity")
+    op.drop_table("bot_identity")
     op.drop_index("bot_memory_index_attempt_space_idx", table_name="bot_memory_index_attempt")
     op.drop_table("bot_memory_index_attempt")
     op.drop_table("bot_memory_vector")

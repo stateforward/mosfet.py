@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+import datetime
 import math
+import pathlib
 import typing
 
 import pytest
+import sqlalchemy.event
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
-from mosfet.abilities import embedding, memory
+from mosfet.abilities import embedding, identification, memory
 from mosfet.providers import sqlite_memory
 from mosfet.providers.sqlite_memory import index as provider_index
 
@@ -92,6 +95,41 @@ def test_a_removal_in_a_rolled_back_transaction_keeps_the_row() -> None:
     assert [neighbor.seq for neighbor in found] == [seq]
     assert gone == ()
     assert count == 0
+
+
+def test_removal_touches_only_memory_vec0_tables(tmp_path: pathlib.Path) -> None:
+    """``remove`` deletes from ``bot_memory_vec_<dims>_<hash>`` vec0 tables only: never identity tables,
+    never a vec0 shadow table, and never another vec0 table that merely shares the memory prefix."""
+
+    engine = sqlite_memory.open_engine(database_path=tmp_path / "memory.sqlite3")
+    vec = sqlite_memory.VecIndex()
+    (seq,) = _seed(engine, vec, [("episode", 0.0)])
+    identities = sqlite_memory.IdentityStore(engine=engine)
+    _ = identities.identify(
+        "voice",
+        (identification.Print(vector=_unit(0.0), model="test/embedder"),),
+        identification.MatchPolicy(threshold=0.5, margin=0.05, refine_threshold=0.65),
+        at=datetime.datetime(2026, 10, 15, tzinfo=datetime.UTC),
+    )
+    with engine.begin() as connection:
+        _ = connection.exec_driver_sql(
+            "CREATE VIRTUAL TABLE bot_memory_vec_scratch USING vec0("
+            "node_seq INTEGER PRIMARY KEY, embedding float[2] distance_metric=cosine, kind TEXT)"
+        )
+        _ = connection.exec_driver_sql(
+            "INSERT INTO bot_memory_vec_scratch (node_seq, embedding, kind) VALUES (?, ?, 'episode')",
+            (seq, memory.index.pack(_unit(0.0))),
+        )
+        statements: list[str] = []
+        sqlalchemy.event.listen(connection, "before_cursor_execute", lambda *args: statements.append(str(args[2])))
+        vec.remove(connection, [seq])
+        scratch = connection.execute(text("SELECT count(*) FROM bot_memory_vec_scratch")).scalar()
+        prints = connection.execute(text("SELECT count(*) FROM bot_identity")).scalar()
+    engine.dispose()
+    deletes = [statement for statement in statements if statement.startswith("DELETE")]
+    assert deletes == [f"DELETE FROM {provider_index.table_name(_SPACE)} WHERE node_seq IN (?)"]
+    assert scratch == 1
+    assert prints == 1
 
 
 def test_table_names_come_only_from_the_space_shape_and_a_hash() -> None:

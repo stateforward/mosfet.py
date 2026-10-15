@@ -52,9 +52,11 @@ class VecIndex(memory.Index):
     def remove(self, connection: Connection, seqs: collections.abc.Sequence[int]) -> None:
         if not seqs:
             return
+        # Only memory's own vec0 tables (``<prefix><dims>_<digest>``): the GLOB alone would also match
+        # their shadow tables, and identity print tables carry a disjoint prefix.
         tables = connection.exec_driver_sql(
-            "SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE ? AND sql LIKE '%USING vec0%'",
-            (f"{memory.schema.VECTOR_INDEX_PREFIX}%",),
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name GLOB ? AND sql LIKE '%USING vec0%'",
+            (f"{memory.schema.VECTOR_INDEX_PREFIX}[0-9]*",),
         ).scalars()
         marks = ", ".join("?" for _ in seqs)
         for table in list(tables):
