@@ -118,7 +118,9 @@ class IdentityStore(identification.Store):
         """Run ``work`` in one ``BEGIN IMMEDIATE`` transaction under the store's lock (database I/O).
 
         Raises:
-            identification.StoreError: ``work``'s own, or ``STORE_FAILED`` for a database failure.
+            identification.StoreError: ``work``'s own, or ``STORE_FAILED`` for a database failure. A
+                database error renders its bound parameters (packed prints among them), so the
+                ``STORE_FAILED`` error names only the failure's type and carries no cause or context.
         """
 
         try:
@@ -137,9 +139,11 @@ class IdentityStore(identification.Store):
                     raise
                 return result
         except (sqlalchemy.exc.SQLAlchemyError, sqlite3.Error) as error:
-            raise identification.StoreError(
-                identification.FailureKind.STORE_FAILED, f"the identity store failed ({type(error).__name__})"
-            ) from error
+            failure = type(error).__name__
+        # Raised outside the handler, so the parameter-bearing error is neither cause nor context.
+        raise identification.StoreError(
+            identification.FailureKind.STORE_FAILED, f"the identity store failed ({failure})"
+        )
 
     @typing.override
     def identify(

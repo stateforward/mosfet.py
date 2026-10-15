@@ -417,9 +417,38 @@ def test_a_failure_sqlite_already_rolled_back_surfaces_the_original_error(tmp_pa
     engine.dispose()
 
     assert raised.value.kind is identification.FailureKind.STORE_FAILED
-    assert "database or disk is full" in str(raised.value.__cause__)
-    assert "no transaction is active" not in str(raised.value.__cause__)
+    # The trigger's error is an IntegrityError; a masking ROLLBACK would surface an OperationalError.
+    assert str(raised.value) == "the identity store failed (IntegrityError)"
     assert after.recognized is False
+
+
+def test_a_failed_statement_never_carries_its_bound_print_into_the_store_error(tmp_path: pathlib.Path) -> None:
+    """A database error renders its bound parameters; a packed print there would leak a biometric."""
+
+    engine = _engine(tmp_path)
+    store = sqlite_memory.IdentityStore(engine=engine)
+    voice = _print(0.123456789, 0.987654321)
+    table = _vec_table(_MODEL, 2)
+    with engine.begin() as connection:
+        # A plain table under the print space's name: the store keeps it, and its MATCH query,
+        # bound to the packed print, fails on the row.
+        _ = connection.exec_driver_sql(f"CREATE TABLE {table} (seq, embedding, kind, distance, k)")
+        _ = connection.exec_driver_sql(f"INSERT INTO {table} VALUES (1, x'00', 'voice', 0.0, 2)")
+
+    with pytest.raises(identification.StoreError) as raised:
+        _ = store.identify("voice", (voice,), _POLICY, at=_START)
+    engine.dispose()
+    chain: list[BaseException] = []
+    error: BaseException | None = raised.value
+    while error is not None and error not in chain:
+        chain.append(error)
+        error = error.__cause__ or error.__context__
+    rendered = "\n".join(f"{error!r} {error}" for error in chain)
+
+    assert raised.value.kind is identification.FailureKind.STORE_FAILED
+    assert repr(memory.index.pack(voice.vector)) not in rendered
+    assert "parameters" not in rendered
+    assert chain == [raised.value]
 
 
 def test_a_store_on_one_shared_in_memory_connection_is_refused() -> None:
