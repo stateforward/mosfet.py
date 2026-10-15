@@ -30,7 +30,9 @@ class RecordingProcessor(processing.Processor):
         self.look_once = look_once
 
     @typing.override
-    async def process(self, input: processing.InputData) -> processing.Events:
+    async def process(
+        self, input: processing.InputData, *, drafts: processing.DraftSink | None = None
+    ) -> processing.Events:
         self.inputs.append(input)
         if self.look_once and len(self.inputs) == 1:
             (target,) = input.actor_events[seeing.LookEvent.name]
@@ -40,7 +42,9 @@ class RecordingProcessor(processing.Processor):
 
 class Silent(processing.Processor):
     @typing.override
-    async def process(self, input: processing.InputData) -> processing.Events:
+    async def process(
+        self, input: processing.InputData, *, drafts: processing.DraftSink | None = None
+    ) -> processing.Events:
         del input
         return ()
 

@@ -19,9 +19,14 @@ _PNG = media.Image(content=b"\x89PNG\r\n\x1a\n" + b"body", media_type="image/png
 
 class EchoTextGenerator(text.TextGenerator):
     @typing.override
-    async def generate(self, input: text.InputData) -> text.OutputData:
+    async def generate(
+        self, input: text.InputData, *, deltas: collections.abc.Callable[[text.Delta], None] | None = None
+    ) -> text.OutputData:
         content = input.messages[-1].content
         assert isinstance(content, str)
+        if deltas is not None:
+            for word in content.upper().split():
+                deltas(text.Delta(content=word))
         return text.OutputData(content=content.upper())
 
 
@@ -128,6 +133,23 @@ def test_text_generation_defines_specific_input_and_output_events() -> None:
     assert output_schema == text_generation_output_schema
     assert output_schema == text.OutputData.model_json_schema()
     assert output_schema["description"]
+
+
+def test_deltas_are_handed_out_while_the_final_output_stays_authoritative() -> None:
+    received: list[text.Delta] = []
+    output = asyncio.run(
+        EchoTextGenerator().generate(
+            text.InputData(messages=(text.TextMessage(role=text.TextRole.USER, content="say this"),)),
+            deltas=received.append,
+        )
+    )
+
+    assert received == [text.Delta(content="SAY"), text.Delta(content="THIS")]
+    assert output == text.OutputData(content="SAY THIS")
+    delta = text.Delta(tool_call=0, arguments='{"events":')
+    assert (delta.content, delta.tool_call, delta.arguments) == ("", 0, '{"events":')
+    with pytest.raises(pydantic.ValidationError):
+        _ = text.Delta(tool_call=-1)
 
 
 def test_text_generation_inherits_generator_field_from_generative() -> None:

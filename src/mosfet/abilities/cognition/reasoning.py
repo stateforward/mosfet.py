@@ -510,7 +510,16 @@ class Reasoning(processing.Processing):
                         recalled=host_input.recalled,
                     ),
                 )
-                raw = await instance._processor.process(child_input)
+                # Reasoning's selections are dispatched as returned, so what it is still writing may be drafted to
+                # its targets as it streams; the drafts carry this operation's id, as the selection will.
+                drafts = (
+                    processing.Processing._draft_sink(
+                        ctx, instance, host_input, operation_id=operation_id, metadata=_public_metadata(metadata)
+                    )
+                    if host_input.actors
+                    else None
+                )
+                raw = await instance._processor.process(child_input, drafts=drafts)
                 reasoned = Reasoning._coerce_reasoned(raw)
             except Exception as error:
                 dispatch_stage(

@@ -52,7 +52,9 @@ def test_reasoning_returns_directed_terminal_to_one_shot_operation() -> None:
 
 class EmptyProcessor(processing.Processor):
     @typing.override
-    async def process(self, input: processing.InputData) -> processing.Events:
+    async def process(
+        self, input: processing.InputData, *, drafts: processing.DraftSink | None = None
+    ) -> processing.Events:
         del input
         return ()
 
@@ -63,7 +65,9 @@ class HeldProcessor(processing.Processor):
         self.release = asyncio.Event()
 
     @typing.override
-    async def process(self, input: processing.InputData) -> processing.Events:
+    async def process(
+        self, input: processing.InputData, *, drafts: processing.DraftSink | None = None
+    ) -> processing.Events:
         del input
         self.called.set()
         await self.release.wait()
@@ -186,7 +190,9 @@ class CapturingProcessor(processing.Processor):
         self.inputs = []
 
     @typing.override
-    async def process(self, input: processing.InputData) -> processing.Events:
+    async def process(
+        self, input: processing.InputData, *, drafts: processing.DraftSink | None = None
+    ) -> processing.Events:
         self.inputs.append(input)
         return ()
 
@@ -258,7 +264,9 @@ class RecordingProcessor(processing.Processor):
         self.calls = []
 
     @typing.override
-    async def process(self, input: processing.InputData) -> processing.Events:
+    async def process(
+        self, input: processing.InputData, *, drafts: processing.DraftSink | None = None
+    ) -> processing.Events:
         self.calls.append(input)
         return ()
 

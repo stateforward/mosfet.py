@@ -1,6 +1,7 @@
 from . import generation
 from .generation import (
     ContentPart,
+    Delta,
     ImagePart,
     InputEvent,
     OutputEvent,
@@ -17,6 +18,7 @@ from .generation import (
 
 __all__ = [
     "ContentPart",
+    "Delta",
     "ImagePart",
     "InputEvent",
     "OutputEvent",

@@ -7,6 +7,10 @@ commands its mouth (an attached :class:`~mosfet.devices.audio.Speaker`) chunk by
 own mark with the text it finishes saying. The mouth plays in real time and reports each chunk's mark once it
 has been played; that report, not the command, is what the utterance records as said.
 
+Text may also arrive as it is written: ``speaking.draft`` carries what was newly written into the utterance's text
+(an append-only delta at an offset), and it goes to the encoder at once; the final ``speaking.input`` under the
+same id ends the text. A final that diverges from what was drafted keeps what was said: nothing is spliced or re-said.
+
 On every command and every played report Speaking hands its Listening peers a motor-command copy (efference)
 stating the playout still commanded and not yet played — a nerve between effector and ear, not an environment
 stimulus and not body fan-out. Speaking also hands Listening a copy of the PCM of its own voice once, so hearing
@@ -21,6 +25,7 @@ from .. import ability
 from .. import vocal
 
 import asyncio
+import collections
 import collections.abc
 import dataclasses
 import datetime
@@ -54,6 +59,11 @@ _LOOKAHEAD = datetime.timedelta(seconds=1)
 _ENCODE_IDLE_TIMEOUT = datetime.timedelta(seconds=5)
 _ENROLL = datetime.timedelta(seconds=6)
 _STOP_TIMEOUT = datetime.timedelta(seconds=1)
+_DRAFT_TIMEOUT = datetime.timedelta(seconds=10)
+_FINISHED_UTTERANCES = 16
+"""How many finished utterance ids Speaking remembers, so a late draft or final for one can never reopen it."""
+_HELD_UTTERANCES = 16
+"""How many other utterances Speaking holds while one is spoken; past it, a new one is refused."""
 _MIN_ENROLL = datetime.timedelta(seconds=1.5)
 """The shortest copy of the bot's own voice worth learning from (above a voiceprint model's 0.3 s floor)."""
 
@@ -70,6 +80,22 @@ _FIRST_AUDIO = _METER.create_histogram(
     "bot.speaking.first_audio.duration",
     unit="s",
     description="Time from an utterance's first text to its first audio chunk commanded to the mouth.",
+)
+_DRAFTED = _METER.create_counter(
+    "bot.speaking.drafted.count",
+    unit="{utterance}",
+    description=(
+        "Drafted utterances whose final text arrived, by outcome: used (the final text extends what was drafted) or "
+        "diverged (it differs from what was drafted; what was drafted is what was said, nothing is spliced or re-said)."
+    ),
+)
+_DRAFT_GAPS = _METER.create_counter(
+    "bot.processing.draft.count",
+    unit="{draft}",
+    description=(
+        "Drafts of selections a model was still writing, by outcome; the consumer of a draft counts gap (a delta "
+        "whose offset is past what was written, after which the utterance waits for its final text)."
+    ),
 )
 _ENCODING = _METER.create_histogram(
     "bot.speaking.encoding.duration",
@@ -178,6 +204,36 @@ class OutputData(pydantic.BaseModel):
     channels: int = pydantic.Field(ge=1, description="Channel count of the played audio.", examples=[1])
 
 
+class DraftData(pydantic.BaseModel):
+    """What was newly written into the text of the utterance named by the event id: an append-only delta."""
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
+        frozen=True,
+        extra="forbid",
+        json_schema_extra={
+            "description": (
+                "Text newly written into the utterance whose id this event carries, and how many characters were "
+                "written before it. It goes to the encoder as soon as it arrives; the final speaking.input under "
+                "the same id ends the text."
+            ),
+            "examples": [{"text": " I can help", "offset": 5}],
+        },
+    )
+
+    text: str = pydantic.Field(
+        description="The characters newly written into the utterance's text, in order.",
+        examples=[" I can help"],
+    )
+    offset: int = pydantic.Field(
+        ge=0,
+        description=(
+            "How many characters of the utterance's text were written before these: a repeated delta is harmless, "
+            "and a delta past what was written is a gap."
+        ),
+        examples=[5],
+    )
+
+
 class StopData(pydantic.BaseModel):
     """Stop the utterance named by the event id: flush the mouth and end with what has been played."""
 
@@ -226,6 +282,13 @@ ProgressEvent = hsm.Event[ProgressData](
     schema=ProgressData,
 )
 """The utterance is moving: sent to its requester, with the input's id, as its first audio starts and audio plays."""
+
+DraftEvent = hsm.Event[DraftData](
+    name="bot.ability.speaking.draft",
+    kind=hsm.EventKind,
+    schema=DraftData,
+)
+"""Text newly written into the utterance this event's id names. Not model-callable: Communication's drafts reach it."""
 
 StopEvent = hsm.Event[StopData](
     name="bot.ability.speaking.stop",
@@ -404,24 +467,27 @@ class _Utterance:
     """The one utterance being spoken: durable machine data for its whole life, cleared on ``idle`` entry.
 
     ``pipe`` and ``stream`` are the utterance's durable resources, like an open socket: the text written for the
-    encoder, and the one encoding stream reading it, closed when the utterance stops streaming. ``encoding_outcome``
-    is how that stream ended and ``failure`` why it failed; ``failed_as`` is what first failed the utterance: its
-    stream, a mouth that overflowed (``overloaded``), or a mouth that stopped reporting (``timeout``). ``marks``
-    holds only the pieces the mouth has not yet reported: a reported piece's text joins ``spoken`` (played) or
-    ``unplayed`` (dropped), and ``aligned`` counts the text the commanded pieces carry. ``backlog`` is what is left
-    of the last encoded chunk still to command, with its aligned text. The text has no length bound (W3-20): what
-    bounds the work in flight is the lookahead, which bounds the marks, and one encoded chunk of backlog; the
-    enrollment copy is at most ``enroll_seconds``.
+    encoder, and the one encoding stream reading it, closed when the utterance stops streaming. ``final`` says
+    the text is ended (nothing more is written), ``text`` is the final text once it has arrived, ``drafted`` that
+    it began as drafts, ``encoding_outcome`` how the stream ended and ``failure`` why it failed; ``failed_as`` is
+    what first failed the utterance: its stream, a mouth that overflowed (``overloaded``), or a mouth that stopped
+    reporting (``timeout``). ``marks`` holds only the pieces the mouth has not yet reported: a reported piece's text
+    joins ``spoken`` (played) or ``unplayed`` (dropped), and ``aligned`` counts the text the commanded pieces carry.
+    ``backlog`` is what is left of the last encoded chunk still to command, with its aligned text. The text has no
+    length bound (W3-20): what bounds the work in flight is the lookahead, which bounds the marks, and one encoded
+    chunk of backlog; the enrollment copy is at most ``enroll_seconds``.
     """
 
     sequence: int
     id: str
     requester: str
     metadata: dict[str, object]
-    text: str
     started_at: float
     pipe: vocal.speech.Text
     stream: collections.abc.AsyncIterator[vocal.speech.Audio]
+    text: str | None = None
+    final: bool = False
+    drafted: bool = False
     marks: dict[str, _Mark] = dataclasses.field(default_factory=dict[str, _Mark])
     commands: int = 0
     aligned: int = 0
@@ -466,10 +532,13 @@ class Speaking(ability.Ability[InputData, OutputData]):
     mouth can buffer. The mouth reports each mark as it is played. The utterance ends when every commanded piece is
     played (or dropped), and ``spoken`` is the aligned text of the played pieces. Audio the mouth drops unplayed
     ends the utterance ``failed``, never ``completed``. A stream that fails, or produces nothing for
-    ``encode_idle_timeout``, ends the utterance as ``failed`` after what was already commanded has played.
-    A ``speaking.stop`` for the utterance flushes the mouth at once, then closes its pipe and its stream (provider
+    ``encode_idle_timeout``, ends the utterance as ``failed`` after what was already commanded has played. A
+    ``speaking.stop`` for the utterance flushes the mouth at once, then closes its pipe and its stream (provider
     cancel), and ends it ``stopped`` once the mouth has reported the flush and the audio already playing (or after
-    ``stop_timeout``).
+    ``stop_timeout``). Text may arrive as drafts (``speaking.draft``, append-only deltas): each is written to the
+    pipe as it arrives, and the final ``speaking.input`` under the same id writes the rest and ends the text, or,
+    when it diverges from what was drafted, ends the text as drafted (counted ``diverged``). Drafts that stop
+    coming while Speaking waits on the encoder end the text after ``draft_timeout``, ``abandoned``.
     """
 
     input_data_type: typing.ClassVar[type[object] | tuple[type[object], ...] | None] = InputData
@@ -481,7 +550,7 @@ class Speaking(ability.Ability[InputData, OutputData]):
     _composite_attachment_lifecycle: typing.ClassVar[bool] = True
     # Detached (never attached, its mouth refused, or released), Speaking answers what it is asked to say with a
     # failure rather than leave the requester waiting, and counts a stop it cannot serve.
-    detached_requests: typing.ClassVar[tuple[hsm.Event[typing.Any], ...]] = (InputEvent,)
+    detached_requests: typing.ClassVar[tuple[hsm.Event[typing.Any], ...]] = (InputEvent, DraftEvent)
     detached_notifications: typing.ClassVar[tuple[hsm.Event[typing.Any], ...]] = (StopEvent,)
 
     _encoder: vocal.speech.SpeechEncoder
@@ -501,6 +570,7 @@ class Speaking(ability.Ability[InputData, OutputData]):
     _piece_bytes: int
     _encode_idle_timeout: datetime.timedelta
     _stop_timeout: datetime.timedelta
+    _draft_timeout: datetime.timedelta
     _enroll_bytes: int
     _clock: collections.abc.Callable[[], float]
     # Durable: the utterance being spoken (None while idle), a counter that tells utterances apart, and whether
@@ -508,6 +578,10 @@ class Speaking(ability.Ability[InputData, OutputData]):
     _utterance: _Utterance | None
     _sequence: int
     _enrolled: bool
+    # Durable: the ids of the last utterances that finished, so nothing late can reopen one; and the final text of
+    # each other utterance that arrived while one was being spoken, in arrival order, released one at a time.
+    _finished: collections.deque[str]
+    _held: collections.OrderedDict[str, hsm.Event[typing.Any]]
 
     def __init__(
         self,
@@ -521,6 +595,7 @@ class Speaking(ability.Ability[InputData, OutputData]):
         encode_idle_timeout: datetime.timedelta = _ENCODE_IDLE_TIMEOUT,
         enroll_seconds: datetime.timedelta = _ENROLL,
         stop_timeout: datetime.timedelta = _STOP_TIMEOUT,
+        draft_timeout: datetime.timedelta = _DRAFT_TIMEOUT,
         clock: collections.abc.Callable[[], float] = time.monotonic,
     ) -> None:
         """Build a Speaking ability.
@@ -536,6 +611,9 @@ class Speaking(ability.Ability[InputData, OutputData]):
             enroll_seconds: The most of its own voice Speaking hands Listening to learn from (at least 1.5 s).
             stop_timeout: The longest a stopped utterance waits for its mouth to report the flush and the audio
                 already playing before what it never reported counts as unspoken.
+            draft_timeout: The longest a drafted utterance waits on the encoder for more of its text, or its
+                final text, before its text ends ``abandoned`` with what was written. A requester's own deadline on
+                the response (Communication's ``response_idle_timeout``) must be longer.
             clock: Monotonic seconds the first-audio latency and the encoding duration are measured on.
 
         Raises:
@@ -547,6 +625,8 @@ class Speaking(ability.Ability[InputData, OutputData]):
             raise ValueError(f"Speaking lookahead must be positive, got {lookahead}.")
         if encode_idle_timeout <= datetime.timedelta(0):
             raise ValueError(f"Speaking encode_idle_timeout must be positive, got {encode_idle_timeout}.")
+        if draft_timeout <= datetime.timedelta(0):
+            raise ValueError(f"Speaking draft_timeout must be positive, got {draft_timeout}.")
         if stop_timeout <= datetime.timedelta(0):
             raise ValueError(f"Speaking stop_timeout must be positive, got {stop_timeout}.")
         if enroll_seconds < _MIN_ENROLL:
@@ -560,6 +640,7 @@ class Speaking(ability.Ability[InputData, OutputData]):
         self._lookahead_seconds = lookahead.total_seconds()
         self._encode_idle_timeout = encode_idle_timeout
         self._stop_timeout = stop_timeout
+        self._draft_timeout = draft_timeout
         pcm = encoder.format
         frame_bytes = _SAMPLE_BYTES * pcm.channels
         self._piece_bytes = max(1, int(lookahead.total_seconds() / 2 * pcm.sample_rate_hz)) * frame_bytes
@@ -568,6 +649,8 @@ class Speaking(ability.Ability[InputData, OutputData]):
         self._utterance = None
         self._sequence = 0
         self._enrolled = False
+        self._finished = collections.deque(maxlen=_FINISHED_UTTERANCES)
+        self._held = collections.OrderedDict()
         self._attachment_group: attachment.Group | None = attachment.Group(speaker)
 
     @typing.override
@@ -621,42 +704,176 @@ class Speaking(ability.Ability[InputData, OutputData]):
         return max(0.0, utterance.commanded - utterance.played - utterance.dropped)
 
     @staticmethod
-    def _has_speak_input(ctx: hsm.Context, instance: "Speaking", event: hsm.Event[typing.Any]) -> bool:
-        """Text to say. Blank text is the encoder's to refuse (R5-1), so its requester still gets a terminal."""
+    def _is_new_input(ctx: hsm.Context, instance: "Speaking", event: hsm.Event[typing.Any]) -> bool:
+        """Final text to say, for an utterance that has not already been said: a finished one is never reopened.
 
-        del ctx, instance
-        return isinstance(event.data, InputData)
+        Blank text is the encoder's to refuse (R5-1), so its requester still gets a terminal.
+        """
+
+        del ctx
+        return isinstance(event.data, InputData) and (not event.id or event.id not in instance._finished)
+
+    @staticmethod
+    def _is_new_draft(ctx: hsm.Context, instance: "Speaking", event: hsm.Event[typing.Any]) -> bool:
+        """The first text written for an utterance not already said; a later delta cannot open one."""
+
+        del ctx
+        return (
+            isinstance(event.data, DraftData)
+            and event.data.offset == 0
+            and bool(event.data.text)
+            and bool(event.id)
+            and event.id not in instance._finished
+        )
+
+    @staticmethod
+    def _is_current_draft(ctx: hsm.Context, instance: "Speaking", event: hsm.Event[typing.Any]) -> bool:
+        del ctx
+        utterance = instance._utterance
+        return (
+            isinstance(event.data, DraftData)
+            and utterance is not None
+            and not utterance.final
+            and event.id == utterance.id
+        )
+
+    @staticmethod
+    def _is_current_final(ctx: hsm.Context, instance: "Speaking", event: hsm.Event[typing.Any]) -> bool:
+        del ctx
+        utterance = instance._utterance
+        return (
+            isinstance(event.data, InputData)
+            and utterance is not None
+            and utterance.text is None
+            and event.id == utterance.id
+        )
+
+    @staticmethod
+    def _is_other_utterance(ctx: hsm.Context, instance: "Speaking", event: hsm.Event[typing.Any]) -> bool:
+        """Final text for an utterance other than the one being spoken, which has not already been said."""
+
+        utterance = instance._utterance
+        return utterance is not None and event.id != utterance.id and Speaking._is_new_input(ctx, instance, event)
+
+    @staticmethod
+    def _hold(ctx: hsm.Context, instance: "Speaking", event: hsm.Event[typing.Any]) -> None:
+        """One utterance at a time: another one's final text waits its turn (its drafts are not held: the final
+        text carries all of them, and nothing of that utterance can be said before its turn)."""
+
+        if event.id in instance._held:
+            instance._held[event.id] = event
+            return
+        if len(instance._held) >= _HELD_UTTERANCES:
+            Speaking._reply_failure(
+                ctx,
+                instance,
+                event.id,
+                Speaking._requester(instance, event),
+                ability.FailureData(message="Speaking is holding too many utterances; this one is refused."),
+                dict(event.metadata),
+            )
+            return
+        instance._held[event.id] = event
 
     @staticmethod
     def _clear(ctx: hsm.Context, instance: "Speaking", event: hsm.Event[typing.Any]) -> None:
-        del ctx, event
+        """Free again: forget the finished utterance (remembering its id), and take up the first one held."""
+
+        del event
+        if instance._utterance is not None:
+            instance._finished.append(instance._utterance.id)
         instance._utterance = None
+        if instance._held:
+            _, held = instance._held.popitem(last=False)
+            _ = hsm.dispatch(ctx, instance, held)
 
     @staticmethod
     def _begin(ctx: hsm.Context, instance: "Speaking", event: hsm.Event[typing.Any]) -> None:
         """Open the utterance: its text goes into a new pipe, read by the one encoding stream it will have.
 
-        The whole text is final, so the pipe is closed once it is written whole, however long it is (W3-20).
+        Final text is written whole, however long it is (W3-20), and the pipe closed; a draft's first delta is written
+        and the pipe left open. The pipe is open whenever the text is not final, so a write never fails, and nothing
+        written here can surface as an encoding failure.
         """
 
         del ctx
         data = event.data
-        assert isinstance(data, InputData)
+        assert isinstance(data, (InputData, DraftData))
         pipe = vocal.speech.Text()
-        pipe.write(data.text)
-        pipe.close()
         instance._sequence += 1
-        instance._utterance = _Utterance(
+        utterance = _Utterance(
             sequence=instance._sequence,
             id=event.id or uuid.uuid4().hex,
             requester=Speaking._requester(instance, event),
             metadata=dict(event.metadata),
-            text=data.text,
             started_at=instance._clock(),
             pipe=pipe,
             stream=instance._encoder.encode(pipe),
+            drafted=isinstance(data, DraftData),
             enroll=None if instance._enrolled or not instance._listening else bytearray(),
         )
+        pipe.write(data.text)
+        if isinstance(data, InputData):
+            utterance.text, utterance.final = data.text, True
+            pipe.close()
+        instance._utterance = utterance
+
+    @staticmethod
+    def _drafted(ctx: hsm.Context, instance: "Speaking", event: hsm.Event[typing.Any]) -> None:
+        """More of the text was written: what is new goes to the encoder; a repeat is ignored, a gap counted."""
+
+        del ctx
+        data = event.data
+        assert isinstance(data, DraftData)
+        utterance = instance._utterance
+        assert utterance is not None
+        written = len(utterance.pipe.written)
+        if data.offset > written:
+            _DRAFT_GAPS.add(1, {"outcome": "gap"})
+            return
+        utterance.pipe.write(data.text[written - data.offset :])
+
+    @staticmethod
+    def _finalized(ctx: hsm.Context, instance: "Speaking", event: hsm.Event[typing.Any]) -> None:
+        """The final text arrived: the rest of it is written and the text ends, unless it diverges from what was
+        drafted, in which case the text ends as drafted. What was said stays said; nothing is spliced or re-said."""
+
+        del ctx
+        data = event.data
+        assert isinstance(data, InputData)
+        utterance = instance._utterance
+        assert utterance is not None
+        written = utterance.pipe.written
+        used = data.text.startswith(written)
+        utterance.text = data.text
+        if not utterance.final:
+            if used:
+                utterance.pipe.write(data.text[len(written) :])
+            utterance.pipe.close()
+            utterance.final = True
+        if utterance.drafted:
+            _DRAFTED.add(1, {"outcome": "used" if used else "diverged"})
+
+    @staticmethod
+    def _is_drafting(ctx: hsm.Context, instance: "Speaking", event: hsm.Event[typing.Any]) -> bool:
+        del ctx, event
+        utterance = instance._utterance
+        return utterance is not None and not utterance.final
+
+    @staticmethod
+    def _draft_delay(ctx: hsm.Context, instance: "Speaking", event: hsm.Event[typing.Any]) -> datetime.timedelta:
+        del ctx, event
+        return instance._draft_timeout
+
+    @staticmethod
+    def _draft_timed_out(ctx: hsm.Context, instance: "Speaking", event: hsm.Event[typing.Any]) -> None:
+        """Nothing more was written: the text ends with what was written, which is still said, ``abandoned``."""
+
+        del ctx, event
+        utterance = instance._utterance
+        assert utterance is not None
+        utterance.pipe.close()
+        utterance.final, utterance.outcome = True, "abandoned"
 
     @staticmethod
     def _efference(ctx: hsm.Context, instance: "Speaking", utterance: _Utterance) -> None:
@@ -821,7 +1038,7 @@ class Speaking(ability.Ability[InputData, OutputData]):
         utterance = instance._utterance
         assert utterance is not None
         Speaking._drop(utterance, data.marks)
-        utterance.outcome = "failed"
+        utterance.final, utterance.outcome = True, "failed"
         utterance.failed_as = utterance.failed_as or "overloaded"
         Speaking._efference(ctx, instance, utterance)
 
@@ -853,7 +1070,7 @@ class Speaking(ability.Ability[InputData, OutputData]):
         utterance = instance._utterance
         assert utterance is not None
         Speaking._drop(utterance, list(utterance.marks))
-        utterance.outcome = "failed"
+        utterance.final, utterance.outcome = True, "failed"
         utterance.failed_as = utterance.failed_as or "timeout"
         Speaking._efference(ctx, instance, utterance)
 
@@ -956,6 +1173,10 @@ class Speaking(ability.Ability[InputData, OutputData]):
         return utterance is not None and Speaking._remaining(utterance) < instance._lookahead_seconds
 
     @staticmethod
+    def _has_room_drafting(ctx: hsm.Context, instance: "Speaking", event: hsm.Event[typing.Any]) -> bool:
+        return Speaking._has_room(ctx, instance, event) and Speaking._is_drafting(ctx, instance, event)
+
+    @staticmethod
     def _is_drained(ctx: hsm.Context, instance: "Speaking", event: hsm.Event[typing.Any]) -> bool:
         """Every commanded piece has been played or dropped."""
 
@@ -983,6 +1204,7 @@ class Speaking(ability.Ability[InputData, OutputData]):
         assert isinstance(event.data, _StreamEndedData)
         utterance = instance._utterance
         assert utterance is not None
+        utterance.final = True
         if not utterance.commands:
             # Non-blank text that yields no audio breaks the contract.
             utterance.encoding_outcome, utterance.failure, utterance.outcome = "failed", "invalid_response", "failed"
@@ -999,6 +1221,7 @@ class Speaking(ability.Ability[InputData, OutputData]):
         assert isinstance(data, _EncodingFailedData)
         utterance = instance._utterance
         assert utterance is not None
+        utterance.final = True
         utterance.encoding_outcome, utterance.failure, utterance.outcome = "failed", data.kind, "failed"
         utterance.failed_as = utterance.failed_as or utterance.failure
 
@@ -1014,6 +1237,7 @@ class Speaking(ability.Ability[InputData, OutputData]):
         del ctx, event
         utterance = instance._utterance
         assert utterance is not None
+        utterance.final = True
         utterance.encoding_outcome, utterance.failure, utterance.outcome = "failed", "timeout", "failed"
         utterance.failed_as = utterance.failed_as or utterance.failure
 
@@ -1051,7 +1275,7 @@ class Speaking(ability.Ability[InputData, OutputData]):
                 metadata=dict(event.metadata),
             ),
         )
-        utterance.outcome = "stopped"
+        utterance.final, utterance.outcome = True, "stopped"
         speaker = instance._speaker
         _ = hsm.dispatch(
             ctx,
@@ -1111,7 +1335,7 @@ class Speaking(ability.Ability[InputData, OutputData]):
 
         pcm = instance._encoder.format
         return OutputData(
-            text=utterance.text,
+            text=utterance.text if utterance.text is not None else utterance.pipe.written,
             spoken=utterance.spoken,
             unspoken=(
                 utterance.unplayed
@@ -1324,7 +1548,7 @@ class Speaking(ability.Ability[InputData, OutputData]):
         # Attached by its owner, Speaking takes up its mouth: a controller attaches to the transducer it drives.
         hsm.state(
             "initializing",
-            hsm.defer(InputEvent, attachment.AttachEvent, attachment.DetachEvent),
+            hsm.defer(InputEvent, DraftEvent, attachment.AttachEvent, attachment.DetachEvent),
             hsm.activity(ability.Ability._attach_composite_group),
             hsm.transition(
                 hsm.on(ability.Ability._composite_attachment_terminal_event),
@@ -1336,7 +1560,7 @@ class Speaking(ability.Ability[InputData, OutputData]):
         # Detached by its owner: the mouth is released with it.
         hsm.state(
             "detaching",
-            hsm.defer(InputEvent, attachment.AttachEvent, attachment.DetachEvent),
+            hsm.defer(InputEvent, DraftEvent, attachment.AttachEvent, attachment.DetachEvent),
             hsm.activity(ability.Ability._detach_composite_group),
             hsm.transition(
                 hsm.on(ability.Ability._composite_attachment_terminal_event),
@@ -1355,21 +1579,31 @@ class Speaking(ability.Ability[InputData, OutputData]):
         hsm.state(
             "wired",
             hsm.initial(hsm.target("idle")),
+            # One utterance at a time. Another one's final text is held explicitly rather than deferred, because the
+            # utterance being spoken must always take its own drafts and final text.
+            hsm.transition(hsm.on(InputEvent), hsm.guard(_is_other_utterance), hsm.effect(_hold)),
             hsm.state(
                 "idle",
                 hsm.entry(_clear),
                 hsm.transition(
                     hsm.on(InputEvent),
-                    hsm.guard(_has_speak_input),
+                    hsm.guard(_is_new_input),
                     hsm.effect(_begin),
-                    hsm.target("/Speaking/wired/speaking"),
+                    hsm.target("/Speaking/wired/speaking/streaming/next"),
+                ),
+                hsm.transition(
+                    hsm.on(DraftEvent),
+                    hsm.guard(_is_new_draft),
+                    hsm.effect(_begin),
+                    hsm.target("/Speaking/wired/speaking/streaming/next"),
                 ),
             ),
-            # One utterance at a time: a request for the next one waits until this one is recorded.
             hsm.state(
                 "speaking",
-                hsm.defer(InputEvent),
                 hsm.initial(hsm.target("streaming")),
+                # The text goes to the pipe as it arrives, whatever the stream is doing.
+                hsm.transition(hsm.on(DraftEvent), hsm.guard(_is_current_draft), hsm.effect(_drafted)),
+                hsm.transition(hsm.on(InputEvent), hsm.guard(_is_current_final), hsm.effect(_finalized)),
                 # Audio played while a piece is being pulled never changes the substate. Audio the mouth dropped
                 # unplayed ends the stream: the utterance has failed, and nothing more is commanded.
                 hsm.transition(hsm.on(audio.PlayedEvent), hsm.guard(_is_our_mark), hsm.effect(_played)),
@@ -1394,14 +1628,22 @@ class Speaking(ability.Ability[InputData, OutputData]):
                     hsm.initial(hsm.target("pulling")),
                     hsm.choice(
                         "next",
-                        hsm.transition(hsm.guard(_has_room), hsm.target("/Speaking/wired/speaking/streaming/pulling")),
+                        hsm.transition(
+                            hsm.guard(_has_room_drafting),
+                            hsm.target("/Speaking/wired/speaking/streaming/pulling/drafting"),
+                        ),
+                        hsm.transition(
+                            hsm.guard(_has_room), hsm.target("/Speaking/wired/speaking/streaming/pulling/final")
+                        ),
                         hsm.transition(hsm.target("/Speaking/wired/speaking/streaming/holding")),
                     ),
-                    # One chunk is pulled per entry, so the deadline measures the longest the encoder has gone
-                    # without producing one.
+                    # One chunk is pulled per entry. While the text is still being written the encoder may be
+                    # waiting for it, so ``drafting`` measures how long nothing more was written; once the text is
+                    # final, ``final`` measures the longest the encoder has gone without producing a chunk.
                     hsm.state(
                         "pulling",
                         hsm.activity(_pull),
+                        hsm.initial(hsm.target("final")),
                         hsm.transition(
                             hsm.on(_CommandedEvent),
                             hsm.guard(_is_current_command),
@@ -1420,10 +1662,41 @@ class Speaking(ability.Ability[InputData, OutputData]):
                             hsm.effect(_encoding_failed),
                             hsm.target("/Speaking/wired/speaking/streaming/ended"),
                         ),
-                        hsm.transition(
-                            hsm.after(_encode_idle_delay),
-                            hsm.effect(_encoding_timed_out),
-                            hsm.target("/Speaking/wired/speaking/streaming/ended"),
+                        hsm.choice(
+                            "written",
+                            hsm.transition(
+                                hsm.guard(_is_drafting),
+                                hsm.target("/Speaking/wired/speaking/streaming/pulling/drafting"),
+                            ),
+                            hsm.transition(hsm.target("/Speaking/wired/speaking/streaming/pulling/final")),
+                        ),
+                        hsm.state(
+                            "drafting",
+                            hsm.transition(
+                                hsm.on(DraftEvent),
+                                hsm.guard(_is_current_draft),
+                                hsm.effect(_drafted),
+                                hsm.target("/Speaking/wired/speaking/streaming/pulling/written"),
+                            ),
+                            hsm.transition(
+                                hsm.on(InputEvent),
+                                hsm.guard(_is_current_final),
+                                hsm.effect(_finalized),
+                                hsm.target("/Speaking/wired/speaking/streaming/pulling/written"),
+                            ),
+                            hsm.transition(
+                                hsm.after(_draft_delay),
+                                hsm.effect(_draft_timed_out),
+                                hsm.target("/Speaking/wired/speaking/streaming/pulling/final"),
+                            ),
+                        ),
+                        hsm.state(
+                            "final",
+                            hsm.transition(
+                                hsm.after(_encode_idle_delay),
+                                hsm.effect(_encoding_timed_out),
+                                hsm.target("/Speaking/wired/speaking/streaming/ended"),
+                            ),
                         ),
                     ),
                     # How the stream ended is recorded before the stream is left, and leaving it closes it.
@@ -1469,7 +1742,6 @@ class Speaking(ability.Ability[InputData, OutputData]):
             # that was already playing, or after ``stop_timeout`` if it never does.
             hsm.state(
                 "stopping",
-                hsm.defer(InputEvent),
                 hsm.initial(hsm.target("flushing")),
                 hsm.transition(hsm.on(audio.PlayedEvent), hsm.guard(_is_our_mark), hsm.effect(_played)),
                 hsm.transition(
@@ -1504,7 +1776,6 @@ class Speaking(ability.Ability[InputData, OutputData]):
             ),
             hsm.state(
                 "recording",
-                hsm.defer(InputEvent),
                 hsm.activity(_record_output),
                 hsm.transition(
                     hsm.on(_ConversationRecordedEvent),
@@ -1529,6 +1800,8 @@ class Speaking(ability.Ability[InputData, OutputData]):
 
 
 __all__ = [
+    "DraftData",
+    "DraftEvent",
     "EfferenceData",
     "EfferenceEvent",
     "InputData",

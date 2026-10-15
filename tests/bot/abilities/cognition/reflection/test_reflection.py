@@ -38,7 +38,9 @@ def test_reflection_revision_progresses_from_typed_child_terminals() -> None:
 
 class EmptyProcessor(processing.Processor):
     @typing.override
-    async def process(self, input: processing.InputData) -> processing.Events:
+    async def process(
+        self, input: processing.InputData, *, drafts: processing.DraftSink | None = None
+    ) -> processing.Events:
         del input
         return ()
 
@@ -54,7 +56,9 @@ class HangingProcessor(processing.Processor):
         self.first_output = first_output
 
     @typing.override
-    async def process(self, input: processing.InputData) -> processing.Events:
+    async def process(
+        self, input: processing.InputData, *, drafts: processing.DraftSink | None = None
+    ) -> processing.Events:
         del input
         self.calls += 1
         if self.calls == 1 and self.first_output is not None:
@@ -1261,7 +1265,9 @@ class CapturingProcessor(processing.Processor):
         self.inputs = []
 
     @typing.override
-    async def process(self, input: processing.InputData) -> processing.Events:
+    async def process(
+        self, input: processing.InputData, *, drafts: processing.DraftSink | None = None
+    ) -> processing.Events:
         self.inputs.append(input)
         return ()
 

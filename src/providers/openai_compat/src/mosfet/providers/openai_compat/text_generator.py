@@ -316,10 +316,20 @@ class TextGenerator(text.TextGenerator):
     image_capacity: media.ImageCapacity = dataclasses.field(default_factory=media.ImageCapacity)
 
     @typing.override
-    async def generate(self, input: text.InputData) -> text.OutputData:
-        return await asyncio.to_thread(self._generate_blocking, input)
+    async def generate(
+        self, input: text.InputData, *, deltas: collections.abc.Callable[[text.Delta], None] | None = None
+    ) -> text.OutputData:
+        """Generate the whole output; with ``deltas``, stream it and hand out each piece as it arrives."""
 
-    def _generate_blocking(self, input: text.InputData) -> text.OutputData:
+        if deltas is None:
+            return await asyncio.to_thread(self._generate_blocking, input)
+        return await self._generate_streaming(input, deltas)
+
+    def _request(
+        self, input: text.InputData
+    ) -> tuple[list[dict[str, object]], tuple[dict[str, object], ...], dict[str, object], object]:
+        """The wire request for ``input``, recorded as sent: messages, tools, extra body, and the client's model."""
+
         images = _admitted_images(input.messages, self.image_capacity)
         messages = [_message_to_openai(message) for message in input.messages]
         tools = _tools_to_openai(input.tools)
@@ -333,7 +343,30 @@ class TextGenerator(text.TextGenerator):
             tools=tools,
             image_count=len(images),
         )
-        extra_body = _extra_body_for_input(input, self.extra_body, self.reasoning_effort)
+        return messages, tools, _extra_body_for_input(input, self.extra_body, self.reasoning_effort), model
+
+    def _output(self, input: text.InputData, response: collections.abc.Mapping[str, object]) -> text.OutputData:
+        _record_usage(self.provider, response, _CHAT_USAGE_FIELDS)
+        message, finish_reason = _first_choice(response)
+        tool_calls = _tool_calls_from_message(message)
+        if finish_reason == "tool_calls" and not tool_calls:
+            raise TextGenerationError("OpenAI-compatible chat completion finished with no tool calls.")
+        if finish_reason != "tool_calls" and tool_calls:
+            raise TextGenerationError(
+                "OpenAI-compatible chat completion included tool calls without a tool_calls finish reason."
+            )
+        _validate_tool_selection(input, tool_calls)
+        response_model = response.get("model")
+        return text.OutputData(
+            content=_content_from_message(message, has_tool_calls=bool(tool_calls)),
+            reasoning=_reasoning_from_message(message),
+            provider=self.provider,
+            model=response_model if isinstance(response_model, str) else None,
+            tool_calls=tool_calls,
+        )
+
+    def _generate_blocking(self, input: text.InputData) -> text.OutputData:
+        messages, tools, extra_body, model = self._request(input)
         started = time.monotonic()
         response: collections.abc.Mapping[str, object] | None = None
         try:
@@ -343,29 +376,143 @@ class TextGenerator(text.TextGenerator):
                 response_format=self.response_format,
                 extra_body=extra_body,
             )
-            _record_usage(self.provider, response, _CHAT_USAGE_FIELDS)
-            message, finish_reason = _first_choice(response)
-            tool_calls = _tool_calls_from_message(message)
-            if finish_reason == "tool_calls" and not tool_calls:
-                raise TextGenerationError("OpenAI-compatible chat completion finished with no tool calls.")
-            if finish_reason != "tool_calls" and tool_calls:
-                raise TextGenerationError(
-                    "OpenAI-compatible chat completion included tool calls without a tool_calls finish reason."
-                )
-            _validate_tool_selection(input, tool_calls)
-            response_model = response.get("model")
-            output = text.OutputData(
-                content=_content_from_message(message, has_tool_calls=bool(tool_calls)),
-                reasoning=_reasoning_from_message(message),
-                provider=self.provider,
-                model=response_model if isinstance(response_model, str) else None,
-                tool_calls=tool_calls,
-            )
+            output = self._output(input, response)
         except Exception as error:
             _record_response(self.provider, model, response, started, error)
             raise
         _record_response(self.provider, model, response, started, None)
         return output
+
+    async def _generate_streaming(
+        self, input: text.InputData, deltas: collections.abc.Callable[[text.Delta], None]
+    ) -> text.OutputData:
+        """Stream the completion, hand out each delta, then map the assembled response as a whole one."""
+
+        messages, tools, extra_body, model = self._request(input)
+        started = time.monotonic()
+        response: collections.abc.Mapping[str, object] | None = None
+        try:
+            stream = _Assembly()
+            async for chunk in self.client.stream_chat_completion(
+                messages=messages,
+                tools=tools,
+                response_format=self.response_format,
+                extra_body=extra_body,
+            ):
+                for delta in stream.add(chunk):
+                    deltas(delta)
+            response = stream.response()
+            output = self._output(input, response)
+        except Exception as error:
+            _record_response(self.provider, model, response, started, error)
+            raise
+        _record_response(self.provider, model, response, started, None)
+        return output
+
+
+@dataclasses.dataclass(kw_only=True)
+class _Call:
+    """One tool call as its chunks arrive."""
+
+    id: str = ""
+    name: str = ""
+    arguments: list[str] = dataclasses.field(default_factory=list[str])
+
+
+@dataclasses.dataclass(kw_only=True)
+class _Assembly:
+    """A streamed chat completion put back together, chunk by chunk, into the shape of a whole response."""
+
+    content: list[str] = dataclasses.field(default_factory=list[str])
+    reasoning: list[str] = dataclasses.field(default_factory=list[str])
+    calls: dict[int, _Call] = dataclasses.field(default_factory=dict[int, _Call])
+    finish_reason: str | None = None
+    model: str | None = None
+    usage: object = None
+
+    def add(self, chunk: collections.abc.Mapping[str, object]) -> tuple[text.Delta, ...]:
+        """Fold one chunk in; return the deltas it carried, in order."""
+
+        model = chunk.get("model")
+        if isinstance(model, str):
+            self.model = model
+        if chunk.get("usage") is not None:
+            self.usage = chunk.get("usage")
+        choices = chunk.get("choices")
+        if not isinstance(choices, collections.abc.Sequence) or isinstance(choices, str | bytes | bytearray):
+            return ()
+        found: list[text.Delta] = []
+        for raw_choice in choices:
+            choice = _mapping(raw_choice, "OpenAI-compatible chat completion chunk choices must be objects.")
+            if choice.get("index", 0) != 0:
+                continue
+            finish_reason = choice.get("finish_reason")
+            if isinstance(finish_reason, str):
+                self.finish_reason = finish_reason
+            delta = choice.get("delta")
+            if delta is None:
+                continue
+            found.extend(self._fold(_mapping(delta, "OpenAI-compatible chat completion delta must be an object.")))
+        return tuple(found)
+
+    def _fold(self, delta: collections.abc.Mapping[str, object]) -> list[text.Delta]:
+        found: list[text.Delta] = []
+        content = delta.get("content")
+        if isinstance(content, str) and content:
+            self.content.append(content)
+            found.append(text.Delta(content=content))
+        for key in ("reasoning", "reasoning_content"):
+            reasoning = delta.get(key)
+            if isinstance(reasoning, str):
+                self.reasoning.append(reasoning)
+        raw_calls = delta.get("tool_calls")
+        if not isinstance(raw_calls, collections.abc.Sequence) or isinstance(raw_calls, str | bytes | bytearray):
+            return found
+        for raw_call in raw_calls:
+            piece = _mapping(raw_call, "OpenAI-compatible streamed tool calls must be objects.")
+            index = piece.get("index")
+            if not isinstance(index, int) or isinstance(index, bool) or index < 0:
+                raise TextGenerationError("OpenAI-compatible streamed tool calls must carry a non-negative index.")
+            call = self.calls.setdefault(index, _Call())
+            call_id = piece.get("id")
+            if isinstance(call_id, str) and call_id:
+                call.id = call_id
+            function = piece.get("function")
+            if function is None:
+                continue
+            function_mapping = _mapping(function, "OpenAI-compatible streamed tool call function must be an object.")
+            name = function_mapping.get("name")
+            if isinstance(name, str) and name:
+                call.name = name
+            arguments = function_mapping.get("arguments")
+            if isinstance(arguments, str) and arguments:
+                call.arguments.append(arguments)
+                found.append(text.Delta(tool_call=index, arguments=arguments))
+        return found
+
+    def response(self) -> dict[str, object]:
+        """The whole response these chunks add up to, in the non-streamed shape."""
+
+        if self.finish_reason is None:
+            raise TextGenerationError("OpenAI-compatible chat completion stream ended without a finish reason.")
+        message: dict[str, object] = {"role": "assistant", "content": "".join(self.content) if self.content else None}
+        if self.reasoning:
+            message["reasoning"] = "".join(self.reasoning)
+        if self.calls:
+            message["tool_calls"] = [
+                {
+                    "id": call.id,
+                    "type": "function",
+                    "function": {"name": call.name, "arguments": "".join(call.arguments)},
+                }
+                for _, call in sorted(self.calls.items())
+            ]
+        response: dict[str, object] = {"choices": [{"finish_reason": self.finish_reason, "message": message}]}
+        if self.model is not None:
+            response["model"] = self.model
+        if self.usage is not None:
+            response["usage"] = self.usage
+        return response
 
 
 def _responses_input(messages: collections.abc.Sequence[text.TextMessage]) -> list[dict[str, object]]:
@@ -480,7 +627,12 @@ class ResponsesTextGenerator(text.TextGenerator):
     image_capacity: media.ImageCapacity = dataclasses.field(default_factory=media.ImageCapacity)
 
     @typing.override
-    async def generate(self, input: text.InputData) -> text.OutputData:
+    async def generate(
+        self, input: text.InputData, *, deltas: collections.abc.Callable[[text.Delta], None] | None = None
+    ) -> text.OutputData:
+        """Generate the whole output. The Responses path here does not stream, so ``deltas`` is never called."""
+
+        del deltas
         return await asyncio.to_thread(self._generate_blocking, input)
 
     def _generate_blocking(self, input: text.InputData) -> text.OutputData:

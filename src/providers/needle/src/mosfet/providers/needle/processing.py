@@ -87,7 +87,9 @@ class Processor(processing.Processor):
         self._engine = engine if engine is not None else needle_engine.LocalEngine()
 
     @typing.override
-    async def process(self, input: processing.InputData) -> processing.Events:
+    async def process(
+        self, input: processing.InputData, *, drafts: processing.DraftSink | None = None
+    ) -> processing.Events:
         offered: dict[str, hsm.Event[typing.Any]] = {}
         for event in input.schemas:
             if not event.name or processing.is_deliberative_handoff_schema(getattr(event, "schema", None)):

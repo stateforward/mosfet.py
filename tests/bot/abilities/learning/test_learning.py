@@ -88,7 +88,9 @@ class LearningTestProcessor(processing.Processor):
         self.write = write
 
     @typing.override
-    async def process(self, input: processing.InputData) -> processing.Events:
+    async def process(
+        self, input: processing.InputData, *, drafts: processing.DraftSink | None = None
+    ) -> processing.Events:
         instructions = input.instructions or ""
         if instructions == reflection.CHANGE_INSTRUCTIONS or "changing phase" in instructions:
             return (
@@ -943,7 +945,9 @@ class _CapturingLearningProcessor(LearningTestProcessor):
         self.captured = []
 
     @typing.override
-    async def process(self, input: processing.InputData) -> processing.Events:
+    async def process(
+        self, input: processing.InputData, *, drafts: processing.DraftSink | None = None
+    ) -> processing.Events:
         self.captured.append(input.input)
         return await super().process(input)
 

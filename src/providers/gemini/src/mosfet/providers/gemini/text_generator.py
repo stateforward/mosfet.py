@@ -296,7 +296,9 @@ class TextGenerator(text.TextGenerator):
     image_capacity: media.ImageCapacity = dataclasses.field(default_factory=_image_capacity)
 
     @typing.override
-    async def generate(self, input: text.InputData) -> text.OutputData:
+    async def generate(
+        self, input: text.InputData, *, deltas: collections.abc.Callable[[text.Delta], None] | None = None
+    ) -> text.OutputData:
         return await asyncio.to_thread(self._generate_blocking, input)
 
     def _generate_blocking(self, input: text.InputData) -> text.OutputData:

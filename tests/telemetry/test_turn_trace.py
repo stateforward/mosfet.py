@@ -161,7 +161,9 @@ class _Unhandled(processing.Processor):
     """Intuition that recognizes nothing, so the turn cascades to reasoning."""
 
     @typing.override
-    async def process(self, input: processing.InputData) -> processing.Events:
+    async def process(
+        self, input: processing.InputData, *, drafts: processing.DraftSink | None = None
+    ) -> processing.Events:
         del input
         return typing.cast(processing.Events, typing.cast(object, processing.Result[processing.Events].unhandled()))
 
@@ -170,7 +172,9 @@ class _Reply(processing.Processor):
     """Reasoning that texts the visitor back, logging its model call the way a provider does."""
 
     @typing.override
-    async def process(self, input: processing.InputData) -> processing.Events:
+    async def process(
+        self, input: processing.InputData, *, drafts: processing.DraftSink | None = None
+    ) -> processing.Events:
         del input
         mosfet.telemetry.record_generator_request(provider="fake", model="fake-model", messages=[])
         _ = await asyncio.to_thread(lambda: None)
@@ -188,7 +192,9 @@ class _NoChange(processing.Processor):
     """Reflection that selects no behavior to author."""
 
     @typing.override
-    async def process(self, input: processing.InputData) -> processing.Events:
+    async def process(
+        self, input: processing.InputData, *, drafts: processing.DraftSink | None = None
+    ) -> processing.Events:
         del input
         return ()
 

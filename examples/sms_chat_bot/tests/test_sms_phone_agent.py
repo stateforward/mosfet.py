@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import collections.abc
 import typing
 
 import mosfet.abilities.language.text as text_generation
@@ -12,21 +13,36 @@ from sms_chat_bot_example.sms_chat_bot import SMSChatBotBody
 
 class EchoTextGenerator(text_generation.TextGenerator):
     @typing.override
-    async def generate(self, input: text_generation.InputData) -> text_generation.OutputData:
+    async def generate(
+        self,
+        input: text_generation.InputData,
+        *,
+        deltas: collections.abc.Callable[[text_generation.Delta], None] | None = None,
+    ) -> text_generation.OutputData:
         greeting = input.messages[-1]
         return text_generation.OutputData(content=f"{greeting.content} from the bot.")
 
 
 class FailingTextGenerator(text_generation.TextGenerator):
     @typing.override
-    async def generate(self, input: text_generation.InputData) -> text_generation.OutputData:
+    async def generate(
+        self,
+        input: text_generation.InputData,
+        *,
+        deltas: collections.abc.Callable[[text_generation.Delta], None] | None = None,
+    ) -> text_generation.OutputData:
         del input
         raise RuntimeError("Text generation failed.")
 
 
 class EmptyTextGenerator(text_generation.TextGenerator):
     @typing.override
-    async def generate(self, input: text_generation.InputData) -> text_generation.OutputData:
+    async def generate(
+        self,
+        input: text_generation.InputData,
+        *,
+        deltas: collections.abc.Callable[[text_generation.Delta], None] | None = None,
+    ) -> text_generation.OutputData:
         del input
         return text_generation.OutputData(content="")
 

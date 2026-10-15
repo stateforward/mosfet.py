@@ -124,7 +124,9 @@ class ProbeProcessor(processing.Processor):
         self.calls = []
 
     @typing.override
-    async def process(self, input: processing.InputData) -> processing.Events:
+    async def process(
+        self, input: processing.InputData, *, drafts: processing.DraftSink | None = None
+    ) -> processing.Events:
         self.calls.append(input)
         return processing.coerce_event_selections(no_output("probe")) or ()
 
@@ -146,7 +148,9 @@ class IgnoreProcessor(processing.Processor):
         self.calls = []
 
     @typing.override
-    async def process(self, input: processing.InputData) -> processing.Events:
+    async def process(
+        self, input: processing.InputData, *, drafts: processing.DraftSink | None = None
+    ) -> processing.Events:
         self.calls.append(input)
         return processing.coerce_event_selections(no_output(f"priority:{input_priority(input.input)}")) or ()
 
@@ -209,7 +213,9 @@ class SequenceProcessor(processing.Processor):
         self.outputs = [_as_output_data(item) for item in outputs]
 
     @typing.override
-    async def process(self, input: processing.InputData) -> processing.Events:
+    async def process(
+        self, input: processing.InputData, *, drafts: processing.DraftSink | None = None
+    ) -> processing.Events:
         self.calls.append(input)
         if not self.outputs:
             # Out of scripted answers is not an error; see BlockingSequenceProcessor.
@@ -239,7 +245,9 @@ class CyclingSelectionProcessor(processing.Processor):
         self.outputs = outputs
 
     @typing.override
-    async def process(self, input: processing.InputData) -> processing.Events:
+    async def process(
+        self, input: processing.InputData, *, drafts: processing.DraftSink | None = None
+    ) -> processing.Events:
         self.calls.append(input)
         output = self.outputs[(len(self.calls) - 1) % len(self.outputs)]
         return processing.coerce_event_selections(output) or ()
@@ -260,7 +268,9 @@ class BlockingSequenceProcessor(processing.Processor):
         self.block_on_call = block_on_call
 
     @typing.override
-    async def process(self, input: processing.InputData) -> processing.Events:
+    async def process(
+        self, input: processing.InputData, *, drafts: processing.DraftSink | None = None
+    ) -> processing.Events:
         self.calls.append(input)
         if len(self.calls) == self.block_on_call:
             _ = await self.release.wait()
@@ -293,7 +303,9 @@ class BlockingProcessor(processing.Processor):
         self.release = release
 
     @typing.override
-    async def process(self, input: processing.InputData) -> processing.Events:
+    async def process(
+        self, input: processing.InputData, *, drafts: processing.DraftSink | None = None
+    ) -> processing.Events:
         priority = input_priority(input.input)
         self.calls.append(priority)
         if len(self.calls) == 1:
@@ -313,7 +325,9 @@ class BlockingAbility(processing.Processing):
 
 class FailingProcessor(processing.Processor):
     @typing.override
-    async def process(self, input: processing.InputData) -> processing.Events:
+    async def process(
+        self, input: processing.InputData, *, drafts: processing.DraftSink | None = None
+    ) -> processing.Events:
         del input
         raise RuntimeError("ability unavailable")
 
@@ -330,7 +344,9 @@ class NestedPrimaryProcessor(processing.Processor):
         self.calls = []
 
     @typing.override
-    async def process(self, input: processing.InputData) -> processing.Events:
+    async def process(
+        self, input: processing.InputData, *, drafts: processing.DraftSink | None = None
+    ) -> processing.Events:
         self.calls.append(input)
         return processing.coerce_event_selections(no_output("nested affordance")) or ()
 
@@ -352,7 +368,9 @@ class NestedPrimaryAbility(processing.Processing):
 
 class HangingProcessor(processing.Processor):
     @typing.override
-    async def process(self, input: processing.InputData) -> processing.Events:
+    async def process(
+        self, input: processing.InputData, *, drafts: processing.DraftSink | None = None
+    ) -> processing.Events:
         del input
         _ = await asyncio.Event().wait()
         raise AssertionError("unreachable")
@@ -372,7 +390,9 @@ class CancellableHangingProcessor(processing.Processor):
         self.cancelled = False
 
     @typing.override
-    async def process(self, input: processing.InputData) -> processing.Events:
+    async def process(
+        self, input: processing.InputData, *, drafts: processing.DraftSink | None = None
+    ) -> processing.Events:
         priority = input_priority(input.input)
         self.calls.append(priority)
         if len(self.calls) > 1:
@@ -429,7 +449,9 @@ class CapturingCognition(cognition.Cognition):
 
 class _NoopReasoningProcessor(processing.Processor):
     @typing.override
-    async def process(self, input: processing.InputData) -> processing.Events:
+    async def process(
+        self, input: processing.InputData, *, drafts: processing.DraftSink | None = None
+    ) -> processing.Events:
         del input
         return ()
 

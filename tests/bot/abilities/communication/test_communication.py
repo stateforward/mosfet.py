@@ -6,7 +6,9 @@ import asyncio
 import collections.abc
 import dataclasses
 import datetime
+import inspect
 import itertools
+import json
 import re
 import pathlib
 import typing
@@ -415,10 +417,145 @@ def test_speaking_progress_keeps_a_long_response_alive_past_the_idle_timeout() -
     assert [item.id for item in spoken] == ["long-response"]
 
 
+def _draft(
+    text: str, response_id: str, *, offset: int = 0, item: int = 0, seq: int = 0
+) -> hsm.Event[processing.DraftData]:
+    return communication.DraftEvent.with_data_and_id(
+        processing.DraftData(text=text, offset=offset, event=communication.RespondEvent.name, item=item, seq=seq),
+        response_id,
+    )
+
+
+class ForwardRecordingSpeaking(speaking.Speaking):
+    """A real Speaking that also notes every draft, final text and stop Communication forwards to it."""
+
+    def __init__(self, encoder: Script) -> None:
+        super().__init__(
+            encoder=encoder,
+            speaker=audio.Speaker(frame=datetime.timedelta(milliseconds=10), clock=_instant()),
+            voice_id="tts:warm",
+        )
+        self.forwarded: list[hsm.Event[typing.Any]] = []
+
+    @typing.override
+    def dispatch(self, ctx: hsm.Context, event: hsm.Event[typing.Any]) -> collections.abc.Awaitable[bool]:
+        if isinstance(event.data, (speaking.InputData, speaking.DraftData, speaking.StopData)):
+            self.forwarded.append(event)
+        return super().dispatch(ctx, event)
+
+
+def test_respond_is_marked_for_drafting_through_communication_draft() -> None:
+    marker = communication.RespondData.__draft__
+    assert marker == processing.Draft(field="text", event=communication.DraftEvent)
+    assert communication.DraftEvent.name == "bot.ability.communication.draft"
+    assert communication.DraftEvent.kind != processing.EventKind
+    assert "__draft__" not in json.dumps(communication.RespondData.model_json_schema())
+
+
+def test_drafts_open_the_response_and_reach_speaking_under_its_id_until_the_final_text() -> None:
+    async def run() -> tuple[list[tuple[str, str, str, int | None]], list[hsm.Event[typing.Any]], str]:
+        ctx = Environment()
+        voice = ForwardRecordingSpeaking(Script())
+        comm = communication.Communication(active_conversation=_conversation(), speaking=voice)
+        collector = await _owned(ctx, voice, comm)
+        _ = await hsm.dispatch(ctx, comm, _draft("Sure. I can", "op-1", seq=0))
+        await _wait_until(lambda: "/behavior/responding" in (comm.state() or ""))
+        _ = await hsm.dispatch(ctx, comm, _draft(" help.", "op-1", offset=11, seq=1))
+        # A draft of some other selection is not this response's text.
+        _ = await hsm.dispatch(
+            ctx,
+            comm,
+            communication.DraftEvent.with_data_and_id(
+                processing.DraftData(text="not a response", offset=0, event="bot.ability.other", item=1, seq=2),
+                "op-1",
+            ),
+        )
+        _ = await hsm.dispatch(ctx, comm, _respond("Sure. I can help.", "op-1"))
+        await _wait_until(lambda: bool(_spoken(collector)))
+        await _wait_until(lambda: "/behavior/active" in (comm.state() or ""))
+        forwarded = [
+            (event.name, event.id or "", typing.cast(typing.Any, event.data).text, getattr(event.data, "offset", None))
+            for event in voice.forwarded
+        ]
+        return forwarded, _spoken(collector), hsm.id(comm)
+
+    forwarded, spoken, comm_id = asyncio.run(run())
+    assert forwarded == [
+        # Each delta goes on unchanged, at its offset; then the final text.
+        (speaking.DraftEvent.name, "op-1", "Sure. I can", 0),
+        (speaking.DraftEvent.name, "op-1", " help.", 11),
+        (speaking.InputEvent.name, "op-1", "Sure. I can help.", None),
+    ]
+    assert [item.id for item in spoken] == ["op-1"]
+    output = spoken[0].data
+    assert isinstance(output, speaking.OutputData)
+    assert (output.text, output.spoken, output.outcome) == ("Sure. I can help.", "Sure. I can help.", "completed")
+    del comm_id
+
+
+def test_another_response_waits_for_the_one_being_spoken_even_while_this_one_is_still_drafted() -> None:
+    async def run() -> list[tuple[str | None, str]]:
+        ctx = Environment()
+        voice = ForwardRecordingSpeaking(Script())
+        comm = communication.Communication(active_conversation=_conversation(), speaking=voice)
+        collector = await _owned(ctx, voice, comm)
+        _ = await hsm.dispatch(ctx, comm, _draft("First", "op-1"))
+        _ = await hsm.dispatch(ctx, comm, _draft("Second", "op-2"))
+        _ = await hsm.dispatch(ctx, comm, _respond("Second.", "op-2"))
+        _ = await hsm.dispatch(ctx, comm, _draft(" one", "op-1", offset=5, seq=1))
+        _ = await hsm.dispatch(ctx, comm, _respond("First one.", "op-1"))
+        await _wait_until(lambda: len(_spoken(collector)) == 2)
+        return [(item.id, typing.cast(speaking.OutputData, item.data).spoken) for item in _spoken(collector)]
+
+    assert asyncio.run(run()) == [("op-1", "First one."), ("op-2", "Second.")]
+
+
+def test_a_draft_for_a_finished_response_is_ignored_and_counted(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with metric_reader.recording(tmp_path, monkeypatch) as metrics:
+        before = sum(point.value for point in metrics.points("bot.communication.response.late.count"))
+
+        async def run() -> tuple[list[str], str]:
+            ctx = Environment()
+            script = Script()
+            voice = _speaking(script)
+            comm = communication.Communication(active_conversation=_conversation(), speaking=voice)
+            collector = await _owned(ctx, voice, comm)
+            _ = await hsm.dispatch(ctx, comm, _respond("Said once.", "once"))
+            await _wait_until(lambda: bool(_spoken(collector)))
+            await _wait_until(lambda: "/behavior/active" in (comm.state() or ""))
+            _ = await hsm.dispatch(ctx, comm, _draft("Said once. And again", "once"))
+            await asyncio.sleep(0.05)
+            return script.calls, comm.state() or ""
+
+        calls, state = asyncio.run(run())
+        late = sum(point.value for point in metrics.points("bot.communication.response.late.count")) - before
+
+    assert calls == ["Said once."]
+    assert state.endswith("/active")
+    assert late == 1
+
+
+def test_the_response_deadline_outlasts_how_long_speaking_waits_for_more_drafted_text() -> None:
+    respond_deadline = typing.cast(
+        datetime.timedelta,
+        inspect.signature(communication.Communication).parameters["response_idle_timeout"].default,
+    )
+    draft_deadline = typing.cast(
+        datetime.timedelta, inspect.signature(speaking.Speaking).parameters["draft_timeout"].default
+    )
+    assert respond_deadline == datetime.timedelta(seconds=15)
+    assert draft_deadline == datetime.timedelta(seconds=10)
+    assert respond_deadline > draft_deadline
+
+
 def test_a_finished_response_cannot_be_reopened_by_a_late_respond(
     tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     with metric_reader.recording(tmp_path, monkeypatch) as metrics:
+        # Points are cumulative for the process: measure the difference this test makes.
+        before = sum(point.value for point in metrics.points("bot.communication.response.late.count"))
 
         async def run() -> tuple[list[str], list[hsm.Event[typing.Any]]]:
             ctx = Environment()
@@ -434,7 +571,7 @@ def test_a_finished_response_cannot_be_reopened_by_a_late_respond(
             return script.calls, _spoken(collector)
 
         calls, spoken = asyncio.run(run())
-        late = sum(point.value for point in metrics.points("bot.communication.response.late.count"))
+        late = sum(point.value for point in metrics.points("bot.communication.response.late.count")) - before
 
     assert calls == ["Said once."]
     assert len(spoken) == 1

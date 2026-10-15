@@ -1,6 +1,7 @@
 """``vision.description``: the ``Description`` wrapper and ``GenerativeDescriber`` over any text generator."""
 
 import asyncio
+import collections.abc
 import datetime
 import typing
 
@@ -32,7 +33,9 @@ class FakeGenerator(text.TextGenerator):
         self.inputs = []
 
     @typing.override
-    async def generate(self, input: text.InputData) -> text.OutputData:
+    async def generate(
+        self, input: text.InputData, *, deltas: collections.abc.Callable[[text.Delta], None] | None = None
+    ) -> text.OutputData:
         self.inputs.append(input)
         return text.OutputData(content=self.reply)
 

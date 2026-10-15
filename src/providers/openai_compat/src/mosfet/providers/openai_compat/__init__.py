@@ -1,4 +1,5 @@
 from .client import (
+    AsyncOpenAIClient,
     ChatCompletionClient,
     OpenAI,
     ChatClient,
@@ -17,6 +18,7 @@ from .text_generator import ResponsesTextGenerator, UnsupportedReasoningEffortEr
 __version__ = "0.1.0"
 
 __all__ = [
+    "AsyncOpenAIClient",
     "ChatCompletionClient",
     "OpenAI",
     "ChatClient",

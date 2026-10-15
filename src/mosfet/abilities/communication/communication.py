@@ -23,6 +23,7 @@ from mosfet import event
 import mosfet
 from mosfet.abilities import ability
 from mosfet.abilities import cognition
+from mosfet.abilities import processing
 from mosfet.abilities import speaking
 from . import conversation
 from mosfet.protocols import attachment
@@ -38,11 +39,14 @@ _RESPONSE_IDLE_TIMEOUT = datetime.timedelta(seconds=15)
 _CLOSED_RESPONSES = 16
 """How many finished response ids Communication remembers, so a late copy of one can never reopen it."""
 
+_HELD_RESPONSES = 16
+"""How many other responses Communication holds while one is being spoken; past it, a new one is refused."""
+
 _METER = metrics.get_meter("mosfet.abilities.communication")
 _LATE = _METER.create_counter(
     "bot.communication.response.late.count",
     unit="{event}",
-    description="Responses that arrived for a response id Communication had already finished; ignored.",
+    description="Responses or drafts that arrived for a response id Communication had already finished; ignored.",
 )
 
 
@@ -78,13 +82,27 @@ InputEvent = hsm.Event[TurnData](
 )
 
 
+DraftEvent = hsm.Event[processing.DraftData](
+    name="bot.ability.communication.draft",
+    kind=hsm.EventKind,
+    schema=processing.DraftData,
+)
+"""Text newly written into a ``respond`` the model is still writing (an append-only delta), under the selection's id.
+Not model-callable: Processing dispatches it while the selection streams, and the final ``respond`` under the same id
+follows."""
+
+
 class RespondData(pydantic.BaseModel):
     """Semantic response selected by cognition for the current communication.
 
     Communication currently delivers this action through its injected Speaking ability. The
     selected payload is deliberately text-only: cognition chooses to respond, while Speaking
-    owns speech encoding and playout.
+    owns speech encoding and playout. ``text`` is marked for drafting: while a model is still writing
+    it, Processing hands it here as :data:`DraftEvent`, so speech can start before the response
+    is complete. The marker is not part of the schema the model sees.
     """
+
+    __draft__: typing.ClassVar[processing.Draft] = processing.Draft(field="text", event=DraftEvent)
 
     model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
         frozen=True,
@@ -231,8 +249,11 @@ class Communication(ability.Ability[TurnData, object]):
     - ``active``: route :data:`InputEvent` to ``_active_conversation`` and accept
       :data:`RespondEvent` for the configured Speaking route; forward terminals.
     - ``responding``: the response's text has gone to the injected Speaking ability as
-      ``speaking.input`` under the response id; Communication forwards Speaking's terminal for that
-      id to its owner. ``waiting`` re-enters on every ``speaking.progress`` for the response, so a long
+      ``speaking.input`` (or, while the model is still writing it, ``speaking.draft``, each
+      append-only delta forwarded unchanged) under the response id; drafts and the final ``respond``
+      for that id keep being forwarded, and Communication forwards Speaking's terminal for that id to
+      its owner. The ``respond`` for another response is held (bounded) until this one ends, then
+      handled in order; its drafts are not held, because the ``respond`` carries all of their text. ``waiting`` re-enters on every ``speaking.progress`` for the response, so a long
       spoken reply is never cut off; ``response_idle_timeout`` of silence from Speaking ends it as
       failed and stops it (``speaking.stop`` for the response id), so Speaking does not go on saying a
       response whose failure was already reported. :data:`StopEvent` is enabled only here, so it is offered only while a response is being
@@ -256,6 +277,9 @@ class Communication(ability.Ability[TurnData, object]):
     # responses that finished, so a late copy of one can never reopen it.
     _response_id: str
     _closed_responses: collections.deque[str]
+    # Durable: the respond of each other response that arrived while one was being spoken, in arrival order;
+    # released one at a time as Communication becomes free.
+    _held_responses: collections.OrderedDict[str, hsm.Event[typing.Any]]
     failed_event: typing.ClassVar[hsm.Event[ability.FailureData]] = FailedEvent
 
     @staticmethod
@@ -281,7 +305,8 @@ class Communication(ability.Ability[TurnData, object]):
             conversations: Conversations Communication may activate.
             speaking: The Speaking ability responses are said through.
             response_idle_timeout: The longest Speaking may go without a sign of progress on a response before
-                Communication gives up on it. It must exceed Speaking's own longest silence inside an utterance.
+                Communication gives up on it. It must exceed Speaking's own longest silence inside an utterance,
+                including how long it waits for more drafted text (Speaking's ``draft_timeout``).
 
         Raises:
             TypeError: ``speaking`` is not a Speaking ability.
@@ -303,6 +328,7 @@ class Communication(ability.Ability[TurnData, object]):
         self._response_idle_timeout = response_idle_timeout
         self._response_id = ""
         self._closed_responses = collections.deque(maxlen=_CLOSED_RESPONSES)
+        self._held_responses = collections.OrderedDict()
         self._attachment_group = attachment.Group(chosen)
 
     @staticmethod
@@ -363,14 +389,37 @@ class Communication(ability.Ability[TurnData, object]):
     # ----- responding: Communication forwards the response to Speaking and follows its progress ---------------
 
     @staticmethod
+    def _is_response_text(event: hsm.Event[typing.Any]) -> bool:
+        """A respond, or a draft of one with some newly written text: the two ways a response's text arrives."""
+
+        data = event.data
+        if isinstance(data, RespondData):
+            return True
+        return isinstance(data, processing.DraftData) and data.event == RespondEvent.name and bool(data.text)
+
+    @staticmethod
     def _is_new_response(ctx: hsm.Context, instance: "Communication", event: hsm.Event[typing.Any]) -> bool:
         del ctx
-        return isinstance(event.data, RespondData) and (not event.id or event.id not in instance._closed_responses)
+        if not Communication._is_response_text(event):
+            return False
+        if isinstance(event.data, processing.DraftData) and not event.id:
+            # A draft is only ever correlated with its final respond by id.
+            return False
+        return not event.id or event.id not in instance._closed_responses
 
     @staticmethod
     def _is_late_response(ctx: hsm.Context, instance: "Communication", event: hsm.Event[typing.Any]) -> bool:
         del ctx
-        return isinstance(event.data, RespondData) and bool(event.id) and event.id in instance._closed_responses
+        return Communication._is_response_text(event) and bool(event.id) and event.id in instance._closed_responses
+
+    @staticmethod
+    def _is_current_response(ctx: hsm.Context, instance: "Communication", event: hsm.Event[typing.Any]) -> bool:
+        del ctx
+        return Communication._is_response_text(event) and bool(event.id) and event.id == instance._response_id
+
+    @staticmethod
+    def _is_other_response(ctx: hsm.Context, instance: "Communication", event: hsm.Event[typing.Any]) -> bool:
+        return Communication._is_new_response(ctx, instance, event) and event.id != instance._response_id
 
     @staticmethod
     def _count_late_response(ctx: hsm.Context, instance: "Communication", event: hsm.Event[typing.Any]) -> None:
@@ -378,14 +427,20 @@ class Communication(ability.Ability[TurnData, object]):
         _LATE.add(1)
 
     @staticmethod
-    def _open_response(ctx: hsm.Context, instance: "Communication", event: hsm.Event[typing.Any]) -> None:
-        """Hold the response's id for as long as it is being spoken, and hand its text to Speaking."""
+    def _forward_text(
+        ctx: hsm.Context, instance: "Communication", event: hsm.Event[typing.Any], response_id: str
+    ) -> None:
+        """Hand the response's text to Speaking under the response id: a draft as a draft, the final as the input."""
 
         data = event.data
-        assert isinstance(data, RespondData)
-        response_id = event.id or uuid.uuid4().hex
-        instance._response_id = response_id
         target = instance._speaking
+        forwarded: hsm.Event[typing.Any]
+        if isinstance(data, RespondData):
+            forwarded = speaking.InputEvent.with_data(speaking.InputData(text=data.text))
+        else:
+            assert isinstance(data, processing.DraftData)
+            # The delta goes on unchanged: what was newly written, at the offset it was written at.
+            forwarded = speaking.DraftEvent.with_data(speaking.DraftData(text=data.text, offset=data.offset))
         with span.operation(
             "bot.communication.response.dispatch",
             scope="bot.abilities.communication",
@@ -397,13 +452,66 @@ class Communication(ability.Ability[TurnData, object]):
                 ctx,
                 target,
                 dataclasses.replace(
-                    speaking.InputEvent.with_data(speaking.InputData(text=data.text)),
+                    forwarded,
                     id=response_id,
                     source=hsm.id(instance),
                     target=hsm.id(target),
                     metadata=dict(event.metadata),
                 ),
             )
+
+    @staticmethod
+    def _open_response(ctx: hsm.Context, instance: "Communication", event: hsm.Event[typing.Any]) -> None:
+        """Hold the response's id for as long as it is being spoken, and hand the text written so far to Speaking."""
+
+        response_id = event.id or uuid.uuid4().hex
+        instance._response_id = response_id
+        _ = instance._held_responses.pop(response_id, None)
+        Communication._forward_text(ctx, instance, event, response_id)
+
+    @staticmethod
+    def _continue_response(ctx: hsm.Context, instance: "Communication", event: hsm.Event[typing.Any]) -> None:
+        """More of the response being spoken, or its final text: on to Speaking under the same id."""
+
+        Communication._forward_text(ctx, instance, event, instance._response_id)
+
+    @staticmethod
+    def _hold_response(ctx: hsm.Context, instance: "Communication", event: hsm.Event[typing.Any]) -> None:
+        """Another response waits its turn: its respond is kept. Its drafts are not: the respond carries all of their
+        text, and nothing of that response can be said before its turn."""
+
+        if not isinstance(event.data, RespondData):
+            return
+        if event.id in instance._held_responses:
+            instance._held_responses[event.id] = event
+            return
+        if len(instance._held_responses) >= _HELD_RESPONSES:
+            failure = ability.FailureData(message="Communication is holding too many responses; this one is refused.")
+            with span.operation(
+                "bot.communication.response.terminal",
+                scope="bot.abilities.communication",
+                component="communication",
+                stage="response_terminal",
+            ) as active:
+                span.record_failure(active, "overloaded")
+                terminal = dataclasses.replace(
+                    instance.failed_event.with_data_and_id(failure, event.id),
+                    source=hsm.id(instance),
+                    target=Communication._attachment_owner_id(instance),
+                )
+                _ = hsm.dispatch(ctx, instance, ability.TerminalErrorEvent.with_data(terminal))
+            return
+        instance._held_responses[event.id] = event
+
+    @staticmethod
+    def _release_held_response(ctx: hsm.Context, instance: "Communication", event: hsm.Event[typing.Any]) -> None:
+        """Free again: the first held response is handled now, as if it had just arrived."""
+
+        del event
+        if not instance._held_responses:
+            return
+        _, held = instance._held_responses.popitem(last=False)
+        _ = hsm.dispatch(ctx, instance, held)
 
     @staticmethod
     def _has_stop(ctx: hsm.Context, instance: "Communication", event: hsm.Event[typing.Any]) -> bool:
@@ -600,6 +708,7 @@ class Communication(ability.Ability[TurnData, object]):
         ),
         hsm.state(
             "active",
+            hsm.entry(_release_held_response),
             # Admit / route speech (and other conversation-shaped input) to the active talk.
             hsm.transition(
                 hsm.on(InputEvent),
@@ -607,13 +716,13 @@ class Communication(ability.Ability[TurnData, object]):
                 hsm.effect(_route_to_active_conversation),
             ),
             hsm.transition(
-                hsm.on(RespondEvent),
+                hsm.on(RespondEvent, DraftEvent),
                 hsm.guard(_is_new_response),
                 hsm.effect(_open_response),
                 hsm.target("/Communication/responding"),
             ),
             hsm.transition(
-                hsm.on(RespondEvent),
+                hsm.on(RespondEvent, DraftEvent),
                 hsm.guard(_is_late_response),
                 hsm.effect(_count_late_response),
             ),
@@ -637,9 +746,20 @@ class Communication(ability.Ability[TurnData, object]):
         hsm.state(
             "responding",
             hsm.exit(_close_response),
-            # Other responses wait their turn; heard speech waits until this one is said or ends.
-            hsm.defer(InputEvent, RespondEvent),
+            # Heard speech waits until this response is said or ends. Other responses are held explicitly rather
+            # than deferred: this response's own drafts and final text must always be taken here.
+            hsm.defer(InputEvent),
             hsm.initial(hsm.target("waiting")),
+            hsm.transition(
+                hsm.on(RespondEvent, DraftEvent),
+                hsm.guard(_is_other_response),
+                hsm.effect(_hold_response),
+            ),
+            hsm.transition(
+                hsm.on(RespondEvent, DraftEvent),
+                hsm.guard(_is_late_response),
+                hsm.effect(_count_late_response),
+            ),
             hsm.transition(
                 hsm.on(speaking.OutputEvent),
                 hsm.guard(_is_response_output),
@@ -654,7 +774,13 @@ class Communication(ability.Ability[TurnData, object]):
             ),
             hsm.state(
                 "waiting",
-                # Re-entering restarts the silence deadline: Speaking is still making progress.
+                # Re-entering restarts the silence deadline: the response is still being written or said.
+                hsm.transition(
+                    hsm.on(RespondEvent, DraftEvent),
+                    hsm.guard(_is_current_response),
+                    hsm.effect(_continue_response),
+                    hsm.target("/Communication/responding/waiting"),
+                ),
                 hsm.transition(
                     hsm.on(speaking.ProgressEvent),
                     hsm.guard(_is_response_progress),
@@ -701,6 +827,7 @@ __all__ = [
     "ActivateData",
     "ActivateEvent",
     "Communication",
+    "DraftEvent",
     "InputEvent",
     "RespondData",
     "RespondEvent",

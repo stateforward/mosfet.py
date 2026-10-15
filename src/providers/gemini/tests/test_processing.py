@@ -42,7 +42,12 @@ class RecordingGenerator(text.TextGenerator):
     image_capacity: ImageCapacity = dataclasses.field(default_factory=ImageCapacity)
 
     @typing.override
-    async def generate(self, input: text.generation.InputData) -> text.generation.OutputData:
+    async def generate(
+        self,
+        input: text.generation.InputData,
+        *,
+        deltas: collections.abc.Callable[[text.generation.Delta], None] | None = None,
+    ) -> text.generation.OutputData:
         self.inputs.append(input)
         return text.generation.OutputData(
             content=self.content,

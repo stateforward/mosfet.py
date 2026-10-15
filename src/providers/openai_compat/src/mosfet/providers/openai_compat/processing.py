@@ -621,7 +621,16 @@ class Processor(processing.Processor):
         self.image_capacity = generator.image_capacity
 
     @typing.override
-    async def process(self, input: processing.InputData) -> processing.Events:
+    async def process(
+        self, input: processing.InputData, *, drafts: processing.DraftSink | None = None
+    ) -> processing.Events:
+        """Select events with one ``dispatch`` tool call.
+
+        With ``drafts``, the call is streamed and its arguments are read as they arrive
+        (:class:`processing.DraftParser`), so marked fields reach ``drafts`` while the model is still writing them.
+        The selection returned is parsed from the whole call, exactly as without drafts.
+        """
+
         instructions = (input.instructions or "").strip()
         if not instructions:
             raise ProcessingError("OpenAI-compatible processing requires non-blank instructions stamped by Processing.")
@@ -649,7 +658,17 @@ class Processor(processing.Processor):
                 else text.generation.ToolSelectionPolicy.NONE
             ),
         )
-        output = await self._generator.generate(generation_input)
+        parser = processing.DraftParser(input.schemas)
+
+        def draft(delta: text.generation.Delta) -> None:
+            # Only the first tool call is the dispatch call being drafted.
+            if drafts is not None and delta.tool_call == 0 and delta.arguments:
+                for written in parser.feed(delta.arguments):
+                    drafts(written)
+
+        output = await self._generator.generate(
+            generation_input, deltas=draft if drafts is not None and operation_tools else None
+        )
         try:
             if output.tool_calls:
                 return _events_from_dispatch_tool_calls(

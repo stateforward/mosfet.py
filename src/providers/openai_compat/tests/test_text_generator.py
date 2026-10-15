@@ -7,8 +7,12 @@ import asyncio
 import base64
 import collections.abc
 import dataclasses
+import json
 import pathlib
+import typing
 
+import httpx
+import openai
 import pytest
 
 from mosfet.providers.openai_compat import TextGenerationError, TextGenerator
@@ -45,6 +49,17 @@ class FakeChatClient:
             )
         )
         return self.response
+
+    def stream_chat_completion(
+        self,
+        *,
+        messages: collections.abc.Sequence[dict[str, object]],
+        tools: collections.abc.Sequence[object] = (),
+        response_format: object | None = None,
+        extra_body: collections.abc.Mapping[str, object] | None = None,
+    ) -> collections.abc.AsyncIterator[dict[str, object]]:
+        del messages, tools, response_format, extra_body
+        raise AssertionError("this fake serves whole responses only")
 
 
 def test_text_generator_maps_bot_text_generation_contract() -> None:
@@ -654,6 +669,17 @@ def test_text_generator_records_otel_request_when_configured(
             )
             return self.response
 
+        def stream_chat_completion(
+            self,
+            *,
+            messages: collections.abc.Sequence[dict[str, object]],
+            tools: collections.abc.Sequence[object] = (),
+            response_format: object | None = None,
+            extra_body: collections.abc.Mapping[str, object] | None = None,
+        ) -> collections.abc.AsyncIterator[dict[str, object]]:
+            del messages, tools, response_format, extra_body
+            raise AssertionError("this fake serves whole responses only")
+
     client = ClientWithModel()
     generator = TextGenerator(client=client, provider="openai_compat")
     _ = asyncio.run(
@@ -1041,3 +1067,126 @@ def test_chat_text_generator_records_image_count_without_payload_capture(
     (request,) = records
     assert request["body"] == {"capture": "disabled", "message_count": 2, "tool_count": 0, "image_count": 1}
     mosfet.telemetry.reset()
+
+
+def _sse(*chunks: object) -> bytes:
+    """A Chat Completions stream as served: one ``data:`` event per chunk, then ``[DONE]``."""
+
+    lines = [f"data: {json.dumps(chunk)}\n\n" for chunk in chunks]
+    return ("".join(lines) + "data: [DONE]\n\n").encode()
+
+
+def _chunk(delta: dict[str, object], finish_reason: str | None = None) -> dict[str, object]:
+    return {
+        "id": "chatcmpl-1",
+        "object": "chat.completion.chunk",
+        "created": 1,
+        "model": "streamer",
+        "choices": [{"index": 0, "delta": delta, "finish_reason": finish_reason}],
+    }
+
+
+_STREAMED_ARGUMENTS = ('{"events": [{"event": "say", ', '"data": {"text": "Hi ', 'there."}}]}')
+
+
+def _streaming_client(requests: list[httpx.Request]) -> openai_compat.ChatClient:
+    def handle(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        body = _sse(
+            _chunk({"role": "assistant", "content": None, "reasoning_content": "Greet them."}),
+            _chunk(
+                {
+                    "tool_calls": [
+                        {
+                            "index": 0,
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {"name": "dispatch", "arguments": ""},
+                        }
+                    ]
+                }
+            ),
+            *(
+                _chunk({"tool_calls": [{"index": 0, "function": {"arguments": piece}}]})
+                for piece in _STREAMED_ARGUMENTS
+            ),
+            _chunk({}, "tool_calls"),
+            {
+                "id": "chatcmpl-1",
+                "object": "chat.completion.chunk",
+                "created": 1,
+                "model": "streamer",
+                "choices": [],
+                "usage": {"prompt_tokens": 7, "completion_tokens": 5, "total_tokens": 12},
+            },
+        )
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=body)
+
+    sdk = openai.AsyncOpenAI(
+        api_key="test-key",
+        base_url="http://compat.test/v1",
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(handle)),
+    )
+    # The SDK's create takes its own keywords; the protocol is the narrow shape this client calls.
+    return openai_compat.ChatClient(
+        model="streamer",
+        base_url="http://compat.test/v1",
+        async_client=typing.cast(openai_compat.AsyncOpenAIClient, typing.cast(object, sdk)),
+    )
+
+
+def test_text_generator_streams_deltas_over_sse_and_returns_the_same_whole_output() -> None:
+    requests: list[httpx.Request] = []
+    deltas: list[text.Delta] = []
+    generator = TextGenerator(client=_streaming_client(requests))
+    tool = {"type": "function", "function": {"name": "dispatch", "parameters": {"type": "object"}}}
+
+    output = asyncio.run(
+        generator.generate(
+            text.InputData(
+                messages=(text.TextMessage(role=text.TextRole.USER, content="hello"),),
+                tools=(tool,),
+                tool_selection=text.ToolSelectionPolicy.REQUIRED,
+            ),
+            deltas=deltas.append,
+        )
+    )
+
+    assert [request.url.path for request in requests] == ["/v1/chat/completions"]
+    sent = json.loads(requests[0].content)
+    assert sent["stream"] is True
+    assert sent["model"] == "streamer"
+    assert sent["messages"] == [{"role": "user", "content": "hello"}]
+    assert sent["tool_choice"] == "required"
+    assert [delta.arguments for delta in deltas if delta.tool_call == 0 and delta.arguments] == list(
+        _STREAMED_ARGUMENTS
+    )
+    assert output == text.OutputData(
+        content="",
+        reasoning="Greet them.",
+        provider="openai_compat",
+        model="streamer",
+        tool_calls=(
+            text.TextToolCall(
+                id="call_1",
+                name="dispatch",
+                args={"events": [{"event": "say", "data": {"text": "Hi there."}}]},
+            ),
+        ),
+    )
+
+
+def test_text_generator_without_deltas_keeps_the_whole_response_path() -> None:
+    requests: list[httpx.Request] = []
+    client = FakeChatClient(
+        response={"model": "m", "choices": [{"finish_reason": "stop", "message": {"content": "ok"}}]}
+    )
+    generator = TextGenerator(client=client)
+
+    output = asyncio.run(
+        generator.generate(text.InputData(messages=(text.TextMessage(role=text.TextRole.USER, content="hi"),)))
+    )
+
+    assert output.content == "ok"
+    assert len(client.calls) == 1
+    assert requests == []

@@ -183,7 +183,9 @@ class Processor(processing.Processor):
         self._pass_wording = pass_wording
 
     @typing.override
-    async def process(self, input: processing.InputData) -> processing.Events:
+    async def process(
+        self, input: processing.InputData, *, drafts: processing.DraftSink | None = None
+    ) -> processing.Events:
         stimulus_document = _stimulus_document(input.input)
         stimulus_data = stimulus_document.get("data")
         groundable: dict[str, processing.Event[typing.Any]] = {}

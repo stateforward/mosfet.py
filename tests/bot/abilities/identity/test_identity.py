@@ -577,7 +577,9 @@ def test_being_addressed_reaches_cognition_through_the_body() -> None:
 
 class _DecidesNothing(processing.Processor):
     @override
-    async def process(self, input: processing.InputData) -> processing.Events:
+    async def process(
+        self, input: processing.InputData, *, drafts: processing.DraftSink | None = None
+    ) -> processing.Events:
         del input
         return ()
 

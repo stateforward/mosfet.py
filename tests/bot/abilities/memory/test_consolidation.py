@@ -41,7 +41,9 @@ class Decider(processing.Processor):
         self.calls = []
 
     @typing.override
-    async def process(self, input: processing.InputData) -> processing.Events:
+    async def process(
+        self, input: processing.InputData, *, drafts: processing.DraftSink | None = None
+    ) -> processing.Events:
         self.calls.append(input)
         if self.gate is not None:
             _ = await self.gate.wait()

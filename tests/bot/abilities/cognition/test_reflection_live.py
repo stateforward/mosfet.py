@@ -502,7 +502,9 @@ def test_live_behavior_forms_after_n_natural_calls_without_preload() -> None:
 
     class _EscalateIntuition(processing.Processor):
         @typing.override
-        async def process(self, input: processing.InputData) -> processing.Events:
+        async def process(
+            self, input: processing.InputData, *, drafts: processing.DraftSink | None = None
+        ) -> processing.Events:
             del input
             # Unhandled → Cognition cascades to reasoning.
             return typing.cast(processing.Events, typing.cast(object, processing.Result[processing.Events].unhandled()))
@@ -514,7 +516,9 @@ def test_live_behavior_forms_after_n_natural_calls_without_preload() -> None:
             self.answered = []
 
         @typing.override
-        async def process(self, input: processing.InputData) -> processing.Events:
+        async def process(
+            self, input: processing.InputData, *, drafts: processing.DraftSink | None = None
+        ) -> processing.Events:
             # Reasoning wraps the deliberative host input; the live ring is an hsm.Event.
             event = input.input
             host = getattr(event, "host_input", None)

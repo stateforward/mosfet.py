@@ -2,6 +2,7 @@ from ... import ability
 from ... import generative
 
 import abc
+import collections.abc
 import dataclasses
 import enum
 import typing
@@ -219,6 +220,31 @@ class OutputData(pydantic.BaseModel):
     )
 
 
+class Delta(pydantic.BaseModel):
+    """A piece of a generation as the model writes it: new content text, or new arguments of one tool call."""
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
+        frozen=True,
+        extra="forbid",
+        json_schema_extra={"examples": [{"content": "Sure", "tool_call": None, "arguments": ""}]},
+    )
+
+    content: str = pydantic.Field(
+        default="", description="New content text since the previous delta.", examples=["Sure"]
+    )
+    tool_call: int | None = pydantic.Field(
+        default=None,
+        ge=0,
+        description="Index, in the output's tool calls, of the tool call ``arguments`` belongs to; None for content.",
+        examples=[0],
+    )
+    arguments: str = pydantic.Field(
+        default="",
+        description="New raw JSON text of that tool call's arguments since its previous delta.",
+        examples=['{"events": [{"event"'],
+    )
+
+
 class TextGenerator(generative.Generator[InputData, OutputData], abc.ABC):
     """Generator that produces text from text-generation input.
 
@@ -228,6 +254,21 @@ class TextGenerator(generative.Generator[InputData, OutputData], abc.ABC):
     """
 
     image_capacity: media.ImageCapacity = media.ImageCapacity()
+
+    @typing.override
+    @abc.abstractmethod
+    def generate(
+        self, input: InputData, *, deltas: collections.abc.Callable[[Delta], None] | None = None
+    ) -> collections.abc.Awaitable[OutputData]:
+        """Generate the output for ``input``.
+
+        Args:
+            input: The text-generation input.
+            deltas: When given, called on the event loop with each piece of the output as the model writes it, by a
+                generator that can stream; one that cannot ignores it. The returned output is still the whole,
+                authoritative result.
+        """
+        ...
 
 
 _TextGenerationApplyCompletedEvent = hsm.Event[OutputData](

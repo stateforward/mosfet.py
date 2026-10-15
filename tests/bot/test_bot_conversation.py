@@ -86,7 +86,9 @@ class ContributionProcessor(processing.Processor):
         self.require_communication_actor = require_communication_actor
 
     @typing.override
-    async def process(self, input: processing.InputData) -> processing.Events:
+    async def process(
+        self, input: processing.InputData, *, drafts: processing.DraftSink | None = None
+    ) -> processing.Events:
         self.inputs.append(input)
         names = {event.name for event in input.schemas}
         assert "bot.ability.speaking.input" not in names
@@ -137,7 +139,9 @@ class CountingProcessor(processing.Processor):
         self.inputs = []
 
     @typing.override
-    async def process(self, input: processing.InputData) -> processing.Events:
+    async def process(
+        self, input: processing.InputData, *, drafts: processing.DraftSink | None = None
+    ) -> processing.Events:
         self.inputs.append(input)
         return ()
 
@@ -518,7 +522,9 @@ def test_bot_defers_second_conversation_contribution_until_idle() -> None:
                 self.inputs = []
 
             @typing.override
-            async def process(self, input: processing.InputData) -> processing.Events:
+            async def process(
+                self, input: processing.InputData, *, drafts: processing.DraftSink | None = None
+            ) -> processing.Events:
                 self.inputs.append(input)
                 first_started.set()
                 if len(self.inputs) == 1:

@@ -351,7 +351,9 @@ class RecordingIntuitionProcessor(processing.Processor):
             self.output = _as_events(output, confidence=confidence)
 
     @typing.override
-    async def process(self, input: processing.InputData) -> processing.Events:
+    async def process(
+        self, input: processing.InputData, *, drafts: processing.DraftSink | None = None
+    ) -> processing.Events:
         self.calls.append(input)
         if isinstance(self.output, cognition.intuition.OutputData):
             if self.output.result is None:
@@ -384,7 +386,9 @@ class DelayedIntuitionProcessor(processing.Processor):
             self.output = _as_events(output, confidence=confidence)
 
     @typing.override
-    async def process(self, input: processing.InputData) -> processing.Events:
+    async def process(
+        self, input: processing.InputData, *, drafts: processing.DraftSink | None = None
+    ) -> processing.Events:
         self.calls.append(input)
         if len(self.calls) == 1:
             try:
@@ -412,7 +416,9 @@ class RecordingReasoningProcessor(processing.Processor):
         )
 
     @typing.override
-    async def process(self, input: processing.InputData) -> processing.Events:
+    async def process(
+        self, input: processing.InputData, *, drafts: processing.DraftSink | None = None
+    ) -> processing.Events:
         self.calls.append(input)
         if isinstance(self.output, cognition.reasoning.OutputData):
             return _as_events(self.output.result)
@@ -430,7 +436,9 @@ class DelayedReasoningProcessor(processing.Processor):
         self.cancelled = False
 
     @typing.override
-    async def process(self, input: processing.InputData) -> processing.Events:
+    async def process(
+        self, input: processing.InputData, *, drafts: processing.DraftSink | None = None
+    ) -> processing.Events:
         self.calls.append(input)
         if len(self.calls) == 1:
             try:
@@ -449,14 +457,18 @@ class FailingReasoningProcessor(processing.Processor):
         self.calls = []
 
     @typing.override
-    async def process(self, input: processing.InputData) -> processing.Events:
+    async def process(
+        self, input: processing.InputData, *, drafts: processing.DraftSink | None = None
+    ) -> processing.Events:
         self.calls.append(input)
         raise RuntimeError("reasoning failed")
 
 
 class InvalidReasoningProcessor(processing.Processor):
     @typing.override
-    async def process(self, input: processing.InputData) -> processing.Events:
+    async def process(
+        self, input: processing.InputData, *, drafts: processing.DraftSink | None = None
+    ) -> processing.Events:
         del input
         return _processor_events({"not": "valid-output"})
 
@@ -482,7 +494,9 @@ class RecordingOutputOperation(processing.Processor):
             self.output = _as_events(output)
 
     @typing.override
-    async def process(self, input: processing.InputData) -> processing.Events:
+    async def process(
+        self, input: processing.InputData, *, drafts: processing.DraftSink | None = None
+    ) -> processing.Events:
         self.calls.append(input)
         return _processor_events(self.output)
 
@@ -509,7 +523,9 @@ class FixedSelectionProcessor(processing.Processor):
         self.calls = []
 
     @typing.override
-    async def process(self, input: processing.InputData) -> processing.Events:
+    async def process(
+        self, input: processing.InputData, *, drafts: processing.DraftSink | None = None
+    ) -> processing.Events:
         self.calls.append(input)
         return _events_from_output(self.selection)
 
@@ -528,7 +544,9 @@ class FixedWriteProcessor(processing.Processor):
         self.calls = []
 
     @typing.override
-    async def process(self, input: processing.InputData) -> processing.Events:
+    async def process(
+        self, input: processing.InputData, *, drafts: processing.DraftSink | None = None
+    ) -> processing.Events:
         self.calls.append(input)
         if not self.written:
             raise RuntimeError("FixedWriteProcessor has no remaining write payloads.")
@@ -603,7 +621,9 @@ class FixedProcessor(processing.Processor):
         return self.write_step
 
     @typing.override
-    async def process(self, input: processing.InputData) -> processing.Events:
+    async def process(
+        self, input: processing.InputData, *, drafts: processing.DraftSink | None = None
+    ) -> processing.Events:
         instructions = input.instructions or ""
         self.builds.append(instructions)
         if instructions == cognition.reflection.CHANGE_INSTRUCTIONS or "changing phase" in instructions:
@@ -1531,7 +1551,9 @@ def test_cancelled_turn_cannot_cancel_the_next_turn(monkeypatch: pytest.MonkeyPa
             self.releases = (asyncio.Event(), asyncio.Event())
 
         @typing.override
-        async def process(self, input: processing.InputData) -> processing.Events:
+        async def process(
+            self, input: processing.InputData, *, drafts: processing.DraftSink | None = None
+        ) -> processing.Events:
             index = len(self.calls)
             self.calls.append(input)
             try:
@@ -1894,7 +1916,9 @@ def test_cognition_returns_idle_without_waiting_for_reflection() -> None:
             self.release = asyncio.Event()
 
         @typing.override
-        async def process(self, input: processing.InputData) -> processing.Events:
+        async def process(
+            self, input: processing.InputData, *, drafts: processing.DraftSink | None = None
+        ) -> processing.Events:
             self.calls.append(input)
             await self.release.wait()
             return ()
@@ -1930,7 +1954,9 @@ def test_reflection_failure_does_not_block_the_next_cognition_turn() -> None:
             self.calls = 0
 
         @typing.override
-        async def process(self, input: processing.InputData) -> processing.Events:
+        async def process(
+            self, input: processing.InputData, *, drafts: processing.DraftSink | None = None
+        ) -> processing.Events:
             del input
             self.calls += 1
             raise RuntimeError("reflection failed")
@@ -2365,7 +2391,9 @@ def test_intuition_reads_confidence_from_patched_event_selections() -> None:
 
     class _PatchedEventsProcessor(processing.Processor):
         @typing.override
-        async def process(self, input: processing.InputData) -> processing.Events:
+        async def process(
+            self, input: processing.InputData, *, drafts: processing.DraftSink | None = None
+        ) -> processing.Events:
             del input
             return (
                 processing.SelectedEvent(
@@ -3904,7 +3932,9 @@ class _EscalatingThenBreaking(RecordingIntuitionProcessor):
         self.actor = actor
 
     @typing.override
-    async def process(self, input: processing.InputData) -> processing.Events:
+    async def process(
+        self, input: processing.InputData, *, drafts: processing.DraftSink | None = None
+    ) -> processing.Events:
         output = await super().process(input)
         self.actor.broken = True
         return output
@@ -4324,7 +4354,9 @@ def test_a_recall_that_fails_is_observed_too_never_silently_dropped() -> None:
 
 class _LeaveAsIs(processing.Processor):
     @typing.override
-    async def process(self, input: processing.InputData) -> processing.Events:
+    async def process(
+        self, input: processing.InputData, *, drafts: processing.DraftSink | None = None
+    ) -> processing.Events:
         del input
         return ()
 

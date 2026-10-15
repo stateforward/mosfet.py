@@ -34,6 +34,7 @@ from mosfet.define import define
 from mosfet.start import started
 import hsm
 import pydantic
+from opentelemetry import metrics
 from pydantic.json_schema import SkipJsonSchema
 
 from mosfet.event import (
@@ -1635,6 +1636,347 @@ _FailedEvent = hsm.Event[FailureData](
 )
 
 
+# --- drafts: the text of a selection the model is still writing ---
+
+
+class DraftData(pydantic.BaseModel):
+    """Text a model has newly written into one marked string field of an event it is still selecting: a delta.
+
+    A model writes a JSON string left to right, so the field only ever grows by appending; each draft carries what
+    was appended and how much was written before it. Nothing here knows any model or language.
+    """
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
+        frozen=True,
+        extra="forbid",
+        json_schema_extra={
+            "description": (
+                "A draft of one string field of an event a model is still writing: the text newly written into the "
+                "field and how many characters were written before it, which event it belongs to, where that event "
+                "sits in the selection, and its order among the drafts of one request. The final selection, under "
+                "the same event id, is authoritative."
+            ),
+            "examples": [
+                {
+                    "text": " I can help",
+                    "offset": 5,
+                    "event": "bot.ability.communication.respond",
+                    "item": 0,
+                    "seq": 3,
+                }
+            ],
+        },
+    )
+
+    text: str = pydantic.Field(
+        description="The unescaped text newly written into the field, in order.",
+        examples=[" I can help"],
+    )
+    offset: int = pydantic.Field(
+        ge=0,
+        description=(
+            "How many characters of the field were written before ``text``: a repeated delta is harmless "
+            "(``offset + len(text)`` within what was written), and one past what was written is a gap."
+        ),
+        examples=[5],
+    )
+    event: str = pydantic.Field(
+        min_length=1,
+        description="Canonical name of the event whose field this drafts.",
+        examples=["bot.ability.communication.respond"],
+    )
+    item: int = pydantic.Field(
+        ge=0, description="Index of the drafted event in the selection's events array.", examples=[0]
+    )
+    seq: int = pydantic.Field(
+        ge=0, description="Order of this draft among every draft of one processing request.", examples=[3]
+    )
+
+
+@dataclasses.dataclass(frozen=True)
+class Draft:
+    """Marker on an event payload schema (``__draft__``): ``field`` may reach the target as ``event`` while written.
+
+    Read by Processing only, never shown to the model: the selected event's schema and payload are unchanged.
+    The final selection follows the drafts under the same event id, and it is what counts.
+    """
+
+    field: str
+    event: hsm.Event[DraftData]
+
+
+class DraftSink(typing.Protocol):
+    """Where a streaming processor hands each draft as it parses it; each call delivers at most one typed event."""
+
+    def __call__(self, draft: DraftData, /) -> None:
+        """Deliver ``draft`` to the target of the event it drafts, or count why it could not."""
+        ...
+
+
+_METER = metrics.get_meter("mosfet.abilities.processing")
+_DRAFTS = _METER.create_counter(
+    "bot.processing.draft.count",
+    unit="{draft}",
+    description=(
+        "Drafts of selections a model was still writing, by outcome: emitted (delivered to the selection's target), "
+        "unparsed (the streamed arguments were malformed; drafting stopped for that request), unresolved (no "
+        "offered marked event with one target, a second drafted item for a target, or data before the event name), "
+        "or gap (counted by the consumer: a delta whose offset is past what was written)."
+    ),
+)
+
+
+def _draft_marker(event: Event[typing.Any] | None) -> Draft | None:
+    model = None if event is None else _payload_base_model(event)
+    marker = typing.cast(object, getattr(model, "__draft__", None))
+    return marker if isinstance(marker, Draft) else None
+
+
+@dataclasses.dataclass(kw_only=True)
+class _Frame:
+    """One open JSON container in the streamed ``dispatch`` arguments, and what it is to the selection."""
+
+    kind: typing.Literal["object", "array"]
+    role: typing.Literal["root", "events", "item", "data", "other"]
+    key: str | None = None
+    count: int = 0
+    item: int = 0
+    event: str | None = None
+    unresolved: bool = False
+
+
+_WHITESPACE = frozenset(" \t\r\n")
+_ESCAPES = {'"': '"', "\\": "\\", "/": "/", "b": "\b", "f": "\f", "n": "\n", "r": "\r", "t": "\t"}
+_LITERAL = frozenset("0123456789+-.eEtruefalsn")
+
+
+class DraftParser:
+    """Incremental reader of a streamed ``dispatch`` tool call's arguments that drafts marked string fields.
+
+    A plain collaborator, built per request with the offered events. ``feed`` takes the next piece of the
+    arguments (``{"events": [{"event": …, "target": …, "data": {…}}]}``) and returns the drafts it completes:
+    the unescaped text newly written into ``data.<field>``, at its offset, for each item whose offered event carries a
+    :class:`Draft` marker for that field. An item is drafted only when its ``event`` string ended before that
+    field's string began; otherwise it is counted ``unresolved``. Malformed arguments stop drafting for the
+    request and are counted ``unparsed``; nothing ever raises into the processor.
+    """
+
+    def __init__(self, schemas: collections.abc.Sequence[Event[typing.Any]]) -> None:
+        self._fields: dict[str, str] = {
+            event.name: marker.field for event in schemas if (marker := _draft_marker(event)) is not None
+        }
+        self._stack: list[_Frame] = []
+        self._mode: typing.Literal["value", "key", "colon", "next", "string", "escape", "unicode", "literal", "end"]
+        self._mode = "value"
+        self._failed: bool = False
+        self._seq: int = 0
+        # The string being read: whether it is a key, which item's draft it is (if any), and its text.
+        self._is_key: bool = False
+        self._drafting: _Frame | None = None
+        self._text: list[str] = []
+        # How many pieces of ``_text`` were already drafted, and how many characters they hold.
+        self._emitted: int = 0
+        self._offset: int = 0
+        self._hex: str = ""
+        self._high: int | None = None
+
+    def feed(self, chunk: str) -> tuple[DraftData, ...]:
+        """Read the next piece of the arguments; return the drafts it advanced, in order."""
+
+        drafts: list[DraftData] = []
+        if self._failed:
+            return ()
+        for character in chunk:
+            if not self._step(character, drafts):
+                self._failed = True
+                self._drafting = None
+                _DRAFTS.add(1, {"outcome": "unparsed"})
+                return tuple(drafts)
+        self._flush(drafts)
+        return tuple(drafts)
+
+    def _flush(self, drafts: list[DraftData]) -> None:
+        frame = self._drafting
+        if frame is None or len(self._text) == self._emitted or frame.event is None:
+            return
+        delta = "".join(self._text[self._emitted :])
+        drafts.append(DraftData(text=delta, offset=self._offset, event=frame.event, item=frame.item, seq=self._seq))
+        self._emitted = len(self._text)
+        self._offset += len(delta)
+        self._seq += 1
+
+    def _open(self, kind: typing.Literal["object", "array"]) -> None:
+        parent = self._stack[-1] if self._stack else None
+        role: typing.Literal["root", "events", "item", "data", "other"] = "other"
+        item = 0
+        if parent is None:
+            role = "root" if kind == "object" else "other"
+        elif parent.role == "root" and parent.key == "events" and kind == "array":
+            role = "events"
+        elif parent.role == "events" and kind == "object":
+            role, item = "item", parent.count
+        elif parent.role == "item" and parent.key == "data" and kind == "object":
+            role, item = "data", parent.item
+        self._stack.append(_Frame(kind=kind, role=role, item=item))
+        self._mode = "key" if kind == "object" else "value"
+
+    def _close(self, kind: typing.Literal["object", "array"]) -> bool:
+        if not self._stack or self._stack[-1].kind != kind:
+            return False
+        _ = self._stack.pop()
+        self._value_done()
+        return True
+
+    def _value_done(self) -> None:
+        if self._stack:
+            self._stack[-1].count += 1
+            self._mode = "next"
+        else:
+            self._mode = "end"
+
+    def _start_string(self) -> None:
+        self._text = []
+        self._emitted = 0
+        self._offset = 0
+        self._hex = ""
+        self._high = None
+        self._drafting = None
+        frame = self._stack[-1] if self._stack else None
+        if self._is_key or frame is None or frame.role != "data":
+            return
+        item = self._item_of(frame)
+        if item is None:
+            return
+        field = None if item.event is None else self._fields.get(item.event)
+        if item.event is None and frame.key is not None and frame.key in self._fields.values():
+            if not item.unresolved:
+                item.unresolved = True
+                _DRAFTS.add(1, {"outcome": "unresolved"})
+            return
+        if field is not None and frame.key == field:
+            frame.event = item.event
+            self._drafting = frame
+
+    def _item_of(self, data: _Frame) -> _Frame | None:
+        return next(
+            (frame for frame in reversed(self._stack) if frame.role == "item" and frame.item == data.item),
+            None,
+        )
+
+    def _end_string(self, drafts: list[DraftData]) -> None:
+        value = "".join(self._text)
+        frame = self._stack[-1] if self._stack else None
+        if self._is_key:
+            if frame is None or frame.kind != "object":
+                return
+            frame.key = value
+            self._mode = "colon"
+            return
+        if self._drafting is not None:
+            self._flush(drafts)
+            self._drafting = None
+        if frame is not None and frame.role == "item" and frame.key == "event":
+            frame.event = value
+        self._value_done()
+
+    def _append(self, text: str) -> None:
+        if self._high is not None:
+            self._text.append("�")
+            self._high = None
+        self._text.append(text)
+
+    def _step(self, character: str, drafts: list[DraftData]) -> bool:
+        mode = self._mode
+        if mode == "string":
+            if character == '"':
+                if self._high is not None:
+                    self._text.append("�")
+                    self._high = None
+                self._end_string(drafts)
+            elif character == "\\":
+                self._mode = "escape"
+            elif character < " ":
+                return False
+            else:
+                self._append(character)
+            return True
+        if mode == "escape":
+            if character == "u":
+                self._hex = ""
+                self._mode = "unicode"
+                return True
+            escaped = _ESCAPES.get(character)
+            if escaped is None:
+                return False
+            self._append(escaped)
+            self._mode = "string"
+            return True
+        if mode == "unicode":
+            if character not in "0123456789abcdefABCDEF":
+                return False
+            self._hex += character
+            if len(self._hex) < 4:
+                return True
+            code = int(self._hex, 16)
+            self._mode = "string"
+            if self._high is not None and 0xDC00 <= code < 0xE000:
+                self._text.append(chr(0x10000 + ((self._high - 0xD800) << 10) + (code - 0xDC00)))
+                self._high = None
+            elif 0xD800 <= code < 0xDC00:
+                if self._high is not None:
+                    self._text.append("�")
+                self._high = code
+            else:
+                self._append(chr(code))
+            return True
+        if mode == "literal":
+            if character in _LITERAL:
+                return True
+            self._value_done()
+            return self._step(character, drafts)
+        if character in _WHITESPACE:
+            return True
+        if mode == "value":
+            if character == '"':
+                self._is_key = False
+                self._mode = "string"
+                self._start_string()
+            elif character == "{":
+                self._open("object")
+            elif character == "[":
+                self._open("array")
+            elif character == "]" and self._stack and self._stack[-1].kind == "array" and not self._stack[-1].count:
+                return self._close("array")
+            elif character in _LITERAL:
+                self._mode = "literal"
+            else:
+                return False
+            return True
+        if mode == "key":
+            if character == '"':
+                self._is_key = True
+                self._mode = "string"
+                self._start_string()
+                return True
+            return character == "}" and not self._stack[-1].count and self._close("object")
+        if mode == "colon":
+            if character != ":":
+                return False
+            self._mode = "value"
+            return True
+        if mode == "next":
+            frame = self._stack[-1]
+            if character == ",":
+                self._mode = "key" if frame.kind == "object" else "value"
+                return True
+            if character == "}":
+                return self._close("object")
+            if character == "]":
+                return self._close("array")
+            return False
+        return False
+
+
 class Processor(abc.ABC):
     """Like Encoder / Decoder: map input to selected events.
 
@@ -1646,8 +1988,14 @@ class Processor(abc.ABC):
     image_capacity: media.ImageCapacity = media.ImageCapacity()
 
     @abc.abstractmethod
-    def process(self, input: InputData) -> collections.abc.Awaitable[Events]:
-        """Return selected events (empty = none)."""
+    def process(self, input: InputData, *, drafts: DraftSink | None = None) -> collections.abc.Awaitable[Events]:
+        """Return selected events (empty = none).
+
+        Args:
+            input: The processing input.
+            drafts: Where to hand drafts of marked fields while the model is still writing its selection, when
+                the processor can stream; a processor that cannot ignores it. ``None`` means nobody to draft to.
+        """
         ...
 
 
@@ -1832,6 +2180,59 @@ class Processing(ability.Ability[InputData, CompletionData]):
         return input.model_copy(update={"instructions": instructions})
 
     @staticmethod
+    def _draft_sink(
+        ctx: hsm.Context,
+        instance: "Processing",
+        input: InputData,
+        *,
+        operation_id: str,
+        metadata: collections.abc.Mapping[str, object],
+    ) -> DraftSink:
+        """The sink this request's drafts go through: each draft reaches its selection's target, or is counted.
+
+        A draft reaches a target only when its event is offered, carries a :class:`Draft` marker, and has exactly
+        one target that declares it (the same rules the final selection is dispatched by); only the first marked
+        item per target is drafted. It is dispatched as the marker's event under the operation id, from the same
+        source the final selection will carry, so the target correlates draft and final by id. Dispatch enqueues
+        in call order, and the final selection is dispatched only after ``process`` returns, so every draft
+        arrives first. Processing dispatches model selections, so drafts are only ever model trust. A stage
+        whose selections are authoritative once returned builds one; a stage that may still discard a returned
+        selection (a confidence gate) must not, since what is drafted is said.
+        """
+
+        offered = {item.name: item for item in input.schemas}
+        source = hsm.id(input.authority or instance)
+        drafted: dict[int, int] = {}
+
+        def sink(draft: DraftData) -> None:
+            marker = _draft_marker(offered.get(draft.event))
+            try:
+                if marker is None:
+                    raise SelectionRejectionError(_unavailable_message(event=draft.event))
+                (selection,) = fill_unique_selection_targets((SelectedEvent(event=draft.event),), input.actor_events)
+                target = _resolve_target(input, selection, dispatch_trust=DispatchTrust.MODEL)
+            except SelectionRejectionError:
+                _DRAFTS.add(1, {"outcome": "unresolved"})
+                return
+            if drafted.setdefault(id(target), draft.item) != draft.item:
+                _DRAFTS.add(1, {"outcome": "unresolved"})
+                return
+            _ = hsm.dispatch(
+                ctx,
+                target,
+                dataclasses.replace(
+                    marker.event.with_data(draft),
+                    id=operation_id,
+                    source=source,
+                    target=hsm.id(target),
+                    metadata=dict(metadata),
+                ),
+            )
+            _DRAFTS.add(1, {"outcome": "emitted"})
+
+        return sink
+
+    @staticmethod
     async def _apply_activity(
         ctx: hsm.Context,
         instance: "Processing",
@@ -1843,7 +2244,15 @@ class Processing(ability.Ability[InputData, CompletionData]):
         if active_operation(instance, event.id) is None:
             _ = await start_operation(instance, event.id)
         try:
-            raw = await instance.processor.process(input)
+            # Actorless products are consumed by their owner (for example Reflection): nobody to draft to.
+            drafts = (
+                Processing._draft_sink(
+                    ctx, instance, input, operation_id=event.id or hsm.id(instance), metadata=event.metadata
+                )
+                if input.actors
+                else None
+            )
+            raw = await instance.processor.process(input, drafts=drafts)
             if isinstance(raw, Result) and not raw.is_handled:
                 output = OutputData(handled=False)
             else:
@@ -2018,6 +2427,10 @@ __all__ = [
     "FailureData",
     "DISPATCH_TOOL_NAME",
     "DispatchTrust",
+    "Draft",
+    "DraftData",
+    "DraftParser",
+    "DraftSink",
     "EventKind",
     "Event",
     "Events",

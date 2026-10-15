@@ -1,6 +1,7 @@
 """``vision.detection``: detected objects and the ``ObjectDetection`` wrapper over an injected detector."""
 
 import asyncio
+import collections.abc
 import datetime
 import json
 import pathlib
@@ -170,7 +171,9 @@ class FakeGenerator(text.TextGenerator):
         self.inputs = []
 
     @typing.override
-    async def generate(self, input: text.InputData) -> text.OutputData:
+    async def generate(
+        self, input: text.InputData, *, deltas: collections.abc.Callable[[text.Delta], None] | None = None
+    ) -> text.OutputData:
         self.inputs.append(input)
         return text.OutputData(content=self.reply)
 

@@ -8,7 +8,7 @@ import os
 import typing
 
 import openai
-from openai import OpenAI
+from openai import AsyncOpenAI, OpenAI
 from opentelemetry import trace
 import pydantic
 
@@ -20,6 +20,10 @@ _STATUS_CLASS_ATTR = "bot.http.status_class"
 
 
 def _no_api_key() -> str:
+    return ""
+
+
+async def _no_api_key_async() -> str:
     return ""
 
 
@@ -64,6 +68,38 @@ class OpenAIClient(typing.Protocol):
     responses: OpenAIResponsesResource
 
 
+class AsyncChatStream(typing.Protocol):
+    """An OpenAI SDK chat completion stream: chunks as they arrive, and a close that ends the response."""
+
+    def __aiter__(self) -> collections.abc.AsyncIterator[object]:
+        """Iterate the streamed chunks."""
+        ...
+
+    async def close(self) -> None:
+        """Close the response, ending the stream at the server."""
+        ...
+
+
+class AsyncOpenAIChatCompletionsResource(typing.Protocol):
+    """OpenAI SDK async chat completions resource used for streaming."""
+
+    async def create(self, **kwargs: object) -> AsyncChatStream:
+        """Create a streamed chat completion with SDK-compatible keyword arguments (``stream=True``)."""
+        ...
+
+
+class AsyncOpenAIChatResource(typing.Protocol):
+    """OpenAI SDK async chat resource used for streaming."""
+
+    completions: AsyncOpenAIChatCompletionsResource
+
+
+class AsyncOpenAIClient(typing.Protocol):
+    """OpenAI SDK async client shape (``openai.AsyncOpenAI``) used for streamed chat completions."""
+
+    chat: AsyncOpenAIChatResource
+
+
 class OpenAIEmbeddingsResource(typing.Protocol):
     """OpenAI SDK embeddings resource used by this provider."""
 
@@ -100,6 +136,17 @@ class ChatCompletionClient(typing.Protocol):
         extra_body: collections.abc.Mapping[str, object] | None = None,
     ) -> dict[str, object]:
         """Create a chat completion response using provider-neutral JSON values."""
+        ...
+
+    def stream_chat_completion(
+        self,
+        *,
+        messages: collections.abc.Sequence[dict[str, object]],
+        tools: collections.abc.Sequence[object] = (),
+        response_format: object | None = None,
+        extra_body: collections.abc.Mapping[str, object] | None = None,
+    ) -> collections.abc.AsyncIterator[dict[str, object]]:
+        """Stream the same request as chunk objects as the server sends them; closing the iterator ends it."""
         ...
 
 
@@ -211,20 +258,29 @@ def _normalized_base_url(value: str) -> str:
 
 
 def _sdk(
-    *, base_url: str, api_key: str | None, timeout_seconds: float, default_headers: collections.abc.Mapping[str, str]
+    *,
+    base_url: str,
+    api_key: str | None,
+    timeout_seconds: float,
+    default_headers: collections.abc.Mapping[str, str],
+    asynchronous: bool = False,
 ) -> object:
-    """Build the OpenAI SDK client both clients use; never sends ``OPENAI_API_KEY`` to another endpoint."""
+    """Build the OpenAI SDK client the clients use; never sends ``OPENAI_API_KEY`` to another endpoint."""
 
-    resolved: str | collections.abc.Callable[[], str] = _no_api_key
-    if api_key is not None:
-        resolved = api_key
-    elif _normalized_base_url(base_url) == _normalized_base_url(_DEFAULT_OPENAI_BASE_URL):
-        environment_key = os.environ.get("OPENAI_API_KEY")
-        if not environment_key:
+    key: str | None = api_key
+    if key is None and _normalized_base_url(base_url) == _normalized_base_url(_DEFAULT_OPENAI_BASE_URL):
+        key = os.environ.get("OPENAI_API_KEY")
+        if not key:
             raise ValueError("api_key is required when base_url is the default OpenAI API endpoint.")
-        resolved = environment_key
+    if asynchronous:
+        return AsyncOpenAI(
+            api_key=_no_api_key_async if key is None else key,
+            base_url=base_url,
+            timeout=timeout_seconds,
+            default_headers=dict(default_headers) or None,
+        )
     return OpenAI(
-        api_key=resolved,
+        api_key=_no_api_key if key is None else key,
         base_url=base_url,
         timeout=timeout_seconds,
         default_headers=dict(default_headers) or None,
@@ -233,7 +289,11 @@ def _sdk(
 
 @dataclasses.dataclass(frozen=True, kw_only=True)
 class ChatClient(ChatCompletionClient, ResponsesClient):
-    """OpenAI SDK-backed client for the Chat Completions API shape and, where served, the Responses API."""
+    """OpenAI SDK-backed client for the Chat Completions API shape and, where served, the Responses API.
+
+    Streamed chat completions go through ``async_client`` (an ``openai.AsyncOpenAI``, built lazily with the same
+    endpoint, key and headers when not injected), so chunks arrive on the event loop as the server sends them.
+    """
 
     model: str
     base_url: str = _DEFAULT_OPENAI_BASE_URL
@@ -242,16 +302,17 @@ class ChatClient(ChatCompletionClient, ResponsesClient):
     default_headers: collections.abc.Mapping[str, str] = dataclasses.field(default_factory=_empty_headers)
     default_body: collections.abc.Mapping[str, object] = dataclasses.field(default_factory=_empty_body)
     client: OpenAIClient | None = None
+    async_client: AsyncOpenAIClient | None = None
     _sdk_client: OpenAIClient | None = dataclasses.field(default=None, init=False, repr=False, compare=False)
+    _async_sdk_client: AsyncOpenAIClient | None = dataclasses.field(default=None, init=False, repr=False, compare=False)
 
-    @typing.override
-    def create_chat_completion(
+    def _chat_kwargs(
         self,
         *,
         messages: collections.abc.Sequence[dict[str, object]],
-        tools: collections.abc.Sequence[object] = (),
-        response_format: object | None = None,
-        extra_body: collections.abc.Mapping[str, object] | None = None,
+        tools: collections.abc.Sequence[object],
+        response_format: object | None,
+        extra_body: collections.abc.Mapping[str, object] | None,
     ) -> dict[str, object]:
         body: dict[str, object] = dict(self.default_body)
         if extra_body is not None:
@@ -267,7 +328,20 @@ class ChatClient(ChatCompletionClient, ResponsesClient):
             kwargs["response_format"] = jsonable(response_format)
         if body:
             kwargs["extra_body"] = body
+        return kwargs
 
+    @typing.override
+    def create_chat_completion(
+        self,
+        *,
+        messages: collections.abc.Sequence[dict[str, object]],
+        tools: collections.abc.Sequence[object] = (),
+        response_format: object | None = None,
+        extra_body: collections.abc.Mapping[str, object] | None = None,
+    ) -> dict[str, object]:
+        kwargs = self._chat_kwargs(
+            messages=messages, tools=tools, response_format=response_format, extra_body=extra_body
+        )
         client = self._client()
         try:
             response = client.chat.completions.create(**kwargs)
@@ -275,6 +349,38 @@ class ChatClient(ChatCompletionClient, ResponsesClient):
             message = "OpenAI-compatible chat completion request failed."
             raise RequestError(message) from error
         return _json_object(response, "OpenAI-compatible chat completion response must be a JSON object.")
+
+    @typing.override
+    async def stream_chat_completion(
+        self,
+        *,
+        messages: collections.abc.Sequence[dict[str, object]],
+        tools: collections.abc.Sequence[object] = (),
+        response_format: object | None = None,
+        extra_body: collections.abc.Mapping[str, object] | None = None,
+    ) -> collections.abc.AsyncIterator[dict[str, object]]:
+        """Stream the chat completion (server-sent events) as chunk objects; usage arrives on the last chunk.
+
+        Raises:
+            RequestError: The request or the stream failed.
+        """
+
+        kwargs = self._chat_kwargs(
+            messages=messages, tools=tools, response_format=response_format, extra_body=extra_body
+        )
+        kwargs["stream"] = True
+        kwargs["stream_options"] = {"include_usage": True}
+        try:
+            stream = await self._async_client().chat.completions.create(**kwargs)
+        except Exception as error:
+            raise RequestError("OpenAI-compatible streamed chat completion request failed.") from error
+        try:
+            async for chunk in stream:
+                yield _json_object(chunk, "OpenAI-compatible chat completion chunk must be a JSON object.")
+        except Exception as error:
+            raise RequestError("OpenAI-compatible chat completion stream failed.") from error
+        finally:
+            await stream.close()
 
     @typing.override
     def create_response(
@@ -329,6 +435,24 @@ class ChatClient(ChatCompletionClient, ResponsesClient):
             ),
         )
         object.__setattr__(self, "_sdk_client", sdk_client)
+        return sdk_client
+
+    def _async_client(self) -> AsyncOpenAIClient:
+        if self.async_client is not None:
+            return self.async_client
+        if self._async_sdk_client is not None:
+            return self._async_sdk_client
+        sdk_client = typing.cast(
+            AsyncOpenAIClient,
+            _sdk(
+                base_url=self.base_url,
+                api_key=self.api_key,
+                timeout_seconds=self.timeout_seconds,
+                default_headers=self.default_headers,
+                asynchronous=True,
+            ),
+        )
+        object.__setattr__(self, "_async_sdk_client", sdk_client)
         return sdk_client
 
 
@@ -413,6 +537,8 @@ class EmbeddingClient(EmbeddingsClient):
 
 
 __all__ = [
+    "AsyncChatStream",
+    "AsyncOpenAIClient",
     "ChatCompletionClient",
     "OpenAI",
     "ChatClient",

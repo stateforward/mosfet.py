@@ -625,7 +625,9 @@ class Processor(processing.Processor):
         self.image_capacity = generator.image_capacity
 
     @typing.override
-    async def process(self, input: processing.InputData) -> processing.Events:
+    async def process(
+        self, input: processing.InputData, *, drafts: processing.DraftSink | None = None
+    ) -> processing.Events:
         instructions = (input.instructions or "").strip()
         if not instructions:
             raise ProcessingError("Gemini processing requires non-blank instructions stamped by Processing.")

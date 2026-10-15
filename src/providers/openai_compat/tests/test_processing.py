@@ -42,11 +42,18 @@ class RecordingGenerator(text.TextGenerator):
     reasoning: str = ""
     tool_calls: tuple[text.TextToolCall, ...] = ()
     inputs: list[text.generation.InputData] = dataclasses.field(default_factory=list)
+    deltas: list[bool] = dataclasses.field(default_factory=list)
     image_capacity: ImageCapacity = dataclasses.field(default_factory=ImageCapacity)
 
     @typing.override
-    async def generate(self, input: text.generation.InputData) -> text.generation.OutputData:
+    async def generate(
+        self,
+        input: text.generation.InputData,
+        *,
+        deltas: collections.abc.Callable[[text.generation.Delta], None] | None = None,
+    ) -> text.generation.OutputData:
         self.inputs.append(input)
+        self.deltas.append(deltas is not None)
         return text.generation.OutputData(
             content=self.content,
             reasoning=self.reasoning,
@@ -256,6 +263,17 @@ class _FakeChatClient:
         self.calls.append({"messages": [dict(message) for message in messages], "tools": list(tools)})
         return self.response
 
+    def stream_chat_completion(
+        self,
+        *,
+        messages: collections.abc.Sequence[dict[str, object]],
+        tools: collections.abc.Sequence[object] = (),
+        response_format: object | None = None,
+        extra_body: collections.abc.Mapping[str, object] | None = None,
+    ) -> collections.abc.AsyncIterator[dict[str, object]]:
+        del messages, tools, response_format, extra_body
+        raise AssertionError("this fake serves whole responses only")
+
 
 def test_processor_process_records_otel_wire_payload(
     tmp_path: pathlib.Path,
@@ -350,3 +368,104 @@ def test_processor_built_from_client_takes_the_provider_generator_capacity() -> 
     client = _FakeChatClient(response={})
 
     assert Processor(client=client).image_capacity == TextGenerator(client=client).image_capacity
+
+
+_SAY_DRAFT_EVENT = hsm.Event[processing.DraftData](name="tests.openai_compat.say.draft", schema=processing.DraftData)
+
+
+class _SayData(pydantic.BaseModel):
+    __draft__: typing.ClassVar[processing.Draft] = processing.Draft(field="text", event=_SAY_DRAFT_EVENT)
+
+    text: str
+
+
+_SayEvent = hsm.Event[_SayData](name="tests.openai_compat.say", kind=processing.EventKind, schema=_SayData)
+
+
+@dataclasses.dataclass
+class _StreamingChatClient:
+    """Serves a dispatch tool call as a stream, its arguments in the given pieces."""
+
+    pieces: tuple[str, ...]
+    model: str = "streamer"
+    streamed: int = 0
+
+    def create_chat_completion(
+        self,
+        *,
+        messages: collections.abc.Sequence[dict[str, object]],
+        tools: collections.abc.Sequence[object] = (),
+        response_format: object | None = None,
+        extra_body: collections.abc.Mapping[str, object] | None = None,
+    ) -> dict[str, object]:
+        del messages, tools, response_format, extra_body
+        raise AssertionError("a processor that can draft streams")
+
+    async def stream_chat_completion(
+        self,
+        *,
+        messages: collections.abc.Sequence[dict[str, object]],
+        tools: collections.abc.Sequence[object] = (),
+        response_format: object | None = None,
+        extra_body: collections.abc.Mapping[str, object] | None = None,
+    ) -> collections.abc.AsyncIterator[dict[str, object]]:
+        del messages, tools, response_format, extra_body
+        self.streamed += 1
+        yield {
+            "model": self.model,
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {
+                        "tool_calls": [{"index": 0, "id": "tc1", "type": "function", "function": {"name": "dispatch"}}]
+                    },
+                }
+            ],
+        }
+        for piece in self.pieces:
+            yield {
+                "model": self.model,
+                "choices": [{"index": 0, "delta": {"tool_calls": [{"index": 0, "function": {"arguments": piece}}]}}],
+            }
+        yield {"model": self.model, "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]}
+
+
+def test_processor_drafts_marked_fields_from_the_streamed_dispatch_arguments() -> None:
+    pieces = ('{"events": [{"event": "tests.openai_compat.say", "data": {"text": "Sure', ". I can", ' help."}}]}')
+    client = _StreamingChatClient(pieces)
+    processor = Processor(client=client)
+    drafts: list[processing.DraftData] = []
+
+    output = asyncio.run(
+        processor.process(
+            processing.InputData(input="hello", schemas=(_SayEvent,), instructions="Select events from schemas."),
+            drafts=drafts.append,
+        )
+    )
+
+    assert client.streamed == 1
+    # Append-only deltas of the field, each at the offset it was written at.
+    assert [(draft.text, draft.offset) for draft in drafts] == [("Sure", 0), (". I can", 4), (" help.", 11)]
+    assert {(draft.event, draft.item) for draft in drafts} == {(_SayEvent.name, 0)}
+    assert [(item.event, item.data) for item in output] == [(_SayEvent.name, {"text": "Sure. I can help."})]
+
+
+def test_processor_without_a_draft_sink_does_not_stream() -> None:
+    generator = RecordingGenerator(
+        content="",
+        tool_calls=(
+            text.TextToolCall(
+                id="tc1",
+                name=processing.DISPATCH_TOOL_NAME,
+                args={"events": [{"event": "tests.openai_compat.say", "data": {"text": "Whole."}}]},
+            ),
+        ),
+    )
+    output = asyncio.run(
+        Processor(generator=generator).process(
+            processing.InputData(input="hello", schemas=(_SayEvent,), instructions="Select events from schemas.")
+        )
+    )
+
+    assert generator.deltas == [False]
+    assert [(item.event, item.data) for item in output] == [(_SayEvent.name, {"text": "Whole."})]

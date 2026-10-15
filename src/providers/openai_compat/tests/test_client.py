@@ -242,6 +242,8 @@ _EMBEDDINGS_RESPONSE = {"object": "list", "data": [{"object": "embedding", "inde
 
 def test_client_exports_only_the_chat_and_approved_embeddings_contract() -> None:
     assert set(chat_client.__all__) == {
+        "AsyncChatStream",
+        "AsyncOpenAIClient",
         "ChatClient",
         "ChatCompletionClient",
         "EmbeddingClient",

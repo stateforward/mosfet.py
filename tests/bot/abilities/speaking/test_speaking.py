@@ -44,6 +44,7 @@ LOOKAHEAD = datetime.timedelta(seconds=1)
 ENCODE_IDLE_TIMEOUT = datetime.timedelta(seconds=5)
 ENROLL = datetime.timedelta(seconds=6)
 STOP_TIMEOUT = datetime.timedelta(seconds=1)
+DRAFT_TIMEOUT = datetime.timedelta(seconds=10)
 
 
 def pcm(milliseconds: int) -> bytes:
@@ -80,6 +81,7 @@ class Script(vocal.speech.SpeechEncoder):
         self.stall_on: str | None = stall_on
         self.whole: bool = whole
         self.reads: list[list[str]] = []
+        self.texts: list[collections.abc.AsyncIterable[str]] = []
         self.closed: list[str] = []
         self.pulled: int = 0
 
@@ -97,9 +99,11 @@ class Script(vocal.speech.SpeechEncoder):
     ) -> collections.abc.AsyncIterator[vocal.speech.Audio]:
         read: list[str] = []
         self.reads.append(read)
+        self.texts.append(input)
         try:
             if self.whole:
-                read.extend([piece async for piece in input])
+                async for piece in input:
+                    read.append(piece)
                 if not "".join(read).strip():
                     raise encoding.Error("invalid_input", "blank text")
                 said = words("".join(read))
@@ -240,6 +244,18 @@ class Stage:
             ),
         )
 
+    async def draft(self, text: str, offset: int, *, id: str = "utterance-1") -> None:
+        _ = await hsm.dispatch(
+            self.environment,
+            self.speaking,
+            dataclasses.replace(
+                speaking.DraftEvent.with_data(speaking.DraftData(text=text, offset=offset)),
+                id=id,
+                source=hsm.id(self.requester),
+                target=hsm.id(self.speaking),
+            ),
+        )
+
     async def stop(self, *, id: str = "utterance-1") -> None:
         _ = await hsm.dispatch(
             self.environment,
@@ -271,6 +287,7 @@ async def stage(
     encode_idle_timeout: datetime.timedelta = ENCODE_IDLE_TIMEOUT,
     enroll_seconds: datetime.timedelta = ENROLL,
     stop_timeout: datetime.timedelta = STOP_TIMEOUT,
+    draft_timeout: datetime.timedelta = DRAFT_TIMEOUT,
     mouth: RecordingSpeaker | None = None,
 ) -> Stage:
     environment = Environment()
@@ -290,6 +307,7 @@ async def stage(
         encode_idle_timeout=encode_idle_timeout,
         enroll_seconds=enroll_seconds,
         stop_timeout=stop_timeout,
+        draft_timeout=draft_timeout,
     )
     await start_ability_tree(environment, voice)
     await wait_until(lambda: (voice.state() or "").endswith("/wired/idle"))
@@ -326,6 +344,8 @@ def test_speaking_requires_ability_conversation_targets_and_sane_bounds() -> Non
         _ = speaking.Speaking(
             encoder=Script(), speaker=mouth, voice_id=VOICE_ID, enroll_seconds=datetime.timedelta(seconds=1)
         )
+    with pytest.raises(ValueError, match="draft_timeout"):
+        _ = speaking.Speaking(encoder=Script(), speaker=mouth, voice_id=VOICE_ID, draft_timeout=datetime.timedelta(0))
     with pytest.raises(ValueError, match="stop_timeout"):
         _ = speaking.Speaking(encoder=Script(), speaker=mouth, voice_id=VOICE_ID, stop_timeout=datetime.timedelta(0))
 
@@ -336,6 +356,8 @@ def test_speaking_input_is_not_a_cognition_call_event() -> None:
     assert speaking.ProgressEvent.kind != processing.EventKind
     assert speaking.StopEvent.name == "bot.ability.speaking.stop"
     assert speaking.StopEvent.kind != processing.EventKind
+    assert speaking.DraftEvent.name == "bot.ability.speaking.draft"
+    assert speaking.DraftEvent.kind != processing.EventKind
     assert speaking.EfferenceEvent.kind != processing.EventKind
 
 
@@ -827,7 +849,7 @@ def test_stop_closes_the_pipe_and_the_stream_in_flight_and_ignores_a_stop_for_an
 
     still, outputs, script, state = asyncio.run(run())
 
-    assert still.endswith("/speaking/streaming/pulling")
+    assert "/speaking/streaming/pulling/" in still
     assert outputs[0].outcome == "stopped"
     # Fine alignment: what was said is exactly the words whose audio played.
     assert (outputs[0].spoken, outputs[0].unspoken) == ("Said first. Then ", "stuck here.")
@@ -926,6 +948,207 @@ def test_a_stop_the_mouth_never_settles_ends_stopped_at_stop_timeout() -> None:
     assert outputs[0].outcome == "stopped"
     assert (outputs[0].spoken, outputs[0].unspoken) == ("", "Nobody hears this.")
     assert last_copy == 0.0
+
+
+def _counts(reader: metric_reader.Reader, name: str) -> collections.Counter[str]:
+    return collections.Counter({str(point.attributes["outcome"]): int(point.value) for point in reader.points(name)})
+
+
+def test_drafted_text_is_spoken_while_it_is_written_and_the_final_text_is_not_said_twice(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with metric_reader.recording(tmp_path, monkeypatch) as reader:
+        before = _counts(reader, "bot.speaking.drafted.count")
+
+        async def run() -> tuple[Stage, list[str], list[speaking.OutputData]]:
+            voice = await stage()
+            await voice.draft("Sure. I can", 0)
+            # A streaming-input encoder says what was written before the rest of the reply exists.
+            await wait_until(lambda: any(item.spoken_seconds > 0.0 for item in voice.progress()))
+            read_while_drafting = list(voice.encoder.reads[0])
+            await voice.draft(" help with that", 11)
+            await voice.say("Sure. I can help with that.")
+            await wait_until(lambda: bool(voice.outputs()))
+            return voice, read_while_drafting, voice.outputs()
+
+        voice, read_while_drafting, outputs = asyncio.run(run())
+        after = _counts(reader, "bot.speaking.drafted.count")
+
+    assert read_while_drafting == ["Sure. I can"]
+    # The deltas, then only the rest of the final text: nothing is cut, joined or said twice.
+    assert voice.encoder.reads == [["Sure. I can", " help with that", "."]]
+    assert outputs == [
+        speaking.OutputData(
+            text="Sure. I can help with that.",
+            spoken="Sure. I can help with that.",
+            unspoken="",
+            outcome="completed",
+            voice_id="tts:warm",
+            sample_rate_hz=RATE,
+            channels=1,
+        )
+    ]
+    assert after - before == collections.Counter({"used": 1})
+
+
+def test_a_long_drafted_reply_is_written_and_spoken_in_full() -> None:
+    """W3-20: no whole-reply cap, drafted or not; every delta and the rest of the final reach the encoder."""
+
+    first = " ".join(["word"] * 1_000) + " "
+    rest = " ".join(["more"] * 700) + "."
+    assert len(first + rest) == 8_500
+
+    async def run() -> tuple[Stage, list[speaking.OutputData]]:
+        voice = await stage()
+        await voice.draft(first, 0)
+        await voice.draft(rest[:-1], len(first))
+        await voice.say(first + rest)
+        await wait_until(lambda: bool(voice.outputs()), timeout=20)
+        return voice, voice.outputs()
+
+    voice, outputs = asyncio.run(run())
+
+    assert voice.encoder.reads == [[first, rest[:-1], "."]]
+    assert (outputs[0].outcome, outputs[0].spoken, outputs[0].unspoken) == ("completed", first + rest, "")
+
+
+def test_a_whole_text_encoder_reads_one_joined_text_and_speaks_only_after_the_final() -> None:
+    async def run() -> tuple[int, Stage, list[speaking.OutputData]]:
+        voice = await stage(Script(whole=True))
+        await voice.draft("Sure. ", 0)
+        await voice.draft("I can help.", 6)
+        await asyncio.sleep(0.05)
+        commanded_before_the_final = len(voice.speaker.frames)
+        await voice.say("Sure. I can help.")
+        await wait_until(lambda: bool(voice.outputs()))
+        return commanded_before_the_final, voice, voice.outputs()
+
+    commanded, voice, outputs = asyncio.run(run())
+
+    assert commanded == 0
+    assert voice.encoder.reads == [["Sure. ", "I can help."]]
+    assert (outputs[0].spoken, outputs[0].outcome) == ("Sure. I can help.", "completed")
+
+
+def test_a_final_that_diverges_from_what_was_drafted_keeps_what_was_said_and_splices_nothing(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with metric_reader.recording(tmp_path, monkeypatch) as reader:
+        before = _counts(reader, "bot.speaking.drafted.count")
+
+        async def run() -> tuple[Stage, list[speaking.OutputData]]:
+            voice = await stage()
+            await voice.draft("Yes. Then more", 0)
+            await wait_until(lambda: any(item.spoken_seconds > 0.0 for item in voice.progress()))
+            await voice.say("Nope. Then something else.")
+            await wait_until(lambda: bool(voice.outputs()))
+            return voice, voice.outputs()
+
+        voice, outputs = asyncio.run(run())
+        after = _counts(reader, "bot.speaking.drafted.count")
+
+    assert voice.encoder.reads == [["Yes. Then more"]]
+    assert outputs[0].text == "Nope. Then something else."
+    assert (outputs[0].spoken, outputs[0].unspoken) == ("Yes. Then more", "")
+    assert outputs[0].outcome == "completed"
+    assert after - before == collections.Counter({"diverged": 1})
+
+
+def test_a_repeated_delta_is_ignored_and_a_gap_is_counted(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with metric_reader.recording(tmp_path, monkeypatch) as reader:
+        before = _counts(reader, "bot.processing.draft.count")
+
+        async def run() -> tuple[Stage, list[speaking.OutputData]]:
+            voice = await stage()
+            await voice.draft("Hel", 0)
+            await voice.draft("Hel", 0)
+            await voice.draft("lo", 3)
+            await voice.draft("lo th", 3)
+            await voice.draft("never written", 50)
+            await voice.say("Hello there.")
+            await wait_until(lambda: bool(voice.outputs()))
+            return voice, voice.outputs()
+
+        voice, outputs = asyncio.run(run())
+        after = _counts(reader, "bot.processing.draft.count")
+
+    assert voice.encoder.reads == [["Hel", "lo", " th", "ere."]]
+    assert (outputs[0].text, outputs[0].spoken) == ("Hello there.", "Hello there.")
+    assert after - before == collections.Counter({"gap": 1})
+
+
+def test_drafts_that_stop_coming_end_abandoned_at_draft_timeout_with_what_was_said() -> None:
+    async def run() -> list[speaking.OutputData]:
+        voice = await stage(draft_timeout=datetime.timedelta(milliseconds=50))
+        await voice.draft("Hello there. And then the", 0)
+        await wait_until(lambda: bool(voice.outputs()))
+        return voice.outputs()
+
+    outputs = asyncio.run(run())
+
+    # What was written is still said, the unfinished end too, and the utterance ends abandoned.
+    assert outputs[0].outcome == "abandoned"
+    assert outputs[0].text == "Hello there. And then the"
+    assert outputs[0].spoken == "Hello there. And then the"
+
+
+def test_a_stop_while_drafting_closes_the_pipe_the_encoder_reads() -> None:
+    async def run() -> tuple[list[str], list[speaking.OutputData], Script]:
+        voice = await stage(Script(whole=True))
+        await voice.draft("Never finished", 0)
+        await wait_until(lambda: bool(voice.encoder.reads and voice.encoder.reads[0]))
+        await voice.stop()
+        await wait_until(lambda: bool(voice.outputs()))
+        # A pipe that is still open would never end this read.
+        rest = await asyncio.wait_for(_read(voice.encoder.texts[0]), timeout=1.0)
+        return rest, voice.outputs(), voice.encoder
+
+    rest, outputs, script = asyncio.run(run())
+
+    assert rest == ["Never finished"]
+    assert script.closed == ["Never finished"]
+    assert (outputs[0].outcome, outputs[0].text, outputs[0].spoken) == ("stopped", "Never finished", "")
+
+
+async def _read(text: collections.abc.AsyncIterable[str]) -> list[str]:
+    return [piece async for piece in text]
+
+
+def test_drafts_and_finals_for_a_finished_utterance_never_reopen_it() -> None:
+    async def run() -> tuple[list[speaking.OutputData], list[list[str]], str]:
+        voice = await stage()
+        await voice.say("Done.", id="finished")
+        await wait_until(lambda: bool(voice.outputs()))
+        await wait_until(lambda: (voice.speaking.state() or "").endswith("/wired/idle"))
+        await voice.draft("Done. And a late", 0, id="finished")
+        await voice.say("Done.", id="finished")
+        await asyncio.sleep(0.05)
+        return voice.outputs(), voice.encoder.reads, voice.speaking.state() or ""
+
+    outputs, reads, state = asyncio.run(run())
+
+    assert len(outputs) == 1
+    assert reads == [["Done."]]
+    assert state.endswith("/wired/idle")
+
+
+def test_the_next_utterance_waits_for_this_one() -> None:
+    async def run() -> list[tuple[str, str]]:
+        voice = await stage()
+        await voice.draft("First thing", 0, id="first")
+        await voice.draft("Second thing.", 0, id="second")
+        await voice.say("First thing.", id="first")
+        await voice.say("Second thing.", id="second")
+        await wait_until(lambda: len(voice.outputs()) == 2)
+        return [
+            (event.id, event.data.spoken)
+            for event in voice.requester.named(speaking.OutputEvent)
+            if isinstance(event.data, speaking.OutputData)
+        ]
+
+    assert asyncio.run(run()) == [("first", "First thing."), ("second", "Second thing.")]
 
 
 def test_one_utterance_at_a_time_the_next_waits_for_the_first_to_be_recorded() -> None:
@@ -1117,7 +1340,9 @@ def test_cognition_does_not_directly_select_speaking_output() -> None:
             self.inputs = []
 
         @typing.override
-        async def process(self, input: processing.InputData) -> processing.Events:
+        async def process(
+            self, input: processing.InputData, *, drafts: processing.DraftSink | None = None
+        ) -> processing.Events:
             self.inputs.append(input)
             return ()
 

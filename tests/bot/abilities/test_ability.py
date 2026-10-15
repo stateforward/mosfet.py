@@ -31,7 +31,9 @@ class SlowTextGenerator(text.TextGenerator):
         self.release = release
 
     @override
-    async def generate(self, input: text.InputData) -> text.OutputData:
+    async def generate(
+        self, input: text.InputData, *, deltas: collections.abc.Callable[[text.Delta], None] | None = None
+    ) -> text.OutputData:
         _ = await self.release.wait()
         content = input.messages[-1].content
         assert isinstance(content, str)
@@ -47,7 +49,9 @@ class RecordingDelayedTextGenerator(text.TextGenerator):
         self.release_first = release_first
 
     @override
-    async def generate(self, input: text.InputData) -> text.OutputData:
+    async def generate(
+        self, input: text.InputData, *, deltas: collections.abc.Callable[[text.Delta], None] | None = None
+    ) -> text.OutputData:
         content = input.messages[-1].content
         assert isinstance(content, str)
         self.calls.append(content)
@@ -58,7 +62,9 @@ class RecordingDelayedTextGenerator(text.TextGenerator):
 
 class EchoTextGenerator(text.TextGenerator):
     @override
-    async def generate(self, input: text.InputData) -> text.OutputData:
+    async def generate(
+        self, input: text.InputData, *, deltas: collections.abc.Callable[[text.Delta], None] | None = None
+    ) -> text.OutputData:
         content = input.messages[-1].content
         assert isinstance(content, str)
         return text.OutputData(content=content.upper())
@@ -66,7 +72,9 @@ class EchoTextGenerator(text.TextGenerator):
 
 class WrongTextGenerator(text.TextGenerator):
     @override
-    async def generate(self, input: text.InputData) -> text.OutputData:
+    async def generate(
+        self, input: text.InputData, *, deltas: collections.abc.Callable[[text.Delta], None] | None = None
+    ) -> text.OutputData:
         del input
         return invalid_value(text.OutputData, "not text generation output")
 

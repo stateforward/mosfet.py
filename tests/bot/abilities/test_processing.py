@@ -7,17 +7,20 @@ from mosfet.abilities.communication import communication, conversation
 from mosfet.abilities.hearing import voice
 from mosfet.abilities.language import text
 from mosfet.devices import phone
-from mosfet.environment import SoundEvent
+from mosfet.environment import Environment, SoundEvent
 from mosfet.protocols import attachment
 
 import asyncio
 import base64
+import collections
 import collections.abc
 import dataclasses
 import datetime
 import gc
 import html
 import json
+import re
+import pathlib
 import typing
 import weakref
 
@@ -25,6 +28,7 @@ import hsm
 import pydantic
 import pytest
 
+from tests import metric_reader
 from tests.type_helpers import object_dict
 from tests.bot.abilities.support import (
     dispatch_ability_for_test,
@@ -146,7 +150,9 @@ def _dispatch_modeled_processing_failure(
 
 class LengthProcessor(processing.Processor):
     @typing.override
-    async def process(self, input: processing.InputData) -> processing.Events:
+    async def process(
+        self, input: processing.InputData, *, drafts: processing.DraftSink | None = None
+    ) -> processing.Events:
         del input
         return ()
 
@@ -164,7 +170,9 @@ class OptionalRecordingProcessor(processing.Processor):
         self.output = output
 
     @typing.override
-    async def process(self, input: processing.InputData) -> processing.Events:
+    async def process(
+        self, input: processing.InputData, *, drafts: processing.DraftSink | None = None
+    ) -> processing.Events:
         self.calls.append(str(input.input))
         return typing.cast(processing.Events, self.output)
 
@@ -185,7 +193,9 @@ class DelayedRecordingProcessor(processing.Processor):
         self.release_first = asyncio.Event()
 
     @typing.override
-    async def process(self, input: processing.InputData) -> processing.Events:
+    async def process(
+        self, input: processing.InputData, *, drafts: processing.DraftSink | None = None
+    ) -> processing.Events:
         self.calls.append(str(input.input))
         if input.input == "first":
             _ = await self.release_first.wait()
@@ -206,7 +216,9 @@ class CancellationRecordingProcessor(processing.Processor):
         self.calls = []
 
     @typing.override
-    async def process(self, input: processing.InputData) -> processing.Events:
+    async def process(
+        self, input: processing.InputData, *, drafts: processing.DraftSink | None = None
+    ) -> processing.Events:
         self.calls.append(str(input.input))
         if input.input != "first":
             return ()
@@ -257,7 +269,9 @@ class FailingRecordingProcessor(processing.Processor):
         self.calls = []
 
     @typing.override
-    async def process(self, input: processing.InputData) -> processing.Events:
+    async def process(
+        self, input: processing.InputData, *, drafts: processing.DraftSink | None = None
+    ) -> processing.Events:
         self.calls.append(str(input.input))
         await asyncio.sleep(0)
         raise RuntimeError("child failed")
@@ -282,7 +296,9 @@ class ContextRecordingProcessor(processing.Processor):
         self._ctx = ctx
 
     @typing.override
-    async def process(self, input: processing.InputData) -> processing.Events:
+    async def process(
+        self, input: processing.InputData, *, drafts: processing.DraftSink | None = None
+    ) -> processing.Events:
         del input
         self.values.append(None if self._ctx is None else self._ctx.value(CONTEXT_KEY))
         return typing.cast(processing.Events, self.output)
@@ -297,7 +313,9 @@ def context_recording(
 
 class _ModeledNoopProcessor(processing.Processor):
     @typing.override
-    async def process(self, input: processing.InputData) -> processing.Events:
+    async def process(
+        self, input: processing.InputData, *, drafts: processing.DraftSink | None = None
+    ) -> processing.Events:
         del input
         raise AssertionError("direct process bypassed modeled child dispatch")
 
@@ -1347,14 +1365,18 @@ class InstructionsRecordingProcessor(processing.Processor):
         self.received = []
 
     @typing.override
-    async def process(self, input: processing.InputData) -> processing.Events:
+    async def process(
+        self, input: processing.InputData, *, drafts: processing.DraftSink | None = None
+    ) -> processing.Events:
         self.received.append(input.instructions)
         return ()
 
 
 class PromptRenderingProcessor(processing.Processor):
     @typing.override
-    async def process(self, input: processing.InputData) -> processing.Events:
+    async def process(
+        self, input: processing.InputData, *, drafts: processing.DraftSink | None = None
+    ) -> processing.Events:
         _ = input.model_facing_content(self.image_capacity)
         return ()
 
@@ -1780,3 +1802,296 @@ def test_serialized_input_uses_normal_pydantic_model_dump() -> None:
     assert json_dumped["input"]["name"] == listening.SpeechEvent.name
     assert "schema" not in json_dumped["input"]
     assert "content" not in json_dumped["input"]["data"]
+
+
+# --- drafts: the text of a selection the model is still writing ----------------------------------------------------
+
+_SAY_DRAFT_EVENT = hsm.Event[processing.DraftData](name="tests.processing.say.draft", schema=processing.DraftData)
+
+
+class _SayData(pydantic.BaseModel):
+    """A marked payload: its ``text`` may be streamed to the target while the model writes it."""
+
+    __draft__: typing.ClassVar[processing.Draft] = processing.Draft(field="text", event=_SAY_DRAFT_EVENT)
+
+    text: str
+
+
+_SAY_EVENT = hsm.Event[_SayData](name="tests.processing.say", kind=processing.EventKind, schema=_SayData)
+_UNMARKED_EVENT = hsm.Event[_SpeakData](name="tests.processing.unmarked", kind=processing.EventKind, schema=_SpeakData)
+
+_SAID = 'Héllo "there" ☺.\nBye \U0001f600 now'
+_SAY_ARGS = (
+    '{"events": [{"event": "tests.processing.unmarked", "data": {"text": "not drafted"}}, '
+    '{"reason": "greet", "event": "tests.processing.say", "target": "voice", "data": {"note": {"text": "x"}, '
+    '"text": "H\\u00e9llo \\"there\\" \\u263a.\\nBye \\ud83d\\ude00 now"}}]}'
+)
+
+
+def _drafted(parser: processing.DraftParser, chunks: collections.abc.Iterable[str]) -> list[processing.DraftData]:
+    return [draft for chunk in chunks for draft in parser.feed(chunk)]
+
+
+def _appended(drafts: collections.abc.Sequence[processing.DraftData]) -> str:
+    """The field the deltas wrote, checking that each one starts exactly where the last one ended."""
+
+    written = ""
+    for draft in drafts:
+        assert draft.text
+        assert draft.offset == len(written)
+        written += draft.text
+    return written
+
+
+def test_draft_parser_emits_append_only_deltas_of_a_marked_field_however_the_arguments_are_split() -> None:
+    assert json.loads(_SAY_ARGS)["events"][1]["data"]["text"] == _SAID
+    schemas = (_UNMARKED_EVENT, _SAY_EVENT)
+    whole = _drafted(processing.DraftParser(schemas), (_SAY_ARGS,))
+    assert whole == [processing.DraftData(text=_SAID, offset=0, event=_SAY_EVENT.name, item=1, seq=0)]
+
+    for cut in range(len(_SAY_ARGS) + 1):
+        drafts = _drafted(processing.DraftParser(schemas), (_SAY_ARGS[:cut], _SAY_ARGS[cut:]))
+        assert _appended(drafts) == _SAID, cut
+        assert [draft.seq for draft in drafts] == list(range(len(drafts)))
+        assert {(draft.event, draft.item) for draft in drafts} == {(_SAY_EVENT.name, 1)}
+
+    by_character = _drafted(processing.DraftParser(schemas), _SAY_ARGS)
+    assert _appended(by_character) == _SAID
+    assert len(by_character) > len(_SAID) // 2
+
+
+def test_draft_parser_drafts_nothing_when_the_data_comes_before_the_event_name(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    arguments = '{"events": [{"data": {"text": "Too early."}, "event": "tests.processing.say"}]}'
+    with metric_reader.recording(tmp_path, monkeypatch) as reader:
+        before = _draft_counts(reader)
+        drafts = _drafted(processing.DraftParser((_SAY_EVENT,)), arguments)
+        after = _draft_counts(reader)
+
+    assert drafts == []
+    assert after - before == collections.Counter({"unresolved": 1})
+
+
+def test_draft_parser_stops_at_malformed_arguments_counts_them_and_never_raises(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    arguments = '{"events": [{"event": "tests.processing.say", "data": {"text": "Fine so far' + '"}}]] }} {"text": "x"}'
+    with metric_reader.recording(tmp_path, monkeypatch) as reader:
+        before = _draft_counts(reader)
+        parser = processing.DraftParser((_SAY_EVENT,))
+        drafts = _drafted(parser, arguments)
+        later = parser.feed('{"events": [{"event": "tests.processing.say", "data": {"text": "more"}}]}')
+        after = _draft_counts(reader)
+
+    assert _appended(drafts) == "Fine so far"
+    assert later == ()
+    assert after - before == collections.Counter({"unparsed": 1})
+
+
+def _draft_counts(reader: metric_reader.Reader) -> collections.Counter[str]:
+    return collections.Counter(
+        {str(point.attributes["outcome"]): int(point.value) for point in reader.points("bot.processing.draft.count")}
+    )
+
+
+class _VoiceActor(hsm.Instance):
+    """Takes the marked event, its draft event and an unmarked event, and records each in arrival order."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.events: list[hsm.Event[typing.Any]] = []
+
+    @staticmethod
+    def _record(ctx: hsm.Context, instance: "_VoiceActor", event: hsm.Event[typing.Any]) -> None:
+        del ctx
+        instance.events.append(event)
+
+    model: typing.ClassVar[hsm.Model | None] = mosfet.define(
+        "DraftVoiceActor",
+        hsm.initial(hsm.target("active")),
+        hsm.state(
+            "active",
+            hsm.transition(hsm.on(_SAY_EVENT), hsm.effect(_record)),
+            hsm.transition(hsm.on(_SAY_DRAFT_EVENT), hsm.effect(_record)),
+            hsm.transition(hsm.on(_UNMARKED_EVENT), hsm.effect(_record)),
+        ),
+    )
+
+
+class _DraftingProcessor(processing.Processor):
+    """Writes drafts as a streaming model would, then returns the final selection."""
+
+    def __init__(self, drafts: collections.abc.Sequence[processing.DraftData], final: processing.Events) -> None:
+        self.drafts: tuple[processing.DraftData, ...] = tuple(drafts)
+        self.final: processing.Events = final
+        self.sinks: list[processing.DraftSink | None] = []
+
+    @typing.override
+    async def process(
+        self, input: processing.InputData, *, drafts: processing.DraftSink | None = None
+    ) -> processing.Events:
+        del input
+        self.sinks.append(drafts)
+        if drafts is not None:
+            for draft in self.drafts:
+                drafts(draft)
+        return self.final
+
+
+def test_processing_drafts_only_offered_marked_unique_targets_under_the_operation_id_before_the_final_selection(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    say = _SAY_EVENT.name
+    drafts = (
+        processing.DraftData(text="Hel", offset=0, event=say, item=0, seq=0),
+        processing.DraftData(text="lo", offset=3, event=say, item=0, seq=1),
+        # A second marked item for the same target is not drafted; only the first is.
+        processing.DraftData(text="Other", offset=0, event=say, item=1, seq=2),
+        # Not marked, and not offered: neither reaches anyone.
+        processing.DraftData(text="nope", offset=0, event=_UNMARKED_EVENT.name, item=2, seq=3),
+        processing.DraftData(text="nope", offset=0, event="tests.processing.not_offered", item=3, seq=4),
+    )
+    final = (processing.SelectedEvent(event=say, data={"text": "Hello."}),)
+
+    async def run() -> tuple[list[hsm.Event[typing.Any]], str]:
+        ctx = shared_hsm_context()
+        voice_actor = _VoiceActor()
+        _ = await mosfet.started(ctx, voice_actor, require_model(voice_actor.model), hsm.Config(id="voice"))
+        processor = _DraftingProcessor(drafts, final)
+        processing_ability = processing.Processing(processor=processor)
+        _ = await dispatch_ability_for_test(
+            processing_ability,
+            ctx,
+            processing.InputData(
+                input="speak",
+                schemas=(_SAY_EVENT, _UNMARKED_EVENT),
+                actors={"voice": voice_actor},
+                actor_events={say: ("voice",), _UNMARKED_EVENT.name: ("voice",)},
+            ),
+        )
+        return voice_actor.events, hsm.id(processing_ability)
+
+    with metric_reader.recording(tmp_path, monkeypatch) as reader:
+        before = _draft_counts(reader)
+        received, processing_id = asyncio.run(run())
+        after = _draft_counts(reader)
+
+    assert [event.name for event in received] == [_SAY_DRAFT_EVENT.name, _SAY_DRAFT_EVENT.name, say]
+    assert [event.data for event in received[:2]] == list(drafts[:2])
+    assert len({event.id for event in received}) == 1 and received[0].id
+    assert {(event.source, event.target) for event in received} == {(processing_id, "voice")}
+    assert after - before == collections.Counter({"emitted": 2, "unresolved": 3})
+
+
+def test_processing_hands_no_draft_sink_when_there_is_no_one_to_draft_to() -> None:
+    async def run() -> list[processing.DraftSink | None]:
+        processor = _DraftingProcessor((), ())
+        _ = await dispatch_ability_for_test(
+            processing.Processing(processor=processor),
+            shared_hsm_context(),
+            processing.InputData(input="actorless", schemas=(_SAY_EVENT,)),
+        )
+        return processor.sinks
+
+    assert asyncio.run(run()) == [None]
+
+
+def test_a_drafted_response_is_heard_before_the_processor_has_finished_writing_it() -> None:
+    from mosfet.abilities import speaking, vocal
+    from mosfet.abilities.communication.conversation import turn_detector
+    from mosfet.devices import audio
+    from tests.hsm_instance_state import start_ability_tree
+
+    rate = 8_000
+
+    class Words(vocal.speech.SpeechEncoder):
+        def __init__(self) -> None:
+            self.format: vocal.speech.Format = vocal.speech.Format(sample_rate_hz=rate, channels=1)
+
+        @typing.override
+        async def encode(
+            self, input: collections.abc.AsyncIterable[str]
+        ) -> collections.abc.AsyncIterator[vocal.speech.Audio]:
+            # A streaming-input encoder: each piece is said as it arrives, one chunk per word of it.
+            async for piece in input:
+                for word in re.findall(r"\s*\S+\s*", piece):
+                    yield vocal.speech.Audio(pcm=b"\x01\x00" * (rate // 50), text=word)
+
+    class Mouth(audio.Speaker):
+        def __init__(self) -> None:
+            ticks = iter(range(0, 10**9, 1_000))
+            super().__init__(frame=datetime.timedelta(milliseconds=10), clock=lambda: float(next(ticks)))
+            self.frames: list[audio.OutputData] = []
+
+        @typing.override
+        def dispatch(self, ctx: hsm.Context, event: hsm.Event[typing.Any]) -> collections.abc.Awaitable[bool]:
+            if isinstance(event.data, audio.OutputData):
+                self.frames.append(event.data)
+            return super().dispatch(ctx, event)
+
+    class Decoder(abilities.Decoder[typing.Any, str]):
+        @typing.override
+        async def decode(self, input: typing.Any) -> str:
+            return str(input)
+
+    class Writer(processing.Processor):
+        """Writes the first sentence, waits until it is heard, then finishes the response."""
+
+        def __init__(self, mouth: Mouth) -> None:
+            self.mouth: Mouth = mouth
+            self.heard_before_return: bool = False
+
+        @typing.override
+        async def process(
+            self, input: processing.InputData, *, drafts: processing.DraftSink | None = None
+        ) -> processing.Events:
+            del input
+            assert drafts is not None
+            drafts(
+                processing.DraftData(text="Sure. I can", offset=0, event=communication.RespondEvent.name, item=0, seq=0)
+            )
+            for _ in range(2_000):
+                if self.mouth.frames:
+                    break
+                await asyncio.sleep(0.001)
+            self.heard_before_return = bool(self.mouth.frames)
+            return (
+                processing.SelectedEvent(event=communication.RespondEvent.name, data={"text": "Sure. I can help."}),
+            )
+
+    async def run() -> tuple[bool, list[str]]:
+        # The mouth is a device: it is attached to in the environment it is powered in.
+        ctx = Environment()
+        mouth = Mouth()
+        voice = speaking.Speaking(encoder=Words(), speaker=mouth, voice_id="tts:warm")
+        talk = conversation.Conversation(turn_detector=turn_detector.TurnDetector(decoder=Decoder()))
+        comm = communication.Communication(active_conversation=talk, speaking=voice)
+        await start_ability_tree(ctx, voice)
+        await start_ability_tree(ctx, comm)
+        for _ in range(2_000):
+            if "/behavior/active" in (comm.state() or "") and (voice.state() or "").endswith("/wired/idle"):
+                break
+            await asyncio.sleep(0.001)
+        writer = Writer(mouth)
+        _ = await dispatch_ability_for_test(
+            processing.Processing(processor=writer),
+            ctx,
+            processing.InputData(
+                input="hello",
+                schemas=(communication.RespondEvent,),
+                actors={"communication": comm},
+                actor_events={communication.RespondEvent.name: ("communication",)},
+            ),
+        )
+        for _ in range(2_000):
+            if (voice.state() or "").endswith("/wired/idle") and len(mouth.frames) >= 4:
+                break
+            await asyncio.sleep(0.001)
+        return writer.heard_before_return, [frame.mark or "" for frame in mouth.frames]
+
+    heard_before_return, marks = asyncio.run(run())
+
+    assert heard_before_return
+    # "Sure. I can" while the rest was being written, then " help." once it was: nothing said twice.
+    assert marks == ["u1.0", "u1.1", "u1.2", "u1.3"]

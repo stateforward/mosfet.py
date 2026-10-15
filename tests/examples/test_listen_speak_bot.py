@@ -153,7 +153,9 @@ def _empty_cognition() -> cognition.Cognition:
 
     class _EmptyProcessor(processing.Processor):
         @override
-        async def process(self, input: processing.InputData) -> processing.Events:
+        async def process(
+            self, input: processing.InputData, *, drafts: processing.DraftSink | None = None
+        ) -> processing.Events:
             del input
             await asyncio.Event().wait()
             raise AssertionError("cancelled test processor resumed")

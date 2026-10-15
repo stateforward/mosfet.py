@@ -60,7 +60,9 @@ class _SequenceProcessor(processing.Processor):
         self.outputs = outputs
 
     @typing.override
-    async def process(self, input: processing.InputData) -> processing.Events:
+    async def process(
+        self, input: processing.InputData, *, drafts: processing.DraftSink | None = None
+    ) -> processing.Events:
         self.calls.append(input)
         return typing.cast(processing.Events, self.outputs[min(len(self.calls) - 1, len(self.outputs) - 1)])
 
@@ -74,7 +76,9 @@ class _CyclingProcessor(processing.Processor):
         self.outputs = outputs
 
     @typing.override
-    async def process(self, input: processing.InputData) -> processing.Events:
+    async def process(
+        self, input: processing.InputData, *, drafts: processing.DraftSink | None = None
+    ) -> processing.Events:
         self.calls.append(input)
         return typing.cast(processing.Events, self.outputs[(len(self.calls) - 1) % len(self.outputs)])
 
