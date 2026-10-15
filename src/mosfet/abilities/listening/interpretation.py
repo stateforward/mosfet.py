@@ -534,7 +534,7 @@ def _is_wav_sound(sound: SoundData) -> bool:
 def _pcm_sound_data(sound: SoundData) -> SoundData:
     """Normalize environment sound to signed 16-bit PCM for identity and speech products.
 
-    Ambient emitters (for example phone_bot Person/SayEncoder) may deliver RIFF/WAVE containers
+    Ambient emitters (for example a recording played into the room) may deliver RIFF/WAVE containers
     as ``audio/wav``. Voice identification and SpeechData require raw ``audio/pcm`` with sample
     rate and channels. Decode with the stdlib ``wave`` module; leave non-WAV media unchanged so
     kind-labeled non-speech paths keep their original bytes when the payload is not a real WAV.

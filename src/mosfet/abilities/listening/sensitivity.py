@@ -130,8 +130,17 @@ def _has_sound(ctx: hsm.Context, instance: "Sensitivity", event: hsm.Event[typin
 
 
 def _has_efference_copy(ctx: hsm.Context, instance: "Sensitivity", event: hsm.Event[typing.Any]) -> bool:
+    """A copy with sound still to come from the mouth."""
+
     del ctx, instance
-    return isinstance(event.data, EfferenceData)
+    return isinstance(event.data, EfferenceData) and event.data.duration > 0.0
+
+
+def _has_silent_copy(ctx: hsm.Context, instance: "Sensitivity", event: hsm.Event[typing.Any]) -> bool:
+    """A copy saying the mouth has nothing left to play."""
+
+    del ctx, instance
+    return isinstance(event.data, EfferenceData) and event.data.duration == 0.0
 
 
 class Sensitivity(ability.Ability[SoundData, OutputData]):
@@ -318,14 +327,19 @@ class Sensitivity(ability.Ability[SoundData, OutputData]):
                 hsm.guard(_has_sound),
                 hsm.effect(_score_against_prediction),
             ),
-            # External self-transition: a second command while the first is still playing exits
-            # and re-enters, which is what restarts the window on the new duration. Utterances
-            # queue behind one another, so the later one is the one still to be heard.
+            # External self-transition: each copy states the playout still to come from now, so it
+            # replaces the last one — re-entering restarts the window on the remaining duration.
             hsm.transition(
                 hsm.on(EfferenceEvent),
                 hsm.guard(_has_efference_copy),
                 hsm.effect(_remember_command),
                 hsm.target("/Sensitivity/producing"),
+            ),
+            # The mouth says it has nothing left to play: the window closes now.
+            hsm.transition(
+                hsm.on(EfferenceEvent),
+                hsm.guard(_has_silent_copy),
+                hsm.target("/Sensitivity/quiet"),
             ),
             # Ballistic: the window closes itself after exactly the sound it was opened for.
             # Nothing else can hold it open, so no failure here can leave a bot deaf.

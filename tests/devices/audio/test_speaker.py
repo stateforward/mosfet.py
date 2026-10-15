@@ -185,6 +185,15 @@ def test_speaker_is_generic_audio_output_peripheral() -> None:
     assert audio.Speaker.required_bot_abilities == ()
 
 
+def test_how_loud_and_where_a_speaker_plays_is_stamped_on_its_sound_never_read_off_it() -> None:
+    """Nothing outside the transducer reads its level or placement; each sound it makes carries them."""
+
+    speaker = audio.Speaker(amplitude_db=60.0)
+
+    assert not hasattr(speaker, "amplitude_db")
+    assert not hasattr(speaker, "placement")
+
+
 def test_speaker_dispatches_audio_output_to_target_device() -> None:
     async def run() -> None:
         speaker = audio.Speaker()

@@ -297,6 +297,39 @@ def test_the_window_closes_itself_and_cannot_leave_a_bot_deaf() -> None:
     assert state.endswith("/quiet")
 
 
+def test_a_copy_with_nothing_left_to_play_closes_the_window_now() -> None:
+    """Each copy states the playout still to come; zero means the mouth is done, so own voice is heard again."""
+
+    async def run() -> tuple[list[sensitivity.OutputData], str]:
+        ctx = shared_hsm_context()
+        stage = await started_stage(ctx)
+        await command_the_mouth(ctx, stage, duration=60.0)
+        await command_the_mouth(ctx, stage, duration=0.0)
+        await hear(ctx, stage, source=MOUTH)
+        await wait_for(stage.outputs, 1)
+        return stage.outputs, stage.state() or ""
+
+    outputs, state = asyncio.run(run())
+
+    assert outputs[0].perceived_level_db == AT_MY_EARS_DB
+    assert state.endswith("/quiet")
+
+
+def test_a_copy_with_nothing_left_to_play_does_not_open_a_window() -> None:
+    async def run() -> tuple[list[sensitivity.OutputData], str]:
+        ctx = shared_hsm_context()
+        stage = await started_stage(ctx)
+        await command_the_mouth(ctx, stage, duration=0.0)
+        await hear(ctx, stage, source=MOUTH)
+        await wait_for(stage.outputs, 1)
+        return stage.outputs, stage.state() or ""
+
+    outputs, state = asyncio.run(run())
+
+    assert outputs[0].perceived_level_db == AT_MY_EARS_DB
+    assert state.endswith("/quiet")
+
+
 def test_sensitivity_output_is_not_offerable_to_a_model() -> None:
     """A scored sound is perception's bookkeeping, never a tool a model can pick."""
 

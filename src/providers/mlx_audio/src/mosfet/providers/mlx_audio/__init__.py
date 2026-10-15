@@ -1,5 +1,5 @@
 from .speech_decoder import SpeechDecoder, SpeechDecodingError
-from .speech_encoder import SpeechEncoder, SpeechEncodingError
+from .speech_encoder import SpeechEncoder
 from .voice import VoiceDecoder, VoiceEncoder
 from .voice_detection import VoiceDetectionError, VoiceActivityClassifier
 from .voice_diarization import VoiceDiarizationError, VoiceDiarizer
@@ -10,7 +10,6 @@ __all__ = [
     "SpeechDecoder",
     "SpeechDecodingError",
     "SpeechEncoder",
-    "SpeechEncodingError",
     "VoiceDecoder",
     "VoiceEncoder",
     "VoiceDetectionError",

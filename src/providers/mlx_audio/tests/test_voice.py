@@ -1,12 +1,13 @@
 from __future__ import annotations
 
-import mosfet.abilities
 from mosfet.abilities import cognition
+from mosfet.abilities import vocal
 from mosfet.abilities.communication import conversation
 from mosfet.abilities.communication.conversation import turn_detector
 from mosfet.abilities.hearing import speech
 
 import asyncio
+import collections.abc
 import dataclasses
 import io
 import typing
@@ -28,14 +29,19 @@ class FixedSpeechDecoder(speech.SpeechDecoder):
         return self.output
 
 
-@dataclasses.dataclass
-class RecordingSpeechEncoder(mosfet.abilities.Encoder[bytes, bytes]):
-    calls: list[bytes] = dataclasses.field(default_factory=list)
+class RecordingSpeechEncoder(vocal.speech.SpeechEncoder):
+    def __init__(self) -> None:
+        self.format: vocal.speech.Format = vocal.speech.Format(sample_rate_hz=24_000, channels=1)
+        self.calls: list[str] = []
 
     @typing.override
-    async def encode(self, input: bytes) -> bytes:
-        self.calls.append(input)
-        return b"encoded voice response"
+    async def encode(
+        self, input: collections.abc.AsyncIterable[str]
+    ) -> collections.abc.AsyncIterator[vocal.speech.Audio]:
+        said = "".join([piece async for piece in input])
+        self.calls.append(said)
+        yield vocal.speech.Audio(pcm=b"\x01\x00", text="")
+        yield vocal.speech.Audio(pcm=b"\x02\x00", text=said)
 
 
 def voice_message() -> conversation.TurnData:
@@ -76,7 +82,7 @@ def test_voice_decoder_uses_mlx_speech_decoder() -> None:
     assert output == "hello caller"
 
 
-def test_voice_encoder_uses_mlx_speech_encoder_result_reason() -> None:
+def test_voice_encoder_speaks_the_result_reason_as_one_pcm_buffer() -> None:
     speech_encoder = RecordingSpeechEncoder()
     encoder = VoiceEncoder(speech_encoder=speech_encoder)
 
@@ -96,8 +102,8 @@ def test_voice_encoder_uses_mlx_speech_encoder_result_reason() -> None:
         )
     )
 
-    assert output == b"encoded voice response"
-    assert speech_encoder.calls == [b"I can help with that."]
+    assert output == b"\x01\x00\x02\x00"
+    assert speech_encoder.calls == ["I can help with that."]
 
 
 def test_voice_encoder_falls_back_to_text() -> None:
@@ -115,4 +121,4 @@ def test_voice_encoder_falls_back_to_text() -> None:
         )
     )
 
-    assert speech_encoder.calls == [b"hello caller"]
+    assert speech_encoder.calls == ["hello caller"]

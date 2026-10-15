@@ -7,6 +7,7 @@ ability. Durable recall is Memory.
 
 from __future__ import annotations
 
+import collections
 import collections.abc
 import dataclasses
 import datetime
@@ -15,13 +16,13 @@ import uuid
 
 import hsm
 import pydantic
+from opentelemetry import metrics
 from pydantic.json_schema import SkipJsonSchema
 
 from mosfet import event
 import mosfet
 from mosfet.abilities import ability
 from mosfet.abilities import cognition
-from mosfet.abilities import processing
 from mosfet.abilities import speaking
 from . import conversation
 from mosfet.protocols import attachment
@@ -31,7 +32,18 @@ from mosfet.telemetry import span
 Conversation = conversation.Conversation
 TurnData = conversation.TurnData
 
-_RESPONSE_TIMEOUT = datetime.timedelta(seconds=6)
+_RESPONSE_IDLE_TIMEOUT = datetime.timedelta(seconds=15)
+"""Default longest silence from Speaking on a response; it exceeds Speaking's own longest silence inside one."""
+
+_CLOSED_RESPONSES = 16
+"""How many finished response ids Communication remembers, so a late copy of one can never reopen it."""
+
+_METER = metrics.get_meter("mosfet.abilities.communication")
+_LATE = _METER.create_counter(
+    "bot.communication.response.late.count",
+    unit="{event}",
+    description="Responses that arrived for a response id Communication had already finished; ignored.",
+)
 
 
 class ActivateData(pydantic.BaseModel):
@@ -71,7 +83,7 @@ class RespondData(pydantic.BaseModel):
 
     Communication currently delivers this action through its injected Speaking ability. The
     selected payload is deliberately text-only: cognition chooses to respond, while Speaking
-    owns synthesis and playout.
+    owns speech encoding and playout.
     """
 
     model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
@@ -116,29 +128,6 @@ FailedEvent = hsm.Event[ability.FailureData](
 )
 
 
-class _PreparedResponseData(pydantic.BaseModel):
-    """A normalized response operation ready for Speaking delivery."""
-
-    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(frozen=True, extra="forbid")
-
-    response: RespondData
-
-
-_PreparedResponseEvent = hsm.Event[_PreparedResponseData](
-    name="bot.ability.communication.response.prepared",
-    schema=_PreparedResponseData,
-)
-_ResponseDispatchedEvent = hsm.Event[_PreparedResponseData](
-    name="bot.ability.communication.response.dispatched",
-    schema=_PreparedResponseData,
-)
-_ResponseHopTimedOutEvent = hsm.Event[object](
-    name="bot.ability.communication.response.hop.timed_out",
-    kind=hsm.ErrorEventKind,
-    schema=object,
-)
-
-
 def _has_conversation_product(
     ctx: hsm.Context,
     instance: "Communication",
@@ -179,15 +168,6 @@ def _has_communication_input(
     return isinstance(event.data, TurnData)
 
 
-def _has_respond(
-    ctx: hsm.Context,
-    instance: "Communication",
-    event: hsm.Event[typing.Any],
-) -> bool:
-    del ctx, instance
-    return isinstance(event.data, RespondData)
-
-
 def _is_speaking_ability(value: object) -> bool:
     return isinstance(value, speaking.Speaking)
 
@@ -226,11 +206,16 @@ class Communication(ability.Ability[TurnData, object]):
     - ``inactive``: attaching the active Conversation composite (or after End).
     - ``active``: route :data:`InputEvent` to ``_active_conversation`` and accept
       :data:`RespondEvent` for the configured Speaking route; forward terminals.
-    - ``responding``: await the injected Speaking ability's typed completion or failure.
+    - ``responding``: the response's text has gone to the injected Speaking ability as
+      ``speaking.input`` under the response id; Communication forwards Speaking's terminal for that
+      id to its owner. ``waiting`` re-enters on every ``speaking.progress`` for the response, so a long
+      spoken reply is never cut off; ``response_idle_timeout`` of silence from Speaking ends it as
+      failed. Leaving ``responding`` by any path retires the response id into a bounded ring of
+      finished ids, and a ``respond`` for a finished id is ignored and counted.
 
-    Construction is keyword-only (``active_conversation=``, ``conversations=``, ``speaking=``).
-    ``speaking`` is a required composition dependency and is never discovered through the actor
-    graph.
+    Construction is keyword-only (``active_conversation=``, ``conversations=``, ``speaking=``,
+    ``response_idle_timeout=``). ``speaking`` is a required composition dependency and is never
+    discovered through the actor graph.
     """
 
     _composite_attachment_lifecycle: typing.ClassVar[bool] = True
@@ -238,6 +223,11 @@ class Communication(ability.Ability[TurnData, object]):
     _active_conversation: Conversation
     _conversations: list[Conversation]
     _speaking: speaking.Speaking
+    _response_idle_timeout: datetime.timedelta
+    # Durable: the id of the response being spoken ("" outside ``responding``), and the ids of the last
+    # responses that finished, so a late copy of one can never reopen it.
+    _response_id: str
+    _closed_responses: collections.deque[str]
     failed_event: typing.ClassVar[hsm.Event[ability.FailureData]] = FailedEvent
 
     @staticmethod
@@ -248,52 +238,33 @@ class Communication(ability.Ability[TurnData, object]):
             return ""
         return hsm.id(instance._attachments[0])
 
-    @staticmethod
-    def _has_response_completed(
-        ctx: hsm.Context,
-        instance: "Communication",
-        event: hsm.Event[typing.Any],
-    ) -> bool:
-        del ctx
-        return (
-            isinstance(event.data, speaking.OutputData)
-            and bool(event.id)
-            and event.source == hsm.id(instance._speaking)
-            and event.target == hsm.id(instance)
-            and (
-                processing.active_operation(instance, event.id) is not None
-                or processing.active_operation_id(instance) is None
-            )
-        )
-
-    @staticmethod
-    def _has_response_failure(
-        ctx: hsm.Context,
-        instance: "Communication",
-        event: hsm.Event[typing.Any],
-    ) -> bool:
-        del ctx
-        return (
-            isinstance(event.data, ability.FailureData)
-            and bool(event.id)
-            and event.source == hsm.id(instance._speaking)
-            and event.target == hsm.id(instance)
-            and (
-                processing.active_operation(instance, event.id) is not None
-                or processing.active_operation_id(instance) is None
-            )
-        )
-
     def __init__(
         self,
         *,
         active_conversation: Conversation | None = None,
         conversations: collections.abc.Sequence[Conversation] | None = None,
         speaking: speaking.Speaking,
+        response_idle_timeout: datetime.timedelta = _RESPONSE_IDLE_TIMEOUT,
     ) -> None:
+        """Build Communication.
+
+        Args:
+            active_conversation: The Conversation made active first.
+            conversations: Conversations Communication may activate.
+            speaking: The Speaking ability responses are said through.
+            response_idle_timeout: The longest Speaking may go without a sign of progress on a response before
+                Communication gives up on it. It must exceed Speaking's own longest silence inside an utterance.
+
+        Raises:
+            TypeError: ``speaking`` is not a Speaking ability.
+            ValueError: No conversation is given, or ``response_idle_timeout`` is not positive.
+        """
+
         super().__init__()
         if not _is_speaking_ability(speaking):
             raise TypeError("Communication speaking must be a Speaking ability.")
+        if response_idle_timeout <= datetime.timedelta(0):
+            raise ValueError(f"Communication response_idle_timeout must be positive, got {response_idle_timeout}.")
         catalog, chosen = _normalize_catalog(
             active_conversation=active_conversation,
             conversations=conversations,
@@ -301,6 +272,9 @@ class Communication(ability.Ability[TurnData, object]):
         self._conversations = catalog
         self._active_conversation = chosen
         self._speaking = speaking
+        self._response_idle_timeout = response_idle_timeout
+        self._response_id = ""
+        self._closed_responses = collections.deque(maxlen=_CLOSED_RESPONSES)
         self._attachment_group = attachment.Group(chosen)
 
     @staticmethod
@@ -358,73 +332,32 @@ class Communication(ability.Ability[TurnData, object]):
             )
             _ = hsm.dispatch(ctx, target, routed)
 
+    # ----- responding: Communication forwards the response to Speaking and follows its progress ---------------
+
     @staticmethod
-    async def _prepare_response(
-        ctx: hsm.Context,
-        instance: "Communication",
-        event: hsm.Event[typing.Any],
-    ) -> None:
-        """Mint one unique response operation and carry it into the routing state."""
+    def _is_new_response(ctx: hsm.Context, instance: "Communication", event: hsm.Event[typing.Any]) -> bool:
+        del ctx
+        return isinstance(event.data, RespondData) and (not event.id or event.id not in instance._closed_responses)
+
+    @staticmethod
+    def _is_late_response(ctx: hsm.Context, instance: "Communication", event: hsm.Event[typing.Any]) -> bool:
+        del ctx
+        return isinstance(event.data, RespondData) and bool(event.id) and event.id in instance._closed_responses
+
+    @staticmethod
+    def _count_late_response(ctx: hsm.Context, instance: "Communication", event: hsm.Event[typing.Any]) -> None:
+        del ctx, instance, event
+        _LATE.add(1)
+
+    @staticmethod
+    def _open_response(ctx: hsm.Context, instance: "Communication", event: hsm.Event[typing.Any]) -> None:
+        """Hold the response's id for as long as it is being spoken, and hand its text to Speaking."""
 
         data = event.data
         assert isinstance(data, RespondData)
-        operation_id = event.id or uuid.uuid4().hex
-        _ = await processing.start_operation(instance, operation_id)
-        _ = hsm.dispatch(
-            ctx,
-            instance,
-            dataclasses.replace(
-                _PreparedResponseEvent.with_data_and_id(_PreparedResponseData(response=data), operation_id),
-                source=hsm.id(instance),
-                target=hsm.id(instance),
-                metadata=dict(event.metadata),
-            ),
-        )
-
-    @staticmethod
-    async def _route_response_to_speaking(
-        ctx: hsm.Context,
-        instance: "Communication",
-        event: hsm.Event[typing.Any],
-    ) -> None:
-        """Move one prepared response into ``responding`` where the speaking hop is awaited."""
-
-        data = event.data
-        assert isinstance(data, _PreparedResponseData)
-        operation_id = event.id
-        _ = hsm.dispatch(
-            ctx,
-            instance,
-            dataclasses.replace(
-                _ResponseDispatchedEvent.with_data_and_id(data, operation_id),
-                source=hsm.id(instance),
-                target=hsm.id(instance),
-                metadata=dict(event.metadata),
-            ),
-        )
-
-    @staticmethod
-    async def _await_speaking_terminal(
-        ctx: hsm.Context,
-        instance: "Communication",
-        event: hsm.Event[typing.Any],
-    ) -> None:
-        """Wait on the speaking hop through the settled one-shot terminal operation.
-
-        The operation actor becomes the request source, so Speaking echoes its correlated
-        terminal back to the reply actor, which settles it here. The settled terminal is then
-        re-dispatched into the same typed continuations (source=speaking, target=owner) that
-        ``responding`` already exposes, so _has_response_completed / _has_response_failure ->
-        _forward_response_* run unchanged. Nothing runs after the state-transition-causing
-        re-dispatch, so the activity is never cancelled mid-work. The modeled ``responding``
-        deadline (hsm.after(_response_timeout_delay)) remains the hop timeout, abandoning only
-        a hop that has not yet settled its terminal.
-        """
-
-        data = event.data
-        assert isinstance(data, _PreparedResponseData)
-        operation_id = event.id
-        hop_id = operation_id
+        response_id = event.id or uuid.uuid4().hex
+        instance._response_id = response_id
+        target = instance._speaking
         with span.operation(
             "bot.communication.response.dispatch",
             scope="bot.abilities.communication",
@@ -432,95 +365,61 @@ class Communication(ability.Ability[TurnData, object]):
             stage="response_dispatch",
             context=telemetry.event_context(event),
         ):
-            if hop_id and processing.active_operation(instance, hop_id) is None:
-                _ = await processing.start_operation(instance, hop_id)
-            try:
-                terminal = await ability.run_terminal_operation(
-                    instance.context(),
-                    child=instance._speaking,
-                    request=dataclasses.replace(
-                        instance._speaking.input_event.with_data_and_id(
-                            speaking.InputData(text=data.response.text), operation_id
-                        ),
-                        metadata=dict(event.metadata),
-                    ),
-                    terminals=(
-                        instance._speaking.output_event,
-                        instance._speaking.failed_event,
-                    ),
-                    timeout=_RESPONSE_TIMEOUT,
-                    on_terminal=lambda _terminal: (
-                        processing.finish_operation(ctx, instance, hop_id) if hop_id else None
-                    ),
-                )
-            except TimeoutError:
-                _ = hsm.dispatch(
-                    ctx,
-                    instance,
-                    dataclasses.replace(
-                        _ResponseHopTimedOutEvent.with_data_and_id(None, hop_id),
-                        source=hsm.id(instance),
-                        target=hsm.id(instance),
-                        metadata=dict(event.metadata),
-                    ),
-                )
-                return
-        if hop_id:
-            processing.finish_operation(ctx, instance, hop_id)
-        _ = hsm.dispatch(
-            ctx,
-            instance,
-            dataclasses.replace(
-                terminal,
-                source=hsm.id(instance._speaking),
-                target=hsm.id(instance),
-            ),
-        )
+            _ = hsm.dispatch(
+                ctx,
+                target,
+                dataclasses.replace(
+                    speaking.InputEvent.with_data(speaking.InputData(text=data.text)),
+                    id=response_id,
+                    source=hsm.id(instance),
+                    target=hsm.id(target),
+                    metadata=dict(event.metadata),
+                ),
+            )
 
     @staticmethod
-    def _has_active_response(
-        ctx: hsm.Context,
-        instance: "Communication",
-        event: hsm.Event[typing.Any],
-    ) -> bool:
-        del ctx
+    def _close_response(ctx: hsm.Context, instance: "Communication", event: hsm.Event[typing.Any]) -> None:
+        """Every way out of ``responding`` retires the response id, so nothing late can match or reopen it."""
+
+        del ctx, event
+        if instance._response_id:
+            instance._closed_responses.append(instance._response_id)
+        instance._response_id = ""
+
+    @staticmethod
+    def _is_from_speaking(instance: "Communication", event: hsm.Event[typing.Any]) -> bool:
+        """Post-delivery correlation: Speaking's reply for the response being spoken, addressed here."""
+
         return (
-            isinstance(event.data, _PreparedResponseData)
-            and bool(event.id)
-            and event.source == hsm.id(instance)
+            bool(instance._response_id)
+            and event.id == instance._response_id
+            and event.source == hsm.id(instance._speaking)
             and event.target == hsm.id(instance)
-            and processing.active_operation(instance, event.id) is not None
         )
 
     @staticmethod
-    def _response_timeout_delay(
+    def _is_response_output(ctx: hsm.Context, instance: "Communication", event: hsm.Event[typing.Any]) -> bool:
+        del ctx
+        return isinstance(event.data, speaking.OutputData) and Communication._is_from_speaking(instance, event)
+
+    @staticmethod
+    def _is_response_failure(ctx: hsm.Context, instance: "Communication", event: hsm.Event[typing.Any]) -> bool:
+        del ctx
+        return isinstance(event.data, ability.FailureData) and Communication._is_from_speaking(instance, event)
+
+    @staticmethod
+    def _is_response_progress(ctx: hsm.Context, instance: "Communication", event: hsm.Event[typing.Any]) -> bool:
+        del ctx
+        return isinstance(event.data, speaking.ProgressData) and Communication._is_from_speaking(instance, event)
+
+    @staticmethod
+    def _response_idle_delay(
         ctx: hsm.Context,
         instance: "Communication",
         event: hsm.Event[typing.Any],
     ) -> datetime.timedelta:
-        del ctx, instance, event
-        return _RESPONSE_TIMEOUT
-
-    @staticmethod
-    def _speaking_deadline_still_pending(
-        ctx: hsm.Context,
-        instance: "Communication",
-        event: hsm.Event[typing.Any],
-    ) -> bool:
-        """Whether the speaking hop is still pending on this machine's token."""
-
         del ctx, event
-        hop_id = processing.active_operation_id(instance)
-        return hop_id is not None and processing.active_operation(instance, hop_id) is not None
-
-    @staticmethod
-    def _is_response_hop_timeout(
-        ctx: hsm.Context,
-        instance: "Communication",
-        event: hsm.Event[typing.Any],
-    ) -> bool:
-        del ctx
-        return event.source == hsm.id(instance) and event.target == hsm.id(instance)
+        return instance._response_idle_timeout
 
     @staticmethod
     def _dispatch_response_timeout(
@@ -529,10 +428,6 @@ class Communication(ability.Ability[TurnData, object]):
         event: hsm.Event[typing.Any],
     ) -> None:
         del event
-        operation_id = processing.active_operation_id(instance)
-        if operation_id is None:
-            return
-        processing.finish_operation(ctx, instance, operation_id)
         failure = ability.FailureData(message="Speaking response timed out.")
         with span.operation(
             "bot.communication.response.terminal",
@@ -540,9 +435,9 @@ class Communication(ability.Ability[TurnData, object]):
             component="communication",
             stage="response_terminal",
         ) as active:
-            span.record_failure(active, "response_timeout")
+            span.record_failure(active, "timeout")
             terminal = dataclasses.replace(
-                instance.failed_event.with_data_and_id(failure, operation_id),
+                instance.failed_event.with_data_and_id(failure, instance._response_id),
                 source=hsm.id(instance),
                 target=Communication._attachment_owner_id(instance),
             )
@@ -556,7 +451,6 @@ class Communication(ability.Ability[TurnData, object]):
     ) -> None:
         data = event.data
         assert isinstance(data, speaking.OutputData)
-        processing.finish_operation(ctx, instance, event.id)
         with span.operation(
             "bot.communication.response.terminal",
             scope="bot.abilities.communication",
@@ -581,7 +475,6 @@ class Communication(ability.Ability[TurnData, object]):
     ) -> None:
         data = event.data
         assert isinstance(data, ability.FailureData)
-        processing.finish_operation(ctx, instance, event.id)
         with span.operation(
             "bot.communication.response.terminal",
             scope="bot.abilities.communication",
@@ -656,8 +549,14 @@ class Communication(ability.Ability[TurnData, object]):
             ),
             hsm.transition(
                 hsm.on(RespondEvent),
-                hsm.guard(_has_respond),
-                hsm.target("/Communication/preparing_response"),
+                hsm.guard(_is_new_response),
+                hsm.effect(_open_response),
+                hsm.target("/Communication/responding"),
+            ),
+            hsm.transition(
+                hsm.on(RespondEvent),
+                hsm.guard(_is_late_response),
+                hsm.effect(_count_late_response),
             ),
             # Conversation contribution → body cognition (Listening-style terminal re-emit).
             hsm.transition(
@@ -677,65 +576,40 @@ class Communication(ability.Ability[TurnData, object]):
             ),
         ),
         hsm.state(
-            "preparing_response",
-            hsm.defer(InputEvent, RespondEvent),
-            hsm.activity(_prepare_response),
-            hsm.transition(
-                hsm.on(_PreparedResponseEvent),
-                hsm.guard(_has_active_response),
-                hsm.target("/Communication/dispatching_response"),
-            ),
-        ),
-        hsm.state(
-            "dispatching_response",
-            hsm.defer(InputEvent, RespondEvent),
-            hsm.activity(_route_response_to_speaking),
-            hsm.transition(
-                hsm.on(_ResponseDispatchedEvent),
-                hsm.guard(_has_active_response),
-                hsm.target("/Communication/responding"),
-            ),
-            hsm.transition(
-                hsm.on(ability.FailedEvent),
-                hsm.guard(_has_response_failure),
-                hsm.effect(_forward_response_failure),
-                hsm.target("/Communication/active"),
-            ),
-            hsm.transition(
-                hsm.on(speaking.OutputEvent),
-                hsm.guard(_has_response_completed),
-                hsm.effect(_forward_response_output),
-                hsm.target("/Communication/active"),
-            ),
-        ),
-        hsm.state(
             "responding",
+            hsm.exit(_close_response),
+            # Other responses wait their turn; heard speech waits until this one is said or ends.
             hsm.defer(InputEvent, RespondEvent),
-            hsm.activity(_await_speaking_terminal),
+            hsm.initial(hsm.target("waiting")),
             hsm.transition(
                 hsm.on(speaking.OutputEvent),
-                hsm.guard(_has_response_completed),
+                hsm.guard(_is_response_output),
                 hsm.effect(_forward_response_output),
                 hsm.target("/Communication/active"),
             ),
             hsm.transition(
                 hsm.on(ability.FailedEvent),
-                hsm.guard(_has_response_failure),
+                hsm.guard(_is_response_failure),
                 hsm.effect(_forward_response_failure),
                 hsm.target("/Communication/active"),
             ),
-            hsm.transition(
-                hsm.after(_response_timeout_delay),
-                hsm.guard(_speaking_deadline_still_pending),
-                hsm.effect(_dispatch_response_timeout),
-                hsm.target("/Communication/active"),
+            hsm.state(
+                "waiting",
+                # Re-entering restarts the silence deadline: Speaking is still making progress.
+                hsm.transition(
+                    hsm.on(speaking.ProgressEvent),
+                    hsm.guard(_is_response_progress),
+                    hsm.target("/Communication/responding/waiting"),
+                ),
+                hsm.transition(
+                    hsm.after(_response_idle_delay),
+                    hsm.effect(_dispatch_response_timeout),
+                    hsm.target("/Communication/responding/expired"),
+                ),
             ),
-            hsm.transition(
-                hsm.on(_ResponseHopTimedOutEvent),
-                hsm.guard(_is_response_hop_timeout),
-                hsm.effect(_dispatch_response_timeout),
-                hsm.target("/Communication/active"),
-            ),
+            # Giving up passes through here, inside ``responding``, so the effect above still has the response
+            # id it gives up on: leaving ``responding`` retires it.
+            hsm.choice("expired", hsm.transition(hsm.target("/Communication/active"))),
         ),
         hsm.state(
             "detaching",

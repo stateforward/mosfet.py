@@ -1,19 +1,17 @@
 from __future__ import annotations
 
-from mosfet.abilities.vocal import speech
-
 import asyncio
 import collections.abc
 import dataclasses
+import typing
 
-import hsm
 import pytest
 
-import mosfet.abilities
-
-from mosfet.providers.mlx_audio import SpeechEncoder, SpeechEncodingError
+from mosfet.abilities import encoding
+from mosfet.abilities.vocal import speech
+from mosfet.providers.mlx_audio import SpeechEncoder
 from mosfet.providers.mlx_audio._mlx import SpeechGenerationResult
-from tests.hsm_instance_state import start_ability_tree
+from tests.bot.abilities.vocal.speech import contract
 
 
 @dataclasses.dataclass
@@ -25,11 +23,21 @@ class FakeSpeechGenerationResult:
 @dataclasses.dataclass
 class FakeSpeechEncodingModel:
     results: tuple[SpeechGenerationResult, ...]
-    calls: list[dict[str, object]] = dataclasses.field(default_factory=list)
+    calls: list[dict[str, object]] = dataclasses.field(default_factory=list[dict[str, object]])
+    generated: int = 0
+    closed: bool = False
 
     def generate(self, text: str, **kwargs: object) -> collections.abc.Iterable[SpeechGenerationResult]:
         self.calls.append({"text": text, **kwargs})
-        return self.results
+        return self._stream()
+
+    def _stream(self) -> collections.abc.Generator[SpeechGenerationResult]:
+        try:
+            for result in self.results:
+                self.generated += 1
+                yield result
+        finally:
+            self.closed = True
 
 
 class FailingSpeechEncodingModel:
@@ -38,128 +46,109 @@ class FailingSpeechEncodingModel:
         raise RuntimeError("mlx unavailable")
 
 
-async def await_speech_encoding(output: collections.abc.Awaitable[bytes]) -> bytes:
-    return await output
+def as_pcm(audio: object) -> bytes:
+    assert isinstance(audio, tuple)
+    return bytes(len(typing.cast(tuple[float, ...], audio)) * 2)
 
 
-def require_model(model: hsm.Model | None) -> hsm.Model:
-    assert model is not None
-    return model
+def chunk(samples: int, *, sample_rate: int = 24_000) -> FakeSpeechGenerationResult:
+    return FakeSpeechGenerationResult(audio=(0.0,) * samples, sample_rate=sample_rate)
 
 
-async def await_speech_encoding_ability(
-    ability: speech.SpeechEncoding,
-    input: bytes,
-    completed: collections.abc.Callable[[], bool],
-) -> None:
-    await start_ability_tree(None, ability)
-    _ = await ability.apply(input)
-    for _ in range(100):
-        if completed():
-            return
-        await asyncio.sleep(0)
-    raise AssertionError("speech encoding ability did not run encoder")
+async def _all(stream: collections.abc.AsyncIterator[speech.Audio]) -> list[speech.Audio]:
+    return [item async for item in stream]
 
 
-def test_speech_encoder_uses_injected_model() -> None:
-    writer_calls: list[tuple[object, int, str]] = []
-    model = FakeSpeechEncodingModel(results=(FakeSpeechGenerationResult(audio=("samples",), sample_rate=24000),))
+def _text(*pieces: str) -> speech.Text:
+    text = speech.Text()
+    for piece in pieces:
+        text.write(piece)
+    text.close()
+    return text
 
-    def write_audio(audio: object, sample_rate: int, audio_format: str) -> bytes:
-        writer_calls.append((audio, sample_rate, audio_format))
-        return b"encoded-wav"
 
-    encoder = SpeechEncoder(
-        model=model,
-        voice="Chelsie",
-        speed=1.2,
-        lang_code="English",
-        audio_format="wav",
-        write_audio=write_audio,
+def test_encoder_reads_the_text_to_its_end_and_streams_each_generated_chunk_aligned_to_the_whole_text() -> None:
+    model = FakeSpeechEncodingModel(results=(chunk(2), chunk(3)))
+    encoder = SpeechEncoder(model=model, voice="Chelsie", speed=1.2, lang_code="English", convert=as_pcm)
+
+    chunks = asyncio.run(contract.assert_speech_encoder(encoder, ["hel", "lo"]))
+
+    assert encoder.format == speech.Format(sample_rate_hz=24_000, channels=1)
+    assert chunks == [speech.Audio(pcm=bytes(4), text=""), speech.Audio(pcm=bytes(6), text="hello")]
+    # One generation per non-blank stream (the whole text, then the one closed after its chunk); blank text has none.
+    assert (
+        model.calls
+        == [
+            {
+                "text": "hello",
+                "voice": "Chelsie",
+                "speed": 1.2,
+                "lang_code": "English",
+                "verbose": False,
+                "stream": True,
+            }
+        ]
+        * 2
     )
 
-    output = asyncio.run(await_speech_encoding(encoder.encode("hello".encode("utf-8"))))
 
-    assert output == b"encoded-wav"
-    assert model.calls == [
-        {
-            "text": "hello",
-            "voice": "Chelsie",
-            "speed": 1.2,
-            "lang_code": "English",
-            "verbose": False,
-            "stream": False,
-        }
-    ]
-    assert writer_calls == [(("samples",), 24000, "wav")]
-    assert isinstance(encoder, mosfet.abilities.Encoder)
-
-
-def test_speech_encoder_uses_injected_loader() -> None:
-    models: list[FakeSpeechEncodingModel] = []
+def test_encoder_loads_its_model_once_and_speaks_in_the_constructor_voice() -> None:
+    loaded: list[str] = []
+    model = FakeSpeechEncodingModel(results=(chunk(1),))
 
     def load_model(model_id: str) -> FakeSpeechEncodingModel:
-        assert model_id == "local/qwen3-tts"
-        model = FakeSpeechEncodingModel(results=(FakeSpeechGenerationResult(audio=(0.1, 0.2), sample_rate=24000),))
-        models.append(model)
+        loaded.append(model_id)
         return model
 
-    encoder = SpeechEncoder(
-        model_id="local/qwen3-tts",
-        load_model=load_model,
-        write_audio=lambda audio, sample_rate, audio_format: f"{audio}:{sample_rate}:{audio_format}".encode("utf-8"),
-    )
+    default = SpeechEncoder(model_id="local/qwen3-tts", load_model=load_model, convert=as_pcm)
+    ryan = SpeechEncoder(model=model, voice="Ryan", convert=as_pcm)
 
-    output = asyncio.run(await_speech_encoding(encoder.encode(b"hello")))
+    _ = asyncio.run(_all(default.encode(_text("one"))))
+    _ = asyncio.run(_all(default.encode(_text("two"))))
+    _ = asyncio.run(_all(ryan.encode(_text("three"))))
 
-    assert output == b"(0.1, 0.2):24000:wav"
-    assert len(models) == 1
-
-
-def test_speech_encoder_can_drive_speech_encoding_ability() -> None:
-    writer_calls: list[tuple[object, int, str]] = []
-    model = FakeSpeechEncodingModel(results=(FakeSpeechGenerationResult(audio=(0.1, 0.2), sample_rate=24000),))
-
-    def write_audio(audio: object, sample_rate: int, audio_format: str) -> bytes:
-        writer_calls.append((audio, sample_rate, audio_format))
-        return b"encoded speech"
-
-    encoder = SpeechEncoder(
-        model=model,
-        write_audio=write_audio,
-    )
-    ability = speech.SpeechEncoding(encoder=encoder)
-
-    asyncio.run(await_speech_encoding_ability(ability, b"hello", lambda: bool(writer_calls)))
-
-    assert model.calls == [
-        {
-            "text": "hello",
-            "speed": 1.0,
-            "lang_code": "auto",
-            "verbose": False,
-            "stream": False,
-        }
-    ]
-    assert writer_calls == [((0.1, 0.2), 24000, "wav")]
+    assert loaded == ["local/qwen3-tts"]
+    assert "voice" not in model.calls[0]
+    assert model.calls[2]["voice"] == "Ryan"
 
 
-def test_speech_encoder_is_awaitable() -> None:
-    encoder = SpeechEncoder(
-        model=FakeSpeechEncodingModel(results=(FakeSpeechGenerationResult(audio=(0.1,), sample_rate=24000),)),
-        write_audio=lambda audio, sample_rate, audio_format: b"encoded speech",
-    )
+def test_closing_the_stream_between_chunks_stops_the_generation() -> None:
+    model = FakeSpeechEncodingModel(results=(chunk(1), chunk(1), chunk(1)))
 
-    output = encoder.encode(b"hello")
+    async def run() -> None:
+        stream = SpeechEncoder(model=model, convert=as_pcm).encode(_text("hello"))
+        _ = await anext(stream)
+        assert isinstance(stream, collections.abc.AsyncGenerator)
+        await stream.aclose()
 
-    assert isinstance(output, collections.abc.Coroutine)
-    assert asyncio.run(output) == b"encoded speech"
+    asyncio.run(run())
+
+    # The first chunk is held until the second arrives, so the last one can carry the text.
+    assert model.closed
+    assert model.generated == 2
 
 
-def test_speech_encoder_wraps_provider_errors() -> None:
-    encoder = SpeechEncoder(model=FailingSpeechEncodingModel())
+def test_a_chunk_at_another_rate_is_refused() -> None:
+    model = FakeSpeechEncodingModel(results=(chunk(1, sample_rate=16_000),))
 
-    with pytest.raises(SpeechEncodingError) as error:
-        _ = asyncio.run(await_speech_encoding(encoder.encode(b"hello")))
+    with pytest.raises(encoding.Error, match="sample_rate_hz=16000") as refused:
+        _ = asyncio.run(_all(SpeechEncoder(model=model, convert=as_pcm).encode(_text("hi"))))
 
-    assert isinstance(error.value.__cause__, RuntimeError)
+    assert refused.value.kind == "invalid_response"
+
+
+def test_provider_failures_are_encoding_errors() -> None:
+    with pytest.raises(encoding.Error) as failed:
+        _ = asyncio.run(_all(SpeechEncoder(model=FailingSpeechEncodingModel()).encode(_text("hello"))))
+
+    assert failed.value.kind == "encode_failed"
+    assert isinstance(failed.value.__cause__, RuntimeError)
+
+
+def test_blank_text_and_no_audio_are_refused() -> None:
+    with pytest.raises(encoding.Error) as blank:
+        _ = asyncio.run(_all(SpeechEncoder(model=FakeSpeechEncodingModel(results=())).encode(_text(" "))))
+    with pytest.raises(encoding.Error) as silent:
+        _ = asyncio.run(_all(SpeechEncoder(model=FakeSpeechEncodingModel(results=())).encode(_text("hi"))))
+
+    assert (blank.value.kind, silent.value.kind) == ("invalid_input", "invalid_response")

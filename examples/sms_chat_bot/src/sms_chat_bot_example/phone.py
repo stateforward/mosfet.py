@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from .events import SMSMessageData
+
+
 class SMSPhone:
     """A small SMS surface that owns incoming and outgoing message state."""
 

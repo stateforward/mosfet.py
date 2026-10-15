@@ -1,6 +1,9 @@
 from mosfet import abilities
 from mosfet.abilities import cognition
+from mosfet.abilities import encoding
 from mosfet.abilities import listening
+from mosfet.abilities import speaking
+from mosfet.abilities import vocal
 from mosfet.abilities.hearing import voice
 from mosfet.devices import audio
 from mosfet.environment import Environment, SoundData, SoundEvent
@@ -10,12 +13,11 @@ from mosfet.providers import pyannote
 import asyncio
 import collections.abc
 import dataclasses
+import io
 import json
-import os
 import pathlib
 import shutil
 import subprocess
-import tempfile
 import threading
 import typing
 import wave
@@ -24,6 +26,7 @@ from typing import ClassVar, Protocol, TypeVar, override
 import hsm
 import pytest
 
+from tests.bot.abilities.vocal.speech import contract
 from tests.bot.lifecycle_replies import started_replies
 
 if typing.TYPE_CHECKING:
@@ -196,6 +199,12 @@ class _HandoffProbeBot(ListenSpeakBot):
         ):
             self._handoff_waiter.set_result(event.data)
         return super().dispatch(ctx, event)
+
+
+def _spoken(text: str) -> speaking.OutputData:
+    return speaking.OutputData(
+        text=text, spoken=text, outcome="completed", voice_id="tts:say", sample_rate_hz=22_050, channels=1
+    )
 
 
 class _FakeRunEncoder:
@@ -394,7 +403,7 @@ def test_listen_speak_run_progress_waits_for_correlated_speaking_terminal(tmp_pa
         await body.dispatch(
             environment,
             _routed_event(
-                speaking.OutputEvent.with_data_and_id(speaking.OutputData(text="I am well."), "stale-operation"),
+                speaking.OutputEvent.with_data_and_id(_spoken("I am well."), "stale-operation"),
                 source=hsm.id(body.speaking()),
                 target=hsm.id(body),
             ),
@@ -404,7 +413,7 @@ def test_listen_speak_run_progress_waits_for_correlated_speaking_terminal(tmp_pa
         await body.dispatch(
             environment,
             _routed_event(
-                speaking.OutputEvent.with_data_and_id(speaking.OutputData(text="I am well."), f"{turn_id}:intuition"),
+                speaking.OutputEvent.with_data_and_id(_spoken("I am well."), f"{turn_id}:intuition"),
                 source=hsm.id(body.speaking()),
                 target=hsm.id(body),
             ),
@@ -464,7 +473,7 @@ def test_listen_speak_run_progress_requires_one_terminal_per_response_selection(
             environment,
             _routed_event(
                 speaking.OutputEvent.with_data_and_id(
-                    speaking.OutputData(text="Reply A."),
+                    _spoken("Reply A."),
                     "different-response-operation-a",
                 ),
                 source=hsm.id(body.speaking()),
@@ -477,7 +486,7 @@ def test_listen_speak_run_progress_requires_one_terminal_per_response_selection(
             environment,
             _routed_event(
                 speaking.OutputEvent.with_data_and_id(
-                    speaking.OutputData(text="Reply B."),
+                    _spoken("Reply B."),
                     "different-response-operation-b",
                 ),
                 source=hsm.id(body.speaking()),
@@ -489,7 +498,7 @@ def test_listen_speak_run_progress_requires_one_terminal_per_response_selection(
         await body.dispatch(
             environment,
             _routed_event(
-                speaking.OutputEvent.with_data_and_id(speaking.OutputData(text="Reply A."), turn_id),
+                speaking.OutputEvent.with_data_and_id(_spoken("Reply A."), turn_id),
                 source=hsm.id(body.speaking()),
                 target=hsm.id(body),
             ),
@@ -564,7 +573,7 @@ def test_listen_speak_run_progress_waits_for_earlier_response_before_later_no_re
         await body.dispatch(
             environment,
             _routed_event(
-                speaking.OutputEvent.with_data_and_id(speaking.OutputData(text="Reply A."), "response-a"),
+                speaking.OutputEvent.with_data_and_id(_spoken("Reply A."), "response-a"),
                 source=hsm.id(body.speaking()),
                 target=hsm.id(body),
             ),
@@ -574,7 +583,7 @@ def test_listen_speak_run_progress_waits_for_earlier_response_before_later_no_re
         await body.dispatch(
             environment,
             _routed_event(
-                speaking.OutputEvent.with_data_and_id(speaking.OutputData(text="Reply A."), "turn-a"),
+                speaking.OutputEvent.with_data_and_id(_spoken("Reply A."), "turn-a"),
                 source=hsm.id(body.speaking()),
                 target=hsm.id(body),
             ),
@@ -738,7 +747,7 @@ def test_listen_speak_communication_drives_body_conversation_and_speaking(tmp_pa
         await body.dispatch(
             environment,
             _routed_event(
-                speaking.OutputEvent.with_data_and_id(speaking.OutputData(text="Hello."), f"{turn_id}:intuition"),
+                speaking.OutputEvent.with_data_and_id(_spoken("Hello."), f"{turn_id}:intuition"),
                 source=hsm.id(body.speaking()),
                 target=hsm.id(body),
             ),
@@ -944,49 +953,71 @@ def test_listen_speak_operator_summary_distinguishes_no_response_and_execution_f
     assert failed_response["status_reason"] == "response_execution_failed"
 
 
-def test_say_encoder_releases_default_destination_after_success(
+def _rendered(*samples: int) -> bytes:
+    output = io.BytesIO()
+    with wave.open(output, "wb") as stream:
+        stream.setnchannels(1)
+        stream.setsampwidth(2)
+        stream.setframerate(22_050)
+        stream.writeframes(b"".join(sample.to_bytes(2, "little", signed=True) for sample in samples))
+    return output.getvalue()
+
+
+async def _encoded(encoder: vocal.speech.SpeechEncoder, text: str) -> list[bytes]:
+    said = vocal.speech.Text()
+    said.write(text)
+    said.close()
+    return [chunk.pcm async for chunk in encoder.encode(said)]
+
+
+def test_say_encoder_streams_the_rendered_pcm_and_renders_in_a_temporary_directory(
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path: pathlib.Path,
 ) -> None:
     import listen_speak_bot_example as example
     from listen_speak_bot_example import SayEncoder
 
-    descriptor, destination = tempfile.mkstemp(dir=tmp_path, suffix=".wav")
-    monkeypatch.setattr(example.tempfile, "mkstemp", lambda **kwargs: (descriptor, destination))
-    monkeypatch.setattr(example, "_say_to_wav", lambda *args, **kwargs: b"wav")
+    rendered: list[pathlib.Path] = []
 
-    assert asyncio.run(SayEncoder().encode(b"reply")) == b"wav"
-    with pytest.raises(OSError):
-        os.fstat(descriptor)
-    assert not pathlib.Path(destination).exists()
+    def render(text: str, destination: pathlib.Path, *, sample_rate_hz: int) -> bytes:
+        assert (text, sample_rate_hz) == ("reply", 22_050)
+        rendered.append(destination)
+        destination.write_bytes(_rendered(1, 2))
+        return _rendered(1, 2)
+
+    monkeypatch.setattr(example, "_say_to_wav", render)
+    encoder = SayEncoder()
+
+    assert asyncio.run(_encoded(encoder, " reply ")) == [b"\x01\x00\x02\x00"]
+    assert encoder.format == vocal.speech.Format(sample_rate_hz=22_050, channels=1)
+    assert encoder.calls == [" reply "]
+    assert [chunk.text for chunk in asyncio.run(contract.assert_speech_encoder(encoder, [" re", "ply "]))] == [
+        " reply "
+    ]
+    assert not rendered[0].parent.exists()
 
 
-def test_say_encoder_releases_default_destination_after_failure(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: pathlib.Path,
-) -> None:
+def test_say_encoder_failures_are_encoding_errors(monkeypatch: pytest.MonkeyPatch) -> None:
     import listen_speak_bot_example as example
     from listen_speak_bot_example import SayEncoder
-
-    descriptor, destination = tempfile.mkstemp(dir=tmp_path, suffix=".wav")
-    monkeypatch.setattr(example.tempfile, "mkstemp", lambda **kwargs: (descriptor, destination))
 
     def fail_render(*args: object, **kwargs: object) -> bytes:
         del args, kwargs
         raise RuntimeError("render failed")
 
     monkeypatch.setattr(example, "_say_to_wav", fail_render)
+    encoder = SayEncoder()
 
-    with pytest.raises(RuntimeError, match="render failed"):
-        asyncio.run(SayEncoder().encode(b"reply"))
-    with pytest.raises(OSError):
-        os.fstat(descriptor)
-    assert not pathlib.Path(destination).exists()
+    with pytest.raises(encoding.Error) as failed:
+        _ = asyncio.run(_encoded(encoder, "reply"))
+    assert failed.value.kind == "encode_failed"
+    with pytest.raises(encoding.Error) as blank:
+        _ = asyncio.run(_encoded(encoder, "   "))
+    assert blank.value.kind == "invalid_input"
+    assert (encoder.calls, encoder.audio) == ([], None)
 
 
-def test_say_encoder_cancellation_does_not_publish_cancelled_encoding(
+def test_say_encoder_cancellation_does_not_publish_the_cancelled_audio(
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path: pathlib.Path,
 ) -> None:
     import listen_speak_bot_example as example
     from listen_speak_bot_example import SayEncoder
@@ -995,15 +1026,13 @@ def test_say_encoder_cancellation_does_not_publish_cancelled_encoding(
     release = threading.Event()
     finished = threading.Event()
     wait_timeout_seconds = 2.0
-    descriptor, destination = tempfile.mkstemp(dir=tmp_path, suffix=".wav")
-    monkeypatch.setattr(example.tempfile, "mkstemp", lambda **kwargs: (descriptor, destination))
 
     def blocked_say_to_wav(text: str, destination: pathlib.Path, *, sample_rate_hz: int) -> bytes:
         del text, destination, sample_rate_hz
         started.set()
         try:
             assert release.wait(timeout=wait_timeout_seconds)
-            return b"wav"
+            return _rendered(1)
         finally:
             finished.set()
 
@@ -1011,7 +1040,7 @@ def test_say_encoder_cancellation_does_not_publish_cancelled_encoding(
     encoder = SayEncoder()
 
     async def run() -> None:
-        task = asyncio.create_task(encoder.encode(b"reply"))
+        task = asyncio.create_task(_encoded(encoder, "reply"))
         _ = await asyncio.to_thread(started.wait, wait_timeout_seconds)
         _ = task.cancel()
         release.set()
@@ -1022,26 +1051,30 @@ def test_say_encoder_cancellation_does_not_publish_cancelled_encoding(
         assert await asyncio.to_thread(finished.wait, wait_timeout_seconds)
 
     asyncio.run(run())
-    with pytest.raises(OSError):
-        os.fstat(descriptor)
-    assert not pathlib.Path(destination).exists()
 
 
-def test_say_encoder_preserves_explicit_destination(monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path) -> None:
+def test_say_encoder_keeps_everything_said_in_an_explicit_destination(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
     import listen_speak_bot_example as example
     from listen_speak_bot_example import SayEncoder
 
-    destination = tmp_path / "reply.wav"
+    samples = iter((1, 2))
 
     def render(text: str, destination: pathlib.Path, *, sample_rate_hz: int) -> bytes:
-        del text, sample_rate_hz
-        destination.write_bytes(b"wav")
-        return b"wav"
+        del text, destination, sample_rate_hz
+        return _rendered(next(samples))
 
     monkeypatch.setattr(example, "_say_to_wav", render)
+    destination = tmp_path / "reply.wav"
+    encoder = SayEncoder(destination=destination)
 
-    assert asyncio.run(SayEncoder(destination=destination).encode(b"reply")) == b"wav"
-    assert destination.read_bytes() == b"wav"
+    _ = asyncio.run(_encoded(encoder, "First."))
+    _ = asyncio.run(_encoded(encoder, "Second."))
+
+    with wave.open(str(destination), "rb") as stream:
+        assert stream.readframes(stream.getnframes()) == b"\x01\x00\x02\x00"
+    assert encoder.calls == ["First.", "Second."]
 
 
 def test_listen_speak_progress_rejects_stale_and_duplicate_speaking_terminals(tmp_path: pathlib.Path) -> None:
@@ -1086,7 +1119,7 @@ def test_listen_speak_progress_rejects_stale_and_duplicate_speaking_terminals(tm
         await body.dispatch(
             environment,
             _routed_event(
-                speaking.OutputEvent.with_data_and_id(speaking.OutputData(text="stale"), "stale-id"),
+                speaking.OutputEvent.with_data_and_id(_spoken("stale"), "stale-id"),
                 source=hsm.id(body.speaking()),
                 target=hsm.id(body),
             ),
@@ -1096,7 +1129,7 @@ def test_listen_speak_progress_rejects_stale_and_duplicate_speaking_terminals(tm
         await body.dispatch(
             environment,
             _routed_event(
-                speaking.OutputEvent.with_data_and_id(speaking.OutputData(text="Reply."), "turn-id"),
+                speaking.OutputEvent.with_data_and_id(_spoken("Reply."), "turn-id"),
                 source=hsm.id(body.speaking()),
                 target=hsm.id(body),
             ),
@@ -1104,7 +1137,7 @@ def test_listen_speak_progress_rejects_stale_and_duplicate_speaking_terminals(tm
         await body.dispatch(
             environment,
             _routed_event(
-                speaking.OutputEvent.with_data_and_id(speaking.OutputData(text="duplicate"), "turn-id"),
+                speaking.OutputEvent.with_data_and_id(_spoken("duplicate"), "turn-id"),
                 source=hsm.id(body.speaking()),
                 target=hsm.id(body),
             ),
@@ -1177,7 +1210,7 @@ def test_listen_speak_progress_correlates_speaking_failure_to_selected_operation
         await body.dispatch(
             environment,
             _routed_event(
-                speaking.OutputEvent.with_data_and_id(speaking.OutputData(text="duplicate"), "turn-id"),
+                speaking.OutputEvent.with_data_and_id(_spoken("duplicate"), "turn-id"),
                 source=hsm.id(body.speaking()),
                 target=hsm.id(body),
             ),

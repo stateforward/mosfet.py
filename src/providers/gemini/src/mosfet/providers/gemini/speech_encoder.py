@@ -1,14 +1,12 @@
 from __future__ import annotations
 
-from mosfet import abilities
-
 import asyncio
 import base64
 import collections.abc
-import dataclasses
-import io
 import typing
-import wave
+
+from mosfet.abilities import encoding
+from mosfet.abilities.vocal import speech
 
 from .client import ContentClient, error_detail
 
@@ -16,32 +14,6 @@ from .client import ContentClient, error_detail
 _DEFAULT_TTS_MODEL = "gemini-3.1-flash-tts-preview"
 _DEFAULT_VOICE = "Kore"
 _DEFAULT_SAMPLE_RATE_HZ = 24_000
-
-
-class SpeechEncodingError(RuntimeError):
-    """Raised when Gemini speech encoding (TTS) fails."""
-
-
-def _empty_config() -> dict[str, object]:
-    return {}
-
-
-def pcm_to_wav(
-    pcm: bytes,
-    *,
-    sample_rate_hz: int = _DEFAULT_SAMPLE_RATE_HZ,
-    channels: int = 1,
-    sample_width: int = 2,
-) -> bytes:
-    """Wrap raw PCM frames in a WAV container."""
-
-    buffer = io.BytesIO()
-    with wave.open(buffer, "wb") as stream:
-        stream.setnchannels(channels)
-        stream.setsampwidth(sample_width)
-        stream.setframerate(sample_rate_hz)
-        stream.writeframes(pcm)
-    return buffer.getvalue()
 
 
 def _mapping(value: object) -> collections.abc.Mapping[str, object] | None:
@@ -97,12 +69,11 @@ def audio_bytes_from_interaction_response(response: collections.abc.Mapping[str,
                         if data:
                             return data
 
-    raise SpeechEncodingError("Gemini TTS interaction did not include output_audio data.")
+    raise encoding.Error("invalid_response", "Gemini TTS interaction did not include output_audio data.")
 
 
-@dataclasses.dataclass(frozen=True, kw_only=True)
-class SpeechEncoder(abilities.Encoder[bytes, bytes]):
-    """Encoder that converts UTF-8 text bytes into Gemini TTS audio bytes.
+class SpeechEncoder(speech.SpeechEncoder):
+    """Gemini text-to-speech as mono s16le PCM at ``sample_rate_hz`` (24 kHz by default).
 
     Uses the Interactions API recommended by current Gemini docs::
 
@@ -113,83 +84,77 @@ class SpeechEncoder(abilities.Encoder[bytes, bytes]):
             generation_config={"speech_config": [{"voice": "Kore"}]},
         )
 
-    Output is raw PCM by default (24 kHz mono 16-bit) or a WAV container when
-    ``output_format="wav"``.
+    The model is not incremental and takes the whole text, so the text is read to its end (joining its pieces
+    in order is the only buffering) and said as one chunk, aligned to the whole text. ``voice_name`` is
+    the Gemini voice the text is spoken in.
     """
 
-    client: ContentClient
-    model: str = _DEFAULT_TTS_MODEL
-    voice_name: str = _DEFAULT_VOICE
-    language_code: str | None = None
-    sample_rate_hz: int = _DEFAULT_SAMPLE_RATE_HZ
-    output_format: str = "pcm"
-    prompt_prefix: str | None = None
-    store: bool = False
-    generation_config: collections.abc.Mapping[str, object] = dataclasses.field(default_factory=_empty_config)
+    def __init__(
+        self,
+        *,
+        client: ContentClient,
+        model: str = _DEFAULT_TTS_MODEL,
+        voice_name: str = _DEFAULT_VOICE,
+        language_code: str | None = None,
+        sample_rate_hz: int = _DEFAULT_SAMPLE_RATE_HZ,
+        prompt_prefix: str | None = None,
+        store: bool = False,
+        generation_config: collections.abc.Mapping[str, object] | None = None,
+    ) -> None:
+        self.format: speech.Format = speech.Format(sample_rate_hz=sample_rate_hz, channels=1)
+        self._client: ContentClient = client
+        self._model: str = model
+        self._voice_name: str = voice_name
+        self._language_code: str | None = language_code
+        self._prompt_prefix: str | None = prompt_prefix
+        self._store: bool = store
+        self._generation_config: dict[str, object] = dict(generation_config or {})
 
     @typing.override
-    async def encode(self, input: bytes) -> bytes:
-        text = input.decode("utf-8")
-        return await asyncio.to_thread(self._encode_blocking, text)
+    async def encode(self, input: collections.abc.AsyncIterable[str]) -> collections.abc.AsyncIterator[speech.Audio]:
+        said = "".join([piece async for piece in input])
+        if not said.strip():
+            raise encoding.Error("invalid_input", "Gemini speech encoding requires non-blank text.")
+        pcm = await asyncio.to_thread(self._generate, said, self._voice_name)
+        yield speech.Audio(pcm=pcm, text=said)
 
-    def _encode_blocking(self, text: str) -> bytes:
-        if not text.strip():
-            raise SpeechEncodingError("Gemini speech encoding requires non-blank text.")
-        spoken = text if not self.prompt_prefix else f"{self.prompt_prefix.rstrip()}\n{text}"
-
-        speech_entry: dict[str, object] = {"voice": self.voice_name}
-        if self.language_code is not None:
-            speech_entry["language_code"] = self.language_code
-
-        generation_config: dict[str, object] = {
-            **dict(self.generation_config),
-            "speech_config": [speech_entry],
-        }
-
+    def _generate(self, text: str, voice_name: str) -> bytes:
+        spoken = text if not self._prompt_prefix else f"{self._prompt_prefix.rstrip()}\n{text}"
+        speech_entry: dict[str, object] = {"voice": voice_name}
+        if self._language_code is not None:
+            speech_entry["language_code"] = self._language_code
+        generation_config: dict[str, object] = {**self._generation_config, "speech_config": [speech_entry]}
         try:
-            response = self.client.create_interaction(
-                model=self.model,
+            response = self._client.create_interaction(
+                model=self._model,
                 input=spoken,
                 response_format={"type": "audio"},
                 generation_config=generation_config,
-                store=self.store,
+                store=self._store,
             )
-            pcm = audio_bytes_from_interaction_response(response)
-        except SpeechEncodingError:
-            raise
         except Exception as error:
-            raise SpeechEncodingError(f"Gemini speech encoding failed: {error_detail(error)}") from error
-
-        reported_rate: int | None = None
+            raise encoding.Error("encode_failed", f"Gemini speech encoding failed: {error_detail(error)}") from error
+        pcm = audio_bytes_from_interaction_response(response)
         output_audio = _mapping(response.get("output_audio"))
-        if output_audio is not None:
-            sample_rate = output_audio.get("sample_rate")
-            if isinstance(sample_rate, int) and sample_rate > 0:
-                reported_rate = sample_rate
-
-        format_name = self.output_format.strip().lower()
-        if format_name in {"", "pcm", "raw", "audio/l16", "audio/pcm"}:
-            # Raw PCM carries no header, so the rate this encoder is configured with is the rate
-            # the audio gets played at downstream — nothing here can correct a disagreement, and
-            # a silent one is heard as a wrong-speed voice rather than raised as an error. Say so
-            # instead. Absent report means the API did not tell us; the configured value stands.
-            if reported_rate is not None and reported_rate != self.sample_rate_hz:
-                raise SpeechEncodingError(
-                    f"Gemini returned {reported_rate} Hz PCM but this encoder is configured for "
-                    f"{self.sample_rate_hz} Hz. Raw PCM has no header to carry the difference, so "
-                    f"playing it would sound wrong rather than fail. Configure sample_rate_hz to "
-                    f"{reported_rate}, or use output_format='wav' to carry the rate in-band."
-                )
-            return pcm
-        if format_name in {"wav", "wave", "audio/wav"}:
-            # A container carries the rate in-band, so the reported one can simply be used.
-            return pcm_to_wav(pcm, sample_rate_hz=reported_rate or self.sample_rate_hz)
-        raise SpeechEncodingError(f"Unsupported Gemini speech output format: {self.output_format}.")
+        reported = None if output_audio is None else output_audio.get("sample_rate")
+        # Raw PCM carries no header, so the rate this encoder declares is the rate the audio gets played
+        # at downstream — nothing can correct a disagreement, and a silent one is heard as a wrong-speed voice
+        # rather than raised as an error. An absent report means the API did not say; the declared rate stands.
+        if isinstance(reported, int) and reported > 0 and reported != self.format.sample_rate_hz:
+            raise encoding.Error(
+                "invalid_response",
+                (
+                    f"Gemini returned {reported} Hz PCM but this encoder declares {self.format.sample_rate_hz} Hz. "
+                    + "Raw PCM has no header to carry the difference, so playing it would sound wrong rather than "
+                    + f"fail. Configure sample_rate_hz to {reported}."
+                ),
+            )
+        if len(pcm) % 2:
+            raise encoding.Error("invalid_response", "Gemini returned PCM that ends mid-sample.")
+        return pcm
 
 
 __all__ = [
     "SpeechEncoder",
-    "SpeechEncodingError",
     "audio_bytes_from_interaction_response",
-    "pcm_to_wav",
 ]

@@ -22,7 +22,6 @@ import argparse
 import asyncio
 import array
 import collections.abc
-import io
 import json
 import os
 import pathlib
@@ -81,19 +80,6 @@ def _say_to_pcm(text: str, *, sample_rate_hz: int = 48_000, voice: str = "Samant
             return handle.readframes(handle.getnframes())
 
 
-def _wav_to_pcm(wav_bytes: bytes) -> tuple[bytes, int]:
-    """Extract s16le mono PCM and sample rate from a WAV container."""
-
-    with wave.open(io.BytesIO(wav_bytes), "rb") as handle:
-        channels = handle.getnchannels()
-        width = handle.getsampwidth()
-        rate = handle.getframerate()
-        frames = handle.readframes(handle.getnframes())
-    if channels != 1 or width != 2:
-        raise RuntimeError(f"Gemini TTS expected mono s16le WAV; got channels={channels} width={width}")
-    return frames, rate
-
-
 async def _gemini_to_pcm(
     text: str,
     *,
@@ -104,6 +90,7 @@ async def _gemini_to_pcm(
 ) -> tuple[bytes, int]:
     """Render speech with off-device Gemini TTS → raw s16le mono PCM."""
 
+    from mosfet.abilities import vocal
     from mosfet.providers.gemini import ChatClient, SpeechEncoder
 
     encoder = SpeechEncoder(
@@ -111,10 +98,13 @@ async def _gemini_to_pcm(
         model=model,
         voice_name=voice_name,
         sample_rate_hz=sample_rate_hz,
-        output_format="wav",
     )
-    wav_bytes = await encoder.encode(text.encode("utf-8"))
-    return _wav_to_pcm(wav_bytes)
+    # A whole string is the text written once and closed.
+    said = vocal.speech.Text()
+    said.write(text)
+    said.close()
+    pcm = b"".join([chunk.pcm async for chunk in encoder.encode(said)])
+    return pcm, encoder.format.sample_rate_hz
 
 
 def _pcm_peak(pcm: bytes) -> int:
@@ -617,7 +607,7 @@ def main() -> None:
         "--tts",
         default="gemini",
         choices=("gemini", "say"),
-        help="Speech synthesis backend (default: gemini off-device; say = macOS offline).",
+        help="Speech encoding backend (default: gemini off-device; say = macOS offline).",
     )
     _ = parser.add_argument(
         "--voice",

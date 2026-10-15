@@ -24,8 +24,6 @@ _ALLOWED_NON_HSM_PROPERTIES = {
     "src/mosfet/behavior/diagnostic.py:Checked.ok",
     "src/mosfet/behavior/diagnostic.py:Report.errors",
     "src/mosfet/behavior/diagnostic.py:Report.ok",
-    "src/mosfet/devices/audio/speaker.py:Speaker.amplitude_db",
-    "src/mosfet/devices/audio/speaker.py:Speaker.placement",
     "src/mosfet/protocols/yamux/frame.py:FrameData.is_ack",
     "src/mosfet/protocols/yamux/frame.py:FrameData.is_fin",
     "src/mosfet/protocols/yamux/frame.py:FrameData.is_rst",

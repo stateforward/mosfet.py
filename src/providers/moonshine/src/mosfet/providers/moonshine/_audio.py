@@ -25,21 +25,6 @@ def audio_bytes_to_float_pcm(
     return _int16_le_to_float(audio), default_sample_rate_hz
 
 
-def float_pcm_to_wav(samples: list[float] | tuple[float, ...], sample_rate_hz: int) -> bytes:
-    """Encode mono float samples as 16-bit PCM WAV."""
-
-    if sample_rate_hz < 1:
-        raise ValueError("sample_rate_hz must be positive.")
-    pcm = array.array("h", (_float_to_int16(sample) for sample in samples))
-    buffer = io.BytesIO()
-    with wave.open(buffer, "wb") as handle:
-        handle.setnchannels(1)
-        handle.setsampwidth(2)
-        handle.setframerate(sample_rate_hz)
-        handle.writeframes(pcm.tobytes())
-    return buffer.getvalue()
-
-
 def float_pcm_to_int16_le(samples: list[float] | tuple[float, ...]) -> bytes:
     """Encode mono float samples as raw little-endian int16 PCM."""
 
@@ -100,5 +85,4 @@ def _float_to_int16(sample: float) -> int:
 __all__ = [
     "audio_bytes_to_float_pcm",
     "float_pcm_to_int16_le",
-    "float_pcm_to_wav",
 ]

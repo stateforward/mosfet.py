@@ -31,6 +31,9 @@ stateforward-mosfet = { workspace = true }
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# test_speech_encoder imports the shared root `tests` package (the speech encoder contract helper),
+# so the repo root has to be importable from this rootdir.
+pythonpath = ["../../.."]
 
 [tool.ruff]
 line-length = 120

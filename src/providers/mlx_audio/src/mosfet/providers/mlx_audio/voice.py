@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import mosfet.abilities
+from mosfet.abilities import vocal
 from mosfet.abilities.communication import conversation
 from mosfet.abilities.hearing import speech
 
@@ -38,13 +39,17 @@ class VoiceDecoder(conversation.voice.VoiceDecoder):
 
 @dataclasses.dataclass(frozen=True, kw_only=True)
 class VoiceEncoder(conversation.voice.VoiceEncoder):
-    """Voice conversation encoder backed by the MLX Audio speech encoder."""
+    """Voice conversation encoder backed by an MLX Audio speech encoder: the reply as one buffer of s16le PCM."""
 
-    speech_encoder: mosfet.abilities.Encoder[bytes, bytes] = dataclasses.field(default_factory=SpeechEncoder)
+    speech_encoder: vocal.speech.SpeechEncoder = dataclasses.field(default_factory=SpeechEncoder)
 
     @typing.override
     async def encode(self, input: mosfet.abilities.EncodeData) -> str | bytes:
-        return await self.speech_encoder.encode(_response_text(input).encode("utf-8"))
+        # A whole string is the text written once and closed.
+        text = vocal.speech.Text()
+        text.write(_response_text(input))
+        text.close()
+        return b"".join([chunk.pcm async for chunk in self.speech_encoder.encode(text)])
 
 
 def _response_text(input: mosfet.abilities.EncodeData) -> str:

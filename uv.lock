@@ -624,23 +624,6 @@ wheels = [
 ]
 
 [[package]]
-name = "elevenlabs"
-version = "2.51.0"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "httpx" },
-    { name = "pydantic" },
-    { name = "pydantic-core" },
-    { name = "requests" },
-    { name = "typing-extensions" },
-    { name = "websockets" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/55/8b/4ead2bb7c63c7e8bc81a47e23ef1e8463db2bd204211d5e45ecaea755b7b/elevenlabs-2.51.0.tar.gz", hash = "sha256:8c7df290cda9e5f76efa68d6e645f68f2f997874ef228492d02c4f9afb232904", size = 627230, upload-time = "2026-06-02T11:36:03.209Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/23/46/919e3a92c8e62ae41d0033257196e017fd7eb2e6b641b7ad6e32da4580b9/elevenlabs-2.51.0-py3-none-any.whl", hash = "sha256:66a419d384bf3a4ee47a203be91af4c10a33622c93088fb5ad691ebae902a49e", size = 1699598, upload-time = "2026-06-02T11:36:01.166Z" },
-]
-
-[[package]]
 name = "fastapi"
 version = "0.137.1"
 source = { registry = "https://pypi.org/simple" }
@@ -1568,8 +1551,8 @@ wheels = [
 name = "mosfet-provider-elevenlabs"
 source = { editable = "src/providers/elevenlabs" }
 dependencies = [
-    { name = "elevenlabs" },
     { name = "stateforward-mosfet" },
+    { name = "websockets" },
 ]
 
 [package.dev-dependencies]
@@ -1580,8 +1563,8 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "elevenlabs", specifier = ">=2.49.0,<3.0.0" },
     { name = "stateforward-mosfet", editable = "." },
+    { name = "websockets", specifier = ">=16.0,<17" },
 ]
 
 [package.metadata.requires-dev]

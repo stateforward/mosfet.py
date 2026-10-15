@@ -1,6 +1,7 @@
 from mosfet.devices import audio, computer, hid
 
 import asyncio
+import collections.abc
 import datetime
 import pathlib
 import typing
@@ -12,7 +13,7 @@ import pydantic
 import pytest
 
 from mosfet import media
-from mosfet.abilities import encoding, speaking
+from mosfet.abilities import speaking, vocal
 from mosfet.environment import Environment, SoundEvent, VisualEvent, space
 from mosfet.protocols import attachment, transport
 from tests import metric_reader
@@ -365,31 +366,29 @@ def test_two_computers_never_carry_one_remote_voice_to_either_speaker() -> None:
     assert asyncio.run(run()) == ([], [])
 
 
-class _Utterance(encoding.Encoder[bytes, bytes]):
+class _Utterance(vocal.speech.SpeechEncoder):
     """A vocal tract: words in, 16-bit sound out. Local, so the chain can be checked without a network."""
 
+    def __init__(self) -> None:
+        self.format = vocal.speech.Format(sample_rate_hz=16_000, channels=1)
+
     @typing.override
-    async def encode(self, input: bytes) -> bytes:
-        spoken = b"spoken:" + input
-        return spoken + b"\x00" * (len(spoken) % 2)
+    async def encode(
+        self, input: collections.abc.AsyncIterable[str]
+    ) -> collections.abc.AsyncIterator[vocal.speech.Audio]:
+        said = "".join([piece async for piece in input])
+        spoken = b"spoken:" + said.encode()
+        yield vocal.speech.Audio(pcm=spoken + b"\x00" * (len(spoken) % 2), text=said)
 
 
 async def _voice(environment: Environment) -> speaking.Speaking:
-    """A bot's voice in the computer's room: a speaking ability and the mouth it plays through."""
+    """A bot's voice in the computer's room: a speaking ability and the mouth it attaches to and plays through."""
 
     mouth = audio.Speaker()
     _ = await mosfet.started(environment, mouth, typing.cast(hsm.Model, audio.Speaker.model))
-    controller = hsm.Instance()
-    _ = await mosfet.started(
-        environment, controller, mosfet.define("Controller", hsm.initial(hsm.target("s")), hsm.state("s"))
-    )
-    _ = await hsm.dispatch(
-        environment, mouth, attachment.AttachEvent.with_data(attachment.AttachData(actor=controller))
-    )
-    voice = speaking.Speaking(
-        encoder=_Utterance(), speaker=mouth, sample_rate_hz=16_000, channels=1, media_type="audio/pcm"
-    )
+    voice = speaking.Speaking(encoder=_Utterance(), speaker=mouth, voice_id="tts:test")
     await start_ability_tree(environment, voice)
+    await wait_until(lambda: (voice.state() or "").endswith("/wired/idle"))
     return voice
 
 

@@ -18,6 +18,50 @@ class Encoder(abc.ABC, typing.Generic[ability.TInput, ability.TOutput]):
         ...
 
 
+class StreamEncoder(abc.ABC, typing.Generic[ability.TInput, ability.TOutput]):
+    """Streaming encoder interface: a stream of input in, a stream of output out as it is produced.
+
+    A sibling of :class:`Encoder`, not a form of it: one value in and one out is a different contract from a
+    stream both ways.
+    """
+
+    @abc.abstractmethod
+    def encode(
+        self, input: collections.abc.AsyncIterable[ability.TInput]
+    ) -> collections.abc.AsyncIterator[ability.TOutput]:
+        """Encode ``input`` as it is read, yielding output as it is produced.
+
+        The encoder reads ``input`` at its own pace; ``input`` ending means the input is final. Closing the
+        returned iterator before it is exhausted (``aclose``) cancels the work and stops reading ``input``.
+
+        Raises:
+            Error: The encoding failed; ``kind`` says why.
+        """
+        ...
+
+
+type FailureKind = typing.Literal["invalid_input", "unavailable", "timeout", "invalid_response", "encode_failed"]
+"""Why an encoding failed, in existing ``FAILURE_KINDS.md`` strings.
+
+``invalid_input`` the input was refused; ``unavailable`` the encoder's service is not serving; ``timeout`` it did
+not answer in time; ``invalid_response`` it returned output outside its contract; ``encode_failed`` the encoding
+failed for no narrower reason.
+"""
+
+
+class Error(Exception):
+    """An encoder failure with a closed, low-cardinality kind. Any encoder may raise it."""
+
+    kind: FailureKind
+    failure_kind: str
+    """The same string as ``kind``, under the name ``telemetry.span.failure_kind`` reads."""
+
+    def __init__(self, kind: FailureKind, message: str) -> None:
+        super().__init__(message)
+        self.kind = kind
+        self.failure_kind = kind
+
+
 # Generic envelope (see the intentional-exception note on ability.InputEvent): this base is
 # generic over TInput/TOutput, so subclasses narrow input/output schemas and validate payloads
 # through input_data_type/output_data_type.

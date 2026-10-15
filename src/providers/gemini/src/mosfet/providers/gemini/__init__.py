@@ -10,7 +10,7 @@ from .client import (
 )
 from .processing import Processor, ProcessingError
 from .speech_decoder import SpeechDecoder, SpeechDecodingError
-from .speech_encoder import SpeechEncoder, SpeechEncodingError
+from .speech_encoder import SpeechEncoder
 from .text_generator import TextGenerationError, TextGenerator
 
 __version__ = "0.1.0"
@@ -28,7 +28,6 @@ __all__ = [
     "SpeechDecoder",
     "SpeechDecodingError",
     "SpeechEncoder",
-    "SpeechEncodingError",
     "TextGenerationError",
     "TextGenerator",
     "__version__",

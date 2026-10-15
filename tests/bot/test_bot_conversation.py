@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import collections.abc
 import dataclasses
 import typing
 import uuid
@@ -15,16 +16,18 @@ from mosfet.abilities import cognition
 from mosfet.abilities import communication
 from mosfet.abilities.communication import conversation
 from mosfet.abilities import decoding
-from mosfet.abilities import encoding
+from mosfet.abilities import ability
 from mosfet.abilities import listening
 from mosfet.abilities.communication.conversation import turn_detector
 from mosfet.abilities import processing
 from mosfet.abilities import speaking
+from mosfet.abilities import vocal
 from mosfet.abilities.hearing import speech
 from mosfet.abilities.hearing import voice as hearing_voice
 from mosfet.abilities.language import text
 from mosfet.bot import Bot
 from mosfet.device import Device
+from mosfet.devices import audio
 from mosfet.environment import SoundData, SoundEvent, Environment
 from tests.bot.test_bot import CapturingCognition, as_cognition
 
@@ -33,15 +36,31 @@ MessageContent: typing.TypeAlias = (
 )
 
 
-class RecordingEncoder(encoding.Encoder[bytes, bytes]):
-    def __init__(self, audio: bytes = b"\x11\x22") -> None:
-        self.calls: list[bytes] = []
-        self._audio = audio
+class RecordingSpeechEncoder(vocal.speech.SpeechEncoder):
+    def __init__(self) -> None:
+        self.format = vocal.speech.Format(sample_rate_hz=16_000, channels=1)
+        self.calls: list[str] = []
 
     @typing.override
-    async def encode(self, input: bytes) -> bytes:
-        self.calls.append(input)
-        return self._audio
+    async def encode(
+        self, input: collections.abc.AsyncIterable[str]
+    ) -> collections.abc.AsyncIterator[vocal.speech.Audio]:
+        said = "".join([piece async for piece in input])
+        self.calls.append(said)
+        yield vocal.speech.Audio(pcm=b"\x11\x22", text=said)
+
+
+def _speaking(
+    encoder: RecordingSpeechEncoder,
+    *,
+    conversation: collections.abc.Sequence[ability.Ability[typing.Any, typing.Any]] = (),
+) -> speaking.Speaking:
+    return speaking.Speaking(
+        encoder=encoder,
+        speaker=audio.Speaker(),
+        voice_id="tts:test",
+        conversation=conversation,
+    )
 
 
 class IdentityTextDecoder(decoding.Decoder[typing.Any, str]):
@@ -146,7 +165,7 @@ def _text_communication(
     speaking_ability = (
         speaking_ability
         if speaking_ability is not None
-        else speaking.Speaking(encoder=RecordingEncoder(), conversation=conversation_ability)
+        else _speaking(RecordingSpeechEncoder(), conversation=(conversation_ability,))
     )
     return (
         communication.Communication(active_conversation=conversation_ability, speaking=speaking_ability),
@@ -171,9 +190,9 @@ def test_conversation_input_uses_identity_sets_and_content() -> None:
 def test_bot_conversation_contribution_reaches_cognition_without_direct_speaking() -> None:
     """Message → Conversation contribution → Bot cognition, without a direct Speaking affordance."""
 
-    async def run() -> tuple[list[bytes], list[processing.InputData], conversation.Messages | None]:
-        encoder = RecordingEncoder()
-        speaking_ability = speaking.Speaking(encoder=encoder, speaker=None)
+    async def run() -> tuple[list[str], list[processing.InputData], conversation.Messages | None]:
+        encoder = RecordingSpeechEncoder()
+        speaking_ability = _speaking(encoder)
         communication_ability, conversation_ability, _ = _text_communication(speaking_ability=speaking_ability)
         processor = ContributionProcessor()
 
@@ -402,9 +421,9 @@ def test_bot_accepts_contribution_with_empty_text_product() -> None:
 def test_bot_accepts_contribution_via_dispatch_to_id() -> None:
     """Contribution handoff addressed to this Bot by id enters cognition (no source-id walk)."""
 
-    async def run() -> tuple[list[processing.InputData], list[bytes]]:
-        encoder = RecordingEncoder()
-        speaking_ability = speaking.Speaking(encoder=encoder, speaker=None)
+    async def run() -> tuple[list[processing.InputData], list[str]]:
+        encoder = RecordingSpeechEncoder()
+        speaking_ability = _speaking(encoder)
         # Address-only path: no acquired Conversation actor required on the body.
         processor = ContributionProcessor(require_communication_actor=False)
 
@@ -443,8 +462,8 @@ def test_bot_product_path_does_not_use_host_turn() -> None:
     """Bot body bridge is the product path: one cognition entry without host_turn or direct Speaking selection."""
 
     async def run() -> int:
-        encoder = RecordingEncoder()
-        speaking_ability = speaking.Speaking(encoder=encoder, speaker=None)
+        encoder = RecordingSpeechEncoder()
+        speaking_ability = _speaking(encoder)
         communication_ability, conversation_ability, _ = _text_communication(speaking_ability=speaking_ability)
         processor = ContributionProcessor()
 
@@ -485,8 +504,8 @@ def test_bot_defers_second_conversation_contribution_until_idle() -> None:
     """Second contribution while processing is deferred and runs after the first completes."""
 
     async def run() -> list[str]:
-        encoder = RecordingEncoder()
-        speaking_ability = speaking.Speaking(encoder=encoder, speaker=None)
+        encoder = RecordingSpeechEncoder()
+        speaking_ability = _speaking(encoder)
         communication_ability, conversation_ability, _ = _text_communication(speaking_ability=speaking_ability)
         # Gate first process until second message is queued.
         first_started = asyncio.Event()

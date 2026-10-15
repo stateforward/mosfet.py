@@ -172,18 +172,6 @@ class Speaker(Device):
         self._queued_seconds = 0.0
         self._chunks = 0
 
-    @property
-    def amplitude_db(self) -> float | None:
-        """How loud this mouth plays at the reference distance, or None if unconstrained."""
-
-        return self._amplitude_db
-
-    @property
-    def placement(self) -> space.Placement | None:
-        """Where this transducer is in the environment, if known."""
-
-        return self._placement
-
     @staticmethod
     def _commander(instance: "Speaker", event: hsm.Event[typing.Any]) -> hsm.Instance | None:
         """The attached controller that stamped itself as ``event.source`` (post-delivery correlation)."""

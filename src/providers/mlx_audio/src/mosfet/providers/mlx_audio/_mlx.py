@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import collections.abc
-import io
 import importlib
 import typing
 
@@ -13,7 +12,7 @@ class SpeechGenerationResult(typing.Protocol):
 
 class SpeechEncodingModel(typing.Protocol):
     def generate(self, text: str, **kwargs: object) -> collections.abc.Iterable[SpeechGenerationResult]:
-        """Return generated speech audio records for the supplied text."""
+        """Return generated speech audio records for the supplied text, one per chunk when streaming."""
         ...
 
 
@@ -65,7 +64,7 @@ class VoiceDiarizationModel(typing.Protocol):
 
 SpeechEncodingModelLoader = collections.abc.Callable[[str], SpeechEncodingModel]
 SpeechDecodingModelLoader = collections.abc.Callable[[str], SpeechDecodingModel]
-SpeechAudioWriter = collections.abc.Callable[[object, int, str], bytes]
+PcmConverter = collections.abc.Callable[[object], bytes]
 StreamingVoiceDetectionSessionLoader = collections.abc.Callable[[str], StreamingVoiceDetectionSession]
 VoiceDiarizationModelLoader = collections.abc.Callable[[str], VoiceDiarizationModel]
 
@@ -76,12 +75,14 @@ def load_speech_encoding_model(model_id: str) -> SpeechEncodingModel:
     return load(model_id)
 
 
-def write_speech_audio(audio: object, sample_rate: int, audio_format: str) -> bytes:
-    module = importlib.import_module("mlx_audio.audio_io")
-    write = typing.cast(collections.abc.Callable[..., None], getattr(module, "write"))
-    output = io.BytesIO()
-    write(output, audio, sample_rate, format=audio_format)
-    return output.getvalue()
+def pcm16(audio: object) -> bytes:
+    """Convert a model's float audio (an MLX or NumPy array in [-1, 1]) to mono s16le PCM bytes."""
+
+    numpy = importlib.import_module("numpy")
+    asarray = typing.cast(collections.abc.Callable[..., typing.Any], getattr(numpy, "asarray"))
+    clip = typing.cast(collections.abc.Callable[..., typing.Any], getattr(numpy, "clip"))
+    samples = asarray(audio, dtype="float32").reshape(-1)
+    return typing.cast(bytes, (clip(samples, -1.0, 1.0) * 32767.0).astype("<i2").tobytes())
 
 
 def load_speech_decoding_model(model_id: str) -> SpeechDecodingModel:

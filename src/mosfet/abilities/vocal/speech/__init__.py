@@ -1,4 +1,6 @@
-from . import encoding
-from .encoding import SpeechEncoding
+"""Speech production: streaming speech encoding of the bot's own voice."""
 
-__all__ = ["SpeechEncoding", "encoding"]
+from . import encoding
+from .encoding import Audio, Format, SpeechEncoder, Text
+
+__all__ = ["Audio", "Format", "SpeechEncoder", "Text", "encoding"]

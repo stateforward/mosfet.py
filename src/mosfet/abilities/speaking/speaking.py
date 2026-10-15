@@ -1,55 +1,83 @@
-"""Speaking: bot output ability that utters text via an encoder.
+"""Speaking: the bot's motor control for its own voice, through the mouth it is wired to.
 
-Model-facing contract is short text (not raw PCM). Internals encode speech and
-elevate playout as ``environment.sound``. An optional ``Speaker`` may still be
-injected for mouth identity / later mouth wiring; playout does not require it.
-On playout entry, Speaking delivers a motor-command copy (efference) directly to
-registered Listening peers — not via body fan-out or environment broadcast.
-Conversation is separate and may invoke Speaking later; cognition does not select
-``speaking.input`` directly. A behavior/topology route owns that dispatch.
+The model-facing contract is short text, never raw audio. Speaking hands an utterance's text, as it is
+written, to an injected :class:`~mosfet.abilities.vocal.speech.SpeechEncoder` through one encoding stream, and
+never splits, joins or inspects it: how the text is chunked for encoding is the encoder's concern. It
+commands its mouth (an attached :class:`~mosfet.devices.audio.Speaker`) chunk by chunk, each chunk under its
+own mark with the text it finishes saying. The mouth plays in real time and reports each chunk's mark once it
+has been played; that report, not the command, is what the utterance records as said.
+
+On every command and every played report Speaking hands its Listening peers a motor-command copy (efference)
+stating the playout still commanded and not yet played — a nerve between effector and ear, not an environment
+stimulus and not body fan-out. Speaking also hands Listening a copy of the PCM of its own voice once, so hearing
+can learn that voice as the bot's own.
+
+Cognition does not select ``speaking.input`` directly: Communication routes a chosen response here.
 """
 
 from __future__ import annotations
 
 from .. import ability
-from .. import encoding
-from .. import processing
+from .. import vocal
 
-import datetime
+import asyncio
 import collections.abc
 import dataclasses
+import datetime
+import time
 import typing
 import uuid
 
 import hsm
 import mosfet
 import pydantic
+from opentelemetry import metrics
 
 from mosfet import lifecycle
 from mosfet import telemetry
+from mosfet.abilities import encoding
+from mosfet.abilities import identification
+from mosfet.devices import audio
 from mosfet.protocols import attachment
 from mosfet.telemetry import span
 
-if typing.TYPE_CHECKING:
-    from mosfet.devices.audio.speaker import Speaker
-
-_DEFAULT_SAMPLE_RATE_HZ = 24_000
-_DEFAULT_CHANNELS = 1
-_RECORDING_TIMEOUT = datetime.timedelta(seconds=5)
-_ENCODING_TIMEOUT = datetime.timedelta(seconds=5)
 ConversationTarget: typing.TypeAlias = ability.Ability[typing.Any, typing.Any]
 
-_LINEAR_PCM_BYTES_PER_SAMPLE = 2
-"""Sample width, in bytes, of the linear PCM this ability plays out (16-bit)."""
+type Outcome = typing.Literal["completed", "stopped", "abandoned", "failed"]
 
-_LINEAR_PCM_MEDIA_TYPES = frozenset({"audio/pcm", "audio/l16", "audio/wav", "audio/x-wav"})
-"""Media types whose byte count is proportional to time, so playout duration is a measurement.
+_MEDIA_TYPE = "audio/pcm"
+_SAMPLE_BYTES = 2
+_RECORDING_TIMEOUT = datetime.timedelta(seconds=5)
+_PLAYOUT_GRACE = datetime.timedelta(seconds=2)
+"""How long past the end of commanded playout a silent mouth is waited for before its audio counts as unplayed."""
+_LOOKAHEAD = datetime.timedelta(seconds=1)
+_ENCODE_IDLE_TIMEOUT = datetime.timedelta(seconds=5)
+_ENROLL = datetime.timedelta(seconds=6)
+_MIN_ENROLL = datetime.timedelta(seconds=1.5)
+"""The shortest copy of the bot's own voice worth learning from (above a voiceprint model's 0.3 s floor)."""
 
-Container headers (WAV's 44 bytes) are left in the count: a fixed header against seconds of
-audio is far below the tolerance any prediction here is compared at. A compressed form is not
-in this set, because for those the byte count says nothing about duration and a guess would be
-a fabricated prediction rather than a measured one.
-"""
+_METER = metrics.get_meter("mosfet.abilities.speaking")
+_UTTERANCES = _METER.create_counter(
+    "bot.speaking.utterance.count",
+    unit="{utterance}",
+    description=(
+        "Utterances Speaking finished, by outcome: completed, stopped, abandoned (its text stopped coming before it "
+        "was final), or failed (encoding failed, or the mouth dropped audio or stopped reporting)."
+    ),
+)
+_FIRST_AUDIO = _METER.create_histogram(
+    "bot.speaking.first_audio.duration",
+    unit="s",
+    description="Time from an utterance's first text to its first audio chunk commanded to the mouth.",
+)
+_ENCODING = _METER.create_histogram(
+    "bot.speaking.encoding.duration",
+    unit="s",
+    description=(
+        "Time an utterance's encoding stream was open, from its creation to its end, by outcome: completed (the "
+        "stream ended), failed, or cancelled (closed before it ended)."
+    ),
+)
 
 
 class InputData(pydantic.BaseModel):
@@ -67,8 +95,8 @@ class InputData(pydantic.BaseModel):
         json_schema_extra={
             "description": (
                 "A request to speak. text is the entire payload: it is required, must be non-empty, and is "
-                "synthesized and played immediately, so this request is never silent and never partial. "
-                "The ability owns speech synthesis and playout, so nothing downstream supplies, completes, "
+                "encoded to speech and played immediately, so this request is never silent and never partial. "
+                "The ability owns speech encoding and playout, so nothing downstream supplies, completes, "
                 "or edits the words. Speaking does not end a turn — it can accompany other events that keep "
                 "running alongside it."
             ),
@@ -89,101 +117,98 @@ class InputData(pydantic.BaseModel):
 
 
 class OutputData(pydantic.BaseModel):
-    """Result of a completed speak action."""
+    """What an utterance actually was: the text asked for, what the room heard, and how it ended."""
 
     model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
         frozen=True,
         extra="forbid",
-        ser_json_bytes="base64",
-        val_json_bytes="base64",
         json_schema_extra={
-            "description": "Speak completed: original text plus audio format metadata used for playout.",
+            "description": (
+                "An utterance finished: the text it was asked to say, the part the mouth actually played, the part "
+                "it did not, how it ended, and the voice and audio format it was said in."
+            ),
+            "examples": [
+                {
+                    "text": "Sure. I can help with that.",
+                    "spoken": "Sure. I can help with that.",
+                    "unspoken": "",
+                    "outcome": "completed",
+                    "voice_id": "tts:warm",
+                    "media_type": "audio/pcm",
+                    "sample_rate_hz": 24000,
+                    "channels": 1,
+                }
+            ],
         },
     )
 
-    text: str = pydantic.Field(min_length=1, description="Text that was spoken.")
-    media_type: str | None = pydantic.Field(
-        default=None,
-        min_length=1,
-        description="Media type of the encoded audio (e.g. audio/pcm, audio/wav).",
-        examples=["audio/pcm", "audio/wav"],
+    text: str = pydantic.Field(min_length=1, description="The text this utterance was asked to say.")
+    spoken: str = pydantic.Field(
+        default="",
+        description=(
+            "The text of the audio the mouth reported played, in order, as the encoder aligned it: what the room "
+            "actually heard. Empty when nothing was played."
+        ),
     )
-    sample_rate_hz: int | None = pydantic.Field(
-        default=None,
-        ge=1,
-        description="Sample rate of the encoded audio in hertz, when known.",
-        examples=[24000],
+    unspoken: str = pydantic.Field(
+        default="",
+        description="The rest of the text the encoder read: what was never played, in order.",
     )
-    channels: int | None = pydantic.Field(
-        default=None,
-        ge=1,
-        description="Channel count of the encoded audio, when known.",
-        examples=[1],
+    outcome: Outcome = pydantic.Field(
+        description=(
+            "How the utterance ended: completed (every chunk played), stopped (cut short on request), abandoned "
+            "(its text stopped coming before it was final), or failed (encoding failed, or the mouth dropped audio "
+            "unplayed or stopped reporting playout)."
+        ),
+        examples=["completed"],
     )
+    voice_id: identification.Id = pydantic.Field(
+        description="The bot's own voice id this utterance was said in.",
+        examples=["tts:warm"],
+    )
+    media_type: typing.Literal["audio/pcm"] = pydantic.Field(
+        default=_MEDIA_TYPE,
+        description="Media type of the audio the mouth played: s16le linear PCM.",
+        examples=["audio/pcm"],
+    )
+    sample_rate_hz: int = pydantic.Field(
+        ge=1, description="Sample rate of the played audio, in hertz.", examples=[24000]
+    )
+    channels: int = pydantic.Field(ge=1, description="Channel count of the played audio.", examples=[1])
 
 
-class _EncodedData(pydantic.BaseModel):
-    """Synthesized speech waiting to be played: the encoding stage's product."""
+class ProgressData(pydantic.BaseModel):
+    """How far the utterance in progress has got: a sign of life for whoever asked for it."""
 
     model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
         frozen=True,
-        ser_json_bytes="base64",
-        val_json_bytes="base64",
+        extra="forbid",
+        json_schema_extra={"examples": [{"spoken_seconds": 1.2}]},
     )
 
-    text: str = pydantic.Field(min_length=1)
-    audio: bytes = pydantic.Field(min_length=1)
-    media_type: str = pydantic.Field(min_length=1)
-    sample_rate_hz: int = pydantic.Field(ge=1)
-    channels: int = pydantic.Field(ge=1)
+    spoken_seconds: float = pydantic.Field(
+        ge=0.0, description="Seconds of this utterance's audio the mouth has reported played.", examples=[1.2]
+    )
 
 
-def _playout_duration(encoded: _EncodedData) -> float | None:
-    """Seconds of sound ``encoded`` will make, or ``None`` when the form does not say.
-
-    For linear PCM the byte count *is* the duration, so this is a measurement of the command
-    that was built, not a guess about it.
-    """
-
-    if encoded.media_type not in _LINEAR_PCM_MEDIA_TYPES:
-        return None
-    frame_bytes = encoded.sample_rate_hz * encoded.channels * _LINEAR_PCM_BYTES_PER_SAMPLE
-    duration = len(encoded.audio) / frame_bytes
-    return duration if duration > 0.0 else None
-
-
-_SpeechEncodedEvent = hsm.Event[_EncodedData](
-    name="bot.ability.speaking.encoded",
-    kind=hsm.CompletionEventKind,
-    schema=_EncodedData,
-)
-_SpeakCompletedEvent = hsm.Event[OutputData](
-    name="bot.ability.speaking.apply.completed",
-    kind=hsm.CompletionEventKind,
-    schema=OutputData,
-)
-_SpeakFailedEvent = hsm.Event[ability.FailureData](
-    name="bot.ability.speaking.apply.failed",
-    kind=hsm.ErrorEventKind,
-    schema=ability.FailureData,
-)
-_ConversationRecordedEvent = hsm.Event[OutputData](
-    name="bot.ability.speaking.conversation.recorded",
-    kind=hsm.CompletionEventKind,
-    schema=OutputData,
-)
-
-# Speaking is reached through behavior/topology wiring, not as a direct cognition tool.
 InputEvent = hsm.Event[InputData](
     name="bot.ability.speaking.input",
     kind=hsm.EventKind,
     schema=InputData,
 )
+"""Speak this text. Reached through Communication's response route, never selected by cognition directly."""
 
 OutputEvent = hsm.Event[OutputData](
     name="bot.ability.speaking.output",
     schema=OutputData,
 )
+"""The utterance finished; sent to its requester (the input's source) with the input's id, else to the owner."""
+
+ProgressEvent = hsm.Event[ProgressData](
+    name="bot.ability.speaking.progress",
+    schema=ProgressData,
+)
+"""The utterance is moving: sent to its requester, with the input's id, as its first audio starts and audio plays."""
 
 
 class EfferenceData(pydantic.BaseModel):
@@ -194,14 +219,15 @@ class EfferenceData(pydantic.BaseModel):
     bad at recognizing their own recorded voice while still responding to it — the thing that
     stops you hearing your own speech as an external event is knowing you are producing it right
     now, not knowing what it sounds like. So this carries only what the command commits to:
-    which mouth, for how long, in what form.
+    which mouth, for how long from now, in what form.
 
     What the bot expects to *hear* as a result is not here either. That is a forward model — the
     mapping from a command to its sensory consequences — and it belongs to perception, which is
     the only thing positioned to learn it and the only thing that ever sees whether it held.
 
-    Owned by Speaking and delivered directly to linked Listening peers on playout entry — a nerve
-    between effector and ear, not an environment stimulus and not body fan-out.
+    Owned by Speaking and delivered directly to its Listening peers each time it commands audio and
+    each time the mouth reports audio played — a nerve between effector and ear, not an environment
+    stimulus and not body fan-out. Each copy replaces the last.
     """
 
     model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
@@ -209,8 +235,8 @@ class EfferenceData(pydantic.BaseModel):
         extra="forbid",
         json_schema_extra={
             "description": (
-                "Copy of a motor command sent to a mouth, delivered to perception at the moment "
-                "the command is issued and before the sound exists in the environment."
+                "Copy of a motor command sent to a mouth, delivered to perception as the command is issued and as "
+                "the mouth plays it: how much commanded sound is still to come from that mouth, from now."
             ),
             "examples": [
                 {
@@ -234,13 +260,13 @@ class EfferenceData(pydantic.BaseModel):
         examples=["01J8ZQ2K7M0000000000000000"],
     )
     duration: float = pydantic.Field(
-        gt=0.0,
+        ge=0.0,
         description=(
-            "Seconds of sound this command commits to, measured from the encoded audio rather "
-            "than estimated. This is how long the consequences of the command are expected to "
-            "last; sound arriving after it is no longer a consequence of this command."
+            "Seconds of playout still commanded and not yet played, measured from now from the audio actually "
+            "commanded rather than estimated. Sound arriving after it is no longer a consequence of the command; "
+            "zero means the mouth has nothing left to say."
         ),
-        examples=[3.6, 0.4],
+        examples=[3.6, 0.0],
     )
     media_type: str | None = pydantic.Field(
         default=None,
@@ -266,7 +292,7 @@ EfferenceEvent = hsm.Event[EfferenceData](
     name="bot.ability.speaking.efference",
     schema=EfferenceData,
 )
-"""Copy of a motor command, delivered Speaking → linked Listening on playout entry.
+"""Copy of a motor command, delivered Speaking → Listening peers as audio is commanded and played.
 
 Deliberately a plain event and never a model-offerable tool: this is a nerve, not a selection.
 A bot does not decide to send an efference copy any more than it decides to send one to its own
@@ -274,150 +300,232 @@ cerebellum, and it must never appear in a menu of things a model can select.
 """
 
 
-def _normalize_efference_targets(
-    listening: hsm.Instance | collections.abc.Sequence[hsm.Instance] | None,
-) -> tuple[hsm.Instance, ...]:
-    if listening is None:
-        return ()
-    if isinstance(listening, hsm.Instance):
-        return (listening,)
-    return tuple(listening)
+class _CommandedData(pydantic.BaseModel):
+    """The next piece of the utterance's audio, to be commanded to the mouth under ``mark``.
+
+    An encoded chunk goes to the mouth in whole-frame pieces of at most half the lookahead: ``audio`` is this
+    piece, and ``backlog`` the rest of the chunk still to command, with ``backlog_text`` the chunk's aligned text,
+    which rides on its last piece (``text`` is ``""`` until then).
+    """
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(frozen=True)
+
+    utterance: int
+    mark: str
+    seconds: float
+    audio: bytes
+    text: str
+    backlog: bytes
+    backlog_text: str
+
+
+class _StreamEndedData(pydantic.BaseModel):
+    """The utterance's stream ended."""
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(frozen=True)
+
+    utterance: int
+
+
+class _EncodingFailedData(pydantic.BaseModel):
+    """The utterance's stream failed."""
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(frozen=True)
+
+    utterance: int
+    kind: encoding.FailureKind
+
+
+_CommandedEvent = hsm.Event[_CommandedData](name="bot.ability.speaking.commanded", schema=_CommandedData)
+_StreamEndedEvent = hsm.Event[_StreamEndedData](name="bot.ability.speaking.stream.ended", schema=_StreamEndedData)
+_EncodingFailedEvent = hsm.Event[_EncodingFailedData](
+    name="bot.ability.speaking.encoding.failed", schema=_EncodingFailedData
+)
+_ConversationRecordedEvent = hsm.Event[OutputData](
+    name="bot.ability.speaking.conversation.recorded",
+    kind=hsm.CompletionEventKind,
+    schema=OutputData,
+)
+_RecordingFailedEvent = hsm.Event[ability.FailureData](
+    name="bot.ability.speaking.recording.failed",
+    kind=hsm.ErrorEventKind,
+    schema=ability.FailureData,
+)
+
+
+@dataclasses.dataclass(kw_only=True)
+class _Mark:
+    """One commanded piece the mouth has not yet reported: how long it plays, and the text it finishes saying."""
+
+    seconds: float
+    text: str
+
+
+@dataclasses.dataclass(kw_only=True)
+class _Utterance:
+    """The one utterance being spoken: durable machine data for its whole life, cleared on ``idle`` entry.
+
+    ``pipe`` and ``stream`` are the utterance's durable resources, like an open socket: the text written for the
+    encoder, and the one encoding stream reading it, closed when the utterance stops streaming. ``encoding_outcome``
+    is how that stream ended and ``failure`` why it failed; ``failed_as`` is what first failed the utterance: its
+    stream, a mouth that overflowed (``overloaded``), or a mouth that stopped reporting (``timeout``). ``marks``
+    holds only the pieces the mouth has not yet reported: a reported piece's text joins ``spoken`` (played) or
+    ``unplayed`` (dropped), and ``aligned`` counts the text the commanded pieces carry. ``backlog`` is what is left
+    of the last encoded chunk still to command, with its aligned text. The text has no length bound (W3-20): what
+    bounds the work in flight is the lookahead, which bounds the marks, and one encoded chunk of backlog; the
+    enrollment copy is at most ``enroll_seconds``.
+    """
+
+    sequence: int
+    id: str
+    requester: str
+    metadata: dict[str, object]
+    text: str
+    started_at: float
+    pipe: vocal.speech.Text
+    stream: collections.abc.AsyncIterator[vocal.speech.Audio]
+    marks: dict[str, _Mark] = dataclasses.field(default_factory=dict[str, _Mark])
+    commands: int = 0
+    aligned: int = 0
+    spoken: str = ""
+    unplayed: str = ""
+    backlog: bytes = b""
+    backlog_text: str = ""
+    commanded: float = 0.0
+    played: float = 0.0
+    dropped: float = 0.0
+    outcome: Outcome = "completed"
+    encoding_outcome: typing.Literal["completed", "failed", "cancelled"] = "cancelled"
+    failure: encoding.FailureKind | None = None
+    failed_as: encoding.FailureKind | typing.Literal["overloaded"] | None = None
+    first_audio: bool = False
+    enroll: bytearray | None = None
 
 
 def _normalize_conversation_targets(
-    conversation: ConversationTarget | collections.abc.Sequence[ConversationTarget] | None,
+    conversation: collections.abc.Sequence[ConversationTarget],
 ) -> tuple[ConversationTarget, ...]:
-    if conversation is None:
-        return ()
-    match = typing.cast(object, conversation)
-    if isinstance(match, ability.Ability):
-        targets: collections.abc.Sequence[ConversationTarget] = (typing.cast(ConversationTarget, conversation),)
-    elif isinstance(match, collections.abc.Sequence):
-        targets = typing.cast("collections.abc.Sequence[ConversationTarget]", conversation)
-    else:
+    if any(not isinstance(typing.cast(object, target), ability.Ability) for target in conversation):
         raise TypeError("Speaking conversation targets must be Ability instances.")
-    if any(not isinstance(typing.cast(object, target), ability.Ability) for target in targets):
-        raise TypeError("Speaking conversation targets must be Ability instances.")
-    return tuple(dict.fromkeys(targets))
-
-
-def link_conversation(speaking: "Speaking", *conversation: ConversationTarget) -> None:
-    """Register explicit Conversation sink(s) for trusted outbound history records."""
-
-    speaking.link_conversation(*conversation)
-
-
-def link_listening(speaking: "Speaking", *listening: hsm.Instance) -> None:
-    """Register Listening peers that receive motor-command copies from ``speaking`` on playout.
-
-    Composition-time wiring when both abilities already exist. Prefer
-    ``Speaking(..., listening=...)`` at construction when the peer is available then.
-    """
-
-    speaking.link_listening(*listening)
-
-
-def _has_speak_input(ctx: hsm.Context, instance: "Speaking", event: hsm.Event[typing.Any]) -> bool:
-    del ctx, instance
-    return isinstance(event.data, InputData)
-
-
-def _has_speak_completed(ctx: hsm.Context, instance: "Speaking", event: hsm.Event[typing.Any]) -> bool:
-    del ctx, instance
-    return isinstance(event.data, OutputData)
-
-
-def _has_speak_failure(ctx: hsm.Context, instance: "Speaking", event: hsm.Event[typing.Any]) -> bool:
-    del ctx, instance
-    return isinstance(event.data, ability.FailureData)
+    return tuple(dict.fromkeys(conversation))
 
 
 class Speaking(ability.Ability[InputData, OutputData]):
-    """Bot output ability: encode text to speech and elevate it as ``environment.sound``.
+    """Bot output ability: say text in the bot's own voice through the mouth it is wired to.
 
-    Constructor-inject a TTS ``encoder``, optional ``speaker`` (mouth identity / future mouth
-    wiring), and optional ``listening`` peer(s) for the motor-command copy on playout entry.
-    Playout broadcasts ``environment.sound`` from this ability; efference is delivered only to
-    registered Listening targets. Cognition does not select ``bot.ability.speaking.input`` directly;
-    a behavior/topology route must dispatch it.
+    Constructor-injected, all of it: the streaming ``encoder``, the ``speaker`` that is the bot's mouth, the
+    ``voice_id`` it speaks as, the ``listening`` peers that receive motor-command copies and the copy of its own
+    voice, and the ``conversation`` sinks it records what was said in.
+
+    Speaking attaches to its mouth as a controller as part of being attached by its owner (its composite
+    attachment group): a mouth that refuses or never answers within the owner's attach timeout fails that attach,
+    and the owner gets ``AttachFailed``; detached, Speaking answers every request to speak with a failure. A
+    detach by the owner releases the mouth, and so does stopping. An utterance's text goes to the encoder
+    through one append-only pipe and one encoding stream. Speaking pulls the stream one chunk at a time, staying at
+    most ``lookahead`` of unplayed audio ahead of the mouth (an unpulled stream pushes back on the provider), and
+    commands each chunk to the mouth in whole-frame pieces of at most half the lookahead, each under its own mark,
+    with the text the encoder aligned to the chunk on its last piece, so no provider has to know how much the
+    mouth can buffer. The mouth reports each mark as it is played. The utterance ends when every commanded piece is
+    played (or dropped), and ``spoken`` is the aligned text of the played pieces. Audio the mouth drops unplayed
+    ends the utterance ``failed``, never ``completed``. A stream that fails, or produces nothing for
+    ``encode_idle_timeout``, ends the utterance as ``failed`` after what was already commanded has played.
     """
 
     input_data_type: typing.ClassVar[type[object] | tuple[type[object], ...] | None] = InputData
     output_data_type: typing.ClassVar[type[object] | tuple[type[object], ...] | None] = OutputData
     input_event: typing.ClassVar[hsm.Event[InputData]] = InputEvent
     output_event: typing.ClassVar[hsm.Event[OutputData]] = OutputEvent
+    # The mouth is attached with Speaking, in its composite attachment group: a mouth that refuses or never
+    # answers fails Speaking's own attach, and its owner is told.
+    _composite_attachment_lifecycle: typing.ClassVar[bool] = True
+    # Detached (never attached, its mouth refused, or released), Speaking answers what it is asked to say with a
+    # failure rather than leave the requester waiting.
+    detached_requests: typing.ClassVar[tuple[hsm.Event[typing.Any], ...]] = (InputEvent,)
 
-    _encoder: encoding.Encoder[bytes, bytes]
-    _speaker: Speaker | None
-    # Live record of an attachment this ability acquired, so stop can release exactly what start
-    # of speech took. The speaker is injected and often shared, so it is never ours to power.
-    _speaker_attached: bool
+    _encoder: vocal.speech.SpeechEncoder
+    _speaker: audio.Speaker
+    _voice_id: identification.Id
     # Live record of a speaker this ability powered up itself, so stop powers down exactly that
     # and never a speaker someone else started.
     _speaker_started: bool
-    _sample_rate_hz: int
-    _channels: int
-    _media_type: str
-    # Listening peers that receive the playout-entry motor-command copy. Composition/DI only —
-    # never walked from the actor graph, never the body attachment list.
-    _efference_targets: tuple[hsm.Instance, ...]
+    # Listening peers that receive motor-command copies and the copy of the bot's own voice. Composition/DI
+    # only — never walked from the actor graph, never the body attachment list.
+    _listening: tuple[hsm.Instance, ...]
     # Explicit trusted sink(s) for committed bot text; never discovered through actor graphs.
     _conversation_targets: tuple[ConversationTarget, ...]
+    _lookahead_seconds: float
+    # The most audio commanded to the mouth at once: whole frames of half the lookahead, so the mouth never has to
+    # buffer a whole provider chunk and always has the next piece queued while one plays.
+    _piece_bytes: int
+    _encode_idle_timeout: datetime.timedelta
+    _enroll_bytes: int
+    _clock: collections.abc.Callable[[], float]
+    # Durable: the utterance being spoken (None while idle), a counter that tells utterances apart, and whether
+    # the bot's own voice has been handed to Listening yet.
+    _utterance: _Utterance | None
+    _sequence: int
+    _enrolled: bool
 
     def __init__(
         self,
         *,
-        encoder: encoding.Encoder[bytes, bytes],
-        speaker: Speaker | None = None,
-        listening: hsm.Instance | collections.abc.Sequence[hsm.Instance] | None = None,
-        conversation: ConversationTarget | collections.abc.Sequence[ConversationTarget] | None = None,
-        sample_rate_hz: int = _DEFAULT_SAMPLE_RATE_HZ,
-        channels: int = _DEFAULT_CHANNELS,
-        media_type: str = "audio/pcm",
+        encoder: vocal.speech.SpeechEncoder,
+        speaker: audio.Speaker,
+        voice_id: identification.Id,
+        listening: collections.abc.Sequence[hsm.Instance] = (),
+        conversation: collections.abc.Sequence[ConversationTarget] = (),
+        lookahead: datetime.timedelta = _LOOKAHEAD,
+        encode_idle_timeout: datetime.timedelta = _ENCODE_IDLE_TIMEOUT,
+        enroll_seconds: datetime.timedelta = _ENROLL,
+        clock: collections.abc.Callable[[], float] = time.monotonic,
     ) -> None:
-        super().__init__()
-        if sample_rate_hz < 1:
-            raise ValueError("sample_rate_hz must be positive.")
-        if channels < 1:
-            raise ValueError("channels must be positive.")
-        self._encoder = encoder
-        self._speaker = speaker
-        self._speaker_attached = False
-        self._speaker_started = False
-        self._sample_rate_hz = sample_rate_hz
-        self._channels = channels
-        self._media_type = media_type
-        self._efference_targets = _normalize_efference_targets(listening)
-        self._conversation_targets = _normalize_conversation_targets(conversation)
+        """Build a Speaking ability.
 
-    def link_conversation(self, *conversation: ConversationTarget) -> None:
-        """Register explicit Conversation sink(s) for trusted outbound history recording."""
+        Args:
+            encoder: Reads an utterance's text as it is written and streams aligned s16le PCM for it.
+            speaker: The bot's mouth. Speaking powers it when nobody has, and attaches to it as a controller.
+            voice_id: The bot's own voice id, stamped on what it says and enrolled as the voice it hears as its own.
+            listening: Peers that receive motor-command copies and the copy of the bot's own voice.
+            conversation: Conversation sinks the spoken text is recorded in as outbound messages.
+            lookahead: The most unplayed audio commanded ahead of the mouth before the next chunk is pulled.
+            encode_idle_timeout: The longest an encoding stream may go without producing a chunk once pulled.
+            enroll_seconds: The most of its own voice Speaking hands Listening to learn from (at least 1.5 s).
+            clock: Monotonic seconds the first-audio latency and the encoding duration are measured on.
 
-        existing = list(self._conversation_targets)
-        for target in _normalize_conversation_targets(conversation):
-            if target not in existing:
-                existing.append(target)
-        self._conversation_targets = tuple(existing)
-
-    def link_listening(self, *listening: hsm.Instance) -> None:
-        """Register Listening peer(s) that receive motor-command copies on playout entry.
-
-        Idempotent for already-registered targets. Does not mutate Listening fields.
+        Raises:
+            ValueError: A duration is not positive, or ``enroll_seconds`` is under 1.5 seconds.
         """
 
-        if not listening:
-            return
-        existing = list(self._efference_targets)
-        for target in listening:
-            if target not in existing:
-                existing.append(target)
-        self._efference_targets = tuple(existing)
+        super().__init__()
+        if lookahead <= datetime.timedelta(0):
+            raise ValueError(f"Speaking lookahead must be positive, got {lookahead}.")
+        if encode_idle_timeout <= datetime.timedelta(0):
+            raise ValueError(f"Speaking encode_idle_timeout must be positive, got {encode_idle_timeout}.")
+        if enroll_seconds < _MIN_ENROLL:
+            raise ValueError(f"Speaking enroll_seconds must be at least {_MIN_ENROLL}, got {enroll_seconds}.")
+        self._encoder = encoder
+        self._speaker = speaker
+        self._voice_id = voice_id
+        self._speaker_started = False
+        self._listening = tuple(dict.fromkeys(listening))
+        self._conversation_targets = _normalize_conversation_targets(conversation)
+        self._lookahead_seconds = lookahead.total_seconds()
+        self._encode_idle_timeout = encode_idle_timeout
+        pcm = encoder.format
+        frame_bytes = _SAMPLE_BYTES * pcm.channels
+        self._piece_bytes = max(1, int(lookahead.total_seconds() / 2 * pcm.sample_rate_hz)) * frame_bytes
+        self._enroll_bytes = int(enroll_seconds.total_seconds() * pcm.sample_rate_hz) * _SAMPLE_BYTES * pcm.channels
+        self._clock = clock
+        self._utterance = None
+        self._sequence = 0
+        self._enrolled = False
+        self._attachment_group: attachment.Group | None = attachment.Group(speaker)
 
     @typing.override
     async def start(self, ctx: hsm.Context, data: object = None) -> typing.Self:
         instance = await super().start(ctx, data)
         speaker = self._speaker
-        if speaker is not None and not lifecycle.is_started(speaker):
+        if not lifecycle.is_started(speaker):
             # The mouth is part of the bot: this ability powers it the way phone firmware powers
             # an earpiece. Parented under the ability's own durable context — never an activity
             # context — so the speaker outlives any single utterance (HSM-CONTEXT-001). An
@@ -431,411 +539,800 @@ class Speaking(ability.Ability[InputData, OutputData]):
 
     @typing.override
     async def stop(self, ctx: hsm.Context) -> None:
-        """Release the speaker this ability wired itself to, power down only what it powered up, then stop."""
+        """Release the mouth and stop, then power down only a mouth this ability powered up."""
 
-        speaker = self._speaker
-        if speaker is not None and self._speaker_attached:
-            self._speaker_attached = False
-            if lifecycle.is_started(speaker):
-                await speaker.detach(ctx, attachment.DetachEvent.with_data(attachment.DetachData(actor=self)))
-        if speaker is not None and self._speaker_started:
-            self._speaker_started = False
-            if lifecycle.is_started(speaker):
-                await speaker.stop(ctx)
+        # A shared mouth must not keep a controller that is gone. Its answer comes back to a Speaking that is
+        # stopping and is ignored, and a mouth that is no longer powered does not take it at all.
+        if lifecycle.is_started(self):
+            _ = hsm.dispatch(
+                self.context(),
+                self._speaker,
+                dataclasses.replace(
+                    attachment.DetachEvent.with_data(attachment.DetachData(actor=self, reply_to=self)),
+                    id=uuid.uuid4().hex,
+                    source=hsm.id(self),
+                ),
+            )
         await super().stop(ctx)
+        if self._speaker_started:
+            self._speaker_started = False
+            if lifecycle.is_started(self._speaker):
+                await self._speaker.stop(ctx)
+
+    # ----- utterance bookkeeping -------------------------------------------------------------------------------
 
     @staticmethod
-    def _dispatch_output(ctx: hsm.Context, instance: "Speaking", event: hsm.Event[typing.Any]) -> None:
+    def _requester(instance: "Speaking", event: hsm.Event[typing.Any]) -> str:
+        """The address an utterance's replies go to: the stamped source, unless that is this ability or absent."""
+
+        return event.source if event.source and event.source != hsm.id(instance) else ""
+
+    @staticmethod
+    def _remaining(utterance: _Utterance) -> float:
+        return max(0.0, utterance.commanded - utterance.played - utterance.dropped)
+
+    @staticmethod
+    def _has_speak_input(ctx: hsm.Context, instance: "Speaking", event: hsm.Event[typing.Any]) -> bool:
+        """Text to say. Blank text is the encoder's to refuse (R5-1), so its requester still gets a terminal."""
+
+        del ctx, instance
+        return isinstance(event.data, InputData)
+
+    @staticmethod
+    def _clear(ctx: hsm.Context, instance: "Speaking", event: hsm.Event[typing.Any]) -> None:
+        del ctx, event
+        instance._utterance = None
+
+    @staticmethod
+    def _begin(ctx: hsm.Context, instance: "Speaking", event: hsm.Event[typing.Any]) -> None:
+        """Open the utterance: its text goes into a new pipe, read by the one encoding stream it will have.
+
+        The whole text is final, so the pipe is closed once it is written whole, however long it is (W3-20).
+        """
+
+        del ctx
         data = event.data
-        assert isinstance(data, OutputData)
-        terminal = dataclasses.replace(
-            instance.output_event.with_data(data),
-            id=event.id or None,
+        assert isinstance(data, InputData)
+        pipe = vocal.speech.Text()
+        pipe.write(data.text)
+        pipe.close()
+        instance._sequence += 1
+        instance._utterance = _Utterance(
+            sequence=instance._sequence,
+            id=event.id or uuid.uuid4().hex,
+            requester=Speaking._requester(instance, event),
             metadata=dict(event.metadata),
-            source=hsm.id(instance),
-            target=event.source,
+            text=data.text,
+            started_at=instance._clock(),
+            pipe=pipe,
+            stream=instance._encoder.encode(pipe),
+            enroll=None if instance._enrolled or not instance._listening else bytearray(),
         )
-        with span.operation(
-            "bot.speaking.terminal",
-            scope="bot.abilities.speaking",
-            component="speaking",
-            stage="terminal",
-            context=telemetry.event_context(event),
-        ):
-            if event.source and event.source != hsm.id(instance):
-                # Directed terminal reply to the caller, not a NACK proxy: delivery is the gate.
-                _ = hsm.dispatch_to(instance.context(), terminal, event.source)
-            else:
-                _ = hsm.dispatch(ctx, instance, ability.TerminalOutputEvent.with_data(terminal))
 
     @staticmethod
-    async def _record_output(
-        ctx: hsm.Context,
-        instance: "Speaking",
-        event: hsm.Event[typing.Any],
-    ) -> None:
+    def _efference(ctx: hsm.Context, instance: "Speaking", utterance: _Utterance) -> None:
+        """Tell every Listening peer how much commanded sound is still to come from the mouth, from now."""
+
+        pcm = instance._encoder.format
+        copy = EfferenceData(
+            mouth=hsm.id(instance._speaker),
+            duration=Speaking._remaining(utterance),
+            media_type=_MEDIA_TYPE,
+            sample_rate_hz=pcm.sample_rate_hz,
+            channels=pcm.channels,
+        )
+        for peer in instance._listening:
+            _ = hsm.dispatch(
+                ctx,
+                peer,
+                dataclasses.replace(
+                    EfferenceEvent.with_data(copy),
+                    id=utterance.id,
+                    source=hsm.id(instance),
+                    target=hsm.id(peer),
+                    metadata=dict(utterance.metadata),
+                ),
+            )
+
+    @staticmethod
+    def _progress(ctx: hsm.Context, instance: "Speaking", utterance: _Utterance) -> None:
+        """Tell the requester the utterance is moving (nothing is sent when the owner asked)."""
+
+        del ctx
+        if not utterance.requester:
+            return
+        progress = ProgressData(spoken_seconds=utterance.played)
+        _ = hsm.dispatch_to(
+            instance.context(),
+            dataclasses.replace(
+                ProgressEvent.with_data(progress),
+                id=utterance.id,
+                source=hsm.id(instance),
+                target=utterance.requester,
+                metadata=dict(utterance.metadata),
+            ),
+            utterance.requester,
+        )
+
+    @staticmethod
+    def _is_current_command(ctx: hsm.Context, instance: "Speaking", event: hsm.Event[typing.Any]) -> bool:
+        del ctx
         data = event.data
-        assert isinstance(data, OutputData)
+        utterance = instance._utterance
+        return (
+            isinstance(data, _CommandedData)
+            and utterance is not None
+            and data.utterance == utterance.sequence
+            and data.mark == f"u{utterance.sequence}.{utterance.commands}"
+            and event.source == hsm.id(instance)
+        )
+
+    @staticmethod
+    def _commanded(ctx: hsm.Context, instance: "Speaking", event: hsm.Event[typing.Any]) -> None:
+        """Command the piece: record its mark, keep a copy of the bot's own voice, tell the ear, then the mouth.
+
+        The order is the point. The record knows the mark before the mouth can report it played, and the
+        motor-command copy leaves before the sound exists: a copy that arrived after the sound would be a report,
+        not a prediction.
+        """
+
+        data = event.data
+        assert isinstance(data, _CommandedData)
+        utterance = instance._utterance
+        assert utterance is not None
+        first = not utterance.commands
+        utterance.marks[data.mark] = _Mark(seconds=data.seconds, text=data.text)
+        utterance.commands += 1
+        utterance.aligned += len(data.text)
+        utterance.backlog, utterance.backlog_text = data.backlog, data.backlog_text
+        utterance.commanded += data.seconds
+        if not utterance.first_audio:
+            utterance.first_audio = True
+            _FIRST_AUDIO.record(max(0.0, instance._clock() - utterance.started_at))
+        enroll = utterance.enroll
+        if enroll is not None and len(enroll) < instance._enroll_bytes:
+            enroll.extend(data.audio[: instance._enroll_bytes - len(enroll)])
+        Speaking._efference(ctx, instance, utterance)
+        pcm = instance._encoder.format
+        speaker = instance._speaker
+        _ = hsm.dispatch(
+            ctx,
+            speaker,
+            dataclasses.replace(
+                audio.OutputEvent.with_data(
+                    audio.OutputData(
+                        audio=data.audio,
+                        media_type=_MEDIA_TYPE,
+                        sample_rate_hz=pcm.sample_rate_hz,
+                        channels=pcm.channels,
+                        mark=data.mark,
+                    )
+                ),
+                source=hsm.id(instance),
+                target=hsm.id(speaker),
+                metadata=dict(event.metadata),
+            ),
+        )
+        if first:
+            Speaking._progress(ctx, instance, utterance)
+
+    @staticmethod
+    def _is_our_mark(ctx: hsm.Context, instance: "Speaking", event: hsm.Event[typing.Any]) -> bool:
+        del ctx
+        data = event.data
+        utterance = instance._utterance
+        return (
+            isinstance(data, audio.PlayedData)
+            and utterance is not None
+            and event.source == hsm.id(instance._speaker)
+            and data.mark in utterance.marks
+        )
+
+    @staticmethod
+    def _played(ctx: hsm.Context, instance: "Speaking", event: hsm.Event[typing.Any]) -> None:
+        data = event.data
+        assert isinstance(data, audio.PlayedData)
+        utterance = instance._utterance
+        assert utterance is not None
+        mark = utterance.marks.pop(data.mark)
+        utterance.spoken += mark.text
+        utterance.played += mark.seconds
+        Speaking._efference(ctx, instance, utterance)
+        Speaking._progress(ctx, instance, utterance)
+
+    @staticmethod
+    def _is_our_flush(ctx: hsm.Context, instance: "Speaking", event: hsm.Event[typing.Any]) -> bool:
+        del ctx
+        data = event.data
+        utterance = instance._utterance
+        return (
+            isinstance(data, audio.FlushedData)
+            and utterance is not None
+            and event.source == hsm.id(instance._speaker)
+            and any(mark in utterance.marks for mark in data.marks)
+        )
+
+    @staticmethod
+    def _drop(utterance: _Utterance, names: collections.abc.Iterable[str]) -> None:
+        """The named marks will never be reported played: their audio is dropped and their text unspoken."""
+
+        for name in names:
+            mark = utterance.marks.pop(name, None)
+            if mark is not None:
+                utterance.unplayed += mark.text
+                utterance.dropped += mark.seconds
+
+    @staticmethod
+    def _overflowed(ctx: hsm.Context, instance: "Speaking", event: hsm.Event[typing.Any]) -> None:
+        """The mouth dropped some of this utterance unplayed (its buffer overflowed): that audio is unspoken, the
+        utterance has failed, and nothing more is commanded."""
+
+        data = event.data
+        assert isinstance(data, audio.FlushedData)
+        utterance = instance._utterance
+        assert utterance is not None
+        Speaking._drop(utterance, data.marks)
+        utterance.outcome = "failed"
+        utterance.failed_as = utterance.failed_as or "overloaded"
+        Speaking._efference(ctx, instance, utterance)
+
+    @staticmethod
+    def _overdue_delay(ctx: hsm.Context, instance: "Speaking", event: hsm.Event[typing.Any]) -> datetime.timedelta:
+        """How long a mouth with audio still to play may go without reporting: the rest of it, plus a grace."""
+
+        del ctx, event
+        utterance = instance._utterance
+        remaining = 0.0 if utterance is None else Speaking._remaining(utterance)
+        return datetime.timedelta(seconds=remaining) + _PLAYOUT_GRACE
+
+    @staticmethod
+    def _playout_overdue(ctx: hsm.Context, instance: "Speaking", event: hsm.Event[typing.Any]) -> None:
+        """The mouth stopped reporting: what it never reported is unspoken, and nothing more is commanded."""
+
+        del event
+        utterance = instance._utterance
+        assert utterance is not None
+        Speaking._drop(utterance, list(utterance.marks))
+        utterance.outcome = "failed"
+        utterance.failed_as = utterance.failed_as or "timeout"
+        Speaking._efference(ctx, instance, utterance)
+
+    # ----- encoding ------------------------------------------------------------------------------------------
+
+    @staticmethod
+    async def _encoding(ctx: hsm.Context, instance: "Speaking", event: hsm.Event[typing.Any]) -> None:
+        """Keep the utterance's encoding stream open while it streams; leaving closes the pipe and the stream.
+
+        Closing the stream is the contract's cancel at the provider. Its duration and outcome are measured here,
+        from the stream's creation to its close, under one span per utterance.
+        """
+
+        utterance = instance._utterance
+        assert utterance is not None
+        active = span.tracer("bot.abilities.speaking").start_span(
+            "bot.speaking.encoding",
+            context=telemetry.event_context(event),
+            attributes={"bot.component.name": "speaking", "bot.stage": "encoding"},
+        )
+        try:
+            await asyncio.wrap_future(ctx.done())
+        finally:
+            utterance.pipe.close()
+            try:
+                aclose = typing.cast(object, getattr(utterance.stream, "aclose", None))
+                if callable(aclose):
+                    _ = await typing.cast(collections.abc.Awaitable[object], aclose())
+            finally:
+                # Measured however the close went: a close that raises still ends the span and is still counted.
+                _ENCODING.record(
+                    max(0.0, instance._clock() - utterance.started_at), {"outcome": utterance.encoding_outcome}
+                )
+                if utterance.failure is not None:
+                    span.record_failure(active, utterance.failure)
+                else:
+                    active.set_attribute(
+                        "bot.outcome", span.Ok if utterance.encoding_outcome == "completed" else span.Cancelled
+                    )
+                active.end()
+
+    @staticmethod
+    async def _pull(ctx: hsm.Context, instance: "Speaking", event: hsm.Event[typing.Any]) -> None:
+        """Hand ``_commanded`` the next piece under its own mark, or report the stream's end.
+
+        The next piece is the front of what is left of the last chunk; when nothing is, the stream's next chunk is
+        pulled and its front is the piece. The piece goes to the mouth from ``_commanded``, not from here, so the
+        record learns of the mark and the ear is told of the command before the mouth can play it. At most one chunk
+        is pulled per entry, and none while a chunk is still being commanded, so a stream that is not pulled pushes
+        back on the provider.
+        """
+
+        del event
+        utterance = instance._utterance
+        assert utterance is not None
+        sequence = utterance.sequence
+        pcm = instance._encoder.format
+        result: hsm.Event[typing.Any]
+        try:
+            if utterance.backlog:
+                chunk = vocal.speech.Audio(pcm=utterance.backlog, text=utterance.backlog_text)
+            else:
+                chunk = await anext(utterance.stream)
+            if len(chunk.pcm) % (_SAMPLE_BYTES * pcm.channels):
+                raise encoding.Error("invalid_response", "An encoded chunk is not whole frames.")
+        except StopAsyncIteration:
+            result = _StreamEndedEvent.with_data(_StreamEndedData(utterance=sequence))
+        except encoding.Error as error:
+            result = _EncodingFailedEvent.with_data(_EncodingFailedData(utterance=sequence, kind=error.kind))
+        except Exception:
+            # An encoder that raised outside its contract failed for no narrower reason.
+            result = _EncodingFailedEvent.with_data(_EncodingFailedData(utterance=sequence, kind="encode_failed"))
+        else:
+            piece, backlog = chunk.pcm[: instance._piece_bytes], chunk.pcm[instance._piece_bytes :]
+            result = _CommandedEvent.with_data(
+                _CommandedData(
+                    utterance=sequence,
+                    mark=f"u{sequence}.{utterance.commands}",
+                    seconds=pcm.seconds(len(piece)),
+                    audio=piece,
+                    text="" if backlog else chunk.text,
+                    backlog=backlog,
+                    backlog_text=chunk.text if backlog else "",
+                )
+            )
+        _ = hsm.dispatch(
+            ctx,
+            instance,
+            dataclasses.replace(
+                result, source=hsm.id(instance), target=hsm.id(instance), metadata=dict(utterance.metadata)
+            ),
+        )
+
+    @staticmethod
+    def _has_room(ctx: hsm.Context, instance: "Speaking", event: hsm.Event[typing.Any]) -> bool:
+        """Less than ``lookahead`` of commanded audio is still unplayed: the next chunk may be pulled."""
+
+        del ctx, event
+        utterance = instance._utterance
+        return utterance is not None and Speaking._remaining(utterance) < instance._lookahead_seconds
+
+    @staticmethod
+    def _is_drained(ctx: hsm.Context, instance: "Speaking", event: hsm.Event[typing.Any]) -> bool:
+        """Every commanded piece has been played or dropped."""
+
+        del ctx, event
+        utterance = instance._utterance
+        return utterance is not None and not utterance.marks
+
+    @staticmethod
+    def _is_current_stream(ctx: hsm.Context, instance: "Speaking", event: hsm.Event[typing.Any]) -> bool:
+        del ctx
+        data = event.data
+        utterance = instance._utterance
+        return (
+            isinstance(data, (_StreamEndedData, _EncodingFailedData))
+            and utterance is not None
+            and data.utterance == utterance.sequence
+            and event.source == hsm.id(instance)
+        )
+
+    @staticmethod
+    def _stream_ended(ctx: hsm.Context, instance: "Speaking", event: hsm.Event[typing.Any]) -> None:
+        """The stream ended: nothing more is pulled; what was commanded plays."""
+
+        del ctx
+        assert isinstance(event.data, _StreamEndedData)
+        utterance = instance._utterance
+        assert utterance is not None
+        if not utterance.commands:
+            # Non-blank text that yields no audio breaks the contract.
+            utterance.encoding_outcome, utterance.failure, utterance.outcome = "failed", "invalid_response", "failed"
+            utterance.failed_as = utterance.failed_as or utterance.failure
+        else:
+            utterance.encoding_outcome = "completed"
+
+    @staticmethod
+    def _encoding_failed(ctx: hsm.Context, instance: "Speaking", event: hsm.Event[typing.Any]) -> None:
+        """The stream failed: nothing more is pulled; what was commanded still plays and counts."""
+
+        del ctx
+        data = event.data
+        assert isinstance(data, _EncodingFailedData)
+        utterance = instance._utterance
+        assert utterance is not None
+        utterance.encoding_outcome, utterance.failure, utterance.outcome = "failed", data.kind, "failed"
+        utterance.failed_as = utterance.failed_as or utterance.failure
+
+    @staticmethod
+    def _encode_idle_delay(ctx: hsm.Context, instance: "Speaking", event: hsm.Event[typing.Any]) -> datetime.timedelta:
+        del ctx, event
+        return instance._encode_idle_timeout
+
+    @staticmethod
+    def _encoding_timed_out(ctx: hsm.Context, instance: "Speaking", event: hsm.Event[typing.Any]) -> None:
+        """The encoder went quiet: leaving ``streaming`` closes its stream, and the utterance has failed."""
+
+        del ctx, event
+        utterance = instance._utterance
+        assert utterance is not None
+        utterance.encoding_outcome, utterance.failure, utterance.outcome = "failed", "timeout", "failed"
+        utterance.failed_as = utterance.failed_as or utterance.failure
+
+    # ----- the record and the terminal -------------------------------------------------------------------------
+
+    @staticmethod
+    def _output(instance: "Speaking", utterance: _Utterance) -> OutputData:
+        """What was said is the aligned text of the played pieces; the rest of what the encoder read is not."""
+
+        pcm = instance._encoder.format
+        return OutputData(
+            text=utterance.text,
+            spoken=utterance.spoken,
+            unspoken=(
+                utterance.unplayed
+                + "".join(mark.text for mark in utterance.marks.values())
+                + utterance.pipe.written[utterance.aligned :]
+            ),
+            outcome=utterance.outcome,
+            voice_id=instance._voice_id,
+            sample_rate_hz=pcm.sample_rate_hz,
+            channels=pcm.channels,
+        )
+
+    @staticmethod
+    async def _record_output(ctx: hsm.Context, instance: "Speaking", event: hsm.Event[typing.Any]) -> None:
+        """Record what the room actually heard as an outbound message in each conversation sink."""
+
+        del event
+        utterance = instance._utterance
+        assert utterance is not None
+        data = Speaking._output(instance, utterance)
         try:
             from ..communication import conversation
 
-            for target in instance._conversation_targets:
-                operation_id = f"{event.id or hsm.id(instance)}:conversation:{hsm.id(target)}"
-                message = conversation.Message(
-                    sequence=0,
-                    direction="outbound",
-                    source_ids=frozenset(),
-                    target_ids=frozenset(),
-                    content=data.text,
-                    content_type="text/plain",
-                    provenance=conversation.MessageProvenance(event=conversation.AppendEvent.name),
-                )
-                await hsm.dispatch(
-                    ctx,
-                    target,
-                    dataclasses.replace(
-                        conversation.AppendEvent.with_data(conversation.AppendData(message=message)),
-                        id=operation_id,
-                        source=hsm.id(instance),
-                        target=hsm.id(target),
-                        metadata=dict(event.metadata),
-                    ),
-                )
+            if data.spoken:
+                for target in instance._conversation_targets:
+                    message = conversation.Message(
+                        sequence=0,
+                        direction="outbound",
+                        source_ids=frozenset(),
+                        target_ids=frozenset(),
+                        content=data.spoken,
+                        content_type="text/plain",
+                        provenance=conversation.MessageProvenance(event=conversation.AppendEvent.name),
+                    )
+                    _ = await hsm.dispatch(
+                        ctx,
+                        target,
+                        dataclasses.replace(
+                            conversation.AppendEvent.with_data(conversation.AppendData(message=message)),
+                            id=f"{utterance.id}:conversation:{hsm.id(target)}",
+                            source=hsm.id(instance),
+                            target=hsm.id(target),
+                            metadata=dict(utterance.metadata),
+                        ),
+                    )
         except Exception as error:
-            Speaking._dispatch_speak_failure(ctx, instance, event, error)
+            _ = hsm.dispatch(
+                ctx,
+                instance,
+                dataclasses.replace(
+                    _RecordingFailedEvent.with_data(ability.FailureData(message=str(error))),
+                    id=utterance.id,
+                    source=hsm.id(instance),
+                    target=hsm.id(instance),
+                    metadata=dict(utterance.metadata),
+                ),
+            )
             return
         _ = hsm.dispatch(
             ctx,
             instance,
             dataclasses.replace(
                 _ConversationRecordedEvent.with_data(data),
-                id=event.id or None,
-                source=event.source,
-                target=event.target,
-                metadata=dict(event.metadata),
+                id=utterance.id,
+                source=hsm.id(instance),
+                target=hsm.id(instance),
+                metadata=dict(utterance.metadata),
             ),
         )
 
     @staticmethod
-    def _recording_timeout_delay(
-        ctx: hsm.Context, instance: "Speaking", event: hsm.Event[typing.Any]
-    ) -> datetime.timedelta:
+    def _is_current_record(ctx: hsm.Context, instance: "Speaking", event: hsm.Event[typing.Any]) -> bool:
+        del ctx
+        utterance = instance._utterance
+        return (
+            utterance is not None
+            and isinstance(event.data, (OutputData, ability.FailureData))
+            and event.id == utterance.id
+            and event.source == hsm.id(instance)
+        )
+
+    @staticmethod
+    def _recording_delay(ctx: hsm.Context, instance: "Speaking", event: hsm.Event[typing.Any]) -> datetime.timedelta:
         del ctx, instance, event
         return _RECORDING_TIMEOUT
 
     @staticmethod
-    def _dispatch_recording_timeout(ctx: hsm.Context, instance: "Speaking", event: hsm.Event[typing.Any]) -> None:
-        failure = ability.FailureData(message="Conversation history recording timed out.")
+    def _enroll(ctx: hsm.Context, instance: "Speaking", utterance: _Utterance) -> None:
+        """Hand Listening the copy of the bot's own voice once there is enough of it; once per lifetime."""
+
+        enroll = utterance.enroll
+        pcm = instance._encoder.format
+        if enroll is None or pcm.seconds(len(enroll)) < _MIN_ENROLL.total_seconds():
+            return
+        # Imported here: Listening's Sensitivity imports this module for the efference copy.
+        from mosfet.abilities import listening
+        from mosfet.abilities.hearing import voice
+
+        copy = listening.EnrollData(
+            voice_id=instance._voice_id,
+            segment=voice.VoiceSegment(
+                audio=bytes(enroll),
+                media_type=_MEDIA_TYPE,
+                sample_rate_hz=pcm.sample_rate_hz,
+                channels=pcm.channels,
+                start_seconds=0.0,
+                end_seconds=pcm.seconds(len(enroll)),
+            ),
+        )
+        for peer in instance._listening:
+            _ = hsm.dispatch(
+                ctx,
+                peer,
+                dataclasses.replace(
+                    listening.EnrollEvent.with_data(copy),
+                    id=utterance.id,
+                    source=hsm.id(instance),
+                    target=hsm.id(peer),
+                    metadata=dict(utterance.metadata),
+                ),
+            )
+        instance._enrolled = True
+
+    @staticmethod
+    def _dispatch_output(ctx: hsm.Context, instance: "Speaking", event: hsm.Event[typing.Any]) -> None:
+        data = event.data
+        assert isinstance(data, OutputData)
+        utterance = instance._utterance
+        assert utterance is not None
+        Speaking._enroll(ctx, instance, utterance)
+        _UTTERANCES.add(1, {"outcome": data.outcome})
+        terminal = dataclasses.replace(
+            instance.output_event.with_data(data),
+            id=utterance.id,
+            metadata=dict(utterance.metadata),
+            source=hsm.id(instance),
+            target=utterance.requester,
+        )
+        with span.operation(
+            "bot.speaking.utterance",
+            scope="bot.abilities.speaking",
+            component="speaking",
+            stage="terminal",
+            attributes={"bot.speaking.outcome": data.outcome},
+            context=telemetry.event_context(event),
+        ) as active:
+            if utterance.failed_as is not None:
+                span.record_failure(active, utterance.failed_as)
+            if utterance.requester:
+                # Directed terminal reply to the caller, not a NACK proxy: delivery is the gate.
+                _ = hsm.dispatch_to(instance.context(), terminal, utterance.requester)
+            else:
+                _ = hsm.dispatch(ctx, instance, ability.TerminalOutputEvent.with_data(terminal))
+
+    @staticmethod
+    def _reply_failure(
+        ctx: hsm.Context,
+        instance: "Speaking",
+        request_id: str,
+        requester: str,
+        failure: ability.FailureData,
+        metadata: dict[str, object],
+    ) -> None:
         terminal = dataclasses.replace(
             instance.failed_event.with_data(failure),
-            id=event.id or None,
+            id=request_id or None,
+            metadata=metadata,
             source=hsm.id(instance),
-            target=event.source,
-            metadata=dict(event.metadata),
+            target=requester,
         )
-        _ = hsm.dispatch(ctx, instance, ability.TerminalErrorEvent.with_data(terminal))
+        with span.operation(
+            "bot.speaking.terminal",
+            scope="bot.abilities.speaking",
+            component="speaking",
+            stage="terminal",
+        ) as active:
+            span.record_failure(active, "speaking_failed")
+            if requester:
+                _ = hsm.dispatch_to(instance.context(), terminal, requester)
+            else:
+                _ = hsm.dispatch(ctx, instance, ability.TerminalErrorEvent.with_data(terminal))
 
     @staticmethod
     def _dispatch_failure(ctx: hsm.Context, instance: "Speaking", event: hsm.Event[typing.Any]) -> None:
         data = event.data
         assert isinstance(data, ability.FailureData)
-        if processing.active_operation(instance, event.id) is not None:
-            processing.finish_operation(ctx, instance, event.id)
-        terminal = dataclasses.replace(
-            instance.failed_event.with_data(data),
-            id=event.id or None,
-            metadata=dict(event.metadata),
-            source=hsm.id(instance),
-            target=event.source,
-        )
-        with span.operation(
-            "bot.speaking.terminal",
-            scope="bot.abilities.speaking",
-            component="speaking",
-            stage="terminal",
-            context=telemetry.event_context(event),
-        ) as active:
-            span.record_failure(active, "speaking_failed")
-            if event.source and event.source != hsm.id(instance):
-                # Directed terminal reply to the caller, not a NACK proxy: delivery is the gate.
-                _ = hsm.dispatch_to(instance.context(), terminal, event.source)
-            else:
-                _ = hsm.dispatch(ctx, instance, ability.TerminalErrorEvent.with_data(terminal))
+        utterance = instance._utterance
+        assert utterance is not None
+        _UTTERANCES.add(1, {"outcome": "failed"})
+        Speaking._reply_failure(ctx, instance, utterance.id, utterance.requester, data, dict(utterance.metadata))
 
     @staticmethod
-    def _dispatch_speak_failure(
-        ctx: hsm.Context,
-        instance: "Speaking",
-        event: hsm.Event[typing.Any],
-        error: Exception,
-    ) -> None:
-        _ = hsm.dispatch(
-            ctx,
-            instance,
-            dataclasses.replace(
-                _SpeakFailedEvent.with_data(ability.FailureData(message=str(error))),
-                id=event.id or None,
-                source=event.source,
-                target=event.target,
-                metadata=dict(event.metadata),
-            ),
-        )
-
-    @staticmethod
-    async def _run_encoding_activity(ctx: hsm.Context, instance: "Speaking", event: hsm.Event[typing.Any]) -> None:
-        """Synthesize speech. No sound exists yet, and nothing has been committed to the air."""
-
-        data = event.data
-        assert isinstance(data, InputData)
-        operation_id = event.id or uuid.uuid4().hex
-        _ = await processing.start_operation(instance, operation_id)
-        try:
-            text = data.text.strip()
-            if not text:
-                raise ValueError("Speaking requires non-blank text.")
-            audio_bytes = await instance._encoder.encode(text.encode("utf-8"))
-            if not audio_bytes:
-                raise ValueError("Speaking encoder produced empty audio.")
-            encoded = _EncodedData(
-                text=text,
-                audio=audio_bytes,
-                media_type=instance._media_type,
-                sample_rate_hz=instance._sample_rate_hz,
-                channels=instance._channels,
-            )
-        except Exception as error:
-            Speaking._dispatch_speak_failure(ctx, instance, event, error)
-            return
-        _ = hsm.dispatch(
-            ctx,
-            instance,
-            dataclasses.replace(
-                _SpeechEncodedEvent.with_data(encoded),
-                id=operation_id,
-                source=event.source,
-                target=event.target,
-                metadata=dict(event.metadata),
-            ),
-        )
-
-    @staticmethod
-    def _has_current_encoding(
-        ctx: hsm.Context,
-        instance: "Speaking",
-        event: hsm.Event[typing.Any],
-    ) -> bool:
-        del ctx
-        return isinstance(event.data, _EncodedData) and processing.active_operation(instance, event.id) is not None
-
-    @staticmethod
-    def _finish_encoding(ctx: hsm.Context, instance: "Speaking", event: hsm.Event[typing.Any]) -> None:
-        processing.finish_operation(ctx, instance, event.id)
-
-    @staticmethod
-    def _encoding_timeout_delay(
-        ctx: hsm.Context,
-        instance: "Speaking",
-        event: hsm.Event[typing.Any],
-    ) -> datetime.timedelta:
-        del ctx, instance, event
-        return _ENCODING_TIMEOUT
-
-    @staticmethod
-    def _dispatch_encoding_timeout(
-        ctx: hsm.Context,
-        instance: "Speaking",
-        event: hsm.Event[typing.Any],
-    ) -> None:
+    def _dispatch_recording_timeout(ctx: hsm.Context, instance: "Speaking", event: hsm.Event[typing.Any]) -> None:
         del event
-        operation_id = processing.active_operation_id(instance)
-        if operation_id is None:
-            return
-        processing.finish_operation(ctx, instance, operation_id)
-        failure = ability.FailureData(message="Speech encoding timed out.")
-        with span.operation(
-            "bot.speaking.terminal",
-            scope="bot.abilities.speaking",
-            component="speaking",
-            stage="terminal",
-        ) as active:
-            span.record_failure(active, "encoding_timeout")
-            terminal = dataclasses.replace(
-                instance.failed_event.with_data_and_id(failure, operation_id),
-                source=hsm.id(instance),
-                target=hsm.id(instance),
-            )
-            _ = hsm.dispatch(ctx, instance, ability.TerminalErrorEvent.with_data(terminal))
-
-    @staticmethod
-    def _issue_efference_copy(ctx: hsm.Context, instance: "Speaking", event: hsm.Event[typing.Any]) -> None:
-        """Copy the command to the mouth to linked Listening peers, on the way to the mouth.
-
-        Entry, not activity: the copy has to leave before the signal does, which is the whole
-        point of an efference copy. A command that reached the air first would arrive at
-        perception as something that merely happened.
-
-        Delivery is Speaking → Listening only (registered peers). Not body fan-out, not
-        environment broadcast. Nothing is sent when there is no mouth or the mouth is unpowered
-        (no signal will exist), when the encoded form does not give a duration (an unbounded
-        window is worse than none), or when no Listening peer is linked. Silence here degrades
-        to the untouched behaviour: the bot hears itself.
-        """
-
-        encoded = event.data
-        assert isinstance(encoded, _EncodedData)
-        speaker = instance._speaker
-        if speaker is None or not lifecycle.is_started(speaker) or not instance._efference_targets:
-            return
-        duration = _playout_duration(encoded)
-        if duration is None:
-            return
-        copy = EfferenceData(
-            mouth=hsm.id(speaker),
-            duration=duration,
-            media_type=encoded.media_type,
-            sample_rate_hz=encoded.sample_rate_hz,
-            channels=encoded.channels,
-        )
-        for peer in instance._efference_targets:
-            if not lifecycle.is_started(peer):
-                continue
-            _ = hsm.dispatch(
-                ctx,
-                peer,
-                dataclasses.replace(
-                    EfferenceEvent.with_data(copy),
-                    id=event.id or None,
-                    source=hsm.id(instance),
-                    target=hsm.id(peer),
-                    metadata=dict(event.metadata),
-                ),
-            )
-
-    @staticmethod
-    async def _run_playout_activity(ctx: hsm.Context, instance: "Speaking", event: hsm.Event[typing.Any]) -> None:
-        """Elevate encoded speech as ``environment.sound``. Completing means the act was committed."""
-
-        encoded = event.data
-        assert isinstance(encoded, _EncodedData)
-        try:
-            from mosfet.environment import Environment, SoundData, SoundEvent
-
-            # Temporary: ability elevates sound directly. Mouth/Speaker transduction returns later.
-            # When a mouth is injected, stamp its public amplitude and origin so distance
-            # filtering still works (Person geometry, far/near ears).
-            speaker = instance._speaker
-            amplitude_db = None if speaker is None else speaker.amplitude_db
-            placement = None if speaker is None else speaker.placement
-            origin = None if placement is None else placement.position
-            sound = dataclasses.replace(
-                SoundEvent.with_data(
-                    SoundData(
-                        audio=encoded.audio,
-                        media_type=encoded.media_type,
-                        sample_rate_hz=encoded.sample_rate_hz,
-                        channels=encoded.channels,
-                        amplitude_db=amplitude_db,
-                    )
-                ),
-                source=hsm.id(instance) if speaker is None else hsm.id(speaker),
-                metadata=dict(event.metadata),
-            )
-            _ = await Environment.from_context(ctx).broadcast(sound, origin=origin)
-            product = OutputData(
-                text=encoded.text,
-                media_type=encoded.media_type,
-                sample_rate_hz=encoded.sample_rate_hz,
-                channels=encoded.channels,
-            )
-        except Exception as error:
-            Speaking._dispatch_speak_failure(ctx, instance, event, error)
-            return
-        _ = hsm.dispatch(
+        utterance = instance._utterance
+        assert utterance is not None
+        _UTTERANCES.add(1, {"outcome": "failed"})
+        Speaking._reply_failure(
             ctx,
             instance,
-            dataclasses.replace(
-                _SpeakCompletedEvent.with_data(product),
-                id=event.id or None,
-                source=event.source,
-                target=event.target,
-                metadata=dict(event.metadata),
-            ),
+            utterance.id,
+            utterance.requester,
+            ability.FailureData(message="Conversation history recording timed out."),
+            dict(utterance.metadata),
         )
 
     submodel: typing.ClassVar[hsm.Model | None] = mosfet.define(
         "Speaking",
-        hsm.initial(hsm.target("idle")),
+        hsm.initial(hsm.target("initializing")),
+        # Attached by its owner, Speaking takes up its mouth: a controller attaches to the transducer it drives.
         hsm.state(
-            "idle",
+            "initializing",
+            hsm.defer(InputEvent, attachment.AttachEvent, attachment.DetachEvent),
+            hsm.activity(ability.Ability._attach_composite_group),
             hsm.transition(
-                hsm.on(InputEvent),
-                hsm.guard(_has_speak_input),
-                hsm.target("../encoding"),
+                hsm.on(ability.Ability._composite_attachment_terminal_event),
+                hsm.guard(ability.Ability._is_composite_attach_complete),
+                hsm.effect(ability.Ability._deliver_composite_attachment_terminal),
+                hsm.target("/Speaking/wired"),
             ),
         ),
-        # Synthesis and playout are separate because they are separate in time and only the
-        # second one makes a sound. Encoding a sentence takes seconds during which the bot is
-        # silent — treating that as part of speaking would have the bot deaf through exactly the
-        # pause a caller is most likely to speak into.
+        # Detached by its owner: the mouth is released with it.
         hsm.state(
-            "encoding",
-            hsm.defer(InputEvent),
-            hsm.activity(_run_encoding_activity),
+            "detaching",
+            hsm.defer(InputEvent, attachment.AttachEvent, attachment.DetachEvent),
+            hsm.activity(ability.Ability._detach_composite_group),
             hsm.transition(
-                hsm.on(_SpeechEncodedEvent),
-                hsm.guard(_has_current_encoding),
-                hsm.effect(_finish_encoding),
-                hsm.target("../playing"),
+                hsm.on(ability.Ability._composite_attachment_terminal_event),
+                hsm.guard(ability.Ability._is_composite_rollback_failure),
+                hsm.effect(ability.Ability._deliver_composite_attachment_terminal),
+                hsm.target("/Speaking/degraded"),
             ),
             hsm.transition(
-                hsm.on(_SpeakFailedEvent),
-                hsm.guard(_has_speak_failure),
-                hsm.effect(_dispatch_failure),
-                hsm.target("../idle"),
-            ),
-            hsm.transition(
-                hsm.after(_encoding_timeout_delay),
-                hsm.effect(_dispatch_encoding_timeout),
-                hsm.target("../idle"),
+                hsm.on(ability.Ability._composite_attachment_terminal_event),
+                hsm.guard(ability.Ability._is_composite_detach_failed),
+                hsm.effect(ability.Ability._deliver_composite_attachment_terminal),
+                hsm.target("/Speaking/wired"),
             ),
         ),
+        hsm.state("degraded"),
         hsm.state(
-            "playing",
-            hsm.defer(InputEvent),
-            hsm.entry(_issue_efference_copy),
-            hsm.activity(_run_playout_activity),
-            hsm.transition(
-                hsm.on(_SpeakCompletedEvent),
-                hsm.guard(_has_speak_completed),
-                hsm.target("../recording"),
+            "wired",
+            hsm.initial(hsm.target("idle")),
+            hsm.state(
+                "idle",
+                hsm.entry(_clear),
+                hsm.transition(
+                    hsm.on(InputEvent),
+                    hsm.guard(_has_speak_input),
+                    hsm.effect(_begin),
+                    hsm.target("/Speaking/wired/speaking"),
+                ),
             ),
-            hsm.transition(
-                hsm.on(_SpeakFailedEvent),
-                hsm.guard(_has_speak_failure),
-                hsm.effect(_dispatch_failure),
-                hsm.target("../idle"),
+            # One utterance at a time: a request for the next one waits until this one is recorded.
+            hsm.state(
+                "speaking",
+                hsm.defer(InputEvent),
+                hsm.initial(hsm.target("streaming")),
+                # Audio played while a piece is being pulled never changes the substate. Audio the mouth dropped
+                # unplayed ends the stream: the utterance has failed, and nothing more is commanded.
+                hsm.transition(hsm.on(audio.PlayedEvent), hsm.guard(_is_our_mark), hsm.effect(_played)),
+                hsm.transition(
+                    hsm.on(audio.FlushedEvent),
+                    hsm.guard(_is_our_flush),
+                    hsm.effect(_overflowed),
+                    hsm.target("/Speaking/wired/speaking/drained"),
+                ),
+                # The utterance's one encoding stream is open exactly while it streams.
+                hsm.state(
+                    "streaming",
+                    hsm.activity(_encoding),
+                    # A new stream has nothing ahead of the mouth yet: the first chunk is pulled at once.
+                    hsm.initial(hsm.target("pulling")),
+                    hsm.choice(
+                        "next",
+                        hsm.transition(hsm.guard(_has_room), hsm.target("/Speaking/wired/speaking/streaming/pulling")),
+                        hsm.transition(hsm.target("/Speaking/wired/speaking/streaming/holding")),
+                    ),
+                    # One chunk is pulled per entry, so the deadline measures the longest the encoder has gone
+                    # without producing one.
+                    hsm.state(
+                        "pulling",
+                        hsm.activity(_pull),
+                        hsm.transition(
+                            hsm.on(_CommandedEvent),
+                            hsm.guard(_is_current_command),
+                            hsm.effect(_commanded),
+                            hsm.target("/Speaking/wired/speaking/streaming/next"),
+                        ),
+                        hsm.transition(
+                            hsm.on(_StreamEndedEvent),
+                            hsm.guard(_is_current_stream),
+                            hsm.effect(_stream_ended),
+                            hsm.target("/Speaking/wired/speaking/streaming/ended"),
+                        ),
+                        hsm.transition(
+                            hsm.on(_EncodingFailedEvent),
+                            hsm.guard(_is_current_stream),
+                            hsm.effect(_encoding_failed),
+                            hsm.target("/Speaking/wired/speaking/streaming/ended"),
+                        ),
+                        hsm.transition(
+                            hsm.after(_encode_idle_delay),
+                            hsm.effect(_encoding_timed_out),
+                            hsm.target("/Speaking/wired/speaking/streaming/ended"),
+                        ),
+                    ),
+                    # How the stream ended is recorded before the stream is left, and leaving it closes it.
+                    hsm.choice("ended", hsm.transition(hsm.target("/Speaking/wired/speaking/drained"))),
+                    # A ``lookahead`` of audio is ahead of the mouth: wait for it to play down.
+                    hsm.state(
+                        "holding",
+                        hsm.transition(
+                            hsm.on(audio.PlayedEvent),
+                            hsm.guard(_is_our_mark),
+                            hsm.effect(_played),
+                            hsm.target("/Speaking/wired/speaking/streaming/next"),
+                        ),
+                        hsm.transition(
+                            hsm.after(_overdue_delay),
+                            hsm.effect(_playout_overdue),
+                            hsm.target("/Speaking/wired/speaking/drained"),
+                        ),
+                    ),
+                ),
+                hsm.choice(
+                    "drained",
+                    hsm.transition(hsm.guard(_is_drained), hsm.target("/Speaking/wired/recording")),
+                    hsm.transition(hsm.target("/Speaking/wired/speaking/draining")),
+                ),
+                # The stream ended or failed: the mouth plays or drops every mark still commanded.
+                hsm.state(
+                    "draining",
+                    hsm.transition(
+                        hsm.on(audio.PlayedEvent),
+                        hsm.guard(_is_our_mark),
+                        hsm.effect(_played),
+                        hsm.target("/Speaking/wired/speaking/drained"),
+                    ),
+                    hsm.transition(
+                        hsm.after(_overdue_delay),
+                        hsm.effect(_playout_overdue),
+                        hsm.target("/Speaking/wired/recording"),
+                    ),
+                ),
             ),
-        ),
-        hsm.state(
-            "recording",
-            hsm.defer(InputEvent),
-            hsm.activity(_record_output),
-            hsm.transition(
-                hsm.on(_ConversationRecordedEvent),
-                hsm.guard(_has_speak_completed),
-                hsm.effect(_dispatch_output),
-                hsm.target("../idle"),
-            ),
-            hsm.transition(
-                hsm.on(_SpeakFailedEvent),
-                hsm.guard(_has_speak_failure),
-                hsm.effect(_dispatch_failure),
-                hsm.target("../idle"),
-            ),
-            hsm.transition(
-                hsm.after(_recording_timeout_delay),
-                hsm.effect(_dispatch_recording_timeout),
-                hsm.target("../idle"),
+            hsm.state(
+                "recording",
+                hsm.defer(InputEvent),
+                hsm.activity(_record_output),
+                hsm.transition(
+                    hsm.on(_ConversationRecordedEvent),
+                    hsm.guard(_is_current_record),
+                    hsm.effect(_dispatch_output),
+                    hsm.target("/Speaking/wired/idle"),
+                ),
+                hsm.transition(
+                    hsm.on(_RecordingFailedEvent),
+                    hsm.guard(_is_current_record),
+                    hsm.effect(_dispatch_failure),
+                    hsm.target("/Speaking/wired/idle"),
+                ),
+                hsm.transition(
+                    hsm.after(_recording_delay),
+                    hsm.effect(_dispatch_recording_timeout),
+                    hsm.target("/Speaking/wired/idle"),
+                ),
             ),
         ),
     )
@@ -846,9 +1343,10 @@ __all__ = [
     "EfferenceEvent",
     "InputData",
     "InputEvent",
-    "link_listening",
-    "link_conversation",
     "OutputData",
     "OutputEvent",
+    "Outcome",
+    "ProgressData",
+    "ProgressEvent",
     "Speaking",
 ]

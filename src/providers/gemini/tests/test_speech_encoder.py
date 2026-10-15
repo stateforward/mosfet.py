@@ -4,15 +4,15 @@ import asyncio
 import base64
 import collections.abc
 import dataclasses
-import io
-import wave
 
 import pytest
 from google.genai import errors as genai_errors
 
-from mosfet.providers.gemini import ChatClient, SpeechEncoder, SpeechEncodingError
+from mosfet.abilities import encoding
+from mosfet.abilities.vocal import speech
+from mosfet.providers.gemini import ChatClient, SpeechEncoder
 from mosfet.providers.gemini import client as gemini_client
-from mosfet.providers.gemini.speech_encoder import pcm_to_wav
+from tests.bot.abilities.vocal.speech import contract
 
 
 @dataclasses.dataclass
@@ -23,12 +23,12 @@ class InteractionCall:
 @dataclasses.dataclass
 class FakeContentClient:
     response: dict[str, object]
-    calls: list[InteractionCall] = dataclasses.field(default_factory=list)
+    calls: list[InteractionCall] = dataclasses.field(default_factory=list[InteractionCall])
     error: Exception | None = None
 
     def generate_content(self, **kwargs: object) -> dict[str, object]:
         del kwargs
-        raise AssertionError("SpeechEncoder must use create_interaction, not generate_content.")
+        raise AssertionError("The speech encoder must use create_interaction, not generate_content.")
 
     def create_interaction(
         self,
@@ -111,15 +111,24 @@ def _tts_response(pcm: bytes, *, sample_rate: int = 24_000) -> dict[str, object]
     }
 
 
-def test_speech_encoder_uses_interactions_api() -> None:
+async def _all(stream: collections.abc.AsyncIterator[speech.Audio]) -> list[bytes]:
+    return [chunk.pcm async for chunk in stream]
+
+
+def _say(encoder: SpeechEncoder, text: str = "hello") -> list[bytes]:
+    said = speech.Text()
+    said.write(text)
+    said.close()
+    return asyncio.run(_all(encoder.encode(said)))
+
+
+def test_encoder_uses_interactions_api_and_yields_one_pcm_chunk() -> None:
     pcm = b"\x00\x01" * 8
     client = FakeContentClient(response=_tts_response(pcm))
     encoder = SpeechEncoder(client=client, voice_name="Puck", model="gemini-3.1-flash-tts-preview")
 
-    result = asyncio.run(encoder.encode(b"Hello there"))
-
-    assert result == pcm
-    assert len(client.calls) == 1
+    assert _say(encoder, "Hello there") == [pcm]
+    assert encoder.format == speech.Format(sample_rate_hz=24_000, channels=1)
     call = client.calls[0].kwargs
     assert call["model"] == "gemini-3.1-flash-tts-preview"
     assert call["input"] == "Hello there"
@@ -128,173 +137,107 @@ def test_speech_encoder_uses_interactions_api() -> None:
     assert call["generation_config"] == {"speech_config": [{"voice": "Puck"}]}
 
 
-def test_speech_encoder_wraps_wav_output() -> None:
-    pcm = b"\x00\x01" * 16
-    client = FakeContentClient(response=_tts_response(pcm, sample_rate=24_000))
-    encoder = SpeechEncoder(client=client, output_format="wav")
+def test_encoder_reads_the_text_to_its_end_and_aligns_its_one_chunk_to_the_whole_text() -> None:
+    pcm = b"\x00\x01" * 8
+    client = FakeContentClient(response=_tts_response(pcm))
 
-    result = asyncio.run(encoder.encode(b"hi"))
+    chunks = asyncio.run(contract.assert_speech_encoder(SpeechEncoder(client=client), ["Hello ", "the", "re"]))
 
-    with wave.open(io.BytesIO(result), "rb") as stream:
-        assert stream.getnchannels() == 1
-        assert stream.getsampwidth() == 2
-        assert stream.getframerate() == 24_000
-        assert stream.readframes(stream.getnframes()) == pcm
+    assert chunks == [speech.Audio(pcm=pcm, text="Hello there")]
+    # One request per non-blank stream (the whole text, then the one closed after its chunk); blank text sends none.
+    assert [call.kwargs["input"] for call in client.calls] == ["Hello there", "Hello there"]
 
 
-def test_speech_encoder_is_awaitable() -> None:
-    client = FakeContentClient(response=_tts_response(b"abc"))
-    encoder = SpeechEncoder(client=client)
+def test_the_constructor_voice_names_the_voice() -> None:
+    client = FakeContentClient(response=_tts_response(b"\x00\x01"))
 
-    encoded = encoder.encode(b"hello")
-    assert isinstance(encoded, collections.abc.Coroutine)
-    assert asyncio.run(encoded) == b"abc"
+    _ = _say(SpeechEncoder(client=client, voice_name="Kore"))
 
-
-def test_speech_encoder_rejects_blank_text() -> None:
-    client = FakeContentClient(response=_tts_response(b"x"))
-    encoder = SpeechEncoder(client=client)
-    try:
-        _ = asyncio.run(encoder.encode(b"   "))
-    except SpeechEncodingError as error:
-        assert "non-blank" in str(error)
-    else:
-        raise AssertionError("Expected SpeechEncodingError.")
+    assert client.calls[0].kwargs["generation_config"] == {"speech_config": [{"voice": "Kore"}]}
 
 
-def test_speech_encoder_rejects_missing_audio() -> None:
-    client = FakeContentClient(response={"output_text": "nope"})
-    encoder = SpeechEncoder(client=client)
-    try:
-        _ = asyncio.run(encoder.encode(b"hello"))
-    except SpeechEncodingError as error:
-        assert "output_audio" in str(error)
-    else:
-        raise AssertionError("Expected SpeechEncodingError.")
+def test_encoder_rejects_blank_text_and_missing_or_ragged_audio() -> None:
+    with pytest.raises(encoding.Error, match="non-blank") as blank:
+        _ = _say(SpeechEncoder(client=FakeContentClient(response=_tts_response(b"xx"))), "   ")
+    assert blank.value.kind == "invalid_input"
+
+    with pytest.raises(encoding.Error, match="output_audio") as missing:
+        _ = _say(SpeechEncoder(client=FakeContentClient(response={"output_text": "nope"})))
+    assert missing.value.kind == "invalid_response"
+
+    with pytest.raises(encoding.Error, match="mid-sample") as ragged:
+        _ = _say(SpeechEncoder(client=FakeContentClient(response=_tts_response(b"abc"))))
+    assert ragged.value.kind == "invalid_response"
 
 
-def test_speech_encoding_failure_names_the_underlying_sdk_error() -> None:
-    """A refused request must say what refused it, in the message the caller can see.
-
-    Abilities turn a raised encoder error into typed failure data with ``str(error)``, so the
-    exception message is the whole diagnostic budget for a live run: whatever it omits is gone
-    by the time anything logs it. ``__cause__`` survives on the exception object and no boundary
-    reads it. One generic line for a quota refusal, a timeout, and a malformed response is how a
-    mute robot and a throttled one look identical afterwards.
-    """
+def test_encoding_failure_names_the_underlying_sdk_error() -> None:
+    """A refused request must say what refused it, in the message the caller can see."""
 
     client = FakeContentClient(response={}, error=_quota_error())
-    encoder = SpeechEncoder(client=client)
 
-    with pytest.raises(SpeechEncodingError) as failure:
-        _ = asyncio.run(encoder.encode(b"hello"))
+    with pytest.raises(encoding.Error) as failure:
+        _ = _say(SpeechEncoder(client=client))
 
     message = str(failure.value)
+    assert failure.value.kind == "encode_failed"
     assert "429" in message
     assert "RESOURCE_EXHAUSTED" in message
     assert "Quota exceeded" in message
     assert "ClientError" in message
 
 
-def test_speech_encoding_failure_names_the_cause_through_the_real_client() -> None:
-    """The live path is encoder → ChatClient → SDK, and every layer must pass the reason up.
-
-    ``ChatClient`` wraps SDK exceptions in ``RequestError`` before the encoder ever sees them, so
-    a reason that only the encoder preserves is still lost in production.
-    """
+def test_encoding_failure_names_the_cause_through_the_real_client() -> None:
+    """The live path is speech encoder → ChatClient → SDK, and every layer must pass the reason up."""
 
     client = ChatClient(model="gemini-3.1-flash-tts-preview", client=_failing_sdk_client(_quota_error()))
-    encoder = SpeechEncoder(client=client)
 
-    with pytest.raises(SpeechEncodingError) as failure:
-        _ = asyncio.run(encoder.encode(b"hello"))
+    with pytest.raises(encoding.Error) as failure:
+        _ = _say(SpeechEncoder(client=client))
 
     message = str(failure.value)
     assert "429" in message
     assert "RESOURCE_EXHAUSTED" in message
-    assert "Quota exceeded" in message
     # Each layer names itself once: a reason repeated per wrapper is noise an operator has to read past.
     assert message.count("Gemini interactions.create request failed") == 1
     assert message.count("Quota exceeded") == 1
 
 
-def test_speech_encoding_failure_names_a_transport_error_without_a_status() -> None:
-    """Timeouts carry no HTTP status, and the message still has to identify them."""
-
+def test_encoding_failure_names_a_transport_error_without_a_status() -> None:
     client = FakeContentClient(response={}, error=TimeoutError("request timed out after 30s"))
-    encoder = SpeechEncoder(client=client)
 
-    with pytest.raises(SpeechEncodingError) as failure:
-        _ = asyncio.run(encoder.encode(b"hello"))
+    with pytest.raises(encoding.Error) as failure:
+        _ = _say(SpeechEncoder(client=client))
 
-    message = str(failure.value)
-    assert "TimeoutError" in message
-    assert "request timed out after 30s" in message
+    assert "TimeoutError" in str(failure.value)
+    assert "request timed out after 30s" in str(failure.value)
 
 
-def test_speech_encoding_failure_keeps_the_original_exception_chained() -> None:
-    """Naming the cause in the message must not cost the chain a debugger can walk."""
-
+def test_encoding_failure_keeps_the_original_exception_chained() -> None:
     error = _quota_error()
-    client = FakeContentClient(response={}, error=error)
-    encoder = SpeechEncoder(client=client)
 
-    with pytest.raises(SpeechEncodingError) as failure:
-        _ = asyncio.run(encoder.encode(b"hello"))
+    with pytest.raises(encoding.Error) as failure:
+        _ = _say(SpeechEncoder(client=FakeContentClient(response={}, error=error)))
 
     assert failure.value.__cause__ is error
 
 
-def test_pcm_to_wav_roundtrip() -> None:
-    pcm = b"\x10\x00" * 4
-    wav = pcm_to_wav(pcm, sample_rate_hz=16_000)
-    with wave.open(io.BytesIO(wav), "rb") as stream:
-        assert stream.getframerate() == 16_000
-        assert stream.readframes(stream.getnframes()) == pcm
+def test_pcm_at_a_rate_the_api_disagrees_with_is_refused() -> None:
+    """Raw PCM has no header, so a rate disagreement is heard, not raised — unless we raise it."""
 
+    client = FakeContentClient(response=_tts_response(b"\x01\x00\x02\x00", sample_rate=48_000))
 
-def test_pcm_output_rejects_a_sample_rate_the_api_disagrees_with() -> None:
-    """Raw PCM has no header, so a rate disagreement is heard, not raised — unless we raise it.
+    with pytest.raises(encoding.Error) as failure:
+        _ = _say(SpeechEncoder(client=client, sample_rate_hz=24_000))
 
-    The label this encoder is configured with is what downstream plays the audio at. If Gemini
-    returns a different rate there is nowhere to record the difference, so the voice comes out at
-    the wrong speed and looks like a model problem. Fail with both numbers instead.
-    """
-
-    pcm = b"\x01\x00\x02\x00"
-    client = FakeContentClient(response=_tts_response(pcm, sample_rate=48_000))
-    encoder = SpeechEncoder(client=client, sample_rate_hz=24_000, output_format="pcm")
-
-    with pytest.raises(SpeechEncodingError) as failure:
-        _ = asyncio.run(encoder.encode(b"hello"))
-
+    assert failure.value.kind == "invalid_response"
     assert "48000" in str(failure.value)
     assert "24000" in str(failure.value)
 
 
-def test_pcm_output_accepts_a_matching_reported_rate() -> None:
+def test_pcm_with_a_matching_or_unreported_rate_is_yielded() -> None:
     pcm = b"\x01\x00\x02\x00"
-    client = FakeContentClient(response=_tts_response(pcm, sample_rate=24_000))
-    encoder = SpeechEncoder(client=client, sample_rate_hz=24_000, output_format="pcm")
+    matching = FakeContentClient(response=_tts_response(pcm, sample_rate=24_000))
+    unreported = FakeContentClient(response={"output_audio": {"data": base64.b64encode(pcm).decode("ascii")}})
 
-    assert asyncio.run(encoder.encode(b"hello")) == pcm
-
-
-def test_pcm_output_falls_back_to_the_configured_rate_when_none_is_reported() -> None:
-    """An unreported rate is not an error: the configured value stands, as it always has."""
-
-    pcm = b"\x01\x00\x02\x00"
-    client = FakeContentClient(response={"output_audio": {"data": base64.b64encode(pcm).decode("ascii")}})
-    encoder = SpeechEncoder(client=client, sample_rate_hz=24_000, output_format="pcm")
-
-    assert asyncio.run(encoder.encode(b"hello")) == pcm
-
-
-def test_wav_output_uses_the_reported_rate_over_the_configured_one() -> None:
-    """The container can carry the difference, so it does — the mirror of the PCM branch."""
-
-    pcm = b"\x01\x00\x02\x00"
-    client = FakeContentClient(response=_tts_response(pcm, sample_rate=16_000))
-    encoder = SpeechEncoder(client=client, sample_rate_hz=24_000, output_format="wav")
-
-    assert asyncio.run(encoder.encode(b"hello")) == pcm_to_wav(pcm, sample_rate_hz=16_000)
+    assert _say(SpeechEncoder(client=matching, sample_rate_hz=24_000)) == [pcm]
+    assert _say(SpeechEncoder(client=unreported, sample_rate_hz=24_000)) == [pcm]

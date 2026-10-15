@@ -2,11 +2,11 @@ from mosfet import abilities
 import mosfet.lifecycle
 import mosfet
 from mosfet.abilities import cognition
-from mosfet.abilities import encoding
 from mosfet.abilities import listening
 from mosfet.abilities import memory
 from mosfet.abilities import processing
 from mosfet.abilities import speaking
+from mosfet.abilities import vocal
 from mosfet.abilities.cognition import Cognition
 from mosfet.abilities.hearing import sound as sound_hearing
 from mosfet.abilities.hearing import speech
@@ -20,6 +20,7 @@ import dataclasses
 import datetime
 import io
 import inspect
+import math
 import os
 import subprocess
 import sys
@@ -4556,17 +4557,30 @@ def test_a_placed_bot_only_hears_what_is_loud_enough_where_it_stands() -> None:
     assert after_near == 1
 
 
-class UtteranceEncoder(encoding.Encoder[bytes, bytes]):
-    """Stands in for a vocal tract: text in, acoustic bytes out, on this machine.
+def spoken(text: str) -> bytes:
+    """The audio a vocal tract below makes for ``text``: its words, marked and whole-sample.
 
-    A real synthesizer (macOS ``say``, Moonshine) is the same contract and is what the phone-bot
-    example uses. Here the audio only has to be traceable back to the words, so the pipeline can
-    be checked without a model download.
+    A real encoder (macOS ``say``, Moonshine) is the same contract and is what the phone-bot example
+    uses. Here the audio only has to be traceable back to the words, so the pipeline can be checked
+    without a model download.
     """
 
+    audio = b"spoken:" + text.encode()
+    return audio + b" " if len(audio) % 2 else audio
+
+
+class UtteranceSpeechEncoder(vocal.speech.SpeechEncoder):
+    """Stands in for a vocal tract: the whole text in, its marked words out as 16 kHz PCM, on this machine."""
+
+    def __init__(self) -> None:
+        self.format = vocal.speech.Format(sample_rate_hz=16_000, channels=1)
+
     @typing.override
-    async def encode(self, input: bytes) -> bytes:
-        return b"spoken:" + input
+    async def encode(
+        self, input: collections.abc.AsyncIterable[str]
+    ) -> collections.abc.AsyncIterator[vocal.speech.Audio]:
+        said = "".join([piece async for piece in input])
+        yield vocal.speech.Audio(pcm=spoken(said), text=said)
 
 
 async def somebody_speaks(
@@ -4585,13 +4599,7 @@ async def somebody_speaks(
 
     mouth = audio.Speaker(placement=space.Placement(position=position), amplitude_db=amplitude_db)
     _ = await mosfet.started(environment, mouth, typing.cast(hsm.Model, mouth.model))
-    voice = speaking.Speaking(
-        encoder=UtteranceEncoder(),
-        speaker=mouth,
-        sample_rate_hz=16_000,
-        channels=1,
-        media_type="audio/wav",
-    )
+    voice = speaking.Speaking(encoder=UtteranceSpeechEncoder(), speaker=mouth, voice_id="person:1")
     await start_ability_tree(environment, voice)
     _ = await voice.apply(speaking.InputData(text=text), ctx=environment)
     return mouth
@@ -4631,9 +4639,9 @@ def test_a_bot_hears_words_somebody_speaks_in_its_environment() -> None:
     assert [stimulus.name for stimulus in stimuli] == [listening.SpeechEvent.name]
     assert isinstance(stimuli[0].data, listening.SpeechData)
     assert stimuli[0].data.content_type == "text/plain"
-    assert stimuli[0].data.content == (
-        b"decoded:" + wav_frame(b"spoken:Call Bob at 555-0142." + silence_sound().audio)
-    ).decode("utf-8", errors="replace")
+    assert stimuli[0].data.content == (b"decoded:" + spoken("Call Bob at 555-0142.") + silence_sound().audio).decode(
+        "utf-8", errors="replace"
+    )
 
 
 def test_words_spoken_from_across_the_room_never_reach_the_bot() -> None:
@@ -4675,7 +4683,7 @@ MOUTH_OFFSET_M = 0.15
 """How far a robot's mouth is from its own ears. Close enough that it is the loudest thing there."""
 
 
-class TimedUtteranceEncoder(encoding.Encoder[bytes, bytes]):
+class TimedUtteranceSpeechEncoder(vocal.speech.SpeechEncoder):
     """A vocal tract that takes a realistic amount of time to say something.
 
     Byte count is what a linear-PCM duration is measured from, so an utterance that is only its
@@ -4683,13 +4691,16 @@ class TimedUtteranceEncoder(encoding.Encoder[bytes, bytes]):
     happening during. The marker stays at the front so the audio is still traceable to the words.
     """
 
-    def __init__(self, *, seconds: float, sample_rate_hz: int, channels: int = 1) -> None:
-        self._seconds = seconds
-        self._frame_bytes = sample_rate_hz * channels * 2
+    def __init__(self, *, seconds: float, sample_rate_hz: int) -> None:
+        self.format = vocal.speech.Format(sample_rate_hz=sample_rate_hz, channels=1)
+        self._bytes = int(sample_rate_hz * seconds) * 2
 
     @typing.override
-    async def encode(self, input: bytes) -> bytes:
-        return (b"spoken:" + input).ljust(int(self._frame_bytes * self._seconds), b"\x00")
+    async def encode(
+        self, input: collections.abc.AsyncIterable[str]
+    ) -> collections.abc.AsyncIterator[vocal.speech.Audio]:
+        said = "".join([piece async for piece in input])
+        yield vocal.speech.Audio(pcm=spoken(said).ljust(self._bytes, b"\x00"), text=said)
 
 
 class SlowSpeechDecoder(RecordingSpeechDecoder):
@@ -4733,12 +4744,10 @@ async def a_bot_with_a_voice(
     ability = IgnoreAbility()
     listening_ability = listening_ability if listening_ability is not None else RecordingListening()
     voice = speaking.Speaking(
-        encoder=TimedUtteranceEncoder(seconds=utterance_seconds, sample_rate_hz=sample_rate_hz),
+        encoder=TimedUtteranceSpeechEncoder(seconds=utterance_seconds, sample_rate_hz=sample_rate_hz),
         speaker=mouth,
-        listening=listening_ability,
-        sample_rate_hz=sample_rate_hz,
-        channels=1,
-        media_type="audio/pcm",
+        voice_id="tts:alice",
+        listening=(listening_ability,),
     )
     active_bot = AbilityAgent(devices={}, cognition=ability, input=(listening_ability,), output=(voice,))
     # The mouth is powered by the Speaking ability it was injected into — part of the bot, not a
@@ -4900,14 +4909,26 @@ def test_somebody_cutting_in_while_the_bot_talks_is_still_heard() -> None:
     """
 
     async def run() -> list[processing.InputData]:
-        active_bot, ability, listening_ability, voice, environment, _ = await a_bot_with_a_voice(utterance_seconds=0.6)
+        active_bot, ability, listening_ability, voice, environment, mouth = await a_bot_with_a_voice(
+            utterance_seconds=0.6
+        )
+        mouth_id = hsm.id(mouth)
 
         _ = await voice.apply(speaking.InputData(text="Hello, this is Alice."), ctx=environment)
         # Mid-utterance: the mouth is still committed and the sensitivity window is still open.
         await asyncio.sleep(0.15)
         # End own-voice HearingSpeech (attenuated, no turn) before the interrupt is heard.
         await close_hearing_speech(active_bot, environment)
-        _ = await somebody_speaks(environment, "Actually, wait.", position=space.Position(x=0.0, y=1.0))
+        caller = await somebody_speaks(environment, "Actually, wait.", position=space.Position(x=0.0, y=1.0))
+        caller_id = hsm.id(caller)
+
+        def the_bot_kept_talking_over_the_caller() -> bool:
+            sources = [event.source for event in list(listening_ability.received) if isinstance(event.data, SoundData)]
+            return caller_id in sources and mouth_id in sources[sources.index(caller_id) + 1 :]
+
+        # The mouth plays in real time, so the caller's words and the bot's next frame share the air:
+        # wait for that overlap instead of racing it, so the turn holds the same sound every run.
+        await wait_until(the_bot_kept_talking_over_the_caller, timeout=5.0)
         await close_hearing_speech(active_bot, environment)
 
         await wait_until(lambda: bool(ability.calls), timeout=5.0)
@@ -4917,11 +4938,13 @@ def test_somebody_cutting_in_while_the_bot_talks_is_still_heard() -> None:
     turns = asyncio.run(run())
 
     stimuli = [turn.input for turn in turns if isinstance(turn.input, hsm.Event)]
-    assert [getattr(stimulus.data, "content", None) for stimulus in stimuli] == [
-        (b"decoded:" + wav_frame(b"spoken:Actually, wait." + silence_sound(received_level_db=0.0).audio)).decode(
-            "utf-8", errors="replace"
-        )
-    ]
+    heard = [getattr(stimulus.data, "content", None) for stimulus in stimuli]
+    words = (b"decoded:" + spoken("Actually, wait.")).decode("utf-8", errors="replace")
+    assert len(heard) == 1, heard
+    assert isinstance(heard[0], str) and heard[0].startswith(words), heard
+    # What follows the caller's words is silence only: the closing frame and the bot's own
+    # playout past its marker, which shared the air with the caller and carries no words.
+    assert heard[0].removeprefix(words).strip("\x00") == "", heard
 
 
 def test_a_bot_does_not_answer_itself_because_it_spoke_while_perception_was_busy() -> None:
@@ -4962,32 +4985,36 @@ def test_a_bot_does_not_answer_itself_because_it_spoke_while_perception_was_busy
 
     stimuli = [turn.input for turn in turns if isinstance(turn.input, hsm.Event)]
     assert [getattr(stimulus.data, "content", None) for stimulus in stimuli] == [
-        (b"decoded:" + wav_frame(b"spoken:Are you there?" + silence_sound().audio)).decode("utf-8", errors="replace")
+        (b"decoded:" + spoken("Are you there?") + silence_sound().audio).decode("utf-8", errors="replace")
     ]
 
 
 def test_speaking_delivers_the_copy_of_its_own_command_to_linked_listening() -> None:
     """A nerve from Speaking to Listening peers — not body fan-out, not environment broadcast.
 
-    Pins the route rather than the consequence: the copy reaches the linked Listening ability
-    with speaking as source and listening as target.
+    Pins the route rather than the consequence: every copy reaches the Listening ability it was wired to,
+    with speaking as source and listening as target, and the last one says the mouth has nothing left.
     """
 
-    async def run() -> list[hsm.Event[typing.Any]]:
+    async def run() -> tuple[list[hsm.Event[typing.Any]], str, str]:
         _, _, listening_ability, voice, environment, _ = await a_bot_with_a_voice(utterance_seconds=0.2)
 
+        def copies() -> list[hsm.Event[typing.Any]]:
+            return [event for event in listening_ability.received if isinstance(event.data, EfferenceData)]
+
         _ = await voice.apply(speaking.InputData(text="Hello."), ctx=environment)
-        await wait_until(
-            lambda: any(isinstance(event.data, EfferenceData) for event in listening_ability.received),
-            timeout=5.0,
-        )
-        return [event for event in listening_ability.received if isinstance(event.data, EfferenceData)]
+        await wait_until(lambda: any(duration == 0.0 for duration in durations(copies())), timeout=5.0)
+        return copies(), hsm.id(voice), hsm.id(listening_ability)
 
-    copies = asyncio.run(run())
+    def durations(copies: list[hsm.Event[typing.Any]]) -> list[float]:
+        return [copy.data.duration for copy in copies if isinstance(copy.data, EfferenceData)]
 
-    assert len(copies) == 1
-    assert copies[0].name == EfferenceEvent.name
-    assert copies[0].name == "bot.ability.speaking.efference"
+    copies, voice_id, listening_id = asyncio.run(run())
+
+    assert {copy.name for copy in copies} == {EfferenceEvent.name, "bot.ability.speaking.efference"}
+    assert {(copy.source, copy.target) for copy in copies} == {(voice_id, listening_id)}
+    assert math.isclose(durations(copies)[0], 0.2, abs_tol=1e-9)
+    assert durations(copies)[-1] == 0.0
 
 
 def test_a_bot_gets_a_turn_because_something_happened_and_never_because_of_what() -> None:

@@ -38,8 +38,11 @@ def test_provider_has_package_owned_dependencies() -> None:
     optional_dependencies = object_dict(root_project.get("optional-dependencies", {}))
 
     assert provider_project_metadata["name"] == "mosfet-provider-elevenlabs"
-    assert "elevenlabs>=2.49.0,<3.0.0" in provider_dependencies
-    assert "stateforward.mosfet" in provider_dependencies
+    # W3-19: the speech encoder speaks the stream-input WebSocket directly; its only requirements are these two.
+    assert sorted(str(dependency) for dependency in provider_dependencies) == [
+        "stateforward.mosfet",
+        "websockets>=16.0,<17",
+    ]
     assert "elevenlabs" not in optional_dependencies
 
 

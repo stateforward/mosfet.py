@@ -1,38 +1,190 @@
-"""Speaking output ability: text → encoder → ``environment.sound`` elevation."""
+"""Speaking: text → one streaming encoding → the attached mouth, chunk by chunk, under aligned, played marks."""
 
 from __future__ import annotations
 
 import asyncio
+import collections
 import collections.abc
 import dataclasses
 import datetime
+import itertools
+import math
+import pathlib
+import re
+import time
 import typing
 
 import hsm
 import mosfet
 import pytest
 from mosfet import lifecycle
-from mosfet.abilities import processing
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
-from mosfet.abilities import ability, encoding
+from mosfet.abilities import ability
+from mosfet.abilities import encoding
+from mosfet.abilities import listening
+from mosfet.abilities import processing
 from mosfet.abilities import speaking
+from mosfet.abilities import vocal
 from mosfet.abilities.communication import conversation
 from mosfet.devices import audio
-from mosfet.abilities.speaking import EfferenceData, EfferenceEvent
-from mosfet.environment import SoundData, SoundEvent, Environment
+from mosfet.environment import Environment, SoundData, SoundEvent
+from mosfet.protocols import attachment
+from mosfet.telemetry import span
+from tests import metric_reader
+from tests.bot.abilities.vocal.speech import contract
 from tests.hsm_instance_state import device_bots, start_ability_tree
-from tests.bot.abilities.support import require_model
+
+RATE = 8_000
+"""8 kHz mono s16le: 1 ms is 8 samples, 16 bytes."""
+VOICE_ID = "tts:warm"
+LOOKAHEAD = datetime.timedelta(seconds=1)
+ENCODE_IDLE_TIMEOUT = datetime.timedelta(seconds=5)
+ENROLL = datetime.timedelta(seconds=6)
 
 
-class RecordingEncoder(encoding.Encoder[bytes, bytes]):
-    def __init__(self, audio: bytes = b"pcm-audio") -> None:
-        self.calls: list[bytes] = []
-        self._audio = audio
+def pcm(milliseconds: int) -> bytes:
+    return b"\x01\x00" * (RATE * milliseconds // 1000)
+
+
+def words(text: str) -> list[str]:
+    """``text`` cut after the whitespace that follows each word: the pieces join back to exactly ``text``."""
+
+    return re.findall(r"\s*\S+\s*", text) or ([text] if text else [])
+
+
+class Script(vocal.speech.SpeechEncoder):
+    """Says ``chunk_ms`` of PCM per word; records the pieces it read and its closes; refuses blank text at its end.
+
+    Aligned finely by default (each chunk carries its word as it reads each piece), or, with ``whole``, the way a
+    whole-text provider emulates alignment: it reads the text to its end, then every chunk carries ``""`` but the
+    last, which carries the whole text.
+    """
+
+    def __init__(
+        self,
+        *,
+        chunk_ms: int = 20,
+        fail_on: str | None = None,
+        fail_kind: encoding.FailureKind = "unavailable",
+        stall_on: str | None = None,
+        whole: bool = False,
+    ) -> None:
+        self.format: vocal.speech.Format = vocal.speech.Format(sample_rate_hz=RATE, channels=1)
+        self.chunk_ms: int = chunk_ms
+        self.fail_on: str | None = fail_on
+        self.fail_kind: encoding.FailureKind = fail_kind
+        self.stall_on: str | None = stall_on
+        self.whole: bool = whole
+        self.reads: list[list[str]] = []
+        self.closed: list[str] = []
+        self.pulled: int = 0
+
+    async def _say(self, word: str, text: str) -> vocal.speech.Audio:
+        if self.fail_on is not None and word.strip().startswith(self.fail_on):
+            raise encoding.Error(self.fail_kind, "the speech service went away")
+        if self.stall_on is not None and word.strip().startswith(self.stall_on):
+            _ = await asyncio.Event().wait()
+        self.pulled += 1
+        return vocal.speech.Audio(pcm=pcm(self.chunk_ms), text=text)
 
     @typing.override
-    async def encode(self, input: bytes) -> bytes:
-        self.calls.append(input)
-        return self._audio
+    async def encode(
+        self, input: collections.abc.AsyncIterable[str]
+    ) -> collections.abc.AsyncIterator[vocal.speech.Audio]:
+        read: list[str] = []
+        self.reads.append(read)
+        try:
+            if self.whole:
+                read.extend([piece async for piece in input])
+                if not "".join(read).strip():
+                    raise encoding.Error("invalid_input", "blank text")
+                said = words("".join(read))
+                for index, word in enumerate(said):
+                    yield await self._say(word, "".join(read) if index == len(said) - 1 else "")
+                return
+            async for piece in input:
+                read.append(piece)
+                for word in words(piece):
+                    yield await self._say(word, word)
+            if not "".join(read).strip():
+                raise encoding.Error("invalid_input", "blank text")
+        finally:
+            self.closed.append("".join(read))
+
+
+class RecordingSpeaker(audio.Speaker):
+    """A real speaker that also notes every frame it was commanded with."""
+
+    def __init__(
+        self,
+        *,
+        clock: collections.abc.Callable[[], float],
+        max_buffered: datetime.timedelta | None = None,
+    ) -> None:
+        super().__init__(
+            frame=datetime.timedelta(milliseconds=10),
+            max_buffered=max_buffered or datetime.timedelta(seconds=30),
+            clock=clock,
+        )
+        self.frames: list[hsm.Event[audio.OutputData]] = []
+
+    @typing.override
+    def dispatch(self, ctx: hsm.Context, event: hsm.Event[typing.Any]) -> collections.abc.Awaitable[bool]:
+        if isinstance(event.data, audio.OutputData):
+            self.frames.append(event)
+        return super().dispatch(ctx, event)
+
+
+def instant() -> collections.abc.Callable[[], float]:
+    """A speaker clock that is always far past the schedule, so playout reports arrive immediately."""
+
+    ticks = itertools.count(0.0, 1_000.0)
+    return lambda: next(ticks)
+
+
+class Collector(hsm.Instance):
+    """Records everything addressed to it: a requester, or a Listening peer."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.events: list[hsm.Event[typing.Any]] = []
+
+    @staticmethod
+    def _record(ctx: hsm.Context, instance: "Collector", event: hsm.Event[typing.Any]) -> None:
+        del ctx
+        instance.events.append(event)
+
+    def named(self, event: hsm.Event[typing.Any]) -> list[hsm.Event[typing.Any]]:
+        return [received for received in self.events if received.name == event.name]
+
+    model: typing.ClassVar[hsm.Model] = mosfet.define(
+        "Collector",
+        hsm.initial(hsm.target("recording")),
+        hsm.state("recording", hsm.transition(hsm.on(hsm.AnyEvent), hsm.effect(_record))),
+    )
+
+
+class SoundListener(hsm.Instance):
+    """Environment participant that records the ``environment.sound`` a speaker transduces."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.sounds: list[SoundData] = []
+
+    @staticmethod
+    def _record(ctx: hsm.Context, instance: "SoundListener", event: hsm.Event[typing.Any]) -> None:
+        del ctx
+        if isinstance(event.data, SoundData):
+            instance.sounds.append(event.data)
+
+    model: typing.ClassVar[hsm.Model] = mosfet.define(
+        "SoundListener",
+        hsm.initial(hsm.target("listening")),
+        hsm.state("listening", hsm.transition(hsm.on(SoundEvent), hsm.effect(_record))),
+    )
 
 
 class RecordingConversation(conversation.Conversation):
@@ -41,82 +193,128 @@ class RecordingConversation(conversation.Conversation):
         self.outputs: list[conversation.Messages] = []
 
     @typing.override
-    def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[bool]:
+    def dispatch(self, ctx: hsm.Context, event: hsm.Event[typing.Any]) -> collections.abc.Awaitable[bool]:
         if event.name == ability.TerminalOutputEvent.name and isinstance(event.data, hsm.Event):
-            terminal = event.data
+            terminal = typing.cast(hsm.Event[typing.Any], event.data)
             if terminal.name == conversation.OutputEvent.name and isinstance(terminal.data, conversation.Messages):
                 self.outputs.append(terminal.data)
         return super().dispatch(ctx, event)
 
 
-class FailingEncoder(encoding.Encoder[bytes, bytes]):
-    @typing.override
-    async def encode(self, input: bytes) -> bytes:
-        del input
-        raise RuntimeError("tts failed")
+def outputs(requester: Collector) -> list[speaking.OutputData]:
+    return [event.data for event in requester.events if isinstance(event.data, speaking.OutputData)]
 
 
-class NeverReturningEncoder(encoding.Encoder[bytes, bytes]):
-    def __init__(self) -> None:
-        self.cancelled = asyncio.Event()
-
-    @typing.override
-    async def encode(self, input: bytes) -> bytes:
-        del input
-        try:
-            await asyncio.Event().wait()
-            raise AssertionError("unreachable")
-        finally:
-            self.cancelled.set()
+def frames(speaker: RecordingSpeaker) -> list[audio.OutputData]:
+    return [frame.data for frame in speaker.frames if isinstance(frame.data, audio.OutputData)]
 
 
-async def _wait_until(condition: typing.Callable[[], bool], *, timeout: float = 2.0) -> None:
+async def wait_until(condition: collections.abc.Callable[[], bool], *, timeout: float = 3.0) -> None:
     deadline = asyncio.get_running_loop().time() + timeout
-    while asyncio.get_running_loop().time() < deadline:
-        if condition():
-            return
-        await asyncio.sleep(0)
-    raise AssertionError("condition not met")
+    while not condition():
+        if asyncio.get_running_loop().time() >= deadline:
+            raise AssertionError("condition not met")
+        await asyncio.sleep(0.001)
 
 
-def test_speaking_rejects_non_ability_conversation_targets() -> None:
+@dataclasses.dataclass
+class Stage:
+    environment: Environment
+    speaking: speaking.Speaking
+    speaker: RecordingSpeaker
+    encoder: Script
+    requester: Collector
+    ear: Collector
+    room: SoundListener
+
+    async def say(self, text: str, *, id: str = "utterance-1") -> None:
+        _ = await hsm.dispatch(
+            self.environment,
+            self.speaking,
+            dataclasses.replace(
+                speaking.InputEvent.with_data(speaking.InputData(text=text)),
+                id=id,
+                source=hsm.id(self.requester),
+                target=hsm.id(self.speaking),
+            ),
+        )
+
+    def outputs(self) -> list[speaking.OutputData]:
+        return outputs(self.requester)
+
+    def copies(self) -> list[speaking.EfferenceData]:
+        return [event.data for event in self.ear.events if isinstance(event.data, speaking.EfferenceData)]
+
+
+async def stage(
+    encoder: Script | None = None,
+    *,
+    clock: collections.abc.Callable[[], float] | None = None,
+    conversation_targets: collections.abc.Sequence[ability.Ability[typing.Any, typing.Any]] = (),
+    lookahead: datetime.timedelta = LOOKAHEAD,
+    encode_idle_timeout: datetime.timedelta = ENCODE_IDLE_TIMEOUT,
+    enroll_seconds: datetime.timedelta = ENROLL,
+    mouth: RecordingSpeaker | None = None,
+) -> Stage:
+    environment = Environment()
+    mouth = mouth or RecordingSpeaker(clock=clock or instant())
+    script = encoder or Script()
+    requester, ear, room = Collector(), Collector(), SoundListener()
+    for actor in (requester, ear, room):
+        _ = await mosfet.started(environment, actor, actor.model)
+    environment.join(room)
+    voice = speaking.Speaking(
+        encoder=script,
+        speaker=mouth,
+        voice_id=VOICE_ID,
+        listening=(ear,),
+        conversation=conversation_targets,
+        lookahead=lookahead,
+        encode_idle_timeout=encode_idle_timeout,
+        enroll_seconds=enroll_seconds,
+    )
+    await start_ability_tree(environment, voice)
+    await wait_until(lambda: (voice.state() or "").endswith("/wired/idle"))
+    return Stage(environment, voice, mouth, script, requester, ear, room)
+
+
+@pytest.fixture
+def finished_spans(monkeypatch: pytest.MonkeyPatch) -> InMemorySpanExporter:
+    """Route this module's spans to an in-memory exporter for the duration of one test."""
+
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    monkeypatch.setattr(span, "tracer_provider", lambda: provider)
+    return exporter
+
+
+def utterance_failure(exporter: InMemorySpanExporter) -> object:
+    """The failure kind on the one terminal utterance span, or ``None`` when it did not fail."""
+
+    (terminal,) = [recorded for recorded in exporter.get_finished_spans() if recorded.name == "bot.speaking.utterance"]
+    return dict(terminal.attributes or {}).get("bot.failure.kind")
+
+
+def test_speaking_requires_ability_conversation_targets_and_sane_bounds() -> None:
+    mouth = audio.Speaker()
     with pytest.raises(TypeError):
-        speaking.Speaking(encoder=RecordingEncoder(), conversation=typing.cast(typing.Any, hsm.Instance()))
-
-    speaker = speaking.Speaking(encoder=RecordingEncoder())
-    with pytest.raises(TypeError):
-        speaker.link_conversation(typing.cast(typing.Any, hsm.Instance()))
-
-
-def test_speaking_records_one_trusted_outbound_message() -> None:
-    async def run() -> tuple[list[conversation.Messages], str, str]:
-        environment = Environment()
-        target = RecordingConversation()
-        speaker = speaking.Speaking(encoder=RecordingEncoder(), conversation=target)
-        await start_ability_tree(environment, target)
-        await start_ability_tree(environment, speaker)
-
-        _ = await speaker.apply(speaking.InputData(text="Hello there."), ctx=environment)
-        await _wait_until(lambda: bool(target.outputs))
-        return target.outputs, hsm.id(speaker), hsm.id(target)
-
-    histories, speaker_id, conversation_id = asyncio.run(run())
-
-    assert histories
-    assert all(len(history.messages) == 1 and history.messages[0].direction == "outbound" for history in histories)
-    provenance_ids = {history.messages[0].provenance.id for history in histories}
-    assert len(provenance_ids) == 1
-    message = histories[0].messages[0]
-    assert message.content == "Hello there."
-    assert message.provenance.event == conversation.AppendEvent.name
-    assert message.provenance.id in provenance_ids
-    assert message.provenance.source == speaker_id
-    assert message.provenance.target == conversation_id
+        _ = speaking.Speaking(
+            encoder=Script(), speaker=mouth, voice_id=VOICE_ID, conversation=(typing.cast(typing.Any, hsm.Instance()),)
+        )
+    with pytest.raises(ValueError, match="lookahead"):
+        _ = speaking.Speaking(encoder=Script(), speaker=mouth, voice_id=VOICE_ID, lookahead=datetime.timedelta(0))
+    with pytest.raises(ValueError, match="enroll_seconds"):
+        _ = speaking.Speaking(
+            encoder=Script(), speaker=mouth, voice_id=VOICE_ID, enroll_seconds=datetime.timedelta(seconds=1)
+        )
 
 
 def test_speaking_input_is_not_a_cognition_call_event() -> None:
     assert speaking.InputEvent.name == "bot.ability.speaking.input"
     assert speaking.InputEvent.kind == hsm.EventKind
+    assert speaking.ProgressEvent.kind != processing.EventKind
+    assert speaking.EfferenceEvent.kind != processing.EventKind
 
 
 def _examples_in(schema: object, path: str = "") -> list[str]:
@@ -137,202 +335,589 @@ def _examples_in(schema: object, path: str = "") -> list[str]:
 
 
 def test_speak_input_schema_offers_no_example_utterance() -> None:
-    """The schema a model reads in order to speak must not hand it something to say.
-
-    Speaking's payload is free text, so an example there is never documentation of a format —
-    it is a complete, valid answer sitting in the one field the model fills in, and a model
-    that is unsure what to say emits it verbatim and the bot says it out loud. Asserted on the
-    projected JSON schema rather than the Python model because that projection is what the
-    model actually reads.
-    """
+    """The schema a model reads in order to speak must not hand it something to say."""
 
     schema = processing.model_facing_event_json_schema(speaking.InputEvent)
 
     assert _examples_in(schema) == []
 
 
-class SoundListener(hsm.Instance):
-    """Environment participant that records the ``environment.sound`` a speaker transduces."""
-
-    def __init__(self, sounds: list[SoundData]) -> None:
-        super().__init__()
-        self._sounds = sounds
-
-    @staticmethod
-    def _record(ctx: hsm.Context, instance: "SoundListener", event: hsm.Event[typing.Any]) -> None:
-        del ctx
-        data = event.data
-        if isinstance(data, SoundData):
-            instance._sounds.append(data)
-
-    model: typing.ClassVar[hsm.Model] = mosfet.define(
-        "SoundListener",
-        hsm.initial(hsm.target("listening")),
-        hsm.state("listening", hsm.transition(hsm.on(SoundEvent), hsm.effect(_record))),
-    )
+def test_the_scripted_encoder_keeps_the_alignment_contract() -> None:
+    assert [
+        chunk.text for chunk in asyncio.run(contract.assert_speech_encoder(Script(), ["Of course, I can", " do that."]))
+    ] == [
+        "Of ",
+        "course, ",
+        "I ",
+        "can",
+        " do ",
+        "that.",
+    ]
+    whole = asyncio.run(contract.assert_speech_encoder(Script(whole=True), ["Of course,", " I can."]))
+    assert [chunk.text for chunk in whole] == ["", "", "", "Of course, I can."]
 
 
-def test_speaking_encodes_text_and_elevates_to_environment_sound() -> None:
-    """Speaking elevates playout as ``environment.sound`` (ability emits; no Speaker required)."""
+def test_speaking_attaches_to_its_mouth_and_streams_each_chunk_under_its_mark() -> None:
+    async def run() -> tuple[Stage, list[speaking.OutputData]]:
+        voice = await stage()
+        assert voice.speaking in device_bots(voice.speaker)
+        await voice.say("Of course, I can do that. See you soon.")
+        await wait_until(lambda: bool(voice.outputs()))
+        # The room hears the mouth, never the ability: one sound per 10 ms slice of every 20 ms chunk.
+        await wait_until(lambda: len(voice.room.sounds) == 2 * len(voice.speaker.frames))
+        return voice, voice.outputs()
 
-    async def run() -> tuple[list[bytes], list[SoundData], speaking.OutputData | None]:
-        encoder = RecordingEncoder(audio=b"\x00\x01")
-        speaking_ability = speaking.Speaking(
-            encoder=encoder,
-            sample_rate_hz=24_000,
+    voice, outputs = asyncio.run(run())
+
+    # The whole text goes to the encoder as it is: core never cuts it.
+    assert voice.encoder.reads == [["Of course, I can do that. See you soon."]]
+    commanded = frames(voice.speaker)
+    assert [frame.mark for frame in commanded] == [f"u1.{chunk}" for chunk in range(9)]
+    assert {(frame.media_type, frame.sample_rate_hz, frame.channels) for frame in commanded} == {("audio/pcm", RATE, 1)}
+    assert {frame.source for frame in voice.speaker.frames} == {hsm.id(voice.speaking)}
+    assert outputs == [
+        speaking.OutputData(
+            text="Of course, I can do that. See you soon.",
+            spoken="Of course, I can do that. See you soon.",
+            unspoken="",
+            outcome="completed",
+            voice_id="tts:warm",
+            sample_rate_hz=RATE,
             channels=1,
-            media_type="audio/pcm",
         )
-        environment = Environment()
-        sounds: list[SoundData] = []
-        listener = SoundListener(sounds)
-
-        await start_ability_tree(environment, speaking_ability)
-        _ = await mosfet.started(environment, listener, listener.model, hsm.Config(id="environment-ear"))
-        environment.join(listener)
-
-        outputs: list[speaking.OutputData] = []
-        original = speaking_ability.dispatch
-
-        def capture_terminal(ctx: hsm.Context, event: hsm.Event) -> typing.Awaitable[bool]:
-            from mosfet.abilities import ability
-
-            if event.name == ability.TerminalOutputEvent.name and isinstance(event.data, hsm.Event):
-                data = event.data.data
-                if isinstance(data, speaking.OutputData):
-                    outputs.append(data)
-            return original(ctx, event)
-
-        speaking_ability.dispatch = capture_terminal  # type: ignore[method-assign]
-        try:
-            _ = await speaking_ability.apply(speaking.InputData(text="  Hello there.  "), ctx=environment)
-            await _wait_until(lambda: bool(outputs))
-        finally:
-            speaking_ability.dispatch = original  # type: ignore[method-assign]
-
-        return encoder.calls, sounds, outputs[0] if outputs else None
-
-    calls, sounds, product = asyncio.run(run())
-    assert calls == [b"Hello there."]
-    assert product is not None
-    assert product.text == "Hello there."
-    assert product.sample_rate_hz == 24_000
-    assert product.media_type == "audio/pcm"
-    assert len(sounds) == 1
-    assert sounds[0].audio == b"\x00\x01"
+    ]
+    terminal = voice.requester.named(speaking.OutputEvent)[0]
+    assert (terminal.id, terminal.source) == ("utterance-1", hsm.id(voice.speaking))
 
 
-def test_speaking_failure_surfaces_on_failed_event() -> None:
-    async def run() -> str:
-        speaking_ability = speaking.Speaking(encoder=FailingEncoder(), speaker=audio.Speaker())
-        environment = Environment()
-        await start_ability_tree(environment, speaking_ability)
-        failures: list[str] = []
-        original = speaking_ability.dispatch
+def test_the_ear_is_told_the_playout_still_to_come_and_zero_when_the_mouth_is_done() -> None:
+    async def run() -> list[speaking.EfferenceData]:
+        voice = await stage(Script(chunk_ms=20))
+        await voice.say("one two three")
+        await wait_until(lambda: bool(voice.outputs()))
+        return voice.copies()
 
-        def capture(ctx: hsm.Context, event: hsm.Event) -> typing.Awaitable[bool]:
-            from mosfet.abilities import ability
+    copies = asyncio.run(run())
 
-            if event.name == ability.TerminalErrorEvent.name and isinstance(event.data, hsm.Event):
-                data = event.data.data
-                if isinstance(data, ability.FailureData):
-                    failures.append(data.message)
-            return original(ctx, event)
-
-        speaking_ability.dispatch = capture  # type: ignore[method-assign]
-        try:
-            _ = await speaking_ability.apply(speaking.InputData(text="hi"), ctx=environment)
-            await _wait_until(lambda: bool(failures))
-        finally:
-            speaking_ability.dispatch = original  # type: ignore[method-assign]
-        return failures[0]
-
-    message = asyncio.run(run())
-    assert "tts failed" in message
+    assert {copy.mouth for copy in copies} == {copies[0].mouth}
+    assert math.isclose(max(copy.duration for copy in copies), 0.06, abs_tol=1e-9)
+    assert copies[-1].duration == 0.0
+    assert all(copy.duration >= 0.0 for copy in copies)
+    assert (copies[0].media_type, copies[0].sample_rate_hz, copies[0].channels) == ("audio/pcm", RATE, 1)
 
 
-def test_speaking_returns_correlated_terminal_directly_to_request_source() -> None:
-    async def run() -> list[hsm.Event[typing.Any]]:
-        environment = Environment()
-        terminals: list[hsm.Event[typing.Any]] = []
+def test_progress_reaches_the_requester_as_audio_starts_and_plays() -> None:
+    async def run() -> list[speaking.ProgressData]:
+        voice = await stage()
+        await voice.say("First one. Second one.")
+        await wait_until(lambda: bool(voice.outputs()))
+        return [event.data for event in voice.requester.events if isinstance(event.data, speaking.ProgressData)]
 
-        class Requester(hsm.Instance):
-            @staticmethod
-            def record(ctx: hsm.Context, instance: "Requester", event: hsm.Event[typing.Any]) -> None:
-                del ctx, instance
-                terminals.append(event)
+    progress = asyncio.run(run())
 
-            model = mosfet.define(
-                "SpeakingRequester",
-                hsm.initial(hsm.target("/SpeakingRequester/waiting")),
-                hsm.state(
-                    "waiting",
-                    hsm.transition(hsm.on(speaking.OutputEvent), hsm.effect(record)),
-                ),
+    assert progress[0] == speaking.ProgressData(spoken_seconds=0.0)
+    assert math.isclose(progress[-1].spoken_seconds, 0.08, abs_tol=1e-9)
+    assert [item.spoken_seconds for item in progress] == sorted(item.spoken_seconds for item in progress)
+
+
+def test_a_failed_encoding_still_plays_what_was_commanded_and_ends_failed() -> None:
+    async def run() -> tuple[list[speaking.OutputData], list[str]]:
+        voice = await stage(Script(fail_on="broken"))
+        await voice.say("This part is fine. Then broken words. Never said.")
+        await wait_until(lambda: bool(voice.outputs()))
+        return voice.outputs(), voice.encoder.closed
+
+    outputs, closed = asyncio.run(run())
+
+    # What was said is exactly the aligned text of the chunks the mouth played.
+    assert outputs[0].outcome == "failed"
+    assert outputs[0].spoken == "This part is fine. Then "
+    assert outputs[0].unspoken == "broken words. Never said."
+    assert closed == ["This part is fine. Then broken words. Never said."]
+
+
+@pytest.mark.parametrize("kind", ["invalid_input", "unavailable", "timeout", "invalid_response", "encode_failed"])
+def test_every_encoding_error_kind_ends_the_utterance_failed_and_is_measured_as_failed(
+    kind: encoding.FailureKind,
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    finished_spans: InMemorySpanExporter,
+) -> None:
+    with metric_reader.recording(tmp_path, monkeypatch) as reader:
+
+        def failed() -> int:
+            return sum(
+                point.count
+                for point in reader.points("bot.speaking.encoding.duration")
+                if point.attributes.get("outcome") == "failed"
             )
 
-        requester = Requester()
-        speaker = speaking.Speaking(encoder=RecordingEncoder())
-        _ = await mosfet.started(environment, requester, requester.model)
-        await start_ability_tree(environment, speaker)
+        before = failed()
 
-        await hsm.dispatch(
+        async def run() -> list[speaking.OutputData]:
+            voice = await stage(Script(fail_on="broken", fail_kind=kind))
+            await voice.say("Fine. Then broken.")
+            await wait_until(lambda: bool(voice.outputs()))
+            return voice.outputs()
+
+        outputs = asyncio.run(run())
+        after = failed()
+
+    assert (outputs[0].outcome, outputs[0].spoken, outputs[0].unspoken) == ("failed", "Fine. Then ", "broken.")
+    assert after == before + 1
+    assert utterance_failure(finished_spans) == kind
+
+
+def test_with_whole_text_alignment_nothing_is_said_until_the_last_chunk_plays() -> None:
+    async def run() -> tuple[list[speaking.OutputData], list[speaking.OutputData]]:
+        broken = await stage(Script(whole=True, fail_on="broken"))
+        await broken.say("This part is fine. Then broken words.")
+        await wait_until(lambda: bool(broken.outputs()))
+        whole = await stage(Script(whole=True))
+        await whole.say("All of this is said.")
+        await wait_until(lambda: bool(whole.outputs()))
+        return broken.outputs(), whole.outputs()
+
+    broken, whole = asyncio.run(run())
+
+    assert (broken[0].outcome, broken[0].spoken) == ("failed", "")
+    assert broken[0].unspoken == "This part is fine. Then broken words."
+    assert (whole[0].outcome, whole[0].spoken, whole[0].unspoken) == ("completed", "All of this is said.", "")
+
+
+def test_an_encoder_that_goes_quiet_is_cancelled_at_the_provider_by_the_modeled_timeout() -> None:
+    async def run() -> tuple[list[speaking.OutputData], Script]:
+        voice = await stage(Script(stall_on="stuck"), encode_idle_timeout=datetime.timedelta(milliseconds=50))
+        await voice.say("Said first. Then stuck here.")
+        await wait_until(lambda: bool(voice.outputs()))
+        return voice.outputs(), voice.encoder
+
+    outputs, script = asyncio.run(run())
+
+    assert outputs[0].outcome == "failed"
+    assert outputs[0].spoken == "Said first. Then "
+    assert script.closed == ["Said first. Then stuck here."]
+
+
+class Chunks:
+    """An async iterator that is not an async generator: closing it is its own ``aclose``."""
+
+    def __init__(
+        self, inner: collections.abc.AsyncGenerator[vocal.speech.Audio], closed: list[str], text: Script
+    ) -> None:
+        self._inner: collections.abc.AsyncGenerator[vocal.speech.Audio] = inner
+        self._closed: list[str] = closed
+        self._script: Script = text
+
+    def __aiter__(self) -> Chunks:
+        return self
+
+    async def __anext__(self) -> vocal.speech.Audio:
+        return await anext(self._inner)
+
+    async def aclose(self) -> None:
+        self._closed.append("".join(self._script.reads[-1]))
+        await self._inner.aclose()
+
+
+class IteratorScript(Script):
+    """An encoder whose streams are plain async iterators with ``aclose``, not async generators."""
+
+    def __init__(self, **options: typing.Any) -> None:
+        super().__init__(**options)
+        self.aclosed: list[str] = []
+
+    @typing.override
+    def encode(self, input: collections.abc.AsyncIterable[str]) -> collections.abc.AsyncIterator[vocal.speech.Audio]:
+        inner = typing.cast(collections.abc.AsyncGenerator[vocal.speech.Audio], super().encode(input))
+        return Chunks(inner, self.aclosed, self)
+
+
+def test_the_stream_is_closed_when_the_utterance_stops_streaming() -> None:
+    async def run() -> tuple[IteratorScript, IteratorScript]:
+        stalled = IteratorScript(stall_on="stuck")
+        voice = await stage(stalled, encode_idle_timeout=datetime.timedelta(milliseconds=50))
+        await voice.say("Said first. Then stuck here.")
+        await wait_until(lambda: bool(voice.outputs()))
+        finished = IteratorScript()
+        voice = await stage(finished)
+        await voice.say("Said whole.")
+        await wait_until(lambda: bool(voice.outputs()))
+        return stalled, finished
+
+    stalled, finished = asyncio.run(run())
+
+    assert stalled.aclosed == ["Said first. Then stuck here."]
+    assert finished.aclosed == ["Said whole."]
+
+
+def test_the_next_chunk_is_pulled_only_once_the_mouth_has_played_down_to_the_lookahead() -> None:
+    async def run() -> tuple[int, int, int]:
+        # A real clock: 100 ms per chunk against a 50 ms lookahead.
+        voice = await stage(Script(chunk_ms=100), clock=time.monotonic, lookahead=datetime.timedelta(milliseconds=50))
+        await voice.say("one two three four")
+        await wait_until(lambda: bool(voice.speaker.frames))
+        await asyncio.sleep(0.03)
+        pulled_mid_chunk = voice.encoder.pulled
+        await wait_until(lambda: bool(voice.outputs()))
+        return pulled_mid_chunk, voice.encoder.pulled, len(voice.speaker.frames)
+
+    mid, total, commanded = asyncio.run(run())
+
+    # Each 100 ms chunk goes to the mouth in four 25 ms pieces (half the lookahead), so the mouth always has the
+    # next piece queued; the encoder is pulled again only once a chunk's last piece is commanded.
+    assert (mid, total, commanded) == (1, 4, 16)
+
+
+def test_a_long_whole_reply_is_written_whole_and_spoken_in_full(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """W3-20: no whole-reply cap. The encoder reads the whole text, and none of it is an encoding failure."""
+
+    text = " ".join(["word"] * 1_700)
+    assert len(text + ".") == 8_500
+
+    with metric_reader.recording(tmp_path, monkeypatch) as reader:
+        before = collections.Counter(
+            {str(point.attributes["outcome"]): point.count for point in reader.points("bot.speaking.encoding.duration")}
+        )
+
+        async def run() -> tuple[Stage, list[speaking.OutputData]]:
+            voice = await stage()
+            await voice.say(text + ".")
+            await wait_until(lambda: bool(voice.outputs()), timeout=20)
+            return voice, voice.outputs()
+
+        voice, outputs = asyncio.run(run())
+        after = collections.Counter(
+            {str(point.attributes["outcome"]): point.count for point in reader.points("bot.speaking.encoding.duration")}
+        )
+
+    assert voice.encoder.reads == [[text + "."]]
+    assert (outputs[0].outcome, outputs[0].spoken, outputs[0].unspoken) == ("completed", text + ".", "")
+    assert after - before == collections.Counter({"completed": 1})
+
+
+def test_one_chunk_longer_than_the_mouths_buffer_is_said_in_pieces_under_the_lookahead() -> None:
+    """A whole-text provider yields 31 s chunks, past the mouth's 30 s buffer; Speaking, not the provider, cuts
+    them into whole-frame pieces of at most half the lookahead, and the chunk's text rides on its last piece."""
+
+    async def run() -> tuple[Stage, list[speaking.OutputData]]:
+        voice = await stage(Script(chunk_ms=31_000, whole=True))
+        await voice.say("A long answer.")
+        await wait_until(lambda: bool(voice.outputs()), timeout=20)
+        return voice, voice.outputs()
+
+    voice, outputs = asyncio.run(run())
+
+    commanded = frames(voice.speaker)
+    assert (outputs[0].outcome, outputs[0].spoken, outputs[0].unspoken) == ("completed", "A long answer.", "")
+    assert max(len(frame.audio) for frame in commanded) == len(pcm(500))
+    assert sum(len(frame.audio) for frame in commanded) == 3 * len(pcm(31_000))
+    assert len(commanded) == 3 * 62
+
+
+def test_audio_the_mouth_drops_never_ends_the_utterance_completed(finished_spans: InMemorySpanExporter) -> None:
+    """A mouth whose buffer cannot take a piece drops it unplayed: the utterance has failed overloaded, and nothing
+    more is commanded after the drop."""
+
+    async def run() -> tuple[Stage, list[speaking.OutputData]]:
+        mouth = RecordingSpeaker(clock=instant(), max_buffered=datetime.timedelta(milliseconds=50))
+        voice = await stage(Script(chunk_ms=100), mouth=mouth)
+        await voice.say("Too big to buffer.")
+        await wait_until(lambda: bool(voice.outputs()))
+        return voice, voice.outputs()
+
+    voice, outputs = asyncio.run(run())
+
+    assert (outputs[0].outcome, outputs[0].spoken, outputs[0].unspoken) == ("failed", "", "Too big to buffer.")
+    assert len(voice.speaker.frames) == 1
+    assert voice.copies()[-1].duration == 0.0
+    assert utterance_failure(finished_spans) == "overloaded"
+
+
+def test_blank_text_goes_to_the_encoder_and_the_requester_always_gets_a_terminal() -> None:
+    """R5-1: blank text is the provider's to refuse once the text ends; Speaking never drops a request silently."""
+
+    class Refusing(Script):
+        @typing.override
+        async def encode(
+            self, input: collections.abc.AsyncIterable[str]
+        ) -> collections.abc.AsyncIterator[vocal.speech.Audio]:
+            read: list[str] = []
+            self.reads.append(read)
+            async for piece in input:
+                read.append(piece)
+            if not "".join(read).strip():
+                raise encoding.Error("invalid_input", "blank text")
+            yield vocal.speech.Audio(pcm=pcm(20), text="".join(read))
+
+    async def run() -> tuple[Stage, list[speaking.OutputData]]:
+        voice = await stage(Refusing())
+        await voice.say("   ")
+        await wait_until(lambda: bool(voice.outputs()))
+        return voice, voice.outputs()
+
+    voice, outputs = asyncio.run(run())
+
+    assert voice.encoder.reads == [["   "]]
+    assert (outputs[0].text, outputs[0].outcome, outputs[0].spoken) == ("   ", "failed", "")
+
+
+def test_a_stream_whose_close_fails_is_still_measured(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    class Breaks(Chunks):
+        @typing.override
+        async def aclose(self) -> None:
+            await super().aclose()
+            raise RuntimeError("the provider broke while closing")
+
+    class BreaksOnClose(IteratorScript):
+        @typing.override
+        def encode(
+            self, input: collections.abc.AsyncIterable[str]
+        ) -> collections.abc.AsyncIterator[vocal.speech.Audio]:
+            inner = typing.cast(collections.abc.AsyncGenerator[vocal.speech.Audio], Script.encode(self, input))
+            return Breaks(inner, self.aclosed, self)
+
+    with metric_reader.recording(tmp_path, monkeypatch) as reader:
+        before = sum(point.count for point in reader.points("bot.speaking.encoding.duration"))
+
+        async def run() -> tuple[BreaksOnClose, list[speaking.OutputData]]:
+            script = BreaksOnClose()
+            voice = await stage(script)
+            await voice.say("Closed badly.")
+            await wait_until(lambda: bool(voice.outputs()))
+            return script, voice.outputs()
+
+        script, outputs = asyncio.run(run())
+        after = sum(point.count for point in reader.points("bot.speaking.encoding.duration"))
+
+    assert script.aclosed == ["Closed badly."]
+    assert outputs[0].outcome == "completed"
+    assert after - before == 1
+
+
+def test_a_mouth_that_stops_reporting_ends_the_utterance_unspoken(
+    monkeypatch: pytest.MonkeyPatch, finished_spans: InMemorySpanExporter
+) -> None:
+    from mosfet.abilities.speaking import speaking as speaking_source
+
+    monkeypatch.setattr(speaking_source, "_PLAYOUT_GRACE", datetime.timedelta(milliseconds=20))
+
+    class Mute(RecordingSpeaker):
+        """Takes the frames and never reports them played."""
+
+        @typing.override
+        def dispatch(self, ctx: hsm.Context, event: hsm.Event[typing.Any]) -> collections.abc.Awaitable[bool]:
+            if isinstance(event.data, audio.OutputData):
+                self.frames.append(event)
+                done: asyncio.Future[bool] = asyncio.get_running_loop().create_future()
+                done.set_result(True)
+                return done
+            return super().dispatch(ctx, event)
+
+    async def run() -> list[speaking.OutputData]:
+        environment = Environment()
+        requester = Collector()
+        _ = await mosfet.started(environment, requester, requester.model)
+        voice = speaking.Speaking(encoder=Script(), speaker=Mute(clock=instant()), voice_id=VOICE_ID)
+        await start_ability_tree(environment, voice)
+        await wait_until(lambda: (voice.state() or "").endswith("/wired/idle"))
+        _ = await hsm.dispatch(
             environment,
-            speaker,
+            voice,
             dataclasses.replace(
-                speaking.InputEvent.with_data_and_id(speaking.InputData(text="Hello."), "speak-1"),
+                speaking.InputEvent.with_data(speaking.InputData(text="Nobody hears this.")),
+                id="unheard",
                 source=hsm.id(requester),
-                target=hsm.id(speaker),
             ),
         )
-        await _wait_until(lambda: bool(terminals))
-        return terminals
+        await wait_until(lambda: bool(outputs(requester)))
+        return outputs(requester)
 
-    terminals = asyncio.run(run())
-    assert len(terminals) == 1
-    assert terminals[0].id == "speak-1"
+    unheard = asyncio.run(run())
+
+    assert unheard[0].outcome == "failed"
+    assert (unheard[0].spoken, unheard[0].unspoken) == ("", "Nobody hears this.")
+    assert utterance_failure(finished_spans) == "timeout"
 
 
-def test_speaking_encoding_timeout_cancels_non_returning_encoder(monkeypatch: pytest.MonkeyPatch) -> None:
-    async def run() -> tuple[str, bool]:
-        from mosfet.abilities.speaking import speaking as speaking_source
+def test_one_utterance_at_a_time_the_next_waits_for_the_first_to_be_recorded() -> None:
+    async def run() -> list[str]:
+        voice = await stage()
+        await voice.say("First thing.", id="first")
+        await voice.say("Second thing.", id="second")
+        await wait_until(lambda: len(voice.outputs()) == 2)
+        return [event.id for event in voice.requester.named(speaking.OutputEvent)]
 
-        monkeypatch.setattr(speaking_source, "_ENCODING_TIMEOUT", datetime.timedelta(milliseconds=10))
-        encoder = NeverReturningEncoder()
-        speaker = speaking.Speaking(encoder=encoder)
+    assert asyncio.run(run()) == ["first", "second"]
+
+
+def test_speaking_records_what_the_room_heard_as_one_trusted_outbound_message() -> None:
+    async def run() -> tuple[list[conversation.Messages], str, str]:
+        target = RecordingConversation()
+        voice = await stage(Script(fail_on="broken"), conversation_targets=(target,))
+        await start_ability_tree(voice.environment, target)
+        await voice.say("Hello there. broken off.")
+        await wait_until(lambda: bool(target.outputs))
+        return target.outputs, hsm.id(voice.speaking), hsm.id(target)
+
+    histories, speaker_id, conversation_id = asyncio.run(run())
+
+    assert all(len(history.messages) == 1 and history.messages[0].direction == "outbound" for history in histories)
+    message = histories[0].messages[0]
+    assert message.content == "Hello there. "
+    assert message.provenance.event == conversation.AppendEvent.name
+    assert message.provenance.source == speaker_id
+    assert message.provenance.target == conversation_id
+
+
+def test_own_voice_is_enrolled_once_from_the_first_utterance_long_enough() -> None:
+    async def run() -> list[hsm.Event[typing.Any]]:
+        voice = await stage(Script(chunk_ms=500))
+        await voice.say("Short.", id="short")
+        await wait_until(lambda: len(voice.outputs()) == 1)
+        await voice.say("Long enough to learn from.", id="long")
+        await wait_until(lambda: len(voice.outputs()) == 2)
+        await voice.say("And once is enough here.", id="again")
+        await wait_until(lambda: len(voice.outputs()) == 3)
+        return voice.ear.named(listening.EnrollEvent)
+
+    enrollments = asyncio.run(run())
+
+    assert len(enrollments) == 1
+    copy = enrollments[0].data
+    assert isinstance(copy, listening.EnrollData)
+    assert copy.voice_id == "tts:warm"
+    assert enrollments[0].id == "long"
+    assert (copy.segment.sample_rate_hz, copy.segment.channels, copy.segment.media_type) == (RATE, 1, "audio/pcm")
+    assert math.isclose(copy.segment.duration_seconds, 2.5, abs_tol=1e-9)
+
+
+def test_own_voice_enrollment_is_bounded_by_enroll_seconds() -> None:
+    async def run() -> listening.EnrollData:
+        voice = await stage(Script(chunk_ms=1_000), enroll_seconds=datetime.timedelta(seconds=2))
+        await voice.say("Three whole seconds.")
+        await wait_until(lambda: bool(voice.ear.named(listening.EnrollEvent)))
+        return [event.data for event in voice.ear.events if isinstance(event.data, listening.EnrollData)][0]
+
+    assert math.isclose(asyncio.run(run()).segment.duration_seconds, 2.0, abs_tol=1e-9)
+
+
+def test_utterances_and_first_audio_are_measured(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def outcomes(points: tuple[metric_reader.Point, ...]) -> collections.Counter[str]:
+        return collections.Counter({str(point.attributes["outcome"]): int(point.value) for point in points})
+
+    with metric_reader.recording(tmp_path, monkeypatch) as reader:
+        # Points are cumulative for the process: measure the difference this test makes.
+        before = outcomes(reader.points("bot.speaking.utterance.count"))
+        first_before = sum(point.count for point in reader.points("bot.speaking.first_audio.duration"))
+
+        async def run() -> None:
+            voice = await stage(Script(fail_on="broken"))
+            await voice.say("Fine.", id="fine")
+            await wait_until(lambda: len(voice.outputs()) == 1)
+            await voice.say("Then broken.", id="broken")
+            await wait_until(lambda: len(voice.outputs()) == 2)
+
+        asyncio.run(run())
+        after = outcomes(reader.points("bot.speaking.utterance.count"))
+        first_audio = reader.points("bot.speaking.first_audio.duration")
+        encoding = reader.points("bot.speaking.encoding.duration")
+
+    assert after - before == collections.Counter({"completed": 1, "failed": 1})
+    assert sum(point.count for point in first_audio) - first_before == 2
+    assert {"completed", "failed"} <= {point.attributes["outcome"] for point in encoding}
+
+
+class Deaf(audio.Speaker):
+    """A mouth that never answers an attach."""
+
+    @typing.override
+    async def attach(self, ctx: hsm.Context, event: hsm.Event[attachment.AttachData]) -> bool:
+        del ctx, event
+        return True
+
+
+async def foreign_mouth() -> audio.Speaker:
+    """A mouth already powered in another environment, which refuses a controller from this one."""
+
+    mouth = audio.Speaker()
+    _ = await mosfet.started(Environment(), mouth, typing.cast(hsm.Model, mouth.model))
+    return mouth
+
+
+@pytest.mark.parametrize("refusing", ["refuses", "never answers"])
+def test_a_mouth_that_refuses_the_attach_fails_speakings_attach_and_its_owner_is_told(refusing: str) -> None:
+    async def run() -> tuple[list[hsm.Event[typing.Any]], list[hsm.Event[typing.Any]], list[hsm.Event[typing.Any]]]:
         environment = Environment()
-        await start_ability_tree(environment, speaker)
-        await hsm.dispatch(
+        owner, requester = Collector(), Collector()
+        for actor in (owner, requester):
+            _ = await mosfet.started(environment, actor, actor.model)
+        mouth = await foreign_mouth() if refusing == "refuses" else Deaf()
+        voice = speaking.Speaking(encoder=Script(), speaker=mouth, voice_id=VOICE_ID)
+        _ = await voice.attach(
             environment,
-            speaker,
-            speaking.InputEvent.with_data_and_id(speaking.InputData(text="Never returns."), "timeout-1"),
+            attachment.AttachEvent.with_data_and_id(
+                attachment.AttachData(actor=owner, timeout=datetime.timedelta(milliseconds=50)), "attach-speaking"
+            ),
         )
-        await _wait_until(lambda: (speaker.state() or "").endswith("/idle"))
-        await encoder.cancelled.wait()
-        return speaker.state() or "", encoder.cancelled.is_set()
+        await wait_until(lambda: bool(owner.events))
+        _ = await hsm.dispatch(
+            environment,
+            voice,
+            dataclasses.replace(
+                speaking.InputEvent.with_data(speaking.InputData(text="Anyone?")),
+                id="refused",
+                source=hsm.id(requester),
+            ),
+        )
+        await wait_until(lambda: bool(requester.named(speaking.Speaking.failed_event)))
+        return (
+            owner.named(attachment.AttachFailedEvent),
+            owner.named(attachment.AttachCompleteEvent),
+            requester.named(speaking.Speaking.failed_event),
+        )
 
-    state, cancelled = asyncio.run(run())
-    assert state.endswith("/idle")
-    assert cancelled
+    refused, completed, failures = asyncio.run(run())
+
+    assert completed == []
+    assert [event.id for event in refused] == ["attach-speaking"]
+    assert [event.id for event in failures] == ["refused"]
+    failure = failures[0].data
+    assert isinstance(failure, ability.FailureData)
+    assert failure.message == "Speaking is not attached."
 
 
-def test_speaking_is_not_cognition_callable() -> None:
-    """Speaking is an effector reached through behavior/topology wiring."""
+def test_speaking_powers_an_unstarted_mouth_and_stops_only_the_mouth_it_started() -> None:
+    async def run() -> tuple[bool, bool, bool, bool]:
+        environment = Environment()
+        owned, shared = audio.Speaker(), audio.Speaker()
+        _ = await mosfet.started(environment, shared, typing.cast(hsm.Model, shared.model))
+        powering = speaking.Speaking(encoder=Script(), speaker=owned, voice_id=VOICE_ID)
+        borrowing = speaking.Speaking(encoder=Script(), speaker=shared, voice_id=VOICE_ID)
+        await start_ability_tree(environment, powering)
+        await start_ability_tree(environment, borrowing)
+        powered = lifecycle.is_started(owned)
+        await wait_until(lambda: borrowing in device_bots(shared))
+        await powering.stop(environment)
+        await borrowing.stop(environment)
+        await wait_until(lambda: borrowing not in device_bots(shared))
+        return powered, lifecycle.is_started(owned), lifecycle.is_started(shared), borrowing in device_bots(shared)
 
-    speaking_ability = speaking.Speaking(encoder=RecordingEncoder())
-    assert speaking.InputEvent.kind == hsm.EventKind
-    assert speaking_ability.input_event is speaking.InputEvent
-    assert speaking_ability.input_event.kind == hsm.EventKind
+    powered, owned_after, shared_after, still_wired = asyncio.run(run())
+
+    assert powered
+    assert not owned_after
+    assert shared_after
+    assert not still_wired
 
 
 def test_cognition_does_not_directly_select_speaking_output() -> None:
     """Body output wiring is absent from cognition's actor/tool inventory."""
 
-    import mosfet
     from mosfet.bot import Bot
     from mosfet.device import Device
-    from mosfet.abilities import processing
-    from mosfet.environment import Environment
     from tests.bot.test_bot import as_cognition
 
     class SpeakProcessor(processing.Processor):
@@ -344,14 +929,11 @@ def test_cognition_does_not_directly_select_speaking_output() -> None:
         @typing.override
         async def process(self, input: processing.InputData) -> processing.Events:
             self.inputs.append(input)
-            names = {event.name for event in input.schemas}
-            assert "bot.ability.speaking.input" not in names
-            assert "speaking" not in input.actors
             return ()
 
-    async def run() -> tuple[list[bytes], list[processing.InputData]]:
-        encoder = RecordingEncoder(audio=b"\x11\x22")
-        speaking_ability = speaking.Speaking(encoder=encoder, speaker=None)
+    async def run() -> tuple[list[list[str]], list[processing.InputData]]:
+        script = Script()
+        speaking_ability = speaking.Speaking(encoder=script, speaker=audio.Speaker(), voice_id=VOICE_ID)
         processor = SpeakProcessor()
 
         class Probe(Bot):
@@ -364,271 +946,17 @@ def test_cognition_does_not_directly_select_speaking_output() -> None:
 
         probe = Probe()
         environment = Environment()
-        await probe.attach(environment)
-        await _wait_until(lambda: (probe.state() or "").endswith("/unfocused"))
-        assert (speaking_ability.state() or "").endswith("/idle")
-
-        await probe.dispatch(
+        _ = await probe.attach(environment)
+        await wait_until(lambda: (probe.state() or "").endswith("/unfocused"))
+        await wait_until(lambda: (speaking_ability.state() or "").endswith("/wired/idle"))
+        _ = await probe.dispatch(
             environment,
             mosfet.InputEvent.with_data(mosfet.InputEventData(target_device="phone", priority=0)),
         )
-        return encoder.calls, processor.inputs
+        await wait_until(lambda: bool(processor.inputs))
+        return script.reads, processor.inputs
 
     calls, inputs = asyncio.run(run())
     assert calls == []
-    assert len(inputs) == 1
     assert "bot.ability.speaking.input" not in {event.name for event in inputs[0].schemas}
     assert "speaking" not in inputs[0].actors
-
-
-class ListeningPeer(hsm.Instance):
-    """Stands where Listening stands: receives the Speaking→Listening motor-command copy.
-
-    The efference copy is delivered to registered peers, not the body. This records arrival order
-    for the nerve under test.
-    """
-
-    def __init__(self, seen: list[str]) -> None:
-        super().__init__()
-        self._seen = seen
-
-    @staticmethod
-    def _record(ctx: hsm.Context, instance: "ListeningPeer", event: hsm.Event[typing.Any]) -> None:
-        del ctx
-        if isinstance(event.data, EfferenceData):
-            instance._seen.append("efference")
-
-    model: typing.ClassVar[hsm.Model] = mosfet.define(
-        "ListeningPeer",
-        hsm.initial(hsm.target("listening")),
-        hsm.state("listening", hsm.transition(hsm.on(EfferenceEvent), hsm.effect(_record))),
-    )
-
-
-class OrderingSoundListener(hsm.Instance):
-    """Environment participant that notes when the sound actually shows up in the room."""
-
-    def __init__(self, seen: list[str]) -> None:
-        super().__init__()
-        self._seen = seen
-
-    @staticmethod
-    def _record(ctx: hsm.Context, instance: "OrderingSoundListener", event: hsm.Event[typing.Any]) -> None:
-        del ctx
-        if isinstance(event.data, SoundData):
-            instance._seen.append("sound")
-
-    model: typing.ClassVar[hsm.Model] = mosfet.define(
-        "OrderingSoundListener",
-        hsm.initial(hsm.target("listening")),
-        hsm.state("listening", hsm.transition(hsm.on(SoundEvent), hsm.effect(_record))),
-    )
-
-
-class AbilityOwner(hsm.Instance):
-    """Attachment owner so Speaking can leave detached lifecycle and run behavior."""
-
-    model: typing.ClassVar[hsm.Model] = mosfet.define(
-        "AbilityOwner",
-        hsm.initial(hsm.target("owning")),
-        hsm.state("owning"),
-    )
-
-
-async def _speak_with_listening_peer(
-    *,
-    media_type: str = "audio/pcm",
-    audio_bytes: bytes = b"\x00" * 32_000,
-    speaker: audio.Speaker | None = None,
-) -> tuple[list[str], list[EfferenceData]]:
-    """Say one thing with a real mouth; return order and copies seen by the linked Listening peer."""
-
-    from mosfet.protocols import attachment
-
-    mouth = audio.Speaker() if speaker is None else speaker
-    environment = Environment()
-    order: list[str] = []
-    copies: list[EfferenceData] = []
-
-    peer = ListeningPeer(order)
-    owner = AbilityOwner()
-    _ = await mosfet.started(environment, peer, peer.model)
-    _ = await mosfet.started(environment, owner, owner.model)
-    speaking_ability = speaking.Speaking(
-        encoder=RecordingEncoder(audio=audio_bytes),
-        speaker=mouth,
-        listening=peer,
-        sample_rate_hz=16_000,
-        channels=1,
-        media_type=media_type,
-    )
-    _ = await mosfet.started(environment, mouth, typing.cast(hsm.Model, mouth.model))
-    listener = OrderingSoundListener(order)
-    _ = await mosfet.started(environment, listener, listener.model, hsm.Config(id="environment-ear"))
-    environment.join(listener)
-
-    _ = await mosfet.started(environment, speaking_ability, typing.cast(hsm.Model, speaking_ability.model))
-    # Attach is ability lifecycle only; the motor-command copy goes to ``listening=peer``, not owner.
-    _ = await speaking_ability.attach(
-        environment,
-        attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)),
-    )
-
-    original = peer.dispatch
-
-    def capture(ctx: hsm.Context, event: hsm.Event[typing.Any]) -> typing.Awaitable[bool]:
-        if isinstance(event.data, EfferenceData):
-            copies.append(event.data)
-        return original(ctx, event)
-
-    peer.dispatch = capture  # type: ignore[method-assign]
-    try:
-        await speaking_ability.dispatch(
-            environment, speaking.InputEvent.with_data(speaking.InputData(text="Hello there."))
-        )
-        await _wait_until(lambda: "sound" in order)
-    finally:
-        peer.dispatch = original  # type: ignore[method-assign]
-    return order, copies
-
-
-def test_the_copy_of_a_command_leaves_before_the_sound_does() -> None:
-    """An efference copy that arrived after the sound would be a report, not a prediction.
-
-    Issued on entry to playout: after the audio exists, strictly before it reaches the mouth.
-    Not at the request — synthesis takes seconds during which nothing is being produced — and
-    not at completion, which means the act was committed, not that the sound stopped.
-    """
-
-    order, copies = asyncio.run(_speak_with_listening_peer())
-
-    assert order[:2] == ["efference", "sound"]
-    assert len(copies) == 1
-
-
-def test_the_copy_says_which_mouth_how_long_and_in_what_form_and_never_the_words() -> None:
-    """Words on the copy would make this self-recognition, which is the thing being avoided.
-
-    Duration is measured, not guessed: 32000 bytes of 16-bit mono at 16 kHz is one second of
-    sound, and that is how long the consequences of this command are expected to last.
-    """
-
-    async def run() -> tuple[audio.Speaker, list[EfferenceData]]:
-        mouth = audio.Speaker()
-        _, copies = await _speak_with_listening_peer(speaker=mouth)
-        return mouth, copies
-
-    mouth, copies = asyncio.run(run())
-
-    assert len(copies) == 1
-    copy = copies[0]
-    assert copy.mouth == hsm.id(mouth)
-    assert copy.duration == 1.0
-    assert copy.media_type == "audio/pcm"
-    assert copy.sample_rate_hz == 16_000
-    assert copy.channels == 1
-    assert "Hello" not in copy.model_dump_json()
-
-
-def test_no_copy_is_issued_for_a_form_whose_byte_count_is_not_a_duration() -> None:
-    """A compressed buffer says nothing about time, and a made-up window is worse than none."""
-
-    order, copies = asyncio.run(_speak_with_listening_peer(media_type="audio/opus"))
-
-    assert copies == []
-    assert "sound" in order
-
-
-def test_the_efference_event_is_never_offerable_to_a_model() -> None:
-    """A nerve, not a tool. Nothing decides to send one, so nothing may select one."""
-
-    assert EfferenceEvent.kind != processing.EventKind
-    assert EfferenceEvent.name == "bot.ability.speaking.efference"
-    # Speaking is also an internal effector boundary; behaviors/topology own the route.
-    assert speaking.InputEvent.kind == hsm.EventKind
-
-
-def test_speaking_powers_an_unstarted_mouth_it_was_given() -> None:
-    """The mouth is part of the bot: the ability brings it up, the way firmware brings up an earpiece.
-
-    An injected speaker that nothing else started is started by this ability when the ability
-    starts — parented under the ability's own lifetime, so it outlives any single utterance —
-    and the very first word already plays out.
-    """
-
-    async def run() -> tuple[list[SoundData], bool]:
-        speaker = audio.Speaker()
-        speaking_ability = speaking.Speaking(encoder=RecordingEncoder(audio=b"\x00\x01"), speaker=speaker)
-        environment = Environment()
-        sounds: list[SoundData] = []
-        listener = SoundListener(sounds)
-
-        await start_ability_tree(environment, speaking_ability)
-        _ = await mosfet.started(environment, listener, listener.model, hsm.Config(id="environment-ear"))
-        environment.join(listener)
-
-        _ = await speaking_ability.apply(speaking.InputData(text="Hello."), ctx=environment)
-        await _wait_until(lambda: bool(sounds))
-        return sounds, lifecycle.is_started(speaker)
-
-    sounds, started = asyncio.run(run())
-
-    assert started
-    assert [sound.audio for sound in sounds] == [b"\x00\x01"]
-
-
-def test_speaking_stops_the_mouth_it_started() -> None:
-    """Stop powers down what start powered up — the same lifecycle, reversed."""
-
-    async def run() -> None:
-        speaker = audio.Speaker()
-        speaking_ability = speaking.Speaking(encoder=RecordingEncoder(), speaker=speaker)
-        environment = Environment()
-
-        await start_ability_tree(environment, speaking_ability)
-        assert lifecycle.is_started(speaker)
-
-        await speaking_ability.stop(environment)
-        assert not lifecycle.is_started(speaker)
-
-    asyncio.run(run())
-
-
-def test_speaking_never_stops_a_mouth_it_did_not_start() -> None:
-    """An externally started speaker keeps running after the ability stops: shared, not owned."""
-
-    async def run() -> None:
-        speaker = audio.Speaker()
-        speaking_ability = speaking.Speaking(encoder=RecordingEncoder(), speaker=speaker)
-        environment = Environment()
-
-        # Started by someone else before the ability ever runs: shared, not owned.
-        _ = await mosfet.started(environment, speaker, require_model(speaker.model))
-        await start_ability_tree(environment, speaking_ability)
-
-        await speaking_ability.stop(environment)
-        assert lifecycle.is_started(speaker)
-
-    asyncio.run(run())
-
-
-def test_speaking_playout_does_not_attach_optional_speaker() -> None:
-    """Temporary: playout elevates ``environment.sound`` without Speaker attachment.
-
-    Mouth/Speaker transduction returns later; an injected speaker must not accumulate
-    controller attachments from utterances in the meantime.
-    """
-
-    async def run() -> int:
-        speaker = audio.Speaker()
-        speaking_ability = speaking.Speaking(encoder=RecordingEncoder(audio=b"\x00\x01"), speaker=speaker)
-        environment = Environment()
-        _ = await mosfet.started(environment, speaker, require_model(speaker.model))
-        await start_ability_tree(environment, speaking_ability)
-
-        for _ in range(3):
-            _ = await speaking_ability.apply(speaking.InputData(text="Hello."), ctx=environment)
-            await _wait_until(lambda: speaking_ability.state().endswith("/idle"))
-        return len(device_bots(speaker))
-
-    assert asyncio.run(run()) == 0

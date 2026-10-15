@@ -248,7 +248,6 @@ class SpeechConfig:
     input_sample_rate_hz: int = DEFAULT_LIVEKIT_INPUT_SAMPLE_RATE_HZ
     input_channels: int = DEFAULT_AUDIO_CHANNELS
     output_sample_rate_hz: int = DEFAULT_GEMINI_OUTPUT_SAMPLE_RATE_HZ
-    output_channels: int = DEFAULT_AUDIO_CHANNELS
 
     @classmethod
     def from_env(cls, env: collections.abc.Mapping[str, str]) -> typing.Self:
@@ -310,12 +309,6 @@ class SpeechConfig:
                 DEFAULT_GEMINI_OUTPUT_SAMPLE_RATE_HZ,
                 "BOT_GEMINI_OUTPUT_SAMPLE_RATE_HZ",
                 "GEMINI_OUTPUT_SAMPLE_RATE_HZ",
-            ),
-            output_channels=_env_int(
-                env,
-                DEFAULT_AUDIO_CHANNELS,
-                "BOT_GEMINI_OUTPUT_CHANNELS",
-                "GEMINI_OUTPUT_CHANNELS",
             ),
         )
 
@@ -586,14 +579,12 @@ def _gemini_speech_decoder(config: SpeechConfig) -> GeminiSpeechDecoder:
 
 
 def _gemini_speech_encoder(config: SpeechConfig) -> GeminiSpeechEncoder:
+    # Raw PCM: this audio ends up on the LiveKit uplink, and AudioFrameEncoder frames the bytes as samples.
     return GeminiSpeechEncoder(
         client=_gemini_speech_client(config),
         model=config.tts_model,
         voice_name=config.voice_name,
         sample_rate_hz=config.output_sample_rate_hz,
-        # Raw PCM, not a WAV container: this audio ends up on the LiveKit uplink, and
-        # AudioFrameEncoder frames the bytes as samples. A RIFF header would be framed as audio.
-        output_format="pcm",
     )
 
 
@@ -713,7 +704,7 @@ robot in the room does not put your voice down its telephone line.
 def _someone_in_the_room() -> person.Person:
     """A person standing in front of the robot, able to say something out loud.
 
-    Local synthesis only: the words are rendered on this machine and become acoustic energy in
+    Local encoding only: the words are rendered on this machine and become acoustic energy in
     the environment. Nothing about them is read here.
     """
 
@@ -760,16 +751,22 @@ def _speaking(
     *,
     speaker: audio.Speaker,
     speech_config: SpeechConfig | None = None,
+    listening: collections.abc.Sequence[hsm.Instance] = (),
+    conversation: collections.abc.Sequence[abilities.Ability[typing.Any, typing.Any]] = (),
 ) -> speaking.Speaking:
-    """Bot output ability: Gemini TTS + phone speaker playout (environment.sound elevation)."""
+    """Bot output ability: Gemini TTS streamed through the robot's own mouth (the phone-side voice speaker).
+
+    Its Listening peer (motor-command copies, own-voice enrollment) and its Conversation sink are wired here,
+    at construction: a nerve and a record route, never discovered from the body.
+    """
 
     config = speech_config or SpeechConfig()
     return speaking.Speaking(
         encoder=_gemini_speech_encoder(config),
         speaker=speaker,
-        sample_rate_hz=config.output_sample_rate_hz,
-        channels=config.output_channels,
-        media_type="audio/pcm",
+        voice_id=f"tts:{config.voice_name.lower()}",
+        listening=listening,
+        conversation=conversation,
     )
 
 
@@ -924,14 +921,18 @@ class PhoneBot(Bot):
         )
         self._listening = listening if listening is not None else _listening(speech_config)
         self._conversation = conversation if conversation is not None else _conversation(speech_config)
-        speaking_instance = (
-            speaking if speaking is not None else _speaking(speaker=self._voice, speech_config=speech_config)
+        # Speaking→Listening nerve and the trusted effector→Conversation route are constructor wiring. A caller
+        # that injects its own Speaking wires those peers when it builds it.
+        self._speaking = (
+            speaking
+            if speaking is not None
+            else _speaking(
+                speaker=self._voice,
+                speech_config=speech_config,
+                listening=(self._listening,),
+                conversation=(self._conversation,),
+            )
         )
-        self._speaking = speaking_instance
-        # Speaking→Listening nerve: motor-command copy is peer delivery, not body/environment.
-        self._speaking.link_listening(self._listening)
-        # Explicit trusted effector→Conversation route; no body policy or graph traversal.
-        self._speaking.link_conversation(self._conversation)
         # Bot acquires Communication; Conversation is nested under it for tool resolution.
         self._communication = abilities.Communication(
             active_conversation=self._conversation,
@@ -1223,7 +1224,7 @@ def _summary_for(
             "base_url": app_config.cognition.intuition_base_url,
             "api_key_loaded": bool(app_config.cognition.intuition_api_key),
         },
-        # Where somebody has to stand to talk to this robot, and how loud. Not which synthesizer
+        # Where somebody has to stand to talk to this robot, and how loud. Not which encoder
         # renders them — that is a constructor argument, and a field here naming one would go
         # stale the moment somebody injects another. Never what was said, either: the words go
         # into the room, not into the operator's readiness report.
@@ -1231,7 +1232,6 @@ def _summary_for(
             "position_m": [_ROOM_POSITION.x, _ROOM_POSITION.y, _ROOM_POSITION.z],
             "amplitude_db": _VOICE_DB,
             "sample_rate_hz": person.VOICE_SAMPLE_RATE_HZ,
-            "media_type": person.VOICE_MEDIA_TYPE,
         },
         "livekit_room_audio_attempted": room_attempted,
         "livekit_room_audio_configured": app_config.livekit.can_connect_room(),
@@ -1277,7 +1277,6 @@ def _summary_for(
             "input_sample_rate_hz": app_config.speech.input_sample_rate_hz,
             "input_channels": app_config.speech.input_channels,
             "output_sample_rate_hz": app_config.speech.output_sample_rate_hz,
-            "output_channels": app_config.speech.output_channels,
         },
     }
 
@@ -1311,7 +1310,9 @@ async def run(
     # Explicit speech wiring: Silero VAD + pyannote voice identity (local) + Gemini STT/TTS (off-device).
     listening_ability = _listening(app_config.speech)
     voice = _voice()
-    speaking_ability = _speaking(speaker=voice, speech_config=app_config.speech)
+    speaking_ability = _speaking(
+        speaker=voice, speech_config=app_config.speech, listening=(listening_ability,), conversation=(conversation,)
+    )
     _LOG.info(
         "speech path stt_provider=gemini stt_model=%s tts_provider=gemini tts_model=%s "
         "tts_voice=%s vad_provider=silero vad_model_id=%s voice_identity_provider=pyannote "

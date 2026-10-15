@@ -48,6 +48,7 @@ from mosfet.abilities import encoding
 from mosfet.abilities import listening
 from mosfet.abilities import memory
 from mosfet.abilities import speaking
+from mosfet.abilities import vocal
 from mosfet.abilities.communication import conversation
 from mosfet.abilities.hearing import voice
 from mosfet.bot import Bot
@@ -354,14 +355,33 @@ def _silence_wav(
     return output.getvalue()
 
 
-class SayEncoder(encoding.Encoder[bytes, bytes]):
-    """Offline TTS: encode UTF-8 text with macOS ``say`` into WAV bytes.
+def _wav_pcm(wav: bytes) -> bytes:
+    """The s16le frames of a WAV rendering."""
 
-    A caller-supplied destination remains caller-owned. Without one, the encoder
-    owns a temporary destination and closes and removes it after rendering,
-    including after failure or cancellation. Cancellation waits for the native
-    render worker to settle before releasing that temporary path, and a cancelled
-    invocation does not publish ``audio`` or ``calls``.
+    with wave.open(io.BytesIO(wav), "rb") as stream:
+        return stream.readframes(stream.getnframes())
+
+
+def _pcm_wav(pcm: bytes, *, sample_rate_hz: int, channels: int) -> bytes:
+    """Wrap s16le frames in a WAV container."""
+
+    output = io.BytesIO()
+    with wave.open(output, "wb") as stream:
+        stream.setnchannels(channels)
+        stream.setsampwidth(2)
+        stream.setframerate(sample_rate_hz)
+        stream.writeframes(pcm)
+    return output.getvalue()
+
+
+class SayEncoder(vocal.speech.SpeechEncoder):
+    """Offline TTS: read an utterance's text to its end, render it with macOS ``say``, and yield it as mono PCM.
+
+    ``say`` is not incremental, so the utterance is one chunk, aligned to the whole text it says. It renders into
+    a temporary directory that is removed after the render, including after failure or cancellation. A
+    caller-supplied ``destination`` receives a WAV of everything spoken so far, rewritten after each utterance,
+    so the reply can be played back. Cancellation waits for the native render worker to settle, and a cancelled
+    utterance does not publish ``audio`` or ``calls``.
     """
 
     def __init__(
@@ -370,45 +390,47 @@ class SayEncoder(encoding.Encoder[bytes, bytes]):
         destination: pathlib.Path | None = None,
         sample_rate_hz: int = _DEFAULT_SAMPLE_RATE_HZ,
     ) -> None:
+        self.format = vocal.speech.Format(sample_rate_hz=sample_rate_hz, channels=_DEFAULT_CHANNELS)
         self.destination = destination
-        self.sample_rate_hz = sample_rate_hz
         self.calls: list[str] = []
         self.audio: bytes | None = None
 
     @override
-    async def encode(self, input: bytes) -> bytes:
-        text = input.decode("utf-8").strip()
-        if not text:
-            raise ValueError("SayEncoder requires non-blank text.")
-        owns_path = self.destination is None
-        if owns_path:
-            descriptor, raw_path = tempfile.mkstemp(suffix=".wav", prefix="say-reply-")
-            os.close(descriptor)
-            path = pathlib.Path(raw_path)
-        else:
-            assert self.destination is not None
-            path = self.destination
-        render_audio = functools.partial(
-            _say_to_wav,
-            text=text,
-            destination=path,
-            sample_rate_hz=self.sample_rate_hz,
-        )
-        render = asyncio.create_task(asyncio.to_thread(render_audio))
-        try:
-            audio = await asyncio.shield(render)
-        except asyncio.CancelledError:
+    async def encode(
+        self, input: collections.abc.AsyncIterable[str]
+    ) -> collections.abc.AsyncIterator[vocal.speech.Audio]:
+        said = "".join([piece async for piece in input])
+        if not said.strip():
+            raise encoding.Error("invalid_input", "SayEncoder requires non-blank text.")
+        with tempfile.TemporaryDirectory(prefix="say-utterance-") as directory:
+            render_audio = functools.partial(
+                _say_to_wav,
+                said.strip(),
+                pathlib.Path(directory) / "utterance.wav",
+                sample_rate_hz=self.format.sample_rate_hz,
+            )
+            render = asyncio.create_task(asyncio.to_thread(render_audio))
             try:
-                _ = await render
+                wav = await asyncio.shield(render)
+            except asyncio.CancelledError:
+                try:
+                    _ = await render
+                except Exception as error:
+                    _LOG.debug("Say render failed while a cancelled encoding settled.", exc_info=error)
+                raise
             except Exception as error:
-                _LOG.debug("Say render failed while a cancelled encoding settled.", exc_info=error)
-            raise
-        finally:
-            if owns_path:
-                path.unlink(missing_ok=True)
-        self.audio = audio
-        self.calls.append(text)
-        return audio
+                raise encoding.Error("encode_failed", "macOS say could not render speech.") from error
+        try:
+            pcm = _wav_pcm(wav)
+        except (EOFError, wave.Error) as error:
+            raise encoding.Error("invalid_response", "macOS say rendered no readable WAV.") from error
+        self.audio = (self.audio or b"") + pcm
+        self.calls.append(said)
+        if self.destination is not None:
+            self.destination.write_bytes(
+                _pcm_wav(self.audio, sample_rate_hz=self.format.sample_rate_hz, channels=self.format.channels)
+            )
+        yield vocal.speech.Audio(pcm=pcm, text=said)
 
 
 def _gemini_client(config: CognitionConfig, *, model: str | None = None) -> GeminiChatClient:
@@ -958,16 +980,14 @@ class ListenSpeakBot(Bot):
             voice_classifier=classifier,
         )
         self._conversation = _conversation(speech_decoder=self._decoder)
-        # The internal Speaker produces WAV and keeps composition-time efference wiring active.
+        # The bot's mouth: Speaking powers it, attaches to it, and streams the encoded PCM through it.
         self._speaker = audio.Speaker()
         self._speaking = speaking.Speaking(
             encoder=self._encoder,
             speaker=self._speaker,
-            listening=self._listening,
-            conversation=self._conversation,
-            sample_rate_hz=sample_rate_hz,
-            channels=_DEFAULT_CHANNELS,
-            media_type="audio/wav",
+            voice_id="tts:say",
+            listening=(self._listening,),
+            conversation=(self._conversation,),
         )
         self._communication = _TrackedCommunication(
             active_conversation=self._conversation,

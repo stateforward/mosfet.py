@@ -6,6 +6,9 @@ import asyncio
 import collections.abc
 import dataclasses
 import datetime
+import itertools
+import re
+import pathlib
 import typing
 
 import hsm
@@ -16,42 +19,69 @@ import pytest
 from mosfet.abilities import communication
 from mosfet.abilities.communication import conversation
 from mosfet.abilities import decoding
-from mosfet.abilities import encoding
 from mosfet.abilities import processing
 from mosfet.abilities import speaking
+from mosfet.abilities import vocal
 from mosfet.abilities.communication.conversation import turn_detector
 from mosfet import event
 from mosfet import StimulusData
 from mosfet.abilities import ability
+from mosfet.devices import audio
 from mosfet.protocols import attachment
 from mosfet.environment import Environment
+from tests import metric_reader
 from tests.hsm_instance_state import start_ability_tree
 from tests.hsm_model import transition_map
 
-
-class RecordingEncoder(encoding.Encoder[bytes, bytes]):
-    def __init__(self) -> None:
-        self.calls: list[bytes] = []
-
-    async def encode(self, input: bytes) -> bytes:
-        self.calls.append(input)
-        return b"deterministic-audio"
+RATE = 8_000
+_ENCODE_IDLE_TIMEOUT = datetime.timedelta(seconds=5)
 
 
-class FailingEncoder(encoding.Encoder[bytes, bytes]):
-    async def encode(self, input: bytes) -> bytes:
-        del input
-        raise RuntimeError("deterministic speech failure")
+class Script(vocal.speech.SpeechEncoder):
+    """Reads the text to its end, then streams 20 ms of PCM per word, each chunk aligned to its word, optionally
+    pausing before each word or stalling forever."""
+
+    def __init__(self, *, pause: float = 0.0, stall: bool = False) -> None:
+        self.format: vocal.speech.Format = vocal.speech.Format(sample_rate_hz=RATE, channels=1)
+        self.pause: float = pause
+        self.stall: bool = stall
+        self.calls: list[str] = []
+
+    @typing.override
+    async def encode(
+        self, input: collections.abc.AsyncIterable[str]
+    ) -> collections.abc.AsyncIterator[vocal.speech.Audio]:
+        said = "".join([piece async for piece in input])
+        self.calls.append(said)
+        if self.stall:
+            _ = await asyncio.Event().wait()
+        for word in re.findall(r"\s*\S+\s*", said):
+            if self.pause:
+                await asyncio.sleep(self.pause)
+            yield vocal.speech.Audio(pcm=b"\x01\x00" * (RATE // 50), text=word)
 
 
-class BlockingEncoder(encoding.Encoder[bytes, bytes]):
-    def __init__(self, release: asyncio.Event) -> None:
-        self._release = release
+def _instant() -> collections.abc.Callable[[], float]:
+    """A speaker clock always past its schedule, so the mouth reports each chunk played at once."""
 
-    async def encode(self, input: bytes) -> bytes:
-        del input
-        await self._release.wait()
-        return b"deterministic-audio"
+    ticks = itertools.count(0.0, 1_000.0)
+    return lambda: next(ticks)
+
+
+def _speaking(
+    encoder: Script | None = None,
+    *,
+    speaker: audio.Speaker | None = None,
+    conversation: collections.abc.Sequence[ability.Ability[typing.Any, typing.Any]] = (),
+    encode_idle_timeout: datetime.timedelta = _ENCODE_IDLE_TIMEOUT,
+) -> speaking.Speaking:
+    return speaking.Speaking(
+        encoder=encoder or Script(),
+        speaker=speaker or audio.Speaker(frame=datetime.timedelta(milliseconds=10), clock=_instant()),
+        voice_id="tts:warm",
+        conversation=conversation,
+        encode_idle_timeout=encode_idle_timeout,
+    )
 
 
 class RecordingConversation(conversation.Conversation):
@@ -109,127 +139,143 @@ async def _wait_until(condition: typing.Callable[[], bool], *, timeout: float = 
     raise AssertionError("condition not met")
 
 
+async def _owned(ctx: hsm.Context, speaker: speaking.Speaking, comm: communication.Communication) -> TerminalCollector:
+    """Start Speaking and Communication, with a collector as Communication's owner."""
+
+    collector = TerminalCollector()
+    await start_ability_tree(ctx, speaker)
+    _ = await mosfet.started(ctx, collector, collector.model)
+    comm_model = comm.model
+    assert comm_model is not None
+    _ = await mosfet.started(ctx, comm, comm_model)
+    await comm.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=collector)))
+    await _wait_until(lambda: "/behavior/active" in (comm.state() or ""))
+    await _wait_until(lambda: (speaker.state() or "").endswith("/wired/idle"))
+    return collector
+
+
+def _respond(text: str, response_id: str) -> hsm.Event[communication.RespondData]:
+    return communication.RespondEvent.with_data_and_id(communication.RespondData(text=text), response_id)
+
+
+def _failures(collector: TerminalCollector) -> list[ability.FailureData]:
+    return [
+        item.data
+        for item in collector.events
+        if item.name == communication.FailedEvent.name and isinstance(item.data, ability.FailureData)
+    ]
+
+
+def _spoken(collector: TerminalCollector) -> list[hsm.Event[typing.Any]]:
+    return [item for item in collector.events if item.name == speaking.OutputEvent.name]
+
+
 def test_communication_construction_uses_active_conversation_keyword() -> None:
     conv = _conversation()
-    speaker = speaking.Speaking(encoder=RecordingEncoder())
-    ability = communication.Communication(active_conversation=conv, speaking=speaker)
-    model = ability.model
-    assert model is not None
+    comm = communication.Communication(active_conversation=conv, speaking=_speaking())
+    assert comm.model is not None
+    with pytest.raises(ValueError, match="response_idle_timeout"):
+        _ = communication.Communication(
+            active_conversation=conv, speaking=_speaking(), response_idle_timeout=datetime.timedelta(0)
+        )
 
 
-def test_communication_response_progresses_on_speaking_terminals_without_private_waiters() -> None:
-    conv = _conversation()
-    speaker = speaking.Speaking(encoder=RecordingEncoder())
-    comm = communication.Communication(active_conversation=conv, speaking=speaker)
+def test_communication_responding_follows_speaking_by_events_without_private_waiters() -> None:
+    comm = communication.Communication(active_conversation=_conversation(), speaking=_speaking())
     model = comm.model
     assert model is not None
 
-    transitions = transition_map(model)["/CommunicationLifecycle/attached/behavior/responding"]
-    assert speaking.OutputEvent.name in transitions
-    assert ability.FailedEvent.name in transitions
-    assert "bot.ability.communication.respond.completed" not in transitions
-    assert "bot.ability.communication.respond.failed" not in transitions
+    transitions = transition_map(model)
+    responding = transitions["/CommunicationLifecycle/attached/behavior/responding"]
+    waiting = transitions["/CommunicationLifecycle/attached/behavior/responding/waiting"]
+    assert speaking.OutputEvent.name in responding
+    assert ability.FailedEvent.name in responding
+    assert speaking.ProgressEvent.name in waiting
+    assert not any(state.endswith(("preparing_response", "dispatching_response")) for state in transitions)
 
 
-def test_communication_respond_routes_one_typed_request_to_speaking() -> None:
-    async def run() -> tuple[list[bytes], list[conversation.Messages]]:
-        ctx = hsm.Context()
+def test_communication_respond_routes_one_typed_request_to_speaking_and_records_what_was_said() -> None:
+    async def run() -> tuple[list[str], list[conversation.Messages], list[hsm.Event[typing.Any]]]:
+        ctx = Environment()
         conv = RecordingConversation()
-        encoder = RecordingEncoder()
-        speaker = speaking.Speaking(encoder=encoder, conversation=conv)
+        script = Script()
+        speaker = _speaking(script, conversation=(conv,))
         comm = communication.Communication(active_conversation=conv, speaking=speaker)
+        collector = await _owned(ctx, speaker, comm)
 
-        await start_ability_tree(ctx, speaker)
-        await start_ability_tree(ctx, comm)
-        await _wait_until(lambda: "/behavior/active" in (comm.state() or ""))
-
-        await hsm.dispatch(
-            ctx,
-            comm,
-            communication.RespondEvent.with_data_and_id(
-                communication.RespondData(text="Hello from Communication."),
-                "response-1",
-            ),
-        )
-        await _wait_until(lambda: encoder.calls == [b"Hello from Communication."])
+        _ = await hsm.dispatch(ctx, comm, _respond("Hello from Communication.", "response-1"))
+        await _wait_until(lambda: bool(_spoken(collector)))
         await _wait_until(lambda: len(conv.outputs) == 1)
-        return encoder.calls, conv.outputs
+        return script.calls, conv.outputs, _spoken(collector)
 
-    calls, outputs = asyncio.run(run())
-    assert calls == [b"Hello from Communication."]
-    assert len(outputs) == 1
+    calls, outputs, spoken = asyncio.run(run())
+    assert calls == ["Hello from Communication."]
     assert [message.direction for message in outputs[0].messages] == ["outbound"]
     assert outputs[0].messages[0].content == "Hello from Communication."
+    assert spoken[0].id == "response-1"
+    assert isinstance(spoken[0].data, speaking.OutputData)
+    assert spoken[0].data.outcome == "completed"
 
 
 def test_communication_ignores_malformed_respond_payload() -> None:
-    async def run() -> tuple[str, tuple[bytes, ...]]:
-        ctx = hsm.Context()
-        conv = _conversation()
-        encoder = RecordingEncoder()
-        speaker = speaking.Speaking(encoder=encoder, conversation=conv)
-        comm = communication.Communication(active_conversation=conv, speaking=speaker)
-
-        await start_ability_tree(ctx, speaker)
-        await start_ability_tree(ctx, comm)
-        await _wait_until(lambda: "/behavior/active" in (comm.state() or ""))
-        await hsm.dispatch(
+    async def run() -> tuple[str, list[str]]:
+        ctx = Environment()
+        script = Script()
+        speaker = _speaking(script)
+        comm = communication.Communication(active_conversation=_conversation(), speaking=speaker)
+        _ = await _owned(ctx, speaker, comm)
+        _ = await hsm.dispatch(
             ctx,
             comm,
-            communication.RespondEvent.with_data_and_id(
-                typing.cast(communication.RespondData, object()), "bad-response"
-            ),
+            communication.RespondEvent.with_data_and_id(typing.cast(communication.RespondData, object()), "bad"),
         )
-        return comm.state() or "", tuple(encoder.calls)
+        return comm.state() or "", script.calls
 
     state, calls = asyncio.run(run())
     assert "/behavior/active" in state
-    assert calls == ()
+    assert calls == []
 
 
 def test_communication_respond_surfaces_speaking_failure() -> None:
-    async def run() -> list[ability.FailureData]:
+    class Deaf(audio.Speaker):
+        """A mouth that never answers an attach, so Speaking's own attach fails and it answers requests failed."""
+
+        @typing.override
+        async def attach(self, ctx: hsm.Context, event: hsm.Event[attachment.AttachData]) -> bool:
+            del ctx, event
+            return True
+
+    async def run() -> tuple[list[ability.FailureData], str]:
         ctx = Environment()
-        conv = _conversation()
-        speaker = speaking.Speaking(encoder=FailingEncoder())
-        comm = communication.Communication(
-            active_conversation=conv,
-            speaking=speaker,
-        )
-        collector = TerminalCollector()
-        await start_ability_tree(ctx, speaker)
-        collector_model = collector.model
-        assert collector_model is not None
-        comm_model = comm.model
-        assert comm_model is not None
-        await mosfet.started(ctx, collector, collector_model)
-        await mosfet.started(ctx, comm, comm_model)
-        await comm.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=collector)))
-        await _wait_until(lambda: "/behavior/active" in (comm.state() or ""))
-        await hsm.dispatch(
+        speaker = _speaking(speaker=Deaf())
+        comm = communication.Communication(active_conversation=_conversation(), speaking=speaker)
+        collector, body = TerminalCollector(), TerminalCollector()
+        _ = await mosfet.started(ctx, body, body.model)
+        _ = await speaker.attach(
             ctx,
-            comm,
-            communication.RespondEvent.with_data_and_id(
-                communication.RespondData(text="This fails."),
-                "response-failure-1",
+            attachment.AttachEvent.with_data(
+                attachment.AttachData(actor=body, timeout=datetime.timedelta(milliseconds=50))
             ),
         )
-        await _wait_until(lambda: any(item.name == communication.FailedEvent.name for item in collector.events))
-        return [
-            typing.cast(ability.FailureData, item.data)
-            for item in collector.events
-            if item.name == communication.FailedEvent.name and isinstance(item.data, ability.FailureData)
-        ]
+        await _wait_until(lambda: any(event.name == attachment.AttachFailedEvent.name for event in body.events))
+        _ = await mosfet.started(ctx, collector, collector.model)
+        _ = await mosfet.started(ctx, comm, typing.cast(hsm.Model, comm.model))
+        await comm.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=collector)))
+        await _wait_until(lambda: "/behavior/active" in (comm.state() or ""))
+        _ = await hsm.dispatch(ctx, comm, _respond("This fails.", "response-failure-1"))
+        await _wait_until(lambda: bool(_failures(collector)))
+        await _wait_until(lambda: "/behavior/active" in (comm.state() or ""))
+        return _failures(collector), comm.state() or ""
 
-    failures = asyncio.run(run())
+    failures, state = asyncio.run(run())
     assert len(failures) == 1
-    assert "deterministic speech failure" in failures[0].message
+    assert failures[0].message == "Speaking is not attached."
+    assert state.endswith("/active")
 
 
 def test_communication_respond_without_id_mints_unique_operation_identity(monkeypatch: pytest.MonkeyPatch) -> None:
     async def run() -> tuple[str, str, str, str]:
         ctx = Environment()
-        conv = _conversation()
         observed: list[hsm.Event[typing.Any]] = []
 
         class RecordingSpeaking(speaking.Speaking):
@@ -238,30 +284,21 @@ def test_communication_respond_without_id_mints_unique_operation_identity(monkey
                     observed.append(event)
                 return super().dispatch(ctx, event)
 
-        speaker = RecordingSpeaking(encoder=RecordingEncoder())
-        comm = communication.Communication(active_conversation=conv, speaking=speaker)
-        collector = TerminalCollector()
-
-        await start_ability_tree(ctx, speaker)
-        collector_model = collector.model
-        comm_model = comm.model
-        assert collector_model is not None
-        assert comm_model is not None
-        _ = await mosfet.started(ctx, collector, collector_model)
-        _ = await mosfet.started(ctx, comm, comm_model)
-        await comm.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=collector)))
-        await _wait_until(lambda: "/behavior/active" in (comm.state() or ""))
+        speaker = RecordingSpeaking(
+            encoder=Script(),
+            speaker=audio.Speaker(frame=datetime.timedelta(milliseconds=10), clock=_instant()),
+            voice_id="tts:warm",
+        )
+        comm = communication.Communication(active_conversation=_conversation(), speaking=speaker)
+        collector = await _owned(ctx, speaker, comm)
         monkeypatch.setattr(muid, "make", lambda: "")
-        await hsm.dispatch(
+        _ = await hsm.dispatch(
             ctx,
             comm,
-            dataclasses.replace(
-                communication.RespondEvent.with_data(communication.RespondData(text="no id")),
-                id="",
-            ),
+            dataclasses.replace(communication.RespondEvent.with_data(communication.RespondData(text="no id")), id=""),
         )
         await _wait_until(lambda: bool(observed))
-        await _wait_until(lambda: any(item.name == speaking.OutputEvent.name for item in collector.events))
+        await _wait_until(lambda: bool(_spoken(collector)))
         request = observed[0]
         return request.id, request.source, request.target, hsm.id(comm)
 
@@ -272,239 +309,124 @@ def test_communication_respond_without_id_mints_unique_operation_identity(monkey
     assert target
 
 
-def test_communication_rejects_stale_speaking_terminal_from_same_endpoint() -> None:
-    async def run() -> str:
+def test_communication_rejects_speaking_terminals_for_another_response_or_recipient() -> None:
+    async def run() -> tuple[str, list[ability.FailureData], list[hsm.Event[typing.Any]]]:
         ctx = Environment()
-        release = asyncio.Event()
-        conv = _conversation()
-        speaker = speaking.Speaking(encoder=BlockingEncoder(release))
-        comm = communication.Communication(active_conversation=conv, speaking=speaker)
-
-        await start_ability_tree(ctx, speaker)
-        await start_ability_tree(ctx, comm)
-        await _wait_until(lambda: "/behavior/active" in (comm.state() or ""))
-        await hsm.dispatch(
-            ctx,
-            comm,
-            communication.RespondEvent.with_data_and_id(
-                communication.RespondData(text="current response"),
-                "current-response",
-            ),
-        )
+        speaker = _speaking(Script(stall=True))
+        comm = communication.Communication(active_conversation=_conversation(), speaking=speaker)
+        collector = await _owned(ctx, speaker, comm)
+        _ = await hsm.dispatch(ctx, comm, _respond("current response", "current-response"))
         await _wait_until(lambda: "/behavior/responding" in (comm.state() or ""))
-
-        await hsm.dispatch(
-            ctx,
-            comm,
-            dataclasses.replace(
-                speaking.OutputEvent.with_data(speaking.OutputData(text="stale response")),
-                id="stale-response",
-                source=hsm.id(speaker),
-                target=hsm.id(comm),
-            ),
+        output = speaking.OutputData(
+            text="stale", outcome="completed", voice_id="tts:warm", sample_rate_hz=RATE, channels=1
         )
-        state = comm.state() or ""
-        release.set()
-        return state
+        for id, target in (("stale-response", hsm.id(comm)), ("current-response", "wrong-recipient")):
+            _ = await hsm.dispatch(
+                ctx,
+                comm,
+                dataclasses.replace(
+                    speaking.OutputEvent.with_data(output), id=id, source=hsm.id(speaker), target=target
+                ),
+            )
+            _ = await hsm.dispatch(
+                ctx,
+                comm,
+                dataclasses.replace(
+                    ability.FailedEvent.with_data(ability.FailureData(message="spoofed failure")),
+                    id=id,
+                    source=hsm.id(speaker),
+                    target=target,
+                ),
+            )
+        return comm.state() or "", _failures(collector), _spoken(collector)
 
-    assert "/behavior/responding" in asyncio.run(run())
-
-
-def test_communication_response_timeout_recovers_after_non_returning_encoder(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    async def run() -> tuple[str, str, list[ability.FailureData]]:
-        from mosfet.abilities.communication import communication as communication_source
-        from mosfet.abilities.speaking import speaking as speaking_source
-
-        monkeypatch.setattr(speaking_source, "_ENCODING_TIMEOUT", datetime.timedelta(milliseconds=10))
-        monkeypatch.setattr(communication_source, "_RESPONSE_TIMEOUT", datetime.timedelta(milliseconds=20))
-        ctx = Environment()
-        conv = _conversation()
-        speaker = speaking.Speaking(encoder=BlockingEncoder(asyncio.Event()))
-        comm = communication.Communication(active_conversation=conv, speaking=speaker)
-        collector = TerminalCollector()
-
-        await start_ability_tree(ctx, speaker)
-        _ = await mosfet.started(ctx, collector, collector.model)
-        comm_model = comm.model
-        assert comm_model is not None
-        _ = await mosfet.started(ctx, comm, comm_model)
-        await comm.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=collector)))
-        await _wait_until(lambda: "/behavior/active" in (comm.state() or ""))
-        await hsm.dispatch(
-            ctx,
-            comm,
-            communication.RespondEvent.with_data_and_id(
-                communication.RespondData(text="This never encodes."),
-                "response-timeout",
-            ),
-        )
-        await _wait_until(lambda: "/behavior/active" in (comm.state() or ""))
-        failures = [
-            item.data
-            for item in collector.events
-            if item.name == communication.FailedEvent.name and isinstance(item.data, ability.FailureData)
-        ]
-        return comm.state() or "", speaker.state() or "", failures
-
-    communication_state, speaking_state, failures = asyncio.run(run())
-    assert communication_state.endswith("/active")
-    assert speaking_state.endswith("/idle")
-    assert len(failures) == 1
-    assert failures[0].message == "Speaking response timed out."
-
-
-def test_communication_settled_speaking_terminal_is_not_abandoned_by_responding_deadline(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A speaking hop that has already settled must take the success path when the deadline is due."""
-
-    async def run() -> tuple[str, list[bytes], list[ability.FailureData]]:
-        from mosfet.abilities.communication import communication as communication_source
-
-        monkeypatch.setattr(communication_source, "_RESPONSE_TIMEOUT", datetime.timedelta(milliseconds=50))
-        ctx = Environment()
-        conv = RecordingConversation()
-        encoder = RecordingEncoder()
-        speaker = speaking.Speaking(encoder=encoder, conversation=conv)
-        comm = communication.Communication(active_conversation=conv, speaking=speaker)
-        collector = TerminalCollector()
-
-        await start_ability_tree(ctx, speaker)
-        _ = await mosfet.started(ctx, collector, collector.model)
-        comm_model = comm.model
-        assert comm_model is not None
-        _ = await mosfet.started(ctx, comm, comm_model)
-        await comm.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=collector)))
-        await _wait_until(lambda: "/behavior/active" in (comm.state() or ""))
-        await hsm.dispatch(
-            ctx,
-            comm,
-            communication.RespondEvent.with_data_and_id(
-                communication.RespondData(text="Already spoken."),
-                "settled-response",
-            ),
-        )
-        await _wait_until(lambda: "/behavior/active" in (comm.state() or ""))
-        await asyncio.sleep(0.08)
-        failures = [
-            item.data
-            for item in collector.events
-            if item.name == communication.FailedEvent.name and isinstance(item.data, ability.FailureData)
-        ]
-        return comm.state() or "", list(encoder.calls), failures
-
-    communication_state, calls, failures = asyncio.run(run())
-    assert communication_state.endswith("/active")
-    assert calls == [b"Already spoken."]
-    assert failures == []
-
-
-def test_communication_rejects_success_terminal_with_wrong_target() -> None:
-    async def run() -> tuple[str, list[ability.FailureData]]:
-        ctx = hsm.Context()
-        conv = _conversation()
-        release = asyncio.Event()
-        speaker = speaking.Speaking(encoder=BlockingEncoder(release))
-        comm = communication.Communication(active_conversation=conv, speaking=speaker)
-        collector = TerminalCollector()
-        await start_ability_tree(ctx, speaker)
-        collector_model = collector.model
-        comm_model = comm.model
-        assert collector_model is not None
-        assert comm_model is not None
-        _ = await mosfet.started(ctx, collector, collector_model)
-        _ = await mosfet.started(ctx, comm, comm_model)
-        await comm.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=collector)))
-        await _wait_until(lambda: "/behavior/active" in (comm.state() or ""))
-        await hsm.dispatch(
-            ctx,
-            comm,
-            communication.RespondEvent.with_data_and_id(
-                communication.RespondData(text="wrong success target"),
-                "wrong-success-target",
-            ),
-        )
-        await _wait_until(lambda: "/behavior/responding" in (comm.state() or ""))
-        await hsm.dispatch(
-            ctx,
-            comm,
-            dataclasses.replace(
-                speaking.OutputEvent.with_data(speaking.OutputData(text="spoofed")),
-                id="wrong-success-target",
-                source=hsm.id(speaker),
-                target="wrong-recipient",
-            ),
-        )
-        state = comm.state() or ""
-        failures = [
-            item.data
-            for item in collector.events
-            if item.name == communication.FailedEvent.name and isinstance(item.data, ability.FailureData)
-        ]
-        release.set()
-        return state, failures
-
-    state, failures = asyncio.run(run())
+    state, failures, spoken = asyncio.run(run())
     assert "/behavior/responding" in state
     assert failures == []
+    assert spoken == []
 
 
-def test_communication_rejects_failure_terminal_with_wrong_target() -> None:
-    async def run() -> tuple[str, list[ability.FailureData]]:
-        ctx = hsm.Context()
-        conv = _conversation()
-        release = asyncio.Event()
-        speaker = speaking.Speaking(encoder=BlockingEncoder(release))
-        comm = communication.Communication(active_conversation=conv, speaking=speaker)
-        collector = TerminalCollector()
-        await start_ability_tree(ctx, speaker)
-        collector_model = collector.model
-        comm_model = comm.model
-        assert collector_model is not None
-        assert comm_model is not None
-        _ = await mosfet.started(ctx, collector, collector_model)
-        _ = await mosfet.started(ctx, comm, comm_model)
-        await comm.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=collector)))
-        await _wait_until(lambda: "/behavior/active" in (comm.state() or ""))
-        await hsm.dispatch(
-            ctx,
-            comm,
-            communication.RespondEvent.with_data_and_id(
-                communication.RespondData(text="wrong failure target"),
-                "wrong-failure-target",
-            ),
+def test_communication_gives_up_on_a_response_after_its_idle_timeout_of_silence() -> None:
+    async def run() -> tuple[str, list[tuple[str, str]], list[hsm.Event[typing.Any]], str]:
+        ctx = Environment()
+        speaker = _speaking(Script(stall=True), encode_idle_timeout=datetime.timedelta(milliseconds=200))
+        comm = communication.Communication(
+            active_conversation=_conversation(),
+            speaking=speaker,
+            response_idle_timeout=datetime.timedelta(milliseconds=30),
         )
-        await _wait_until(lambda: "/behavior/responding" in (comm.state() or ""))
-        await hsm.dispatch(
-            ctx,
-            comm,
-            dataclasses.replace(
-                ability.FailedEvent.with_data(ability.FailureData(message="spoofed failure")),
-                id="wrong-failure-target",
-                source=hsm.id(speaker),
-                target="wrong-recipient",
-            ),
-        )
+        collector = await _owned(ctx, speaker, comm)
+        _ = await hsm.dispatch(ctx, comm, _respond("This is never spoken.", "response-timeout"))
+        await _wait_until(lambda: bool(_failures(collector)))
         state = comm.state() or ""
-        failures = [
-            item.data
-            for item in collector.events
-            if item.name == communication.FailedEvent.name and isinstance(item.data, ability.FailureData)
+        # Speaking finishes on its own deadline later; that late terminal is ignored.
+        await _wait_until(lambda: (speaker.state() or "").endswith("/wired/idle"))
+        await asyncio.sleep(0.01)
+        failed = [
+            (event.id, event.data.message)
+            for event in collector.events
+            if event.name == communication.FailedEvent.name and isinstance(event.data, ability.FailureData)
         ]
-        release.set()
-        return state, failures
+        return state, failed, _spoken(collector), speaker.state() or ""
 
-    state, failures = asyncio.run(run())
-    assert "/behavior/responding" in state
+    state, failures, spoken, speaking_state = asyncio.run(run())
+    assert state.endswith("/active")
+    # The failure names the response it gave up on.
+    assert failures == [("response-timeout", "Speaking response timed out.")]
+    assert spoken == []
+    assert speaking_state.endswith("/wired/idle")
+
+
+def test_speaking_progress_keeps_a_long_response_alive_past_the_idle_timeout() -> None:
+    async def run() -> tuple[list[ability.FailureData], list[hsm.Event[typing.Any]]]:
+        ctx = Environment()
+        # Six words, 40 ms apart: a quarter second of speech against a 100 ms silence deadline.
+        speaker = _speaking(Script(pause=0.04))
+        comm = communication.Communication(
+            active_conversation=_conversation(),
+            speaking=speaker,
+            response_idle_timeout=datetime.timedelta(milliseconds=100),
+        )
+        collector = await _owned(ctx, speaker, comm)
+        _ = await hsm.dispatch(ctx, comm, _respond("one two three four five six", "long-response"))
+        await _wait_until(lambda: bool(_spoken(collector) or _failures(collector)))
+        return _failures(collector), _spoken(collector)
+
+    failures, spoken = asyncio.run(run())
     assert failures == []
+    assert [item.id for item in spoken] == ["long-response"]
+
+
+def test_a_finished_response_cannot_be_reopened_by_a_late_respond(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with metric_reader.recording(tmp_path, monkeypatch) as metrics:
+
+        async def run() -> tuple[list[str], list[hsm.Event[typing.Any]]]:
+            ctx = Environment()
+            script = Script()
+            speaker = _speaking(script)
+            comm = communication.Communication(active_conversation=_conversation(), speaking=speaker)
+            collector = await _owned(ctx, speaker, comm)
+            _ = await hsm.dispatch(ctx, comm, _respond("Said once.", "once"))
+            await _wait_until(lambda: bool(_spoken(collector)))
+            await _wait_until(lambda: "/behavior/active" in (comm.state() or ""))
+            _ = await hsm.dispatch(ctx, comm, _respond("Said once.", "once"))
+            await asyncio.sleep(0.05)
+            return script.calls, _spoken(collector)
+
+        calls, spoken = asyncio.run(run())
+        late = sum(point.value for point in metrics.points("bot.communication.response.late.count"))
+
+    assert calls == ["Said once."]
+    assert len(spoken) == 1
+    assert late == 1
 
 
 def test_communication_catalog_via_conversations_keyword() -> None:
     first = _conversation()
     second = _conversation()
-    speaker = speaking.Speaking(encoder=RecordingEncoder())
+    speaker = _speaking()
     ability = communication.Communication(
         conversations=(first, second),
         active_conversation=first,
@@ -520,7 +442,7 @@ def test_communication_activate_event_while_inactive() -> None:
         ctx = hsm.Context()
         first = _conversation()
         second = _conversation()
-        speaker = speaking.Speaking(encoder=RecordingEncoder())
+        speaker = _speaking()
         ability = communication.Communication(
             active_conversation=first,
             conversations=(first, second),
@@ -549,7 +471,7 @@ def test_communication_activate_ignored_while_engaged() -> None:
         ctx = hsm.Context()
         first = _conversation()
         second = _conversation()
-        speaker = speaking.Speaking(encoder=RecordingEncoder())
+        speaker = _speaking()
         ability = communication.Communication(active_conversation=first, speaking=speaker)
         assert ability.model is not None
         _ = await mosfet.started(ctx, ability, ability.model)
@@ -576,9 +498,9 @@ def test_communication_activate_ignored_while_engaged() -> None:
 
 def test_communication_offers_respond_but_not_input_events() -> None:
     async def run() -> tuple[str, ...]:
-        ctx = hsm.Context()
+        ctx = Environment()
         conv = _conversation()
-        speaker = speaking.Speaking(encoder=RecordingEncoder())
+        speaker = _speaking()
         comm = communication.Communication(active_conversation=conv, speaking=speaker)
         await start_ability_tree(ctx, speaker)
         await start_ability_tree(ctx, comm)
@@ -592,16 +514,16 @@ def test_communication_offers_respond_but_not_input_events() -> None:
 
 
 def test_conversation_output_does_not_automatically_speak() -> None:
-    async def run() -> list[bytes]:
-        ctx = hsm.Context()
+    async def run() -> list[str]:
+        ctx = Environment()
         conv = _conversation()
-        encoder = RecordingEncoder()
-        speaker = speaking.Speaking(encoder=encoder)
+        encoder = Script()
+        speaker = _speaking(encoder)
         comm = communication.Communication(active_conversation=conv, speaking=speaker)
         await start_ability_tree(ctx, speaker)
         await start_ability_tree(ctx, comm)
         await _wait_until(lambda: "/behavior/active" in (comm.state() or ""))
-        await hsm.dispatch(
+        _ = await hsm.dispatch(
             ctx,
             comm,
             conversation.OutputEvent.with_data(
@@ -626,11 +548,11 @@ def test_conversation_output_does_not_automatically_speak() -> None:
 
 
 def test_outbound_latest_conversation_output_is_not_forwarded() -> None:
-    async def run() -> tuple[list[hsm.Event], list[bytes]]:
-        ctx = hsm.Context()
+    async def run() -> tuple[list[hsm.Event], list[str]]:
+        ctx = Environment()
         conv = _conversation()
-        encoder = RecordingEncoder()
-        speaker = speaking.Speaking(encoder=encoder)
+        encoder = Script()
+        speaker = _speaking(encoder)
         comm = communication.Communication(active_conversation=conv, speaking=speaker)
         collector = TerminalCollector()
 
@@ -643,7 +565,7 @@ def test_outbound_latest_conversation_output_is_not_forwarded() -> None:
         _ = await mosfet.started(ctx, comm, comm_model)
         await comm.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=collector)))
         await _wait_until(lambda: "/behavior/active" in (comm.state() or ""))
-        await hsm.dispatch(
+        _ = await hsm.dispatch(
             ctx,
             comm,
             conversation.OutputEvent.with_data(

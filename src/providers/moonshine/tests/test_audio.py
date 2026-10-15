@@ -9,7 +9,6 @@ import pytest
 from mosfet.providers.moonshine._audio import (
     audio_bytes_to_float_pcm,
     float_pcm_to_int16_le,
-    float_pcm_to_wav,
 )
 
 
@@ -46,8 +45,13 @@ def test_audio_bytes_to_float_pcm_reads_raw_int16() -> None:
 
 
 def test_float_pcm_roundtrip_wav() -> None:
-    original = [0.0, 0.25, -0.25]
-    wav = float_pcm_to_wav(original, 24_000)
+    buffer = io.BytesIO()
+    with wave.open(buffer, "wb") as handle:
+        handle.setnchannels(1)
+        handle.setsampwidth(2)
+        handle.setframerate(24_000)
+        handle.writeframes(float_pcm_to_int16_le([0.0, 0.25, -0.25]))
+    wav = buffer.getvalue()
 
     samples, rate = audio_bytes_to_float_pcm(wav)
 

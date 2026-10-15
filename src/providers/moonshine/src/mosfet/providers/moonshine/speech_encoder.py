@@ -1,72 +1,74 @@
-"""Moonshine on-device text-to-speech adapter for speaking / vocal encoding."""
+"""Moonshine on-device text-to-speech as a ``vocal.speech.SpeechEncoder``."""
 
 from __future__ import annotations
 
 import asyncio
-import dataclasses
+import collections.abc
 import typing
 
-from mosfet import abilities
+from mosfet.abilities import encoding
+from mosfet.abilities.vocal import speech
 
-from ._audio import float_pcm_to_int16_le, float_pcm_to_wav
+from ._audio import float_pcm_to_int16_le
 from ._runtime import MoonshineTextToSpeech, MoonshineTextToSpeechLoader, load_text_to_speech
 
 
-class SpeechEncodingError(RuntimeError):
-    """Raised when Moonshine speech encoding fails."""
+class SpeechEncoder(speech.SpeechEncoder):
+    """Moonshine ``TextToSpeech.synthesize`` as mono s16le PCM at ``sample_rate_hz``.
 
-
-@dataclasses.dataclass(frozen=True, kw_only=True)
-class SpeechEncoder(abilities.Encoder[bytes, bytes]):
-    """``Encoder`` that converts UTF-8 text into Moonshine-synthesized audio bytes.
-
-    Uses ``TextToSpeech.synthesize`` (float PCM) and returns WAV by default so
-    Speaking / speaker paths can elevate playout without a cloud TTS key.
+    The model is not incremental and takes the whole text, so the text is read to its end (joining its pieces in
+    order is the only buffering) and said as one chunk once the model has spoken it, aligned to the whole text. Audio at
+    a rate other than the declared ``sample_rate_hz`` is refused as ``invalid_response``, because raw PCM carries
+    no header to correct it. ``voice`` selects the voice the model is loaded with; an injected ``tts`` is used as
+    is.
     """
 
-    language: str = "en-us"
-    voice: str | None = None
-    speed: float | None = None
-    audio_format: str = "wav"
-    download: bool = True
-    tts: MoonshineTextToSpeech | None = None
-    load_tts: MoonshineTextToSpeechLoader = load_text_to_speech
+    def __init__(
+        self,
+        *,
+        language: str = "en-us",
+        voice: str | None = None,
+        speed: float | None = None,
+        sample_rate_hz: int = 24_000,
+        download: bool = True,
+        tts: MoonshineTextToSpeech | None = None,
+        load_tts: MoonshineTextToSpeechLoader = load_text_to_speech,
+    ) -> None:
+        self.format: speech.Format = speech.Format(sample_rate_hz=sample_rate_hz, channels=1)
+        self._language: str = language
+        self._voice: str | None = voice
+        self._speed: float | None = speed
+        self._download: bool = download
+        self._tts: MoonshineTextToSpeech | None = tts
+        self._load_tts: MoonshineTextToSpeechLoader = load_tts
 
     @typing.override
-    async def encode(self, input: bytes) -> bytes:
-        text = input.decode("utf-8")
-        if not text.strip():
-            raise SpeechEncodingError("Moonshine speech encoding requires non-empty text.")
-        return await asyncio.to_thread(self._encode_blocking, text)
+    async def encode(self, input: collections.abc.AsyncIterable[str]) -> collections.abc.AsyncIterator[speech.Audio]:
+        said = "".join([piece async for piece in input])
+        if not said.strip():
+            raise encoding.Error("invalid_input", "Moonshine speech encoding requires non-blank text.")
+        pcm = await asyncio.to_thread(self._generate, said)
+        yield speech.Audio(pcm=pcm, text=said)
 
-    def _encode_blocking(self, text: str) -> bytes:
+    def _generate(self, text: str) -> bytes:
         try:
-            synthesizer = self.tts
-            if synthesizer is None:
-                synthesizer = self.load_tts(
-                    language=self.language,
-                    voice=self.voice,
-                    download=self.download,
-                )
-            samples, sample_rate = synthesizer.synthesize(text, speed=self.speed)
-            if not samples:
-                raise SpeechEncodingError("Moonshine did not return speech samples.")
-            if sample_rate < 1:
-                raise SpeechEncodingError("Moonshine returned an invalid sample rate.")
-            if self.audio_format == "wav":
-                return float_pcm_to_wav(samples, sample_rate)
-            if self.audio_format == "pcm":
-                return float_pcm_to_int16_le(samples)
-            message = f"Unsupported Moonshine audio_format {self.audio_format!r}; use 'wav' or 'pcm'."
-            raise SpeechEncodingError(message)
-        except SpeechEncodingError:
-            raise
+            tts = self._tts
+            if tts is None:
+                tts = self._load_tts(language=self._language, voice=self._voice, download=self._download)
+            samples, sample_rate = tts.synthesize(text, speed=self._speed)
         except Exception as error:
-            message = "Moonshine speech encoding failed."
-            raise SpeechEncodingError(message) from error
+            raise encoding.Error("encode_failed", "Moonshine speech encoding failed.") from error
+        if not samples:
+            raise encoding.Error("invalid_response", "Moonshine did not return speech samples.")
+        if sample_rate != self.format.sample_rate_hz:
+            raise encoding.Error(
+                "invalid_response",
+                (
+                    f"Moonshine returned {sample_rate} Hz audio; this encoder declares "
+                    + f"{self.format.sample_rate_hz} Hz. Configure sample_rate_hz={sample_rate}."
+                ),
+            )
+        return float_pcm_to_int16_le(samples)
 
 
-__all__ = [
-    "SpeechEncoder",
-    "SpeechEncodingError",
-]
+__all__ = ["SpeechEncoder"]

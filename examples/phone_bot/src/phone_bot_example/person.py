@@ -24,14 +24,16 @@ import subprocess
 import tempfile
 import typing
 import uuid
+import wave
 
 import hsm
 import mosfet
 
-from mosfet import abilities
 from mosfet import lifecycle
 from mosfet.abilities import ability
+from mosfet.abilities import encoding
 from mosfet.abilities import speaking
+from mosfet.abilities import vocal
 from mosfet.devices import audio
 from mosfet.environment import Environment, space
 from mosfet.protocols import attachment
@@ -42,30 +44,24 @@ _LOG = logging.getLogger("phone_bot_example.hsm")
 VOICE_SAMPLE_RATE_HZ = 16_000
 """Rate the synthesized utterance is rendered at. 16 kHz is what speech models want."""
 
-VOICE_CHANNELS = 1
-
-VOICE_MEDIA_TYPE = "audio/wav"
-"""``say`` renders a container, and Listening's PCM wrapper passes a real WAV straight through."""
-
 
 def require_local_speech_tools() -> None:
-    """Fail early, and by name, when the local synthesizer is not on this machine."""
+    """Fail early, and by name, when the local encoder is not on this machine."""
 
     missing = [name for name in ("say", "afconvert") if shutil.which(name) is None]
     if missing:
         raise RuntimeError(
             f"Speaking to a bot needs the macOS speech tools ({', '.join(missing)} not found). "
-            "Run on macOS, or inject another Encoder[bytes, bytes] into Person."
+            "Run on macOS, or inject another vocal.speech.SpeechEncoder into Person."
         )
 
 
 def _run_quietly(command: list[str]) -> None:
-    """Run a synthesizer command, raising a failure that cannot repeat what was said.
+    """Run an encoder command, raising a failure that cannot repeat what was said.
 
     ``check=False`` on purpose. ``check=True`` builds a ``CalledProcessError`` holding the whole
-    argv, and for ``say`` the argv *is* the operator's sentence — which then travels, because
-    ``Speaking`` wraps any exception as ``FailureData(message=str(error))`` and the owner logs
-    it. Catching and re-raising is not enough either: the original would survive on
+    argv, and for ``say`` the argv *is* the operator's sentence — which then travels with the
+    encoding error and into whatever logs it. Catching and re-raising is not enough either: the original would survive on
     ``__context__``. Never constructing it is the only version with nothing left to leak. The
     command name and its exit status are the whole diagnostic anyone needs.
     """
@@ -75,35 +71,45 @@ def _run_quietly(command: list[str]) -> None:
         raise RuntimeError(f"{command[0]} failed with exit status {completed.returncode}")
 
 
-class SayEncoder(abilities.Encoder[bytes, bytes]):
-    """Local text-to-speech: macOS ``say`` rendered to 16-bit mono WAV bytes.
+class SayEncoder(vocal.speech.SpeechEncoder):
+    """Local text-to-speech: macOS ``say`` rendered to 16-bit mono PCM, one chunk per utterance.
 
     On-device and free, which is the whole requirement for a person talking in a room — the
-    words never leave the machine. Any other ``Encoder[bytes, bytes]`` drops in unchanged; the
+    words never leave the machine. ``say`` is not incremental, so the text is read to its end and said as
+    one chunk, aligned to the whole text. Any other ``vocal.speech.SpeechEncoder`` drops in unchanged; the
     Moonshine ``SpeechEncoder`` in ``src/providers/moonshine`` is the same contract.
     """
 
     def __init__(self, *, voice: str | None = None, sample_rate_hz: int = VOICE_SAMPLE_RATE_HZ) -> None:
+        self.format = vocal.speech.Format(sample_rate_hz=sample_rate_hz, channels=1)
         self.voice = voice
-        self.sample_rate_hz = sample_rate_hz
 
     @typing.override
-    async def encode(self, input: bytes) -> bytes:
-        text = input.decode("utf-8").strip()
-        if not text:
-            raise ValueError("Saying something out loud needs something to say.")
-        return await asyncio.to_thread(self._render, text)
+    async def encode(
+        self, input: collections.abc.AsyncIterable[str]
+    ) -> collections.abc.AsyncIterator[vocal.speech.Audio]:
+        said = "".join([piece async for piece in input])
+        if not said.strip():
+            raise encoding.Error("invalid_input", "Saying something out loud needs something to say.")
+        try:
+            pcm = await asyncio.to_thread(self._render, said.strip(), self.voice)
+        except RuntimeError as error:
+            # The message names the command and its exit status, never the words (see _run_quietly).
+            raise encoding.Error("encode_failed", str(error)) from None
+        yield vocal.speech.Audio(pcm=pcm, text=said)
 
-    def _render(self, text: str) -> bytes:
+    def _render(self, text: str, voice: str | None) -> bytes:
         require_local_speech_tools()
         with tempfile.TemporaryDirectory(prefix="phone-bot-said-") as directory:
             aiff = pathlib.Path(directory) / "utterance.aiff"
             wav = pathlib.Path(directory) / "utterance.wav"
             # Argument list, never a shell: the operator's own prose is the input here.
-            say = ["say", "-o", str(aiff), *(() if self.voice is None else ("-v", self.voice)), text]
+            say = ["say", "-o", str(aiff), *(() if voice is None else ("-v", voice)), text]
             _run_quietly(say)
-            _run_quietly(["afconvert", "-f", "WAVE", "-d", f"LEI16@{self.sample_rate_hz}", str(aiff), str(wav)])
-            return wav.read_bytes()
+            rate = self.format.sample_rate_hz
+            _run_quietly(["afconvert", "-f", "WAVE", "-d", f"LEI16@{rate}", str(aiff), str(wav)])
+            with wave.open(str(wav), "rb") as rendered:
+                return rendered.readframes(rendered.getnframes())
 
 
 class Person(hsm.Instance):
@@ -129,12 +135,9 @@ class Person(hsm.Instance):
     def __init__(
         self,
         *,
-        encoder: abilities.Encoder[bytes, bytes],
+        encoder: vocal.speech.SpeechEncoder,
         position: space.Position,
         amplitude_db: float,
-        sample_rate_hz: int = VOICE_SAMPLE_RATE_HZ,
-        channels: int = VOICE_CHANNELS,
-        media_type: str = VOICE_MEDIA_TYPE,
     ) -> None:
         super().__init__()
         # No threshold on the mouth: a mouth does not listen. The placement is here so the
@@ -143,9 +146,7 @@ class Person(hsm.Instance):
         self._voice = speaking.Speaking(
             encoder=encoder,
             speaker=self._mouth,
-            sample_rate_hz=sample_rate_hz,
-            channels=channels,
-            media_type=media_type,
+            voice_id="person:say",
         )
         self._arrived = None
         self._arriving_id = None
@@ -178,9 +179,22 @@ class Person(hsm.Instance):
         del ctx, instance
         data = event.data
         message = data.message if isinstance(data, ability.FailureData) else "unknown"
-        # Never silent: an utterance that failed to synthesize is a person who opened their mouth
-        # and made no sound, which looks exactly like a bot that did not hear them.
+        # Never silent: an utterance that failed is a person who opened their mouth and made no
+        # sound, which looks exactly like a bot that did not hear them.
         _LOG.warning("person utterance failed reason=%s", message)
+
+    @staticmethod
+    def _is_unfinished_utterance(ctx: hsm.Context, instance: "Person", event: hsm.Event[typing.Any]) -> bool:
+        del ctx, instance
+        return isinstance(event.data, speaking.OutputData) and event.data.outcome != "completed"
+
+    @staticmethod
+    def _log_unfinished_utterance(ctx: hsm.Context, instance: "Person", event: hsm.Event[typing.Any]) -> None:
+        del ctx, instance
+        data = event.data
+        assert isinstance(data, speaking.OutputData)
+        # The outcome only, never the words: what went unsaid is the operator's sentence.
+        _LOG.warning("person utterance %s", data.outcome)
 
     model: typing.ClassVar[hsm.Model] = mosfet.define(
         "Person",
@@ -205,6 +219,11 @@ class Person(hsm.Instance):
             hsm.transition(
                 hsm.on(speaking.Speaking.failed_event),
                 hsm.effect(_log_utterance_failure),
+            ),
+            hsm.transition(
+                hsm.on(speaking.OutputEvent),
+                hsm.guard(_is_unfinished_utterance),
+                hsm.effect(_log_unfinished_utterance),
             ),
         ),
         hsm.state("voiceless"),
@@ -269,8 +288,6 @@ class Person(hsm.Instance):
 __all__ = [
     "Person",
     "SayEncoder",
-    "VOICE_CHANNELS",
-    "VOICE_MEDIA_TYPE",
     "VOICE_SAMPLE_RATE_HZ",
     "require_local_speech_tools",
 ]

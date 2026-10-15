@@ -1,6 +1,8 @@
+from . import enrollment
 from . import interpretation
 from . import listening
 from . import sensitivity
+from .enrollment import EnrollData, EnrollEvent
 from .interpretation import (
     Interpretation,
     ListeningFailedEvent,
@@ -13,6 +15,8 @@ from .listening import Listening
 from .sensitivity import Sensitivity
 
 __all__ = [
+    "EnrollData",
+    "EnrollEvent",
     "ListeningFailedEvent",
     "Interpretation",
     "Listening",
@@ -21,6 +25,7 @@ __all__ = [
     "Sensitivity",
     "SpeechData",
     "SpeechEvent",
+    "enrollment",
     "interpretation",
     "listening",
     "sensitivity",

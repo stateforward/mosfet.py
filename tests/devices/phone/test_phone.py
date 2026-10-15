@@ -16,7 +16,7 @@ from opentelemetry import _logs, trace
 import mosfet
 import mosfet.lifecycle
 import mosfet.telemetry
-from mosfet.abilities import encoding
+from mosfet.abilities import vocal
 from mosfet.abilities import processing
 from mosfet.abilities import speaking
 import mosfet.devices.phone as phone_contracts
@@ -2466,12 +2466,19 @@ def test_the_robots_own_voice_goes_up_the_wire(monkeypatch: pytest.MonkeyPatch) 
     assert asyncio.run(run()) == 1
 
 
-class _Utterance(encoding.Encoder[bytes, bytes]):
+class _Utterance(vocal.speech.SpeechEncoder):
     """A vocal tract: words in, sound out. Local, so the chain can be checked without a network."""
 
+    def __init__(self) -> None:
+        self.format = vocal.speech.Format(sample_rate_hz=16_000, channels=1)
+
     @typing.override
-    async def encode(self, input: bytes) -> bytes:
-        return b"spoken:" + input
+    async def encode(
+        self, input: collections.abc.AsyncIterable[str]
+    ) -> collections.abc.AsyncIterator[vocal.speech.Audio]:
+        said = "".join([piece async for piece in input])
+        spoken = b"spoken:" + said.encode()
+        yield vocal.speech.Audio(pcm=spoken + b"\x00" * (len(spoken) % 2), text=said)
 
 
 def test_a_bot_that_speaks_is_heard_by_its_own_mouthpiece_and_goes_up_the_wire(
@@ -2479,7 +2486,7 @@ def test_a_bot_that_speaks_is_heard_by_its_own_mouthpiece_and_goes_up_the_wire(
 ) -> None:
     """The product claim, end to end: a bot decides to say something and the far end can hear it.
 
-    Everything between the decision and the wire is the real thing — ``Speaking`` synthesizes and
+    Everything between the decision and the wire is the real thing — ``Speaking`` encodes and
     hands the signal to the mouth it was built with, the mouth transduces into the environment,
     the environment works out that a 60 dB voice 0 cm from a close-talk mouthpiece clears its
     70 dB threshold, and the mouthpiece carries the capture to the firmware holding it. Sibling
@@ -2494,13 +2501,7 @@ def test_a_bot_that_speaks_is_heard_by_its_own_mouthpiece_and_goes_up_the_wire(
         phone, mouth, _ = await _handset_on_a_call(environment)
         assert phone_microphone(phone) is not None
 
-        voice = speaking.Speaking(
-            encoder=_Utterance(),
-            speaker=mouth,
-            sample_rate_hz=16_000,
-            channels=1,
-            media_type="audio/pcm",
-        )
+        voice = speaking.Speaking(encoder=_Utterance(), speaker=mouth, voice_id="tts:alice")
         await start_ability_tree(environment, voice)
         _ = await voice.apply(speaking.InputData(text="Hello, this is Alice."), ctx=environment)
 

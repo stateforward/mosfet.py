@@ -1,13 +1,15 @@
-"""Bot output ability: speak text through TTS encoding into ``environment.sound``."""
+"""Bot output ability: say text in the bot's own voice through the mouth it is wired to."""
 
 from .speaking import (
     EfferenceData,
     EfferenceEvent,
     InputData,
     InputEvent,
-    link_listening,
+    Outcome,
     OutputData,
     OutputEvent,
+    ProgressData,
+    ProgressEvent,
     Speaking,
 )
 
@@ -16,8 +18,10 @@ __all__ = [
     "EfferenceEvent",
     "InputData",
     "InputEvent",
-    "link_listening",
+    "Outcome",
     "OutputData",
     "OutputEvent",
+    "ProgressData",
+    "ProgressEvent",
     "Speaking",
 ]

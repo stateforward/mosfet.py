@@ -9,12 +9,15 @@ import hsm
 import mosfet
 import pydantic
 
-from mosfet import abilities
 from mosfet import address
 from mosfet import lifecycle
 from mosfet import telemetry
 from mosfet.event import validate_event_data
 from mosfet.protocols import attachment
+
+if typing.TYPE_CHECKING:
+    # Annotation-only: abilities (Speaking) import devices, so a runtime import here would be a cycle.
+    from mosfet import abilities
 
 from mosfet.device.events import (
     FirmwareInitializingFailedEvent,
@@ -103,7 +106,7 @@ class Device(Traced, attachment.Attachment):
     """Component prefix for this device's ingress span and holder captures; one constant per subclass."""
     _attachment_limit: typing.ClassVar[int | None] = None
     _firmware_initializing_timeout: typing.ClassVar[datetime.timedelta] = _DEFAULT_FIRMWARE_INITIALIZING_TIMEOUT
-    required_bot_abilities: typing.ClassVar[tuple[type[abilities.Ability[typing.Any, typing.Any]], ...]] = ()
+    required_bot_abilities: typing.ClassVar[tuple[type["abilities.Ability[typing.Any, typing.Any]"], ...]] = ()
     _peripherals: tuple["Device", ...]
     _placement: space.Placement | None
     _firmware: hsm.Instance | None
@@ -113,7 +116,7 @@ class Device(Traced, attachment.Attachment):
 
     def __init_subclass__(
         cls,
-        required_bot_abilities: tuple[type[abilities.Ability[typing.Any, typing.Any]], ...] = (),
+        required_bot_abilities: tuple[type["abilities.Ability[typing.Any, typing.Any]"], ...] = (),
         **kwargs: object,
     ) -> None:
         super().__init_subclass__(**kwargs)

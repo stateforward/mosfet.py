@@ -93,7 +93,7 @@ def wav_sound(
     channels: int = 1,
     received_level_db: float | None = None,
 ) -> SoundData:
-    """Ambient person speech as phone_bot Person/SayEncoder emits it: RIFF/WAVE container."""
+    """Ambient speech that arrives in a RIFF/WAVE container rather than as raw PCM."""
 
     buffer = io.BytesIO()
     with wave.open(buffer, "wb") as stream:
@@ -547,7 +547,7 @@ def test_listening_identifies_first_vad_segment_and_carries_id_through_window() 
 
 
 def test_listening_identifies_ambient_wav_sound_without_speech_decoder() -> None:
-    """Person/SayEncoder ambient speech is audio/wav; identity still labels SpeechData."""
+    """Ambient speech in audio/wav still has its voice identified on SpeechData."""
 
     pcm_voice = b"\x01\x00" * 240
     pcm_silence = b"\x00\x00" * 240

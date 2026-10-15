@@ -78,18 +78,22 @@ the same against any image-capable generator.
 Current docs use `client.interactions.create` (not the legacy generateContent-only speech path):
 
 ```python
-from bot.providers.gemini import ChatClient, SpeechDecoder, SpeechEncoder
+from mosfet.abilities import vocal
+from mosfet.providers.gemini import ChatClient, SpeechDecoder, SpeechEncoder
 
 client = ChatClient(api_key="your-gemini-api-key")
 
 # TTS — gemini-3.1-flash-tts-preview
 # interactions.create(model=..., input=text, response_format={"type":"audio"},
 #                     generation_config={"speech_config":[{"voice":"Kore"}]})
-audio = await SpeechEncoder(client=client, voice_name="Kore").encode(b"Hello.")
+text = vocal.speech.Text()
+text.write("Hello.")
+text.close()
+pcm = b"".join([chunk.pcm async for chunk in SpeechEncoder(client=client, voice_name="Kore").encode(text)])
 
 # STT — gemini-3.5-flash multimodal audio understanding
 # interactions.create(model=..., input=[{"type":"text",...},{"type":"audio",...}])
-transcript = await SpeechDecoder(client=client, mime_type="audio/wav").decode(audio)
+transcript = await SpeechDecoder(client=client, mime_type="audio/wav").decode(wav_bytes)
 ```
 
 | Component | Default model | API |
@@ -98,8 +102,12 @@ transcript = await SpeechDecoder(client=client, mime_type="audio/wav").decode(au
 | `SpeechEncoder` (TTS) | `gemini-3.1-flash-tts-preview` | `interactions.create` |
 | `SpeechDecoder` (STT) | `gemini-3.5-flash` | `interactions.create` |
 
-`SpeechEncoder` returns raw PCM (24 kHz mono) by default; set `output_format="wav"` for a WAV container.
-Interactions are created with `store=False` so encode/decode calls do not retain server-side state.
+`SpeechEncoder` is a `vocal.speech.SpeechEncoder`. The model takes the whole text, so it reads the text to its end
+(joining its pieces in order is its only buffering) and yields one chunk of raw mono s16le PCM at
+`sample_rate_hz` (24 kHz by default) whose aligned `text` is the whole text (whole-text alignment: nothing is
+said until that chunk plays). It refuses audio the API reports at another rate (`invalid_response`),
+because raw PCM has no header to carry the difference. Interactions are created with `store=False` so
+encoding and decode calls do not retain server-side state.
 
 Credentials resolve from, in order: `api_key=`, `GEMINI_API_KEY`, or `GOOGLE_API_KEY`.
 Vertex AI: `ChatClient(vertexai=True, project=..., location=...)`.

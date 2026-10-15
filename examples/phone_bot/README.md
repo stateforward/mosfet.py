@@ -108,7 +108,7 @@ decided, and that is a legitimate outcome. Answering, declining, dialing, and ha
 the bot's decisions — nothing in the wiring makes them.
 
 Requires macOS (`say` and `afconvert`); the readiness summary warns by name if they are missing.
-Any other `Encoder[bytes, bytes]` drops in — the Moonshine `SpeechEncoder` in
+Any other `vocal.speech.SpeechEncoder` drops in — the Moonshine `SpeechEncoder` in
 `src/providers/moonshine` is the same contract.
 
 ## What “connected” means

@@ -5,8 +5,8 @@ description = "ElevenLabs speech provider package for stateforward.mosfet."
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
-  "elevenlabs>=2.49.0,<3.0.0",
   "stateforward.mosfet",
+  "websockets>=16.0,<17",
 ]
 
 [dependency-groups]
@@ -31,6 +31,9 @@ stateforward-mosfet = { workspace = true }
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# test_speech_encoder imports the shared root `tests` package (the speech encoder contract helper),
+# so the repo root has to be importable from this rootdir.
+pythonpath = ["../../.."]
 
 [tool.ruff]
 line-length = 120

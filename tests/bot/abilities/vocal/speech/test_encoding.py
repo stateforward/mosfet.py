@@ -1,149 +1,141 @@
-from mosfet import abilities
+"""The streaming speech encoding contract: Format, Audio, Text and SpeechEncoder."""
+
+from mosfet.abilities import encoding
 from mosfet.abilities.vocal import speech
 
 import asyncio
 import collections.abc
 import typing
-from typing import override
 
-import hsm
+import pydantic
 import pytest
 
-from tests.bot.abilities.support import dispatch_ability_for_test, start_abilities_for_test
-from tests.type_helpers import invalid_value
+from tests.bot.abilities.vocal.speech import contract
 
 
-class FixedSpeechEncoder(abilities.Encoder[bytes, bytes]):
-    @override
-    async def encode(self, input: bytes) -> bytes:
-        return b"encoded:" + input
+def test_format_is_linear_pcm_with_a_rate_and_one_or_two_channels() -> None:
+    pcm = speech.Format(sample_rate_hz=24_000, channels=1)
+
+    assert pcm.sample_rate_hz == 24_000
+    assert pcm.channels == 1
+    with pytest.raises(pydantic.ValidationError):
+        _ = speech.Format(sample_rate_hz=4_000, channels=1)
+    with pytest.raises(pydantic.ValidationError):
+        _ = speech.Format(sample_rate_hz=24_000, channels=3)
+    with pytest.raises(pydantic.ValidationError):
+        _ = speech.Format.model_validate({"sample_rate_hz": 24_000, "channels": 1, "media_type": "audio/mp3"})
 
 
-class WrongSpeechEncoder(abilities.Encoder[bytes, bytes]):
-    @override
-    async def encode(self, input: bytes) -> bytes:
-        del input
-        return invalid_value(bytes, "not speech bytes")
+def test_format_measures_whole_frames_of_s16le() -> None:
+    stereo = speech.Format(sample_rate_hz=8_000, channels=2)
+
+    assert stereo.seconds(32_000) == 1.0
+    assert stereo.seconds(6) == 1 / 8_000
 
 
-class FailingSpeechEncoder(abilities.Encoder[bytes, bytes]):
-    @override
-    async def encode(self, input: bytes) -> bytes:
-        del input
-        raise RuntimeError("encoder unavailable")
+class _Words(speech.SpeechEncoder):
+    """Reads the text to its end, then says it one word per chunk, each chunk aligned to its word."""
+
+    def __init__(self) -> None:
+        self.format: speech.Format = speech.Format(sample_rate_hz=8_000, channels=1)
+        self.closed: bool = False
+
+    @typing.override
+    async def encode(self, input: collections.abc.AsyncIterable[str]) -> collections.abc.AsyncIterator[speech.Audio]:
+        try:
+            whole = "".join([piece async for piece in input])
+            if not whole.strip():
+                raise encoding.Error("invalid_input", "blank text")
+            for word in whole.split(" "):
+                yield speech.Audio(pcm=b"\x00\x00", text=word if word == whole.split(" ")[-1] else word + " ")
+        finally:
+            self.closed = True
 
 
-class RecordingSpeechEncoding(speech.SpeechEncoding):
-    outputs: list[bytes]
-    failures: list[abilities.FailureData]
+def test_a_speech_encoder_is_a_stream_encoder_of_text_to_aligned_audio() -> None:
+    assert issubclass(speech.SpeechEncoder, encoding.StreamEncoder)
+    assert speech.SpeechEncoder.__abstractmethods__ == frozenset({"encode"})
 
-    def __init__(self, *, encoder: abilities.Encoder[bytes, bytes]) -> None:
-        super().__init__(encoder=encoder)
-        self.outputs = []
-        self.failures = []
+    async def run() -> tuple[speech.Audio, bool]:
+        encoder = _Words()
+        text = speech.Text()
+        text.write("one two three")
+        text.close()
+        stream = encoder.encode(text)
+        first = await anext(stream)
+        assert isinstance(stream, collections.abc.AsyncGenerator)
+        await stream.aclose()
+        return first, encoder.closed
 
-    @override
-    def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[bool]:
-        if event.name == self.output_event.name:
-            output = event.data
-            assert isinstance(output, bytes)
-            self.outputs.append(output)
-        if event.name == self.failed_event.name:
-            failure = event.data
-            assert isinstance(failure, abilities.FailureData)
-            self.failures.append(failure)
-        return super().dispatch(ctx, event)
+    first, closed = asyncio.run(run())
 
-
-async def wait_until(condition: collections.abc.Callable[[], bool]) -> None:
-    for _ in range(100):
-        if condition():
-            return
-        await asyncio.sleep(0.001)
+    assert first == speech.Audio(pcm=b"\x00\x00", text="one ")
+    assert closed
 
 
-def require_model(model: hsm.Model | None) -> hsm.Model:
-    assert model is not None
-    return model
+def test_the_provider_contract_holds_for_an_aligned_speech_encoder() -> None:
+    chunks = asyncio.run(contract.assert_speech_encoder(_Words(), ["one t", "wo three"]))
+
+    assert [chunk.text for chunk in chunks] == ["one ", "two ", "three"]
 
 
-async def start_ability_tree(ctx: hsm.Context | None, ability: abilities.Ability[typing.Any, typing.Any]) -> None:
-    await start_abilities_for_test(hsm.Context() if ctx is None else ctx, ability)
+def test_audio_is_whole_frames_with_the_text_it_finishes_saying() -> None:
+    assert speech.Audio(pcm=b"\x01\x00", text="").text == ""
+    with pytest.raises(pydantic.ValidationError):
+        _ = speech.Audio(pcm=b"", text="Hi")
+    with pytest.raises(pydantic.ValidationError):
+        _ = speech.Audio.model_validate({"pcm": b"\x01\x00"})
+    with pytest.raises(pydantic.ValidationError):
+        _ = speech.Audio.model_validate({"pcm": b"\x01\x00", "text": "Hi", "seconds": 1.0})
 
 
-def test_speech_encoding_uses_injected_encoder() -> None:
-    async def run() -> tuple[str, list[bytes]]:
-        ability = RecordingSpeechEncoding(encoder=FixedSpeechEncoder())
-        await start_ability_tree(None, ability)
+def test_text_is_an_append_only_pipe_that_ends_once_closed() -> None:
+    async def run() -> tuple[list[str], str]:
+        text = speech.Text()
+        text.write("Sure. ")
+        read: list[str] = []
 
-        _ = await ability.apply(b"speech")
-        await wait_until(lambda: bool(ability.outputs))
-        return ability.state(), ability.outputs
+        async def reader() -> None:
+            async for piece in text:
+                read.append(piece)
 
-    active_state, outputs = asyncio.run(run())
+        task = asyncio.ensure_future(reader())
+        await asyncio.sleep(0)
+        text.write("")
+        text.write("I can help")
+        await asyncio.sleep(0)
+        text.close()
+        text.close()
+        await task
+        return read, text.written
 
-    assert active_state == "/RecordingSpeechEncodingLifecycle/attached/behavior/idle"
-    assert outputs == [b"encoded:speech"]
+    read, written = asyncio.run(run())
 
-
-def test_speech_encoding_rejects_input_event_with_wrong_payload_type() -> None:
-    async def run() -> tuple[str, list[bytes], list[abilities.FailureData]]:
-        ability = RecordingSpeechEncoding(encoder=FixedSpeechEncoder())
-        await start_ability_tree(None, ability)
-
-        await hsm.dispatch(
-            None,
-            ability,
-            ability.input_event.with_data("not speech bytes"),
-        )
-        return ability.state(), ability.outputs, ability.failures
-
-    active_state, outputs, failures = asyncio.run(run())
-
-    assert active_state == "/RecordingSpeechEncodingLifecycle/attached/behavior/idle"
-    assert outputs == []
-    assert failures == []
+    assert read == ["Sure. ", "I can help"]
+    assert written == "Sure. I can help"
 
 
-def test_speech_encoding_routes_wrong_output_type_to_failure() -> None:
-    async def run() -> tuple[str, list[bytes], list[abilities.FailureData]]:
-        ability = RecordingSpeechEncoding(encoder=WrongSpeechEncoder())
-        await start_ability_tree(None, ability)
+def test_text_has_no_length_bound_and_refuses_writes_after_it_is_final() -> None:
+    """W3-20: a long reply is said in full; the pipe never caps the text."""
 
-        with pytest.raises(RuntimeError, match="output schema"):
-            _ = await dispatch_ability_for_test(ability, hsm.Context(), b"speech")
-        await wait_until(lambda: bool(ability.failures))
-        return ability.state(), ability.outputs, ability.failures
+    async def run() -> str:
+        return "".join([piece async for piece in text])
 
-    active_state, outputs, failures = asyncio.run(run())
-
-    assert active_state == "/RecordingSpeechEncodingLifecycle/attached/behavior/idle"
-    assert outputs == []
-    assert len(failures) == 1
-    assert "output schema" in failures[0].message
-
-
-def test_speech_encoding_routes_encoder_exception_to_failure() -> None:
-    async def run() -> tuple[str, list[bytes], list[abilities.FailureData]]:
-        ability = RecordingSpeechEncoding(encoder=FailingSpeechEncoder())
-        await start_ability_tree(None, ability)
-
-        with pytest.raises(RuntimeError, match="encoder unavailable"):
-            _ = await dispatch_ability_for_test(ability, hsm.Context(), b"speech")
-        await wait_until(lambda: bool(ability.failures))
-        return ability.state(), ability.outputs, ability.failures
-
-    active_state, outputs, failures = asyncio.run(run())
-
-    assert active_state == "/RecordingSpeechEncodingLifecycle/attached/behavior/idle"
-    assert outputs == []
-    assert len(failures) == 1
-    assert failures[0].message == "encoder unavailable"
+    reply = "x" * 100 * 1024
+    text = speech.Text()
+    text.write(reply)
+    text.write("y" * 500)
+    assert text.written == reply + "y" * 500
+    text.close()
+    with pytest.raises(ValueError, match="final"):
+        text.write("z")
+    assert asyncio.run(run()) == reply + "y" * 500
 
 
-def test_speech_encoding_is_concrete_ability() -> None:
-    ability = speech.SpeechEncoding(encoder=FixedSpeechEncoder())
+def test_core_has_no_text_segmentation_and_exports_only_the_encoder_contract() -> None:
+    """W3-14: the text goes to the TTS model; core never cuts it. W3-21: the TTS model is a speech encoder."""
 
-    assert isinstance(ability, abilities.Ability)
-    assert speech.SpeechEncoding.input_data_type is bytes
-    assert speech.SpeechEncoding.output_data_type is bytes
+    assert not hasattr(speech, "segment")
+    assert not hasattr(speech.encoding, "segment")
+    assert sorted(speech.__all__) == ["Audio", "Format", "SpeechEncoder", "Text", "encoding"]
+    assert sorted(speech.encoding.__all__) == ["Audio", "Format", "SpeechEncoder", "Text"]

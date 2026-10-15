@@ -4,10 +4,12 @@ from mosfet import behavior as behavior_events
 from mosfet.abilities import cognition
 from mosfet.abilities import memory
 from mosfet.abilities import processing
+from mosfet.abilities import vocal
 from mosfet.abilities.cognition import cognition as cognition_module
 from mosfet.abilities.language import text
 from mosfet.abilities.cognition import reflection as reflection_module
 from mosfet.behavior import instance as behavior_instance
+from mosfet.devices import audio
 from mosfet.protocols import attachment
 
 import asyncio
@@ -44,10 +46,14 @@ def _revision_host_timeout(*, validation_passes: int) -> float:
     return validation_passes * _STARLARK_VALIDATION_TIMEOUT_SECONDS + _REVISION_PIPELINE_OVERHEAD_SECONDS
 
 
-class _NoopSpeechEncoder(abilities.Encoder[bytes, bytes]):
-    async def encode(self, input: bytes) -> bytes:
-        del input
-        return b"test-audio"
+class _NoopSpeechEncoder(vocal.speech.SpeechEncoder):
+    def __init__(self) -> None:
+        self.format = vocal.speech.Format(sample_rate_hz=16_000, channels=1)
+
+    async def encode(
+        self, input: collections.abc.AsyncIterable[str]
+    ) -> collections.abc.AsyncIterator[vocal.speech.Audio]:
+        yield vocal.speech.Audio(pcm=b"\x00\x00", text="".join([piece async for piece in input]))
 
 
 def test_cognition_never_uses_metadata_for_coordination() -> None:
@@ -3465,7 +3471,12 @@ def test_autonomy_native_seed_preserves_acoustic_speech_for_conversation() -> No
         )
         communication_actor = communication.Communication(
             active_conversation=conversation_actor,
-            speaking=abilities.Speaking(encoder=_NoopSpeechEncoder(), conversation=conversation_actor),
+            speaking=abilities.Speaking(
+                encoder=_NoopSpeechEncoder(),
+                speaker=audio.Speaker(),
+                voice_id="tts:test",
+                conversation=(conversation_actor,),
+            ),
         )
         assert conversation_actor.model is not None
         assert communication_actor.model is not None

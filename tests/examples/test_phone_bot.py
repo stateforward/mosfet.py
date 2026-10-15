@@ -204,7 +204,7 @@ import typing
 
 import hsm
 import mosfet
-from mosfet import abilities
+from mosfet.abilities import vocal
 from mosfet.environment import Environment, SoundData, SoundEvent, space
 from phone_bot_example import person
 
@@ -228,15 +228,19 @@ class Ear(hsm.Instance):
     )
 
 
-class WordsAsAudio(abilities.Encoder):
+class WordsAsAudio(vocal.speech.SpeechEncoder):
     """A vocal tract with no macOS in it, so this runs anywhere the example imports.
 
-    The real one is ``person.SayEncoder``; this is the same contract with the synthesizer taken
+    The real one is ``person.SayEncoder``; this is the same contract with the encoding taken
     out, so the audio stays traceable back to the words through every stage.
     """
 
-    async def encode(self, input: bytes) -> bytes:
-        return b"spoken:" + input
+    def __init__(self) -> None:
+        self.format = vocal.speech.Format(sample_rate_hz=16000, channels=1)
+
+    async def encode(self, input):
+        said = "".join([piece async for piece in input])
+        yield vocal.speech.Audio(pcm=b"spoken:" + said.encode(), text=said)
 
 
 async def main() -> None:
@@ -276,32 +280,38 @@ asyncio.run(main())
     assert _run_phone_bot_python(code) == "\n".join(
         [
             "1 0",
-            "spoken:Call Bob at 555-0142. 60.0 audio/wav 16000",
+            "spoken:Call Bob at 555-0142. 60.0 audio/pcm 16000",
         ]
     )
 
 
 @pytest.mark.skipif(
     shutil.which("say") is None or shutil.which("afconvert") is None,
-    reason="the local synthesizer for talking to a bot is macOS say/afconvert",
+    reason="the local encoder for talking to a bot is macOS say/afconvert",
 )
 def test_the_words_somebody_types_are_synthesized_on_this_machine() -> None:
     """The operator's line becomes real audio locally: no key, no network, no provider.
 
-    Only that it is audio is asserted. What it sounds like is the synthesizer's business, and
+    Only that it is audio is asserted. What it sounds like is the encoder's business, and
     what it means is nobody's business on this side of the microphone.
     """
 
     code = "\n".join(
         [
             "import asyncio",
+            "from mosfet.abilities import vocal",
             "from phone_bot_example import person",
-            "audio = asyncio.run(person.SayEncoder().encode(b'Call Bob at phone bot bob.'))",
-            "print(audio[:4].decode(), audio[8:12].decode(), len(audio) > 1000)",
+            "async def said():",
+            "    text = vocal.speech.Text()",
+            "    text.write('Call Bob at phone bot bob.')",
+            "    text.close()",
+            "    return [chunk async for chunk in person.SayEncoder().encode(text)]",
+            "chunks = asyncio.run(said())",
+            "print(len(chunks), len(chunks[0].pcm) > 1000, len(chunks[0].pcm) % 2 == 0, chunks[0].text)",
         ]
     )
 
-    assert _run_phone_bot_python(code) == "RIFF WAVE True"
+    assert _run_phone_bot_python(code) == "1 True True Call Bob at phone bot bob."
 
 
 def test_the_turnkey_command_hands_the_bot_a_config_and_nothing_else(tmp_path: pathlib.Path) -> None:
@@ -333,11 +343,10 @@ def test_the_turnkey_command_hands_the_bot_a_config_and_nothing_else(tmp_path: p
 
 
 def test_a_failed_utterance_never_repeats_what_somebody_said() -> None:
-    """When the synthesizer fails, the words do not come back out in the failure.
+    """When the encoder fails, the words do not come back out in the failure.
 
-    ``Speaking`` turns any exception from the encoder into ``FailureData(message=str(error))``,
-    which the owner logs, so anything the encoder puts in an exception is something that ends up
-    in a log file. ``say``'s argv *is* the sentence, so this pins that neither the message nor
+    An encoding error travels to whatever logs it, so anything the encoder puts in an exception
+    is something that ends up in a log file. ``say``'s argv *is* the sentence, so this pins that neither the message nor
     the exception chain behind it carries the utterance anywhere.
     """
 
@@ -345,13 +354,17 @@ def test_a_failed_utterance_never_repeats_what_somebody_said() -> None:
 import asyncio
 import subprocess
 
+from mosfet.abilities import vocal
 from phone_bot_example import person
 
 SAID = "Call Bob at 555-0142 and mention the budget"
 real = subprocess.run
 person.subprocess.run = lambda command, **kwargs: real(["false"], **kwargs)
+text = vocal.speech.Text()
+text.write(SAID)
+text.close()
 try:
-    asyncio.run(person.SayEncoder().encode(SAID.encode()))
+    asyncio.run(anext(person.SayEncoder().encode(text)))
 except Exception as error:
     chain = [str(error), repr(error.__cause__), repr(error.__context__)]
     print(str(error))
@@ -666,7 +679,6 @@ def test_phone_bot_example_loads_local_provider_env_without_secret_output(tmp_pa
         "input_sample_rate_hz": 48000,
         "input_channels": 1,
         "output_sample_rate_hz": 24000,
-        "output_channels": 1,
     }
     assert "secret-openai-key" not in json.dumps(summary)
     assert "secret-mercury-key" not in json.dumps(summary)
@@ -761,8 +773,8 @@ def test_phone_bot_example_routes_livekit_audio_through_phone_service() -> None:
     # The handset earpiece and the robot's voice are separate transducers, in separate places.
     # Sharing one object would put the same speaker at the ear and at the mouth, which is how the
     # far end ends up hearing itself.
-    assert "_speaking(speaker=voice" in source
-    assert "_speaking(speaker=speaker" not in source
+    assert re.search(r"_speaking\(\s*speaker=voice", source)
+    assert not re.search(r"_speaking\(\s*speaker=speaker", source)
     # The voice transducer is the robot's mouth, not a device it owns: Speaking powers it, so it
     # is injected into the ability and never registered with the body. The behavioral proof is
     # test_phone_bot_powers_the_voice_transducer_it_speaks_through (voice started via public seam).
@@ -939,7 +951,7 @@ def test_phone_bot_powers_the_voice_transducer_it_speaks_through() -> None:
 
     Regression: the speaker split gave Speaking its own transducer and nothing started it, so the
     first utterance raised "Device is not started in this environment" and the bot never spoke.
-    The mouth is powered but not yet wired: attachment still waits for the first utterance.
+    The mouth is powered and wired: Speaking attaches to it as a controller as soon as it is attached itself.
     """
 
     code = """
@@ -965,7 +977,7 @@ async def main() -> None:
 asyncio.run(main())
 """
 
-    assert _run_phone_bot_python(code) == "\n".join(["True", "/Device/detached"])
+    assert _run_phone_bot_python(code) == "\n".join(["True", "/Device/attached/silent"])
 
 
 def test_two_labeled_phone_bots_publish_distinct_roots_and_owned_devices() -> None:
