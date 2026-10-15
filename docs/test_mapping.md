@@ -181,6 +181,14 @@ it), never through a stand-in carrier that records publishes.
 | `tests/bot/abilities/identification/test_store.py` | `src/mosfet/abilities/identification/store.py` (`InProcessStore` through `Matcher` with a fake wall clock: mint then recognize, in-order prints, kind and model isolation, sticky own never pruned, forget, prune by last seen and over the cap least recently seen first, a plain match advances last seen without refining, dimension mismatch `invalid_input` with nothing committed, enroll upsert refining up to the weight cap, another model `invalid_input`, hard-cap eviction and `store_failed` when full of own ids, two threads serialize) |
 | `tests/bot/abilities/identification/test_registry.py` | `src/mosfet/abilities/identification/identification.py` (`Registry` HSM runtime with one fake time driving the HSM clock and the wall clock: replies to the source under the request id with `kind` echoed, deferral while busy, busy `timeout` with the late result ignored, identifier failures replied with their kind and no payload, invalid print `invalid_input`, detached requests answered `unavailable` at once, a request in flight at detach answered `unavailable` and the reattached registry serving again, retention cutoff, steady traffic does not starve pruning, a prune due while busy runs through the after-busy choice, a prune timeout re-arms and serves deferred requests, a prune failure never ends a request, metric and span attributes closed with no vector) |
 
+## Vision
+
+| Test | Source under test |
+| --- | --- |
+| `tests/bot/abilities/vision/test_classification.py` | `src/mosfet/abilities/vision/classification.py` (`InputData.content` is non-empty text or a typed `media.Image`; raw bytes, empty text and a `kind` field are rejected; JSON round trip of the image) |
+| `tests/bot/abilities/test_reading.py` (typed-image cases) | `src/mosfet/abilities/reading/reading.py` (`InputData` like classification; the image route hands the image decoder the same `media.Image`; a text classification of an image is refused as a route mismatch) |
+| `src/providers/mlx_vlm/tests/test_image_decoder.py`, `test_visual_classifier.py` | `mlx_vlm/image_decoder.py`, `_image_file.py`, `visual_classifier.py` (the temporary file is named by media type: `.png`, `.jpg`, `.webp`; no configurable suffix; routing by typed content, blank text unreadable) |
+
 ## Intentional indirect coverage (do not "fix" by reaching in further)
 
 - `tests/bot/abilities/test_ability.py` subclasses `abilities.Ability` to

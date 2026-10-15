@@ -3,8 +3,6 @@ from .. import decoding
 from .. import encoding
 from .. import vision
 
-import base64
-import binascii
 import collections.abc
 import dataclasses
 import datetime
@@ -13,12 +11,12 @@ import uuid
 
 import hsm
 import mosfet
+import mosfet.media
 
 from mosfet.protocols import attachment
 import pydantic
 
 
-InputKind: typing.TypeAlias = typing.Literal["image", "text"]
 ReadingOutputKind: typing.TypeAlias = typing.Literal["image", "text", "unreadable"]
 ReadingStage: typing.TypeAlias = typing.Literal[
     "classification",
@@ -37,59 +35,23 @@ class InputData(pydantic.BaseModel):
 
     model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
         frozen=True,
-        ser_json_bytes="base64",
-        val_json_bytes="base64",
+        extra="forbid",
         json_schema_extra={
             "description": "Readable source candidate that focuses the reading ability.",
             "examples": [
-                {"kind": "text", "content": "Read this note."},
-                {"kind": "image", "content": "aW1hZ2UgYnl0ZXM="},
+                {"content": "Read this note."},
+                {"content": {"content": "iVBORw0KGgo=", "media_type": "image/png"}},
             ],
         },
     )
 
-    kind: InputKind = pydantic.Field(
-        description="InputData carrier that determines the first concrete reading route after classification.",
-        examples=["text", "image"],
-    )
-    content: str | bytes = pydantic.Field(
+    content: typing.Annotated[str, pydantic.Field(min_length=1, strict=True)] | mosfet.media.Image = pydantic.Field(
         description=(
-            "Readable source payload. Text inputs carry a string, while image inputs carry raw image bytes encoded "
-            "as base64 in JSON."
+            "Readable source payload: non-empty text, or one typed image (`mosfet.media.Image`) whose encoded "
+            "bytes travel as base64 in JSON alongside its media type. Classification decides the reading route."
         ),
-        examples=["Read this note.", "aW1hZ2UgYnl0ZXM="],
+        examples=["Read this note.", {"content": "iVBORw0KGgo=", "media_type": "image/png"}],
     )
-
-    @pydantic.model_validator(mode="before")
-    @classmethod
-    def decode_image_content(cls, data: object) -> object:
-        """DecodeData JSON image content before the kind/content invariant is checked."""
-
-        if not isinstance(data, dict):
-            return data
-        source = typing.cast(dict[str, object], data)
-        if source.get("kind") != "image":
-            return source
-        content = source.get("content")
-        if not isinstance(content, str):
-            return source
-        try:
-            decoded = base64.b64decode(content, altchars=b"-_", validate=True)
-        except binascii.Error as error:
-            raise ValueError("image reading input requires base64 content.") from error
-        decoded_data: dict[str, object] = dict(source)
-        decoded_data["content"] = decoded
-        return decoded_data
-
-    @pydantic.model_validator(mode="after")
-    def validate_content_kind(self) -> typing.Self:
-        """Keep the declared input carrier aligned with the payload type."""
-
-        if self.kind == "text" and not isinstance(self.content, str):
-            raise ValueError("text reading input requires string content.")
-        if self.kind == "image" and not isinstance(self.content, bytes):
-            raise ValueError("image reading input requires bytes content.")
-        return self
 
 
 class OutputData(pydantic.BaseModel):
@@ -154,11 +116,7 @@ class FailedEventData(pydantic.BaseModel):
 class _ReadingClassifiedEventData(pydantic.BaseModel):
     """Private completion payload for reading classification."""
 
-    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
-        frozen=True,
-        ser_json_bytes="base64",
-        val_json_bytes="base64",
-    )
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(frozen=True)
 
     input: InputData
     classification: vision.classification.OutputData
@@ -318,7 +276,7 @@ def _reading_text_decoder(instance: "Reading") -> decoding.Decoding[str, str]:
     return Reading.text_decoder(instance)
 
 
-def _reading_image_decoder(instance: "Reading") -> decoding.Decoding[bytes, str]:
+def _reading_image_decoder(instance: "Reading") -> decoding.Decoding[mosfet.media.Image, str]:
     return Reading.image_decoder(instance)
 
 
@@ -375,7 +333,7 @@ async def _run_reading_classification(
         )
         return
     try:
-        classification_input = vision.classification.InputData(kind=input.kind, content=input.content)
+        classification_input = vision.classification.InputData(content=input.content)
     except Exception as error:
         _ = hsm.dispatch(
             ctx,
@@ -531,7 +489,7 @@ async def _run_image_decoding(
         return
     try:
         content = classified.input.content
-        assert isinstance(content, bytes)
+        assert isinstance(content, mosfet.media.Image)
     except Exception as error:
         _ = hsm.dispatch(
             ctx,
@@ -715,7 +673,7 @@ def _classified_as_image(ctx: hsm.Context, instance: "Reading", event: hsm.Event
     return (
         isinstance(data, _ReadingClassifiedEventData)
         and data.classification.kind == "image"
-        and isinstance(data.input.content, bytes)
+        and isinstance(data.input.content, mosfet.media.Image)
         and _matches_active_reading_operation(instance, event)
     )
 
@@ -792,7 +750,7 @@ class Reading(ability.Ability[InputData, OutputData]):
     _composite_attachment_lifecycle: typing.ClassVar[bool] = True
     _visual_classifier: vision.classification.VisualClassification
     _text_decoder: decoding.Decoding[str, str]
-    _image_decoder: decoding.Decoding[bytes, str]
+    _image_decoder: decoding.Decoding[mosfet.media.Image, str]
     _output_encoder: encoding.Encoding[typing.Any, typing.Any]
 
     @staticmethod
@@ -804,7 +762,7 @@ class Reading(ability.Ability[InputData, OutputData]):
         return instance._text_decoder
 
     @staticmethod
-    def image_decoder(instance: "Reading") -> decoding.Decoding[bytes, str]:
+    def image_decoder(instance: "Reading") -> decoding.Decoding[mosfet.media.Image, str]:
         return instance._image_decoder
 
     @staticmethod
@@ -816,7 +774,7 @@ class Reading(ability.Ability[InputData, OutputData]):
         *,
         visual_classifier: vision.classification.VisualClassifier,
         text_decoder: decoding.Decoder[str, str],
-        image_decoder: decoding.Decoder[bytes, str],
+        image_decoder: decoding.Decoder[mosfet.media.Image, str],
         output_encoder: encoding.Encoder[OutputData, OutputData],
     ) -> None:
         super().__init__()
@@ -967,7 +925,6 @@ __all__ = [
     "ReadingOutputEvent",
     "FailedEventData",
     "InputData",
-    "InputKind",
     "OutputData",
     "ReadingOutputKind",
     "Reading",

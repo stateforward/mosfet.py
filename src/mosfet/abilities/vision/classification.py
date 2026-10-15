@@ -2,17 +2,15 @@ from .. import ability
 from .. import classifying
 
 import abc
-import base64
-import binascii
 import dataclasses
 import typing
 
 import hsm
 import mosfet
+import mosfet.media
 import pydantic
 
 
-VisualClassificationInputKind: typing.TypeAlias = typing.Literal["image", "text"]
 VisualClassificationKind: typing.TypeAlias = typing.Literal["image", "text", "unreadable"]
 
 
@@ -21,59 +19,23 @@ class InputData(pydantic.BaseModel):
 
     model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
         frozen=True,
-        ser_json_bytes="base64",
-        val_json_bytes="base64",
+        extra="forbid",
         json_schema_extra={
             "description": "Readable source candidate that should be classified before the reading pipeline routes it.",
             "examples": [
-                {"kind": "text", "content": "Read this note."},
-                {"kind": "image", "content": "aW1hZ2UgYnl0ZXM="},
+                {"content": "Read this note."},
+                {"content": {"content": "iVBORw0KGgo=", "media_type": "image/png"}},
             ],
         },
     )
 
-    kind: VisualClassificationInputKind = pydantic.Field(
-        description="Declared input carrier received by the reading pipeline.",
-        examples=["image", "text"],
-    )
-    content: str | bytes = pydantic.Field(
+    content: typing.Annotated[str, pydantic.Field(min_length=1, strict=True)] | mosfet.media.Image = pydantic.Field(
         description=(
-            "Readable source payload. Text inputs carry a string, while image inputs carry raw image bytes encoded "
-            "as base64 in JSON."
+            "Readable source payload: non-empty text, or one typed image (`mosfet.media.Image`) whose encoded "
+            "bytes travel as base64 in JSON alongside its media type."
         ),
-        examples=["Read this note.", "aW1hZ2UgYnl0ZXM="],
+        examples=["Read this note.", {"content": "iVBORw0KGgo=", "media_type": "image/png"}],
     )
-
-    @pydantic.model_validator(mode="before")
-    @classmethod
-    def decode_image_content(cls, data: object) -> object:
-        """DecodeData JSON image content before the kind/content invariant is checked."""
-
-        if not isinstance(data, dict):
-            return data
-        source = typing.cast(dict[str, object], data)
-        if source.get("kind") != "image":
-            return source
-        content = source.get("content")
-        if not isinstance(content, str):
-            return source
-        try:
-            decoded = base64.b64decode(content, altchars=b"-_", validate=True)
-        except binascii.Error as error:
-            raise ValueError("image visual classification input requires base64 content.") from error
-        decoded_data: dict[str, object] = dict(source)
-        decoded_data["content"] = decoded
-        return decoded_data
-
-    @pydantic.model_validator(mode="after")
-    def validate_content_kind(self) -> typing.Self:
-        """Keep the declared input carrier aligned with the payload type."""
-
-        if self.kind == "text" and not isinstance(self.content, str):
-            raise ValueError("text visual classification input requires string content.")
-        if self.kind == "image" and not isinstance(self.content, bytes):
-            raise ValueError("image visual classification input requires bytes content.")
-        return self
 
 
 class OutputData(pydantic.BaseModel):
@@ -231,7 +193,6 @@ class VisualClassification(classifying.Classifying[InputData, OutputData]):
 __all__ = [
     "VisualClassification",
     "InputData",
-    "VisualClassificationInputKind",
     "VisualClassificationKind",
     "OutputData",
     "VisualClassifier",

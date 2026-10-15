@@ -4,7 +4,6 @@ from . import classification
 from .classification import (
     VisualClassification,
     InputData,
-    VisualClassificationInputKind,
     VisualClassificationKind,
     OutputData,
     VisualClassifier,
@@ -13,7 +12,6 @@ from .classification import (
 __all__ = [
     "VisualClassification",
     "InputData",
-    "VisualClassificationInputKind",
     "VisualClassificationKind",
     "OutputData",
     "VisualClassifier",

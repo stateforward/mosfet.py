@@ -1,4 +1,5 @@
 from mosfet import abilities
+from mosfet import media
 from mosfet.abilities import vision
 
 import asyncio
@@ -11,6 +12,9 @@ import pytest
 
 from tests.bot.abilities.support import dispatch_ability_for_test, start_abilities_for_test
 from tests.type_helpers import model_view, object_dict
+
+
+PNG = media.Image(content=b"\x89PNG\r\n\x1a\n" + b"image bytes", media_type="image/png")
 
 
 class FixedVisualClassifier(vision.VisualClassifier):
@@ -58,23 +62,38 @@ async def start_ability_tree(ctx: hsm.Context | None, ability: abilities.Ability
     await start_abilities_for_test(hsm.Context() if ctx is None else ctx, ability)
 
 
-def test_visual_classification_input_separates_text_and_image_payloads() -> None:
-    text_input = vision.InputData(kind="text", content="read this")
-    image_input = vision.InputData(kind="image", content=b"image bytes")
-    image_json_input = vision.InputData.model_validate_json('{"kind":"image","content":"aW1hZ2UgYnl0ZXM="}')
-    urlsafe_image_input = vision.InputData(kind="image", content=b"\xfb\xff")
-    round_tripped_image_input = vision.InputData.model_validate_json(urlsafe_image_input.model_dump_json())
+def test_visual_classification_input_carries_text_or_a_typed_image() -> None:
+    text_input = vision.InputData(content="read this")
+    image_input = vision.InputData(content=PNG)
+    image_json_input = vision.InputData.model_validate_json(
+        '{"content":{"content":"iVBORw0KGgo=","media_type":"image/png"}}'
+    )
+    round_tripped_image_input = vision.InputData.model_validate_json(image_input.model_dump_json())
 
     assert text_input.content == "read this"
-    assert image_input.content == b"image bytes"
-    assert image_json_input.content == b"image bytes"
-    assert round_tripped_image_input.content == b"\xfb\xff"
+    assert image_input.content == PNG
+    assert image_json_input.content == media.Image(content=b"\x89PNG\r\n\x1a\n", media_type="image/png")
+    assert round_tripped_image_input == image_input
 
-    with pytest.raises(ValueError):
-        _ = vision.InputData(kind="text", content=b"not text")
 
+@pytest.mark.parametrize(
+    "data",
+    [
+        {"content": b"raw image bytes"},
+        {"content": ""},
+        {"kind": "image", "content": PNG},
+        {"kind": "text", "content": "read this"},
+    ],
+    ids=["bytes", "empty-text", "kind-image", "kind-text"],
+)
+def test_visual_classification_input_rejects_bytes_empty_text_and_kind(data: dict[str, object]) -> None:
     with pytest.raises(ValueError):
-        _ = vision.InputData(kind="image", content="not image")
+        _ = vision.InputData.model_validate(data)
+
+
+def test_visual_classification_input_no_longer_exports_an_input_kind() -> None:
+    assert not hasattr(vision, "VisualClassificationInputKind")
+    assert not hasattr(vision.classification, "VisualClassificationInputKind")
 
 
 def test_visual_classification_output_records_kind_and_confidence() -> None:
@@ -92,9 +111,7 @@ def test_visual_classification_uses_injected_classifier() -> None:
         ability = RecordingVisualClassification(classifier=FixedVisualClassifier())
         await start_ability_tree(None, ability)
 
-        _ = await dispatch_ability_for_test(
-            ability, hsm.Context(), vision.InputData(kind="image", content=b"image bytes")
-        )
+        _ = await dispatch_ability_for_test(ability, hsm.Context(), vision.InputData(content=PNG))
         await wait_until(lambda: bool(ability.outputs))
         return ability.outputs
 

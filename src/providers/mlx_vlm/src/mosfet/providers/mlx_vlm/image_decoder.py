@@ -6,6 +6,7 @@ import dataclasses
 import typing
 
 import mosfet.abilities
+import mosfet.media as media
 
 from ._image_file import temporary_image_file
 from ._mlx import (
@@ -29,17 +30,16 @@ def _default_generate_kwargs() -> collections.abc.Mapping[str, object]:
 
 
 @dataclasses.dataclass(frozen=True, kw_only=True)
-class ImageDecoder(mosfet.abilities.Decoder[bytes, str]):
+class ImageDecoder(mosfet.abilities.Decoder[media.Image, str]):
     """Image decoder backed by an MLX vision-language model.
 
-    The decoder accepts encoded image bytes, writes them to a temporary image
-    file, and asks an injected or loaded MLX VLM model to return only readable
-    text from the image.
+    The decoder accepts a typed image, writes its encoded bytes to a temporary
+    file named by its media type, and asks an injected or loaded MLX VLM model
+    to answer the configured prompt about it.
     """
 
     model_id: str = "mlx-community/Qwen2-VL-2B-Instruct-4bit"
     prompt: str = "Read all visible text in this image. Return only the text."
-    image_file_suffix: str = ".png"
     verbose: bool = False
     generate_kwargs: collections.abc.Mapping[str, object] = dataclasses.field(default_factory=_default_generate_kwargs)
     model: object | None = None
@@ -51,15 +51,15 @@ class ImageDecoder(mosfet.abilities.Decoder[bytes, str]):
     generate: ImageGenerator = generate
 
     @typing.override
-    async def decode(self, input: bytes) -> str:
+    async def decode(self, input: media.Image) -> str:
         return await asyncio.to_thread(self._decode_blocking, input)
 
-    def _decode_blocking(self, image: bytes) -> str:
+    def _decode_blocking(self, image: media.Image) -> str:
         try:
             model, processor = self._model_and_processor()
             config = self._config(model)
             prompt = self.apply_chat_template(processor, config, self.prompt, num_images=1)
-            with temporary_image_file(image, suffix=self.image_file_suffix) as image_path:
+            with temporary_image_file(image) as image_path:
                 output = self.generate(
                     model,
                     processor,

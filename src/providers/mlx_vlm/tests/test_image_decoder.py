@@ -6,11 +6,18 @@ import dataclasses
 import pathlib
 import sys
 import types
+import typing
 
 import pytest
 
 import mosfet.abilities
+import mosfet.media as media
 from mosfet.providers.mlx_vlm import ImageDecoder, ImageDecodingError
+
+
+PNG = media.Image(content=b"\x89PNG\r\n\x1a\n" + b"image bytes", media_type="image/png")
+JPEG = media.Image(content=b"\xff\xd8\xff" + b"image bytes", media_type="image/jpeg")
+WEBP = media.Image(content=b"RIFF\x00\x00\x00\x00WEBP" + b"image bytes", media_type="image/webp")
 
 
 @dataclasses.dataclass
@@ -115,7 +122,7 @@ def test_image_decoder_uses_injected_runtime() -> None:
         generate=runtime.generate,
     )
 
-    output = asyncio.run(await_image_decoding(decoder.decode(b"image bytes")))
+    output = asyncio.run(await_image_decoding(decoder.decode(PNG)))
 
     assert output == "Total due: $14.21"
     assert runtime.loaded_model_ids == ["local/qwen2-vl"]
@@ -139,7 +146,7 @@ def test_image_decoder_uses_injected_runtime() -> None:
         "processor": "processor",
         "prompt": "formatted:Read the text.",
         "images": runtime.generate_calls[0]["images"],
-        "image_bytes": b"image bytes",
+        "image_bytes": PNG.content,
         "verbose": True,
         "generate_kwargs": {"max_tokens": 64},
     }
@@ -208,7 +215,7 @@ def test_image_decoder_default_constructor_uses_mlx_vlm_runtime(
     monkeypatch.setitem(sys.modules, "mlx_vlm.prompt_utils", prompt_utils_module)
     decoder = ImageDecoder()
 
-    output = asyncio.run(await_image_decoding(decoder.decode(b"image bytes")))
+    output = asyncio.run(await_image_decoding(decoder.decode(PNG)))
 
     assert output == "default image text"
     assert loaded_model_ids == ["mlx-community/Qwen2-VL-2B-Instruct-4bit"]
@@ -232,7 +239,7 @@ def test_image_decoder_default_constructor_uses_mlx_vlm_runtime(
         "processor": "processor",
         "prompt": "formatted:Read all visible text in this image. Return only the text.",
         "images": generate_calls[0]["images"],
-        "image_bytes": b"image bytes",
+        "image_bytes": PNG.content,
         "verbose": False,
         "generate_kwargs": {"max_tokens": 512, "temperature": 0.0},
     }
@@ -251,7 +258,7 @@ def test_image_decoder_uses_injected_model_processor_and_config() -> None:
         generate=runtime.generate,
     )
 
-    output = asyncio.run(await_image_decoding(decoder.decode(b"image bytes")))
+    output = asyncio.run(await_image_decoding(decoder.decode(PNG)))
 
     assert output == "serial number 1234"
     assert runtime.loaded_model_ids == []
@@ -267,7 +274,7 @@ def test_image_decoder_is_awaitable() -> None:
         generate=runtime.generate,
     )
 
-    output = decoder.decode(b"image bytes")
+    output = decoder.decode(PNG)
 
     assert isinstance(output, collections.abc.Coroutine)
     assert asyncio.run(output) == "Total due: $14.21"
@@ -283,7 +290,7 @@ def test_image_decoder_wraps_provider_errors() -> None:
     )
 
     with pytest.raises(ImageDecodingError) as error:
-        _ = asyncio.run(await_image_decoding(decoder.decode(b"image bytes")))
+        _ = asyncio.run(await_image_decoding(decoder.decode(PNG)))
 
     assert isinstance(error.value.__cause__, RuntimeError)
 
@@ -298,7 +305,7 @@ def test_image_decoder_wraps_model_loader_errors() -> None:
     )
 
     with pytest.raises(ImageDecodingError) as error:
-        _ = asyncio.run(await_image_decoding(decoder.decode(b"image bytes")))
+        _ = asyncio.run(await_image_decoding(decoder.decode(PNG)))
 
     assert isinstance(error.value.__cause__, RuntimeError)
 
@@ -313,7 +320,7 @@ def test_image_decoder_wraps_config_loader_errors() -> None:
     )
 
     with pytest.raises(ImageDecodingError) as error:
-        _ = asyncio.run(await_image_decoding(decoder.decode(b"image bytes")))
+        _ = asyncio.run(await_image_decoding(decoder.decode(PNG)))
 
     assert isinstance(error.value.__cause__, RuntimeError)
 
@@ -328,7 +335,7 @@ def test_image_decoder_wraps_chat_template_errors() -> None:
     )
 
     with pytest.raises(ImageDecodingError) as error:
-        _ = asyncio.run(await_image_decoding(decoder.decode(b"image bytes")))
+        _ = asyncio.run(await_image_decoding(decoder.decode(PNG)))
 
     assert isinstance(error.value.__cause__, RuntimeError)
 
@@ -343,6 +350,33 @@ def test_image_decoder_rejects_missing_text() -> None:
     )
 
     with pytest.raises(ImageDecodingError) as error:
-        _ = asyncio.run(await_image_decoding(decoder.decode(b"image bytes")))
+        _ = asyncio.run(await_image_decoding(decoder.decode(PNG)))
 
     assert isinstance(error.value.__cause__, TypeError)
+
+
+@pytest.mark.parametrize(
+    ("image", "suffix"),
+    [(PNG, ".png"), (JPEG, ".jpg"), (WEBP, ".webp")],
+    ids=["png", "jpeg", "webp"],
+)
+def test_image_decoder_names_the_temporary_file_by_media_type(image: media.Image, suffix: str) -> None:
+    runtime = FakeRuntime()
+    decoder = ImageDecoder(
+        load_model=runtime.load_model,
+        load_config=runtime.load_config,
+        apply_chat_template=runtime.apply_chat_template,
+        generate=runtime.generate,
+    )
+
+    _ = asyncio.run(await_image_decoding(decoder.decode(image)))
+
+    images = runtime.generate_calls[0]["images"]
+    assert isinstance(images, tuple)
+    image_path = typing.cast(tuple[pathlib.Path, ...], images)[0]
+    assert image_path.suffix == suffix
+    assert runtime.generate_calls[0]["image_bytes"] == image.content
+
+
+def test_image_decoder_has_no_configurable_file_suffix() -> None:
+    assert "image_file_suffix" not in {field.name for field in dataclasses.fields(ImageDecoder)}

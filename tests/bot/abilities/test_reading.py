@@ -1,4 +1,5 @@
 from mosfet import abilities
+from mosfet import media
 from mosfet.abilities import reading
 from mosfet.abilities import vision
 from mosfet.protocols import attachment
@@ -19,6 +20,10 @@ import mosfet.abilities.reading.reading as reading_module
 
 from tests.hsm_instance_state import ability_terminal_owner, start_ability_tree as start_unready_ability_tree
 from tests.type_helpers import model_view, object_dict
+
+
+PNG = media.Image(content=b"\x89PNG\r\n\x1a\n" + b"image bytes", media_type="image/png")
+BLANK_PNG = media.Image(content=b"\x89PNG\r\n\x1a\n" + b"blank", media_type="image/png")
 
 
 def require_model(model: hsm.Model | None) -> hsm.Model:
@@ -68,14 +73,14 @@ class StubTextDecoder(abilities.Decoder[str, str]):
         return f"text:{input}"
 
 
-class StubImageDecoder(abilities.Decoder[bytes, str]):
-    calls: list[bytes]
+class StubImageDecoder(abilities.Decoder[media.Image, str]):
+    calls: list[media.Image]
 
     def __init__(self) -> None:
         self.calls = []
 
     @typing.override
-    async def decode(self, input: bytes) -> str:
+    async def decode(self, input: media.Image) -> str:
         self.calls.append(input)
         return "image text"
 
@@ -117,7 +122,7 @@ class RecordingReading(reading.Reading):
         *,
         visual_classifier: vision.VisualClassifier,
         text_decoder: abilities.Decoder[str, str],
-        image_decoder: abilities.Decoder[bytes, str],
+        image_decoder: abilities.Decoder[media.Image, str],
         output_encoder: abilities.Encoder[reading.reading.OutputData, reading.reading.OutputData],
     ) -> None:
         super().__init__(
@@ -201,23 +206,38 @@ def stub_reading(
     )
 
 
-def test_reading_input_separates_text_and_image_payloads() -> None:
-    text_input = reading.reading.InputData(kind="text", content="read this")
-    image_input = reading.reading.InputData(kind="image", content=b"image bytes")
-    image_json_input = reading.reading.InputData.model_validate_json('{"kind":"image","content":"aW1hZ2UgYnl0ZXM="}')
-    urlsafe_image_input = reading.reading.InputData(kind="image", content=b"\xfb\xff")
-    round_tripped_image_input = reading.reading.InputData.model_validate_json(urlsafe_image_input.model_dump_json())
+def test_reading_input_carries_text_or_a_typed_image() -> None:
+    text_input = reading.reading.InputData(content="read this")
+    image_input = reading.reading.InputData(content=PNG)
+    image_json_input = reading.reading.InputData.model_validate_json(
+        '{"content":{"content":"iVBORw0KGgo=","media_type":"image/png"}}'
+    )
+    round_tripped_image_input = reading.reading.InputData.model_validate_json(image_input.model_dump_json())
 
     assert text_input.content == "read this"
-    assert image_input.content == b"image bytes"
-    assert image_json_input.content == b"image bytes"
-    assert round_tripped_image_input.content == b"\xfb\xff"
+    assert image_input.content == PNG
+    assert image_json_input.content == media.Image(content=b"\x89PNG\r\n\x1a\n", media_type="image/png")
+    assert round_tripped_image_input == image_input
 
-    with pytest.raises(ValueError):
-        _ = reading.reading.InputData(kind="text", content=b"not text")
 
+@pytest.mark.parametrize(
+    "data",
+    [
+        {"content": b"raw image bytes"},
+        {"content": ""},
+        {"kind": "image", "content": PNG},
+        {"kind": "text", "content": "read this"},
+    ],
+    ids=["bytes", "empty-text", "kind-image", "kind-text"],
+)
+def test_reading_input_rejects_bytes_empty_text_and_kind(data: dict[str, object]) -> None:
     with pytest.raises(ValueError):
-        _ = reading.reading.InputData(kind="image", content="not image")
+        _ = reading.reading.InputData.model_validate(data)
+
+
+def test_reading_no_longer_exports_an_input_kind() -> None:
+    assert not hasattr(reading, "InputKind")
+    assert not hasattr(reading.reading, "InputKind")
 
 
 def test_reading_output_records_normalized_text_and_source_kind() -> None:
@@ -630,15 +650,13 @@ def test_reading_apply_runs_text_route_to_encoded_output() -> None:
         )
         await start_ability_tree(None, reading_ability)
 
-        output = await dispatch_ability_for_test(
-            reading_ability, hsm.Context(), reading.InputData(kind="text", content="hello")
-        )
+        output = await dispatch_ability_for_test(reading_ability, hsm.Context(), reading.InputData(content="hello"))
         return output, visual_classifier.calls, text_decoder.calls, output_encoder.calls
 
     output, classification_calls, text_calls, encoder_calls = asyncio.run(run())
 
     assert output == reading.OutputData(text="text:hello", source_kind="text", confidence=0.99)
-    assert classification_calls == [vision.classification.InputData(kind="text", content="hello")]
+    assert classification_calls == [vision.classification.InputData(content="hello")]
     assert text_calls == ["hello"]
     assert encoder_calls == [reading.OutputData(text="text:hello", source_kind="text", confidence=0.99)]
 
@@ -655,7 +673,7 @@ def test_reading_directed_operation_preserves_requester_across_nested_children()
             reading_ability.context(),
             child=reading_ability,
             request=reading_ability.input_event.with_data_and_id(
-                reading.InputData(kind="text", content="hello"),
+                reading.InputData(content="hello"),
                 "reading:directed",
             ),
             terminals=(reading_ability.output_event, reading_ability.failed_event),
@@ -674,9 +692,7 @@ def test_reading_directed_operation_preserves_requester_across_nested_children()
 def test_reading_ignores_stale_terminal_event_for_previous_apply_operation() -> None:
     async def run() -> tuple[list[reading.OutputData], str, bool]:
         async def run_apply(reading_ability: reading.Reading) -> reading.OutputData:
-            return await dispatch_ability_for_test(
-                reading_ability, hsm.Context(), reading.InputData(kind="text", content="current")
-            )
+            return await dispatch_ability_for_test(reading_ability, hsm.Context(), reading.InputData(content="current"))
 
         reading_ability = RecordingReading(
             visual_classifier=StubVisualClassifier(vision.classification.OutputData(kind="text", confidence=0.99)),
@@ -736,7 +752,7 @@ def test_reading_detach_delegates_once_to_attachment_group_while_focused(
             output_encoder=HangingOutputEncoder(),
         )
         await start_ability_tree(ctx, reading_ability)
-        _ = await reading_ability.apply(reading.InputData(kind="text", content="current"), ctx=ctx)
+        _ = await reading_ability.apply(reading.InputData(content="current"), ctx=ctx)
         await wait_until(
             lambda: reading_ability.state() == "/RecordingReadingLifecycle/attached/behavior/Focused/EncodingOutput"
         )
@@ -915,7 +931,7 @@ def test_reading_model_tracks_focus_classification_decoding_and_encoding() -> No
 
 def test_reading_runs_text_route_to_encoded_output() -> None:
     async def run() -> tuple[
-        list[reading.OutputData], list[vision.classification.InputData], list[str], list[bytes], str
+        list[reading.OutputData], list[vision.classification.InputData], list[str], list[media.Image], str
     ]:
         visual_classifier = StubVisualClassifier(vision.classification.OutputData(kind="text", confidence=0.99))
         text_decoder = StubTextDecoder()
@@ -928,7 +944,7 @@ def test_reading_runs_text_route_to_encoded_output() -> None:
         )
         await start_ability_tree(None, reading_ability)
 
-        _ = await reading_ability.apply(reading.InputData(kind="text", content="hello"))
+        _ = await reading_ability.apply(reading.InputData(content="hello"))
         await wait_until(lambda: bool(reading_ability.outputs))
 
         return (
@@ -942,7 +958,7 @@ def test_reading_runs_text_route_to_encoded_output() -> None:
     outputs, classification_calls, text_calls, image_calls, active_state = asyncio.run(run())
 
     assert outputs == [reading.OutputData(text="text:hello", source_kind="text", confidence=0.99)]
-    assert classification_calls == [vision.classification.InputData(kind="text", content="hello")]
+    assert classification_calls == [vision.classification.InputData(content="hello")]
     assert text_calls == ["hello"]
     assert image_calls == []
     assert active_state == "/RecordingReadingLifecycle/attached/behavior/Unfocused"
@@ -950,7 +966,7 @@ def test_reading_runs_text_route_to_encoded_output() -> None:
 
 def test_reading_runs_image_route_to_encoded_output() -> None:
     async def run() -> tuple[
-        list[reading.OutputData], list[vision.classification.InputData], list[str], list[bytes], str
+        list[reading.OutputData], list[vision.classification.InputData], list[str], list[media.Image], str
     ]:
         visual_classifier = StubVisualClassifier(vision.classification.OutputData(kind="image", confidence=0.87))
         text_decoder = StubTextDecoder()
@@ -963,7 +979,7 @@ def test_reading_runs_image_route_to_encoded_output() -> None:
         )
         await start_ability_tree(None, reading_ability)
 
-        _ = await reading_ability.apply(reading.InputData(kind="image", content=b"image bytes"))
+        _ = await reading_ability.apply(reading.InputData(content=PNG))
         await wait_until(lambda: bool(reading_ability.outputs))
 
         return (
@@ -977,9 +993,9 @@ def test_reading_runs_image_route_to_encoded_output() -> None:
     outputs, classification_calls, text_calls, image_calls, active_state = asyncio.run(run())
 
     assert outputs == [reading.OutputData(text="image text", source_kind="image", confidence=0.87)]
-    assert classification_calls == [vision.classification.InputData(kind="image", content=b"image bytes")]
+    assert classification_calls == [vision.classification.InputData(content=PNG)]
     assert text_calls == []
-    assert image_calls == [b"image bytes"]
+    assert image_calls == [PNG]
     assert active_state == "/RecordingReadingLifecycle/attached/behavior/Unfocused"
 
 
@@ -995,7 +1011,7 @@ def test_reading_runs_unreadable_route_to_encoded_output() -> None:
         )
         await start_ability_tree(None, reading_ability)
 
-        _ = await reading_ability.apply(reading.InputData(kind="image", content=b"blank"))
+        _ = await reading_ability.apply(reading.InputData(content=BLANK_PNG))
         await wait_until(lambda: bool(reading_ability.outputs))
 
         return reading_ability.outputs
@@ -1017,9 +1033,7 @@ def test_reading_rejects_classification_that_does_not_match_input_payload() -> N
         await start_ability_tree(None, reading_ability)
 
         with pytest.raises(RuntimeError, match="classification route"):
-            _ = await dispatch_ability_for_test(
-                reading_ability, hsm.Context(), reading.InputData(kind="image", content=b"image bytes")
-            )
+            _ = await dispatch_ability_for_test(reading_ability, hsm.Context(), reading.InputData(content=PNG))
         await wait_until(lambda: bool(reading_ability.failures))
 
         return reading_ability.outputs, reading_ability.failures, text_decoder.calls, reading_ability.state()
