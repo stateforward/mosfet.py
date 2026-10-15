@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import collections.abc
+import dataclasses
 import json
 import pathlib
 import typing
@@ -233,3 +234,128 @@ def test_full_capture_never_exports_image_bytes_from_event_payloads(monkeypatch:
     logged = pathlib.Path("otel-logs.jsonl").read_text(encoding="utf-8")
     assert _PNG_BASE64 not in logged
     assert f"<image:image/png:{len(_PNG)} bytes>" in json.dumps(record["body"])
+
+
+_VECTOR = (0.6180339887, 0.2718281828, 0.1414213562)
+
+
+class _Voiceprint(capture.Biometric):
+    vector: tuple[float, ...]
+
+
+class _Faceprint(capture.Biometric):
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(frozen=True, extra="forbid")
+
+    vector: tuple[float, ...]
+
+
+class _Sighting(pydantic.BaseModel):
+    confidence: float
+    voiceprint: _Voiceprint
+
+
+@dataclasses.dataclass(frozen=True)
+class _Frame:
+    sighting: _Sighting
+    faceprint: _Faceprint
+
+
+class _HeardData(pydantic.BaseModel):
+    level_db: float
+    voiceprint: _Voiceprint
+    samples: dict[str, _Voiceprint]
+
+
+_HEARD = hsm.Event[_HeardData](name="demo.heard", schema=_HeardData)
+
+
+class _Ear(hsm.Instance):
+    model: typing.ClassVar[hsm.Model] = mosfet.define(
+        "CaptureEar",
+        hsm.initial(hsm.target("idle")),
+        hsm.state("idle", hsm.transition(hsm.on(_HEARD), hsm.target("../heard"))),
+        hsm.state("heard"),
+        hsm.observe(mosfet.telemetry.observer),
+    )
+
+
+def _floats(tree: object) -> list[float]:
+    if isinstance(tree, float):
+        return [tree]
+    if isinstance(tree, dict):
+        return [item for value in typing.cast(dict[str, object], tree).values() for item in _floats(value)]
+    if isinstance(tree, list):
+        return [item for value in typing.cast(list[object], tree) for item in _floats(value)]
+    return []
+
+
+def test_jsonable_renders_biometric_values_as_their_class_name_at_every_depth() -> None:
+    voiceprint = _Voiceprint(vector=_VECTOR)
+    faceprint = _Faceprint(vector=_VECTOR)
+    nested = {"frame": _Frame(sighting=_Sighting(confidence=0.75, voiceprint=voiceprint), faceprint=faceprint)}
+
+    assert capture.jsonable(voiceprint) == "<biometric:_Voiceprint>"
+    assert capture.jsonable(faceprint) == "<biometric:_Faceprint>"
+    assert capture.jsonable(nested) == {
+        "frame": {
+            "sighting": {"confidence": 0.75, "voiceprint": "<biometric:_Voiceprint>"},
+            "faceprint": "<biometric:_Faceprint>",
+        }
+    }
+    assert capture.jsonable([{"prints": (voiceprint, faceprint)}]) == [
+        {"prints": ["<biometric:_Voiceprint>", "<biometric:_Faceprint>"]}
+    ]
+
+
+def test_jsonable_catches_a_biometric_model_nested_in_a_model_before_its_dump_is_written() -> None:
+    data = _HeardData(
+        level_db=-12.5, voiceprint=_Voiceprint(vector=_VECTOR), samples={"first": _Voiceprint(vector=_VECTOR)}
+    )
+
+    tree = capture.jsonable(data)
+
+    assert tree == {
+        "level_db": -12.5,
+        "voiceprint": "<biometric:_Voiceprint>",
+        "samples": {"first": "<biometric:_Voiceprint>"},
+    }
+    assert not set(_VECTOR) & set(_floats(tree))
+
+
+def test_jsonable_leaves_non_biometric_floats_alone() -> None:
+    assert capture.jsonable({"similarity": 0.9, "scores": (0.1, 0.2)}) == {"similarity": 0.9, "scores": [0.1, 0.2]}
+    assert capture.jsonable(_Sighting(confidence=0.75, voiceprint=_Voiceprint(vector=_VECTOR))) == {
+        "confidence": 0.75,
+        "voiceprint": "<biometric:_Voiceprint>",
+    }
+
+
+def test_full_capture_never_writes_a_biometric_vector_from_a_dispatched_event(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("BOT_OTEL_CAPTURE", "full")
+    assert mosfet.telemetry.configure() is True
+
+    async def run() -> None:
+        ear = _Ear()
+        _ = await mosfet.started(None, ear, ear.model)
+        data = _HeardData(
+            level_db=-12.5, voiceprint=_Voiceprint(vector=_VECTOR), samples={"first": _Voiceprint(vector=_VECTOR)}
+        )
+        _ = await hsm.dispatch(None, ear, _HEARD.with_data_and_id(data, "heard-1"))
+
+    asyncio.run(run())
+
+    heard = [
+        record
+        for record in _records()
+        if record["attributes"].get("hsm.event.name") == "demo.heard" and record["body"]["occurrence"] == "event"
+    ]
+    assert len(heard) == 1
+    assert heard[0]["body"]["event"]["data"] == {
+        "level_db": -12.5,
+        "voiceprint": "<biometric:_Voiceprint>",
+        "samples": {"first": "<biometric:_Voiceprint>"},
+    }
+    logged = pathlib.Path("otel-logs.jsonl").read_text(encoding="utf-8")
+    assert all(str(value) not in logged for value in _VECTOR)

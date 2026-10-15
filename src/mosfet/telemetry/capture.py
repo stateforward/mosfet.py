@@ -15,7 +15,9 @@ are never written: mapping keys that name a credential are replaced with ``<reda
 string values shaped like bearer tokens or API keys are masked, at every depth. Image content is
 never written either: a ``mosfet.media.Image`` anywhere in a payload, including nested inside a
 Pydantic model, becomes ``<image:<media_type>:<N> bytes>``; raw bytes become ``<bytes:N>``; and an
-RFC 2397 base64 data URL becomes ``<data-url:<media_type>:<N> chars>``.
+RFC 2397 base64 data URL becomes ``<data-url:<media_type>:<N> chars>``. Biometric values are
+never written: any instance of ``Biometric`` (a voiceprint, a face print), at any depth, becomes
+``<biometric:<ClassName>>``, so no vector that identifies a person reaches the log file.
 
 Log bodies carry the payload; attributes stay low-cardinality (component, stage, event name).
 """
@@ -54,6 +56,16 @@ _SECRET_VALUE = re.compile(
 _DATA_URL = re.compile(r"data:([A-Za-z0-9!#$&^_.+-]+/[A-Za-z0-9!#$&^_.+-]+);base64,([A-Za-z0-9+/_-]+=*)")
 
 
+class Biometric(pydantic.BaseModel):
+    """Marker base model for values that identify a person's body (voiceprints, face prints).
+
+    It declares no fields and no behavior; subclasses declare their own fields and
+    ``model_config``. Capture renders any instance, at any depth, as ``<biometric:<ClassName>>``
+    and never writes its contents. A biometric type derives from it alone, for example
+    ``class Print(capture.Biometric)``, never beside another ``pydantic.BaseModel`` base.
+    """
+
+
 def full_enabled() -> bool:
     """Whether the runtime opted in to full-content capture (``BOT_OTEL_CAPTURE=full``)."""
 
@@ -71,11 +83,15 @@ def _beside_source(source: object, dumped: object, *, depth: int) -> AnyValue:
 
     The dump alone has already turned an ``Image``'s bytes into base64 text, so finding an image
     nested at any depth inside a model means walking the model's own values next to its dump.
-    Leaves keep the dump's JSON form; only an ``Image`` source is replaced by its size marker.
+    Leaves keep the dump's JSON form; an ``Image`` source is replaced by its size marker and a
+    ``Biometric`` source by its class marker, so neither the image bytes nor the biometric
+    values in the dump are written.
     """
 
     if depth > _MAX_DEPTH:
         return _TRUNCATED
+    if isinstance(source, Biometric):
+        return f"<biometric:{type(source).__name__}>"
     if isinstance(source, media.Image):
         return f"<image:{source.media_type}:{len(source.content)} bytes>"
     if isinstance(source, pydantic.RootModel):
@@ -117,10 +133,13 @@ def jsonable(value: object, *, _depth: int = 0) -> AnyValue:
     Mapping keys that name a credential and string values shaped like one are masked. A
     ``media.Image`` at any depth becomes ``<image:<media_type>:<N> bytes>``, raw bytes become
     ``<bytes:N>``, and a base64 data URL inside a string becomes ``<data-url:<media_type>:<N> chars>``.
+    A ``Biometric`` at any depth becomes ``<biometric:<ClassName>>``.
     """
 
     if _depth > _MAX_DEPTH:
         return _TRUNCATED
+    if isinstance(value, Biometric):
+        return f"<biometric:{type(value).__name__}>"
     if value is None or isinstance(value, (bool, int, float)):
         return value
     if isinstance(value, str):
@@ -214,4 +233,4 @@ def record_dispatch(
     return delivery
 
 
-__all__ = ["emit", "full_enabled", "jsonable", "payload_enabled", "record_dispatch"]
+__all__ = ["Biometric", "emit", "full_enabled", "jsonable", "payload_enabled", "record_dispatch"]

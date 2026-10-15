@@ -170,6 +170,12 @@ it), never through a stand-in carrier that records publishes.
 | `src/providers/websocket/tests/test_server.py` | `websocket/server.py` (`Server` answers a `PeerAttachData` registration created, a repeat existing, another endpoint's or a plain request `conflict`; binds an authenticated connection to its peer's endpoint; an unregistered peer or any other path closes `4404`; only the registered endpoint can withdraw its route; a registration before listening waits; a server that cannot listen, or not in time, fails and refuses registrations; a closed socket stops its connection; stopping the server closes the listener and every socket and stops every connection; a real Computer typed into through the server tells its holder and its display content reaches the remote peer; `integration`: a real `websockets` listener on loopback carries a named stream to its port); the fakes in `tests/websocket_fakes.py` are a socket, a listener, and a browser that is a client-role yamux connection with raw streams |
 | `src/providers/websocket/tests/test_package_metadata.py` | `src/providers/websocket/pyproject.toml` (owns `websockets>=16.0,<17`; dynamic version matches the installed metadata) |
 
+## Identification and biometric capture
+
+| Test | Source under test |
+| --- | --- |
+| `tests/telemetry/test_capture.py` (biometric cases) | `src/mosfet/telemetry/capture.py` (`Biometric`, a field-less Pydantic marker model that biometric types derive from alone: any instance at any depth, in a model, dataclass, mapping or sequence, renders as `<biometric:<ClassName>>`; a biometric model nested in a model is replaced before its dump is written; a dispatched event's full-capture body carries no vector float; non-biometric floats unchanged) |
+
 ## Intentional indirect coverage (do not "fix" by reaching in further)
 
 - `tests/bot/abilities/test_ability.py` subclasses `abilities.Ability` to
