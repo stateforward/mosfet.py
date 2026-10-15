@@ -25,8 +25,14 @@ could not fingerprint (no voiceprint, W3-13) stays unidentified; its content is 
 other segments are still identified. The embedding itself never
 leaves this step. The bot's own voice is enrolled from what its mouth said (``listening.EnrollEvent``).
 
+Another voice heard while the bot's own mouth is producing is a fact of its own
+(``listening.OverlapEvent``), stated once per utterance once that voice has been going for
+``overlap_min_voiced``, after it was recognized when voice identification is composed, and never for
+a voice recognized as the bot's own. It is perception, not a decision: nothing here stops anything.
+
 Telemetry: ``bot.listening.voice.own.count`` counts products whose voice was recognized as the bot's
-own (no attributes). ``bot.identification.count`` (``bot.identification.kind="voice"``,
+own (no attributes). ``bot.listening.overlap.count`` (``bot.listening.overlap.path="local"``) counts
+the overlap facts stated. ``bot.identification.count`` (``bot.identification.kind="voice"``,
 ``bot.outcome="failed"``, ``bot.failure.kind`` ``timeout`` or ``invalid_input``) counts embeddings
 this ear could not identify: one the registry did not answer within ``recognize_timeout``, or one
 that could not be printed (no model, or an invalid vector). Failures the registry answers it counts
@@ -36,6 +42,7 @@ itself. A segment given no voiceprint is counted as ``bot.outcome="skipped"`` (`
 from __future__ import annotations
 
 from . import enrollment
+from . import overlap
 from . import sensitivity
 from .. import ability
 from .. import classifying
@@ -88,6 +95,12 @@ _IDENTIFICATION = _METER.create_counter(
     description="Prints identified or enrolled, by kind and outcome; failed requests count once.",
 )
 
+_OVERLAP = _METER.create_counter(
+    "bot.listening.overlap.count",
+    unit="{fact}",
+    description="Overlap facts stated: another voice heard while the bot's own mouth was producing, by hearing path.",
+)
+
 DEFAULT_PRODUCT_THRESHOLD_DB = 3.0
 """How loud what is left of an arrival must be, in dB, to be worth handing on.
 
@@ -98,6 +111,12 @@ yes or a no, and every contributor that reduces a perceived level is compared ag
 
 DEFAULT_RECOGNIZE_TIMEOUT = datetime.timedelta(seconds=2)
 """How long the ear waits for the voice registry to say who was heard before handing the product on without voices."""
+
+DEFAULT_OVERLAP_MIN_VOICED = datetime.timedelta(seconds=0.5)
+"""How long another voice must have been going while the bot speaks before it is an overlap fact.
+
+Above the 0.3 s a voice embedder needs to say who it is, and long enough that an echo blip is not a fact.
+"""
 
 ListeningStage: typing.TypeAlias = typing.Literal[
     "sensitivity",
@@ -188,6 +207,14 @@ class _EnrollmentEndedData(pydantic.BaseModel):
     model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(frozen=True)
 
     failure: str | None = None
+
+
+class _OverlapRecognizedData(pydantic.BaseModel):
+    """Private completion payload: who the overlapping voice is, or ``None`` when it could not be identified."""
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(frozen=True)
+
+    heard: voice.HeardVoice | None = None
 
 
 class _SpeechDecodingCompletedEventData(pydantic.BaseModel):
@@ -429,6 +456,11 @@ _ListeningStageFailedEvent = hsm.Event[FailedEventData](
     kind=hsm.ErrorEventKind,
     schema=FailedEventData,
 )
+_OverlapRecognizedEvent = hsm.Event[_OverlapRecognizedData](
+    name="bot.ability.listening.overlap_recognition.completed",
+    kind=hsm.CompletionEventKind,
+    schema=_OverlapRecognizedData,
+)
 _EnrollmentEndedEvent = hsm.Event[_EnrollmentEndedData](
     name="bot.ability.listening.enrollment.ended",
     kind=hsm.CompletionEventKind,
@@ -516,7 +548,7 @@ def _dispatch_listening_cognition_input_with_operation(
         source_count = len(source_ids) if isinstance(source_ids, collections.abc.Collection) else 0
         active.set_attribute("bot.identity.source.count", source_count)
         product = typing.cast(object, stimulus.data)
-        participants = product.participants if isinstance(product, SoundData | SpeechData) else ()
+        participants = product.participants if isinstance(product, SoundData | SpeechData | overlap.OverlapData) else ()
         handoff = cognition.InputEvent.with_data(cognition.InputData(stimulus=stimulus, participants=participants))
         handoff = _listening_event_with_context(handoff, event, operation_id=resolved_operation_id)
         handoff = dataclasses.replace(
@@ -1001,6 +1033,9 @@ class Interpretation(ability.Ability[sensitivity.OutputData, cognition.InputData
     # Union of participants stamped on the sound admitted into the open utterance (machine-owned, reset with it).
     _active_participants: tuple[mosfet.Participant, ...]
     _active_operation_id: str | None
+    _overlap_min_voiced: datetime.timedelta
+    # Whether the open utterance's overlap fact has been stated (or is being recognized): once per utterance.
+    _overlap_stated: bool
     # The completion whose voices are being identified (the opening VAD span, or the diarized utterance), held
     # only while an identifying state waits, so its modeled deadline can hand the utterance on without voices.
     _identifying: _VoiceDetectionCompletedEventData | _VoiceDiarizationCompletedEventData | None
@@ -1020,18 +1055,20 @@ class Interpretation(ability.Ability[sensitivity.OutputData, cognition.InputData
         registry: identification.Registry | None = None,
         recognize_timeout: datetime.timedelta = DEFAULT_RECOGNIZE_TIMEOUT,
         product_threshold_db: float = DEFAULT_PRODUCT_THRESHOLD_DB,
+        overlap_min_voiced: datetime.timedelta = DEFAULT_OVERLAP_MIN_VOICED,
     ) -> None:
         """Interpret scored sound with the given classifiers.
 
         ``voice_classifier`` embeds voices and ``registry`` (an unstarted voice
         ``identification.Registry`` its owner starts and attaches) tells who each is; they come
         together or not at all. ``recognize_timeout`` bounds the wait for the registry's answer: a
-        product it does not cover carries no voices.
+        product it does not cover carries no voices. ``overlap_min_voiced`` is how long another voice
+        must have been going while the bot's mouth is producing before it is an overlap fact.
 
         Raises:
-            ValueError: If ``product_threshold_db`` is negative, ``recognize_timeout`` is not positive,
-                ``voice_classifier`` is combined with ``speech_decoder``, or only one of
-                ``voice_classifier`` and ``registry`` is given.
+            ValueError: If ``product_threshold_db`` is negative, ``recognize_timeout`` or
+                ``overlap_min_voiced`` is not positive, ``voice_classifier`` is combined with
+                ``speech_decoder``, or only one of ``voice_classifier`` and ``registry`` is given.
         """
 
         super().__init__()
@@ -1039,6 +1076,9 @@ class Interpretation(ability.Ability[sensitivity.OutputData, cognition.InputData
             raise ValueError("product_threshold_db must not be negative.")
         if recognize_timeout <= datetime.timedelta(0):
             raise ValueError("recognize_timeout must be positive.")
+        if overlap_min_voiced <= datetime.timedelta(0):
+            raise ValueError("overlap_min_voiced must be positive.")
+        self._overlap_min_voiced = overlap_min_voiced
         self._product_threshold_db = product_threshold_db
         self._voice_detection = voice.detection.VoiceDetection(classifier=voice_activity_classifier)
         self._sound_classification = (
@@ -1083,6 +1123,7 @@ class Interpretation(ability.Ability[sensitivity.OutputData, cognition.InputData
         self._active_voices = ()
         self._active_participants = ()
         self._active_operation_id = None
+        self._overlap_stated = False
         self._identifying = None
 
     @staticmethod
@@ -1315,6 +1356,7 @@ class Interpretation(ability.Ability[sensitivity.OutputData, cognition.InputData
         instance._open_speech_wav = False
         instance._active_voices = ()
         instance._active_participants = ()
+        instance._overlap_stated = False
 
     @staticmethod
     def _append_open_speech(
@@ -1573,6 +1615,182 @@ class Interpretation(ability.Ability[sensitivity.OutputData, cognition.InputData
         assert isinstance(completion, _VoiceDetectionCompletedEventData)
         Interpretation._append_open_speech(instance, completion.sensed, completion.voice_detection)
         Interpretation._emit_speech_product(ctx, instance, event, completion)
+
+    @staticmethod
+    def _open_voiced_seconds(instance: "Interpretation") -> float:
+        """How long the open utterance's voice has been going: the PCM admitted since voice detection opened it."""
+
+        rate = instance._open_speech_sample_rate_hz
+        frame_bytes = 2 * instance._open_speech_channels
+        if rate is None or frame_bytes <= 0:
+            return 0.0
+        return (len(instance._open_speech_audio) // frame_bytes) / float(rate)
+
+    @staticmethod
+    def _is_overlap_due(ctx: hsm.Context, instance: "Interpretation", event: hsm.Event[typing.Any]) -> bool:
+        """Another voice, while the body is producing, has been going long enough to be a fact.
+
+        Once per utterance; the voiced chunk arrived inside the efference window; it is louder than the
+        product threshold (the same comparison as ``_is_audible_product``, so the bot's own voice at its
+        predicted level never qualifies); and the open utterance has lasted ``overlap_min_voiced``.
+        """
+
+        del ctx
+        sensed = _listening_sensed(event)
+        return (
+            not instance._overlap_stated
+            and sensed is not None
+            and sensed.producing
+            and (sensed.perceived_level_db is None or sensed.perceived_level_db >= instance._product_threshold_db)
+            and Interpretation._open_voiced_seconds(instance) >= instance._overlap_min_voiced.total_seconds()
+        )
+
+    @staticmethod
+    def _is_overlap_due_unrecognized(
+        ctx: hsm.Context, instance: "Interpretation", event: hsm.Event[typing.Any]
+    ) -> bool:
+        """Due, with voice identification composed but nobody recognized for this utterance yet: recognize first."""
+
+        return (
+            Interpretation._is_overlap_due(ctx, instance, event)
+            and instance._voice_identification is not None
+            and not instance._active_voices
+        )
+
+    @staticmethod
+    def _state_overlap_as(
+        ctx: hsm.Context,
+        instance: "Interpretation",
+        event: hsm.Event[typing.Any],
+        voices: tuple[voice.HeardVoice, ...],
+    ) -> None:
+        """State the overlap fact for the open utterance, unless the voice is the bot's own.
+
+        A voice recognized as the bot's own is perception of who spoke: its echo is not another voice.
+        """
+
+        instance._overlap_stated = True
+        if any(heard.recognition.own for heard in voices):
+            return
+        _, heard = _voice_stamps(voices)
+        fact = overlap.OverlapData(
+            voiced_seconds=Interpretation._open_voiced_seconds(instance),
+            voices=voices,
+            participants=_merged_participants(instance._active_participants, heard),
+        )
+        _OVERLAP.add(1, {"bot.listening.overlap.path": "local"})
+        Interpretation._dispatch_listening_cognition_input(ctx, instance, event, overlap.OverlapEvent.with_data(fact))
+
+    @staticmethod
+    def _overlap_recognition_delay(
+        ctx: hsm.Context, instance: "Interpretation", event: hsm.Event[typing.Any]
+    ) -> datetime.timedelta:
+        """The overlap fact waits for its voice at most this long: the embedding, then the registry's answer."""
+
+        del ctx, event
+        return instance._recognize_timeout * 2
+
+    @staticmethod
+    def _state_unrecognized_overlap(ctx: hsm.Context, instance: "Interpretation", event: hsm.Event[typing.Any]) -> None:
+        """Nobody was recognized in time: the overlap is stated without voices."""
+
+        Interpretation._unidentified(1, identification.FailureKind.TIMEOUT)
+        Interpretation._state_overlap_as(ctx, instance, event, ())
+
+    @staticmethod
+    def _state_overlap(ctx: hsm.Context, instance: "Interpretation", event: hsm.Event[typing.Any]) -> None:
+        """State the fact with whoever was already recognized opening this utterance (nobody, without identification)."""
+
+        Interpretation._state_overlap_as(ctx, instance, event, instance._active_voices)
+
+    @staticmethod
+    def _begin_overlap_recognition(ctx: hsm.Context, instance: "Interpretation", event: hsm.Event[typing.Any]) -> None:
+        del ctx, event
+        instance._overlap_stated = True
+
+    @staticmethod
+    def _has_overlap_recognition(ctx: hsm.Context, instance: "Interpretation", event: hsm.Event[typing.Any]) -> bool:
+        del ctx
+        return _has_current_operation(instance._active_operation_id, event) and isinstance(
+            event.data, _OverlapRecognizedData
+        )
+
+    @staticmethod
+    def _state_recognized_overlap(ctx: hsm.Context, instance: "Interpretation", event: hsm.Event[typing.Any]) -> None:
+        recognized = event.data
+        assert isinstance(recognized, _OverlapRecognizedData)
+        Interpretation._state_overlap_as(ctx, instance, event, () if recognized.heard is None else (recognized.heard,))
+
+    @staticmethod
+    async def _identify_overlap(instance: "Interpretation", event: hsm.Event[typing.Any]) -> voice.HeardVoice | None:
+        """Who the voice heard so far in the open utterance is, or ``None`` when it could not be identified.
+
+        Embedding is bounded by ``recognize_timeout`` like the registry's answer, so the fact waits for
+        recognition no longer than the ear waits for anyone.
+        """
+
+        embedder = instance._voice_identification
+        assert embedder is not None, "overlap recognition runs only with voice identification composed"
+        rate = instance._open_speech_sample_rate_hz
+        audio = Interpretation._open_speech_bytes(instance)
+        if rate is None or not audio:
+            return None
+        segment = voice.VoiceSegment(
+            audio=audio,
+            media_type="audio/pcm",
+            sample_rate_hz=rate,
+            channels=instance._open_speech_channels,
+            start_seconds=0.0,
+            end_seconds=Interpretation._open_voiced_seconds(instance),
+        )
+        operation_id = instance._active_operation_id or event.id or uuid.uuid4().hex
+        try:
+            embedded = await ability.run_terminal_operation(
+                instance.context(),
+                child=embedder,
+                request=dataclasses.replace(
+                    embedder.input_event.with_data_and_id(
+                        voice.identification.InputData(segments=(segment,)),
+                        f"{operation_id}:overlap_embedding:{uuid.uuid4().hex}",
+                    ),
+                    metadata=dict(event.metadata),
+                ),
+                terminals=(embedder.output_event, embedder.failed_event),
+                timeout=instance._recognize_timeout,
+            )
+        except TimeoutError:
+            Interpretation._unidentified(1, identification.FailureKind.TIMEOUT)
+            return None
+        output = embedded.data
+        if not isinstance(output, voice.identification.OutputData) or len(output.embeddings) != 1:
+            return None
+        (heard,) = await Interpretation._recognize(instance, event, (segment,), output.embeddings)
+        return heard
+
+    @staticmethod
+    async def _run_overlap_recognition(
+        ctx: hsm.Context, instance: "Interpretation", event: hsm.Event[typing.Any]
+    ) -> None:
+        """Recognize the overlapping voice before stating the fact, then go back to hearing the utterance."""
+
+        with span.operation(
+            "bot.listening.recognize_overlap",
+            scope=_SCOPE,
+            component=_COMPONENT,
+            stage="overlap_recognition",
+            context=telemetry.event_context(event),
+        ) as active:
+            heard = await Interpretation._identify_overlap(instance, event)
+            active.set_attribute("bot.voice.identified.count", int(heard is not None))
+        _ = hsm.dispatch(
+            ctx,
+            instance,
+            _listening_event_with_context(
+                _OverlapRecognizedEvent.with_data(_OverlapRecognizedData(heard=heard)),
+                event,
+                operation_id=instance._active_operation_id,
+            ),
+        )
 
     @staticmethod
     async def _run_voice_detection(
@@ -1926,6 +2144,8 @@ class Interpretation(ability.Ability[sensitivity.OutputData, cognition.InputData
             )
             voices = await Interpretation._recognize(instance, event, segments, output.embeddings)
             active.set_attribute("bot.voice.identified.count", sum(heard is not None for heard in voices))
+            if own := sum(heard is not None and heard.recognition.own for heard in voices):
+                _OWN_VOICE.add(own)
             identified = _VoiceIdentificationCompletedEventData(
                 sensed=Interpretation._open_speech_sensed_or(instance, completion.sensed),
                 voice_detection=voice_detection or voice.detection.ApplyData(),
@@ -2025,8 +2245,6 @@ class Interpretation(ability.Ability[sensitivity.OutputData, cognition.InputData
                 voices[index] = voice.HeardVoice(
                     recognition=recognition, start_seconds=segment.start_seconds, end_seconds=segment.end_seconds
                 )
-        if own := sum(heard is not None and heard.recognition.own for heard in voices):
-            _OWN_VOICE.add(own)
         return tuple(voices)
 
     @staticmethod
@@ -2475,7 +2693,7 @@ class Interpretation(ability.Ability[sensitivity.OutputData, cognition.InputData
                     hsm.on(_VoiceDetectionCompletedEvent),
                     hsm.guard(_has_detected_voice),
                     hsm.effect(_enter_hearing_speech),
-                    hsm.target("/Interpretation/Working/HearingSpeech"),
+                    hsm.target("/Interpretation/Working/Voiced"),
                 ),
             ),
             # Open speech window: scored frames keep going to VAD until sticky End.
@@ -2504,13 +2722,49 @@ class Interpretation(ability.Ability[sensitivity.OutputData, cognition.InputData
                     hsm.on(_VoiceDetectionCompletedEvent),
                     hsm.guard(_has_detected_voice),
                     hsm.effect(_continue_hearing_speech),
-                    hsm.target("/Interpretation/Working/HearingSpeech"),
+                    hsm.target("/Interpretation/Working/Voiced"),
                 ),
                 hsm.transition(
                     hsm.on(_VoiceDetectionCompletedEvent),
                     hsm.guard(_has_detected_no_voice),
                     hsm.effect(_close_hearing_speech),
                     hsm.target("/Interpretation/Working/SpeechEnded"),
+                ),
+            ),
+            # Every voiced chunk of the open utterance passes here once it is admitted and handed on. Another
+            # voice while the body is producing is stated once it has lasted overlap_min_voiced; with voice
+            # identification composed and nobody recognized yet, it is recognized first.
+            hsm.choice(
+                "Voiced",
+                hsm.transition(
+                    hsm.guard(_is_overlap_due_unrecognized),
+                    hsm.effect(_begin_overlap_recognition),
+                    hsm.target("/Interpretation/Working/RecognizingOverlap"),
+                ),
+                hsm.transition(
+                    hsm.guard(_is_overlap_due),
+                    hsm.effect(_state_overlap),
+                    hsm.target("/Interpretation/Working/HearingSpeech"),
+                ),
+                hsm.transition(
+                    hsm.target("/Interpretation/Working/HearingSpeech"),
+                ),
+            ),
+            # Bounded by recognize_timeout for the embedding and again for the registry's answer: the fact is
+            # stated with nobody recognized when either did not answer in time.
+            hsm.state(
+                "RecognizingOverlap",
+                hsm.activity(_run_overlap_recognition),
+                hsm.transition(
+                    hsm.on(_OverlapRecognizedEvent),
+                    hsm.guard(_has_overlap_recognition),
+                    hsm.effect(_state_recognized_overlap),
+                    hsm.target("/Interpretation/Working/HearingSpeech"),
+                ),
+                hsm.transition(
+                    hsm.after(_overlap_recognition_delay),
+                    hsm.effect(_state_unrecognized_overlap),
+                    hsm.target("/Interpretation/Working/HearingSpeech"),
                 ),
             ),
             # After VAD End: direct identification, optional diarize/STT on the full utterance; else products already streamed.
@@ -2596,7 +2850,7 @@ class Interpretation(ability.Ability[sensitivity.OutputData, cognition.InputData
                     hsm.on(_VoiceIdentificationCompletedEvent),
                     hsm.guard(_has_voice_identification_completion),
                     hsm.effect(_enter_hearing_speech_from_identification),
-                    hsm.target("/Interpretation/Working/HearingSpeech"),
+                    hsm.target("/Interpretation/Working/Voiced"),
                 ),
                 hsm.transition(hsm.after(_identify_delay), hsm.effect(_identify_nobody)),
             ),
@@ -2652,6 +2906,7 @@ class Interpretation(ability.Ability[sensitivity.OutputData, cognition.InputData
 
 
 __all__ = [
+    "DEFAULT_OVERLAP_MIN_VOICED",
     "DEFAULT_PRODUCT_THRESHOLD_DB",
     "DEFAULT_RECOGNIZE_TIMEOUT",
     "FailedEventData",

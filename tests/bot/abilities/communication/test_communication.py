@@ -637,6 +637,35 @@ def test_stop_reaches_speaking_and_the_response_ends_stopped_with_what_was_said(
     assert state.endswith("/active")
 
 
+def test_an_overlap_fact_alone_never_stops_the_response_being_spoken() -> None:
+    """Hearing another voice while speaking is a fact for the bot to judge; nothing seeded stops speech on it."""
+
+    from mosfet.abilities import cognition, listening
+    from mosfet.abilities.communication import behaviors
+
+    async def run() -> tuple[str, str, list[str]]:
+        ctx = Environment()
+        script = Script(stall_on="stuck")
+        speaker = _speaking(script)
+        comm = communication.Communication(active_conversation=_conversation(), speaking=speaker)
+        collector = await _owned(ctx, speaker, comm)
+        _ = await hsm.dispatch(ctx, comm, _respond("Said first. Then stuck here.", "response-1"))
+        await _wait_until(lambda: len(script.calls) == 1)
+        fact = listening.OverlapEvent.with_data(listening.OverlapData(voiced_seconds=0.8, text="wait"))
+        handoff = cognition.InputEvent.with_data(cognition.InputData(stimulus=fact))
+        for target in (comm, speaker):
+            _ = await hsm.dispatch(ctx, target, fact)
+            _ = await hsm.dispatch(ctx, target, handoff)
+        await asyncio.sleep(0.1)
+        return comm.state() or "", speaker.state() or "", [item.name for item in collector.events]
+
+    comm_state, speaker_state, owner_events = asyncio.run(run())
+    assert listening.OverlapEvent.name not in behaviors.SPEECH_HEARD_TRIGGERS
+    assert "/behavior/responding" in comm_state
+    assert "/speaking/" in speaker_state and "/stopping" not in speaker_state
+    assert speaking.OutputEvent.name not in owner_events
+
+
 def test_communication_catalog_via_conversations_keyword() -> None:
     first = _conversation()
     second = _conversation()

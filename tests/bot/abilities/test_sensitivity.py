@@ -330,6 +330,31 @@ def test_a_copy_with_nothing_left_to_play_does_not_open_a_window() -> None:
     assert state.endswith("/quiet")
 
 
+def test_a_sound_is_stamped_producing_only_while_the_window_is_open() -> None:
+    """Producing is the window fact: own mouth or somebody else, inside the window; neither, outside it."""
+
+    async def run() -> list[sensitivity.OutputData]:
+        ctx = shared_hsm_context()
+        stage = await started_stage(ctx)
+        await hear(ctx, stage, source=ELSEWHERE)
+        await wait_for(stage.outputs, 1)
+        await command_the_mouth(ctx, stage, duration=60.0)
+        await hear(ctx, stage, source=MOUTH)
+        await wait_for(stage.outputs, 2)
+        await hear(ctx, stage, source=ELSEWHERE, received_level_db=SOURCE_DB)
+        await wait_for(stage.outputs, 3)
+        await command_the_mouth(ctx, stage, duration=0.0)
+        await hear(ctx, stage, source=ELSEWHERE)
+        await wait_for(stage.outputs, 4)
+        return stage.outputs
+
+    outputs = asyncio.run(run())
+
+    assert [output.producing for output in outputs] == [False, True, True, False]
+    # The stamp changes nothing about the level: somebody else inside the window survives in full.
+    assert outputs[2].perceived_level_db == SOURCE_DB
+
+
 def test_sensitivity_output_is_not_offerable_to_a_model() -> None:
     """A scored sound is perception's bookkeeping, never a tool a model can pick."""
 

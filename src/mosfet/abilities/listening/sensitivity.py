@@ -18,7 +18,8 @@ own production arriving at a gain the model does not predict — is not noise to
 is the bot noticing that its voice came back wrong, and it is allowed through.
 
 What comes out is a level in dB: how loud the part of this arrival that the body could *not*
-account for is. Nothing is decided here and nothing is dropped. Whether that level wins is one
+account for is, and whether the body was producing when it arrived (``producing``: the window
+was open). Nothing is decided here and nothing is dropped. Whether that level wins is one
 comparison, made once, at the point perception becomes a product.
 """
 
@@ -76,6 +77,15 @@ class OutputData(pydantic.BaseModel):
             "shown to be quiet and must be treated as heard."
         ),
         examples=[76.5, 0.0, 12.0],
+    )
+    producing: bool = pydantic.Field(
+        default=False,
+        description=(
+            "Whether the body was producing sound when this arrived: a mouth had been commanded and its efference "
+            "window was still open. A fact about the moment, not about where the sound came from; somebody else's "
+            "voice arriving while the bot talks is producing too."
+        ),
+        examples=[False, True],
     )
 
 
@@ -238,11 +248,10 @@ class Sensitivity(ability.Ability[SoundData, OutputData]):
     def _score_unproduced(ctx: hsm.Context, instance: "Sensitivity", event: hsm.Event[typing.Any]) -> None:
         """This arrival is no consequence of anything the body is doing, so all of it survives.
 
-        Either nothing is being produced, or something is but this did not come off the mouth
-        producing it. Own voice reaching here the first way means it took longer to come back
-        than the command lasted — a delayed line, an echo, feedback — and that is real
-        information about the call, which is the point of bounding the window rather than
-        suppressing own audio outright.
+        Nothing is being produced. Own voice reaching here means it took longer to come back than
+        the command lasted — a delayed line, an echo, feedback — and that is real information
+        about the call, which is the point of bounding the window rather than suppressing own
+        audio outright.
         """
 
         sound = Sensitivity._sound(event)
@@ -287,7 +296,14 @@ class Sensitivity(ability.Ability[SoundData, OutputData]):
 
         sound = Sensitivity._sound(event)
         if Sensitivity._acoustic_source(event) != _producing_mouth(instance):
-            Sensitivity._score_unproduced(ctx, instance, event)
+            # Somebody cutting in, or the far end still going: never predicted, so all of it
+            # survives, and it arrived while the body was producing.
+            Sensitivity._emit(
+                ctx,
+                instance,
+                event,
+                OutputData(sound=sound, perceived_level_db=sound.received_level_db, producing=True),
+            )
             return
         observed = _path_gain_db(sound)
         learned = _learned_path_gain_db(instance)
@@ -298,7 +314,7 @@ class Sensitivity(ability.Ability[SoundData, OutputData]):
             perceived = 0.0
         else:
             perceived = abs(observed - learned)
-        Sensitivity._emit(ctx, instance, event, OutputData(sound=sound, perceived_level_db=perceived))
+        Sensitivity._emit(ctx, instance, event, OutputData(sound=sound, perceived_level_db=perceived, producing=True))
 
     submodel: typing.ClassVar[hsm.Model | None] = mosfet.define(
         "Sensitivity",

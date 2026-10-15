@@ -23,6 +23,7 @@ from typing import override
 import hsm
 import mosfet
 from tests.bot.abilities.support import dispatch_ability_for_test
+import pydantic
 import pytest
 
 from mosfet.abilities.speaking import EfferenceData, EfferenceEvent
@@ -331,7 +332,6 @@ class RecordingListening(listening.Listening):
         recognize_timeout: datetime.timedelta = datetime.timedelta(seconds=2),
         product_threshold_db: float | None = None,
     ) -> None:
-        thresholds = {} if product_threshold_db is None else {"product_threshold_db": product_threshold_db}
         super().__init__(
             voice_activity_classifier=voice_activity_classifier,
             sound_classifier=sound_classifier,
@@ -340,7 +340,11 @@ class RecordingListening(listening.Listening):
             voice_classifier=voice_classifier,
             registry=registry,
             recognize_timeout=recognize_timeout,
-            **thresholds,
+            product_threshold_db=(
+                listening.interpretation.DEFAULT_PRODUCT_THRESHOLD_DB
+                if product_threshold_db is None
+                else product_threshold_db
+            ),
         )
         # Filled by the terminal mirror from what this ability emits. Not from dispatch: the
         # interpretation half's products travel through this ability on their way out, so a
@@ -2189,3 +2193,232 @@ def test_unstamped_sound_yields_speech_and_handoffs_without_participants() -> No
 
     assert all(handoff.participants == () for handoff in handoffs)
     assert _handoff_participants_match_their_stimulus(handoffs)
+
+
+# Overlap: another voice heard while the body is producing is a fact, once per utterance.
+
+_TENTH = b"\x01\x00" * 1_600  # 0.1 s of 16 kHz mono PCM
+_SOMEBODY = mosfet.Participant(ref="person-7", role=mosfet.ParticipantRole.SOURCE)
+
+
+def somebody_speaking(tenths: int) -> SoundData:
+    """Somebody else's voice, as a device that heard it emits it: nothing about it is the bot's own."""
+
+    return SoundData(
+        audio=_TENTH * tenths,
+        media_type="audio/pcm",
+        sample_rate_hz=16_000,
+        channels=1,
+        received_level_db=60.0,
+        participants=(_SOMEBODY,),
+    )
+
+
+def _overlaps(handoffs: list[cognition.InputData]) -> list[listening.OverlapData]:
+    return [
+        typing.cast(listening.OverlapData, _stimulus(handoff).data)
+        for handoff in handoffs
+        if _stimulus(handoff).name == listening.OverlapEvent.name
+    ]
+
+
+def _overlapping_utterance(
+    *chunks: SoundData,
+    producing: bool = True,
+    source: str = "somebody-elses-mouth",
+    voice_classifier: FixedVoiceClassifier | None = None,
+    diarizer: FixedVoiceDiarizer | None = None,
+    enroll_as: str | None = None,
+) -> list[cognition.InputData]:
+    """Hear one utterance of voiced chunks then silence, optionally while the body is producing."""
+
+    async def run() -> list[cognition.InputData]:
+        detector = SequenceVoiceActivityClassifier(*([_VOICE_APPLY] * len(chunks)), _SILENCE_APPLY)
+        listening_ability = RecordingListening(
+            voice_activity_classifier=detector,
+            voice_diarizer=diarizer,
+            voice_classifier=voice_classifier,
+            registry=None if voice_classifier is None else voice_registry(),
+        )
+        ctx = hsm.Context()
+        await start_ability_tree(ctx, listening_ability)
+        if enroll_as is not None:
+            assert voice_classifier is not None
+            copy = listening.EnrollData(
+                voice_id=enroll_as,
+                segment=voice.VoiceSegment(
+                    audio=b"\x02\x00" * 24_000,
+                    media_type="audio/pcm",
+                    sample_rate_hz=16_000,
+                    channels=1,
+                    start_seconds=0.0,
+                    end_seconds=1.5,
+                ),
+            )
+            _ = await hsm.dispatch(
+                ctx, listening_ability, listening.EnrollEvent.with_data_and_id(copy, "enroll-own-voice")
+            )
+            calls = voice_classifier.calls
+            await wait_until(lambda: len(calls) == 1)
+        if producing:
+            await start_producing(listening_ability, duration=60.0)
+        for chunk in chunks:
+            await arrives_from(listening_ability, chunk, source=source)
+        await arrives_from(listening_ability, somebody_speaking(1), source=source)
+        await wait_until(lambda: detector.index == len(chunks) + 1)
+        if diarizer is not None:
+            diarized = diarizer.calls
+            await wait_until(lambda: bool(diarized))
+        # Whatever the closing chunk and the utterance's end make is handed off within a few loop turns.
+        await asyncio.sleep(0.1)
+        return listening_ability.handoffs
+
+    return asyncio.run(run())
+
+
+def test_another_voice_while_the_body_speaks_is_one_overlap_fact_per_utterance() -> None:
+    handoffs = _overlapping_utterance(somebody_speaking(3), somebody_speaking(3), somebody_speaking(3))
+
+    (overlap,) = _overlaps(handoffs)
+    assert overlap.voiced_seconds == pytest.approx(0.6)
+    assert overlap.text is None
+    assert overlap.voices == ()
+    assert overlap.participants == (_SOMEBODY,)
+    (fact,) = [handoff for handoff in handoffs if _stimulus(handoff).name == listening.OverlapEvent.name]
+    assert fact.participants == (_SOMEBODY,)
+    # The fact is perception alongside the speech, never instead of it: every chunk is still a product.
+    names = [_stimulus(handoff).name for handoff in handoffs]
+    assert names.count(listening.SpeechEvent.name) == 4
+
+
+def test_a_voice_while_the_body_is_quiet_is_no_overlap() -> None:
+    handoffs = _overlapping_utterance(somebody_speaking(3), somebody_speaking(3), producing=False)
+
+    assert _overlaps(handoffs) == []
+
+
+def test_a_voice_shorter_than_overlap_min_voiced_is_no_overlap() -> None:
+    handoffs = _overlapping_utterance(somebody_speaking(4))
+
+    assert _overlaps(handoffs) == []
+
+
+def test_the_bodys_own_mouth_at_its_predicted_level_is_no_overlap() -> None:
+    own = own_production(_TENTH * 3)
+    handoffs = _overlapping_utterance(own, own, own, source=MOUTH)
+
+    assert _overlaps(handoffs) == []
+
+
+def test_a_sound_at_or_below_the_product_threshold_is_no_overlap() -> None:
+    quiet = somebody_speaking(3).model_copy(update={"received_level_db": 2.0})
+    handoffs = _overlapping_utterance(quiet, quiet, quiet)
+
+    assert _overlaps(handoffs) == []
+
+
+def test_an_identified_overlapping_voice_is_stamped_on_the_fact() -> None:
+    handoffs = _overlapping_utterance(
+        somebody_speaking(3),
+        somebody_speaking(3),
+        voice_classifier=FixedVoiceClassifier(voice.identification.VoiceEmbedding(embedding=(0.6, 0.8), model="m")),
+    )
+
+    (overlap,) = _overlaps(handoffs)
+    (heard,) = overlap.voices
+    assert heard.recognition.own is False
+    assert overlap.participants == (_SOMEBODY, identification.participant("voice", heard.recognition.id))
+
+
+def test_a_recognized_own_voice_makes_no_overlap_fact() -> None:
+    """An echo the bot recognizes as its own voice is perception of who spoke, not another voice."""
+
+    handoffs = _overlapping_utterance(
+        somebody_speaking(3),
+        somebody_speaking(3),
+        voice_classifier=FixedVoiceClassifier(voice.identification.VoiceEmbedding(embedding=(0.6, 0.8), model="m")),
+        enroll_as="tts:warm",
+    )
+
+    assert _overlaps(handoffs) == []
+    assert any(_stimulus(handoff).name == listening.SpeechEvent.name for handoff in handoffs)
+
+
+def test_a_diarizing_ear_recognizes_the_overlapping_voice_before_stating_the_fact() -> None:
+    classifier = FixedVoiceClassifier(voice.identification.VoiceEmbedding(embedding=(0.6, 0.8), model="m"))
+    handoffs = _overlapping_utterance(
+        somebody_speaking(3),
+        somebody_speaking(3),
+        voice_classifier=classifier,
+        diarizer=FixedVoiceDiarizer(
+            segment=voice.diarization.VoiceDiarizationSegment(
+                audio=_TENTH * 7,
+                media_type="audio/pcm",
+                sample_rate_hz=16_000,
+                channels=1,
+                start_seconds=0.0,
+                end_seconds=0.7,
+            )
+        ),
+    )
+
+    (overlap,) = _overlaps(handoffs)
+    (heard,) = overlap.voices
+    assert heard.recognition.own is False
+    assert (heard.start_seconds, heard.end_seconds) == (0.0, pytest.approx(0.6))
+    # The overlap recognized the 0.6 s heard so far; the diarized products are identified after the utterance.
+    assert classifier.calls[0].segments[0].audio == _TENTH * 6
+
+
+def test_an_overlap_whose_voice_is_never_recognized_is_stated_without_voices(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def never_recognized(*args: object) -> None:
+        del args
+        _ = await asyncio.Event().wait()
+
+    # Recognition that never comes back, however it is bounded inside: only the modeled deadline ends the wait.
+    monkeypatch.setattr(listening.interpretation.Interpretation, "_identify_overlap", staticmethod(never_recognized))
+
+    async def run() -> list[cognition.InputData]:
+        chunks = (somebody_speaking(3), somebody_speaking(3))
+        detector = SequenceVoiceActivityClassifier(*([_VOICE_APPLY] * len(chunks)), _SILENCE_APPLY)
+        listening_ability = RecordingListening(
+            voice_activity_classifier=detector,
+            voice_diarizer=FixedVoiceDiarizer(),
+            voice_classifier=FixedVoiceClassifier(voice.identification.VoiceEmbedding(embedding=(0.6, 0.8), model="m")),
+            registry=voice_registry(),
+            recognize_timeout=datetime.timedelta(milliseconds=20),
+        )
+        await start_ability_tree(hsm.Context(), listening_ability)
+        await start_producing(listening_ability, duration=60.0)
+        for chunk in (*chunks, somebody_speaking(1)):
+            await arrives_from(listening_ability, chunk, source="somebody-elses-mouth")
+        await wait_until(lambda: bool(_overlaps(listening_ability.handoffs)))
+        return listening_ability.handoffs
+
+    handoffs = asyncio.run(run())
+
+    (overlap,) = _overlaps(handoffs)
+    assert overlap.voices == ()
+    assert overlap.participants == (_SOMEBODY,)
+
+
+def test_overlap_facts_are_counted_by_path(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    with metric_reader.recording(tmp_path, monkeypatch) as reader:
+        before = _sum(reader, "bot.listening.overlap.count", **{"bot.listening.overlap.path": "local"})
+        _ = _overlapping_utterance(somebody_speaking(3), somebody_speaking(3))
+        assert _sum(reader, "bot.listening.overlap.count", **{"bot.listening.overlap.path": "local"}) - before == 1
+
+
+def test_the_overlap_fact_is_a_typed_model_facing_stimulus() -> None:
+    assert listening.OverlapEvent.name == "bot.ability.listening.overlap"
+    assert listening.OverlapEvent.schema is listening.OverlapData
+    with pytest.raises(pydantic.ValidationError):
+        _ = listening.OverlapData(voiced_seconds=-0.1)
+
+
+def test_overlap_min_voiced_must_be_positive() -> None:
+    with pytest.raises(ValueError, match="overlap_min_voiced"):
+        _ = listening.Listening(
+            voice_activity_classifier=FixedVoiceActivityClassifier(_SILENCE_APPLY),
+            overlap_min_voiced=datetime.timedelta(0),
+        )

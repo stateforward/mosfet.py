@@ -109,17 +109,21 @@ class Listening(ability.Ability[SoundData, cognition.InputData]):
         registry: identification.Registry | None = None,
         recognize_timeout: datetime.timedelta = interpretation.DEFAULT_RECOGNIZE_TIMEOUT,
         product_threshold_db: float = interpretation.DEFAULT_PRODUCT_THRESHOLD_DB,
+        overlap_min_voiced: datetime.timedelta = interpretation.DEFAULT_OVERLAP_MIN_VOICED,
     ) -> None:
         """Hear through the given classifiers.
 
         ``voice_classifier`` and ``registry`` identify voices and come together: ``registry`` is an
         unstarted ``identification.Registry`` constructed with ``kind="voice"``, which this ear owns
         from here on (its group starts it, attaches it for the ear's attached lifetime, and stops
-        it). ``recognize_timeout`` bounds each wait for the registry's answer.
+        it). ``recognize_timeout`` bounds each wait for the registry's answer. ``overlap_min_voiced``
+        is how long another voice must have been going while the bot's mouth is producing before the
+        ear states it as a ``listening.OverlapEvent`` fact.
 
         Raises:
             ValueError: If only one of ``voice_classifier`` and ``registry`` is given, or as
-                ``Interpretation`` raises for its own arguments.
+                ``Interpretation`` raises for its own arguments (including a non-positive
+                ``overlap_min_voiced``).
         """
 
         super().__init__()
@@ -133,6 +137,7 @@ class Listening(ability.Ability[SoundData, cognition.InputData]):
             registry=registry,
             recognize_timeout=recognize_timeout,
             product_threshold_db=product_threshold_db,
+            overlap_min_voiced=overlap_min_voiced,
         )
         self._registry = registry
         owned = (self._sensitivity, self._interpretation, *(() if registry is None else (registry,)))
