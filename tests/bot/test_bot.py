@@ -2207,56 +2207,56 @@ def test_bot_fans_out_visual_event_to_input_without_cognition() -> None:
     assert state.endswith("/active/unfocused")
 
 
-class ArousalRecordingCognition(cognition.Cognition):
-    """Cognition that records the arousal notices the body sends it (test-only observation)."""
+class RestRecordingConsolidation(memory.Consolidation):
+    """Consolidation that records the rest and wake notices Cognition sends it (test-only observation)."""
 
-    arousals: list[hsm.Event[typing.Any]]
-    calls: list[processing.InputData]
+    notices: list[str]
 
-    def __init__(self) -> None:
+    def __init__(self, *, memory: memory.Memory) -> None:
+        super().__init__(memory=memory, processor=_NoopReasoningProcessor())
+        self.notices = []
+
+    @typing.override
+    def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[bool]:
+        if event.name in (memory.RestEvent.name, memory.WakeEvent.name):
+            self.notices.append(event.name.rsplit(".", 1)[-1])
+        return super().dispatch(ctx, event)
+
+
+def test_bot_stimuli_without_a_product_neither_wake_nor_hold_cognition_awake() -> None:
+    """Only perception products wake cognition: a stimulus no input ability turns into one is not a turn."""
+
+    async def run() -> tuple[list[str], int, list[processing.InputData]]:
         store = memory.Memory()
+        consolidation = RestRecordingConsolidation(memory=store)
         ignore = IgnoreProcessor()
-        super().__init__(
+        ability = cognition.Cognition(
             intuition=cognition.Intuition(processor=ignore),
             reasoning=cognition.Reasoning(processor=_NoopReasoningProcessor()),
             reflection=_reflection_for_test(store),
             memory=store,
+            consolidation=consolidation,
+            rest_after=datetime.timedelta(milliseconds=50),
         )
-        self.arousals = []
-        self.calls = ignore.calls
-
-    @typing.override
-    def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[bool]:
-        if event.name == cognition.ArousalEvent.name:
-            self.arousals.append(event)
-        return super().dispatch(ctx, event)
-
-
-def test_bot_arouses_cognition_once_for_every_environment_stimulus() -> None:
-    """The reflex floor: any stimulus the body fans out can wake a resting bot; nothing is ranked."""
-
-    async def run() -> tuple[list[hsm.Event[typing.Any]], str, list[processing.InputData]]:
-        ability = ArousalRecordingCognition()
         active_bot = AbilityAgent(devices={}, cognition=ability, input=())
         _ = await start_bot_with_devices(active_bot)
-        sound = SoundEvent.with_data(
-            SoundData(audio=b"heard-chunk", media_type="audio/pcm", sample_rate_hz=48_000, channels=1)
-        )
         frame = media.Image(content=b"\x89PNG\r\n\x1a\n" + b"frame-bytes", media_type="image/png")
-        await active_bot.dispatch(active_bot.context(), sound)
-        await active_bot.dispatch(active_bot.context(), VisualEvent.with_data(VisualData(image=frame, kind="camera")))
-        await wait_until(lambda: len(ability.arousals) == 2)
-        await asyncio.sleep(0.05)
-        return list(ability.arousals), hsm.id(active_bot), ability.calls
+        sent = 0
+        # A frame every 10 ms for up to a second: far more often than rest_after.
+        while sent < 100 and "rest" not in consolidation.notices:
+            await active_bot.dispatch(
+                active_bot.context(), VisualEvent.with_data(VisualData(image=frame, kind="camera"))
+            )
+            sent += 1
+            await asyncio.sleep(0.01)
+        return list(consolidation.notices), sent, ignore.calls
 
-    arousals, bot_id, calls = asyncio.run(run())
+    notices, sent, calls = asyncio.run(run())
 
-    assert [event.data for event in arousals] == [
-        cognition.ArousalData(stimulus=SoundEvent.name),
-        cognition.ArousalData(stimulus=VisualEvent.name),
-    ]
-    assert all(event.source == bot_id for event in arousals)
-    # Arousal is not a turn: the stimulus itself still never reaches cognition.
+    # It rested while the stimuli kept arriving, and none of them woke it.
+    assert notices == ["rest"]
+    assert sent < 100
+    # The stimulus itself never reaches cognition.
     assert calls == []
 
 

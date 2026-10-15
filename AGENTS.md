@@ -212,7 +212,8 @@
   bias mechanically, so nothing arbitrates per stimulus.
 - NEVER rank stimuli in the body. A priority table ("a ring outranks a thought") is writing the behavior the bot should
   have chosen.
-- The body owns only the reflex floor—the level no bias can tune away—so a bot can never make itself permanently
-  unreachable.
+- The body owns only the reflex floor—admitting every environment stimulus and fanning it out to input abilities,
+  whose perception products wake cognition at thresholds no bias can tune away—so a bot can never make itself
+  permanently unreachable.
 - Effector exclusivity (one mouth says one thing at a time) is device-local contention, NEVER a bot-wide focus concept.
 - ALWAYS keep examples outside `src/`, with example-local deps/lockfiles when the example must stay runnable.

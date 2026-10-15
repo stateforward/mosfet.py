@@ -94,23 +94,6 @@ class CancelledData(pydantic.BaseModel):
     )
 
 
-class ArousalData(pydantic.BaseModel):
-    """The body perceived an environment stimulus: whatever it is, it wakes a resting bot."""
-
-    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
-        frozen=True,
-        extra="forbid",
-        json_schema_extra={"examples": [{"stimulus": "environment.sound"}]},
-    )
-
-    stimulus: str = pydantic.Field(
-        min_length=1,
-        max_length=200,
-        description="Name of the environment stimulus the body fanned out (a low-cardinality label).",
-        examples=["environment.sound"],
-    )
-
-
 class _UseFailedEventData(pydantic.BaseModel):
     """Private failure payload carrying failure details and operation identity."""
 
@@ -143,11 +126,6 @@ CancelledEvent = hsm.Event[CancelledData](
     kind=hsm.CompletionEventKind,
     schema=CancelledData,
 )
-ArousalEvent = hsm.Event[ArousalData](
-    name="bot.ability.cognition.arousal",
-    schema=ArousalData,
-)
-"""Sent by the body for every environment stimulus it fans out; wakes rest and restarts the rest timer."""
 _CancelPendingEvent = hsm.Event[CancelData](
     name="bot.ability.cognition.cancel.pending",
     schema=CancelData,
@@ -294,9 +272,8 @@ class Cognition(ability.Ability[InputData, OutputData]):
     decides on, the way a routine tick is.
 
     With ``consolidation`` composed too, Cognition rests once it has been idle for ``rest_after``:
-    it sends ``consolidation`` a ``memory.RestEvent``, and the first cognition input or body
-    ``ArousalEvent`` (sent for every environment stimulus) wakes it with ``memory.WakeEvent``. An
-    arousal while awake restarts the inactivity timer.
+    it sends ``consolidation`` a ``memory.RestEvent``, and the first cognition input wakes it with
+    ``memory.WakeEvent``.
 
     With ``routines`` composed, Reflection settling a turn sends Routines a reconcile (its
     inventory writes may have created, changed, or broken a persistent routine), and every
@@ -1600,7 +1577,7 @@ class Cognition(ability.Ability[InputData, OutputData]):
 
     @staticmethod
     def _wake(ctx: hsm.Context, instance: "Cognition", event: hsm.Event[typing.Any]) -> None:
-        """Leaving rest for any reason (input, arousal, reboot, detach): consolidation stops."""
+        """Leaving rest for any reason (input, reboot, detach): consolidation stops."""
 
         del event
         Cognition._notify_consolidation(ctx, instance, memory.WakeEvent.with_data(memory.WakeData()))
@@ -1636,8 +1613,8 @@ class Cognition(ability.Ability[InputData, OutputData]):
             ),
         ),
         # Not processing a turn. A cognition that cannot consolidate is simply idle. One that can
-        # is awake, and rests once it has been awake for rest_after; every input and every body
-        # arousal leaves rest through these shared transitions, which wakes it.
+        # is awake, and rests once it has been awake for rest_after; every input leaves rest through
+        # these shared transitions, which wakes it.
         hsm.state(
             "ready",
             hsm.initial(hsm.target("/Cognition/ready/idle")),
@@ -1652,8 +1629,6 @@ class Cognition(ability.Ability[InputData, OutputData]):
                 hsm.transition(hsm.after(_rest_delay), hsm.target("/Cognition/ready/resting")),
             ),
             hsm.state("resting", hsm.entry(_rest), hsm.exit(_wake)),
-            # Arousal restarts the inactivity timer while awake, and wakes a resting bot.
-            hsm.transition(hsm.on(ArousalEvent), hsm.guard(_has_consolidation), hsm.target("/Cognition/ready/awake")),
             # Call surface for deliberative tools (snapshot-offered when host is an actor).
             hsm.transition(
                 hsm.on(types.IgnoreEvent),
@@ -2011,8 +1986,6 @@ class Cognition(ability.Ability[InputData, OutputData]):
 
 
 __all__ = [
-    "ArousalData",
-    "ArousalEvent",
     "InputEvent",
     "OutputEvent",
     "Cognition",

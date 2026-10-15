@@ -4364,18 +4364,6 @@ async def _resting_cognition(
     return ability, consolidation, ctx, body
 
 
-async def _arouse(ctx: hsm.Context, ability: cognition.Cognition, body: hsm.Instance) -> None:
-    _ = await hsm.dispatch(
-        ctx,
-        ability,
-        dataclasses.replace(
-            cognition.ArousalEvent.with_data(cognition.ArousalData(stimulus="environment.sound")),
-            source=hsm.id(body),
-            target=hsm.id(ability),
-        ),
-    )
-
-
 def test_cognition_rest_needs_memory_and_a_positive_rest_after() -> None:
     store = memory.Memory()
     intuition, reasoning = cognition_abilities()
@@ -4394,23 +4382,23 @@ def test_cognition_rest_needs_memory_and_a_positive_rest_after() -> None:
     members = require_model(cognition.Cognition.model).members
     for state in ("ready", "ready/idle", "ready/awake", "ready/resting"):
         assert f"/CognitionLifecycle/attached/behavior/{state}" in members
-    assert cognition.ArousalEvent.name == "bot.ability.cognition.arousal"
-    assert cognition.ArousalEvent.kind != processing.EventKind
 
 
-def test_cognition_rests_after_inactivity_and_arousal_or_any_input_wakes_it() -> None:
+def test_cognition_rests_after_inactivity_and_any_input_wakes_it() -> None:
     async def run() -> tuple[list[str], list[str], list[str], str]:
-        ability, consolidation, ctx, body = await _resting_cognition(datetime.timedelta(milliseconds=50))
+        ability, consolidation, ctx, _ = await _resting_cognition(datetime.timedelta(milliseconds=50))
         try:
             await _until_rest(lambda: consolidation.notices == ["rest"])
             resting = ability.state()
-            await _arouse(ctx, ability, body)
-            await _until_rest(lambda: consolidation.notices[-1:] == ["wake"])
-            woken = list(consolidation.notices)
-            # Idle again, so it rests again; a turn wakes it the same way.
-            await _until_rest(lambda: consolidation.notices[-1:] == ["rest"])
             _ = await hsm.dispatch(
                 ctx, ability, ability.input_event.with_data_and_id(await started_cognition_input(ctx), "turn-1")
+            )
+            await _until_rest(lambda: consolidation.notices[-1:] == ["wake"])
+            woken = list(consolidation.notices)
+            # Idle again, so it rests again; the next turn wakes it the same way.
+            await _until_rest(lambda: consolidation.notices[-1:] == ["rest"])
+            _ = await hsm.dispatch(
+                ctx, ability, ability.input_event.with_data_and_id(await started_cognition_input(ctx), "turn-2")
             )
             await _until_rest(lambda: consolidation.notices[2:4] == ["rest", "wake"])
             by_turn = list(consolidation.notices[:4])
@@ -4427,12 +4415,16 @@ def test_cognition_rests_after_inactivity_and_arousal_or_any_input_wakes_it() ->
     assert all(a != b for a, b in itertools.pairwise(notices))
 
 
-def test_arousal_while_awake_restarts_the_inactivity_timer() -> None:
+def test_a_turn_while_awake_restarts_the_inactivity_timer() -> None:
     async def run() -> tuple[list[str], list[str]]:
-        ability, consolidation, ctx, body = await _resting_cognition(datetime.timedelta(milliseconds=500))
+        ability, consolidation, ctx, _ = await _resting_cognition(datetime.timedelta(milliseconds=500))
         try:
             await asyncio.sleep(0.35)
-            await _arouse(ctx, ability, body)
+            # The turn runs to its terminal and returns through ready/settling to a fresh awake.
+            _ = await hsm.dispatch(
+                ctx, ability, ability.input_event.with_data_and_id(await started_cognition_input(ctx), "turn-1")
+            )
+            await _until_rest(lambda: ability.state().endswith("/ready/awake"))
             await asyncio.sleep(0.35)
             # 0.7 s since attach: without the restart it would have rested at 0.5 s.
             before = list(consolidation.notices)

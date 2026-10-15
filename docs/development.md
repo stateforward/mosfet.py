@@ -129,9 +129,9 @@ it in one transaction; `ReleaseEvent` gives a unit back. Every request gets exac
 Consolidation runs while the bot rests. With `memory.Consolidation` composed, Cognition between
 turns is `ready/awake` rather than `ready/idle`; once it has been awake for `rest_after` (default
 ten minutes) it moves to `ready/resting` and sends Consolidation a `memory.RestEvent`. Any
-cognition input, and the `cognition.ArousalEvent` the body sends for every environment stimulus it
-fans out, wakes it (`memory.WakeEvent`); an arousal while awake restarts the timer. A cognition
-without consolidation stays `ready/idle` and never rests. At rest Consolidation backfills
+cognition input wakes it (`memory.WakeEvent`), and a turn while awake restarts the timer;
+environment stimuli that no input ability turns into a product neither wake it nor hold it awake.
+A cognition without consolidation stays `ready/idle` and never rests. At rest Consolidation backfills
 missing vectors, then leases unit after unit and shows each to its model, which is offered only
 the model-callable events Memory declares (`bot.ability.memory.consolidate`) and is told its
 capacities (link, merge, forget, or leave the unit as it is), never which to use. Selections go
