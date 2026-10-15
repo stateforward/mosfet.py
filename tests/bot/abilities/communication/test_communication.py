@@ -39,12 +39,13 @@ _ENCODE_IDLE_TIMEOUT = datetime.timedelta(seconds=5)
 
 class Script(vocal.speech.SpeechEncoder):
     """Reads the text to its end, then streams 20 ms of PCM per word, each chunk aligned to its word, optionally
-    pausing before each word or stalling forever."""
+    pausing before each word or stalling forever (at a word)."""
 
-    def __init__(self, *, pause: float = 0.0, stall: bool = False) -> None:
+    def __init__(self, *, pause: float = 0.0, stall: bool = False, stall_on: str | None = None) -> None:
         self.format: vocal.speech.Format = vocal.speech.Format(sample_rate_hz=RATE, channels=1)
         self.pause: float = pause
         self.stall: bool = stall
+        self.stall_on: str | None = stall_on
         self.calls: list[str] = []
 
     @typing.override
@@ -58,6 +59,8 @@ class Script(vocal.speech.SpeechEncoder):
         for word in re.findall(r"\s*\S+\s*", said):
             if self.pause:
                 await asyncio.sleep(self.pause)
+            if self.stall_on is not None and word.strip().startswith(self.stall_on):
+                _ = await asyncio.Event().wait()
             yield vocal.speech.Audio(pcm=b"\x01\x00" * (RATE // 50), text=word)
 
 
@@ -346,10 +349,25 @@ def test_communication_rejects_speaking_terminals_for_another_response_or_recipi
     assert spoken == []
 
 
-def test_communication_gives_up_on_a_response_after_its_idle_timeout_of_silence() -> None:
-    async def run() -> tuple[str, list[tuple[str, str]], list[hsm.Event[typing.Any]], str]:
+def test_communication_gives_up_on_a_response_after_its_idle_timeout_of_silence_and_stops_it() -> None:
+    async def run() -> tuple[str, list[tuple[str, str]], list[hsm.Event[typing.Any]], list[str], str]:
         ctx = Environment()
-        speaker = _speaking(Script(stall=True), encode_idle_timeout=datetime.timedelta(milliseconds=200))
+        stops: list[str] = []
+
+        class RecordingSpeaking(speaking.Speaking):
+            @typing.override
+            def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[bool]:
+                if isinstance(event.data, speaking.StopData):
+                    stops.append(event.id)
+                return super().dispatch(ctx, event)
+
+        # Speaking itself would wait far longer than the test for an encoding that never starts.
+        speaker = RecordingSpeaking(
+            encoder=Script(stall=True),
+            speaker=audio.Speaker(frame=datetime.timedelta(milliseconds=10), clock=_instant()),
+            voice_id="tts:warm",
+            encode_idle_timeout=datetime.timedelta(seconds=60),
+        )
         comm = communication.Communication(
             active_conversation=_conversation(),
             speaking=speaker,
@@ -359,7 +377,7 @@ def test_communication_gives_up_on_a_response_after_its_idle_timeout_of_silence(
         _ = await hsm.dispatch(ctx, comm, _respond("This is never spoken.", "response-timeout"))
         await _wait_until(lambda: bool(_failures(collector)))
         state = comm.state() or ""
-        # Speaking finishes on its own deadline later; that late terminal is ignored.
+        # The response it gave up on is stopped, so Speaking is free again; its late terminal is ignored.
         await _wait_until(lambda: (speaker.state() or "").endswith("/wired/idle"))
         await asyncio.sleep(0.01)
         failed = [
@@ -367,12 +385,12 @@ def test_communication_gives_up_on_a_response_after_its_idle_timeout_of_silence(
             for event in collector.events
             if event.name == communication.FailedEvent.name and isinstance(event.data, ability.FailureData)
         ]
-        return state, failed, _spoken(collector), speaker.state() or ""
+        return state, failed, _spoken(collector), stops, speaker.state() or ""
 
-    state, failures, spoken, speaking_state = asyncio.run(run())
+    state, failures, spoken, stops, speaking_state = asyncio.run(run())
     assert state.endswith("/active")
-    # The failure names the response it gave up on.
     assert failures == [("response-timeout", "Speaking response timed out.")]
+    assert stops == ["response-timeout"]
     assert spoken == []
     assert speaking_state.endswith("/wired/idle")
 
@@ -421,6 +439,65 @@ def test_a_finished_response_cannot_be_reopened_by_a_late_respond(
     assert calls == ["Said once."]
     assert len(spoken) == 1
     assert late == 1
+
+
+def test_stop_is_offered_only_while_a_response_is_being_spoken() -> None:
+    async def run() -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
+        ctx = Environment()
+        speaker = _speaking(Script(stall=True))
+        comm = communication.Communication(active_conversation=_conversation(), speaking=speaker)
+        _ = await _owned(ctx, speaker, comm)
+        before = tuple(item.name for item in processing.enabled_call_events(comm))
+        _ = await hsm.dispatch(ctx, comm, _respond("This is never spoken.", "response-1"))
+        await _wait_until(lambda: "/behavior/responding" in (comm.state() or ""))
+        during = tuple(item.name for item in processing.enabled_call_events(comm))
+        _ = await hsm.dispatch(ctx, comm, communication.StopEvent.with_data(communication.StopData()))
+        await _wait_until(lambda: "/behavior/active" in (comm.state() or ""))
+        after = tuple(item.name for item in processing.enabled_call_events(comm))
+        return before, during, after
+
+    before, during, after = asyncio.run(run())
+    assert communication.StopEvent.kind == processing.EventKind
+    assert communication.StopEvent.name not in before
+    assert communication.StopEvent.name in during
+    assert communication.StopEvent.name not in after
+    assert speaking.StopEvent.name not in during
+
+
+def test_stop_reaches_speaking_and_the_response_ends_stopped_with_what_was_said() -> None:
+    async def run() -> tuple[list[hsm.Event[typing.Any]], list[conversation.Messages], list[str], str]:
+        ctx = Environment()
+        conv = RecordingConversation()
+        script = Script(stall_on="stuck")
+        speaker = _speaking(script, conversation=(conv,))
+        comm = communication.Communication(active_conversation=conv, speaking=speaker)
+        collector = await _owned(ctx, speaker, comm)
+        _ = await hsm.dispatch(ctx, comm, _respond("Said first. Then stuck here.", "response-1"))
+        await _wait_until(lambda: len(script.calls) == 1)
+        # The instant mouth reports the first words played within a few loop turns.
+        await asyncio.sleep(0.05)
+        _ = await hsm.dispatch(
+            ctx, comm, communication.StopEvent.with_data_and_id(communication.StopData(), "operation-7")
+        )
+        await _wait_until(lambda: bool(_spoken(collector)))
+        await _wait_until(lambda: len(conv.outputs) == 1)
+        await _wait_until(lambda: "/behavior/active" in (comm.state() or ""))
+        return (
+            _spoken(collector),
+            conv.outputs,
+            [failure.message for failure in _failures(collector)],
+            comm.state() or "",
+        )
+
+    spoken, outputs, failures, state = asyncio.run(run())
+    assert [item.id for item in spoken] == ["response-1"]
+    output = spoken[0].data
+    assert isinstance(output, speaking.OutputData)
+    assert output.outcome == "stopped"
+    assert (output.spoken, output.unspoken) == ("Said first. Then ", "stuck here.")
+    assert outputs[0].messages[0].content == "Said first. Then "
+    assert failures == []
+    assert state.endswith("/active")
 
 
 def test_communication_catalog_via_conversations_keyword() -> None:

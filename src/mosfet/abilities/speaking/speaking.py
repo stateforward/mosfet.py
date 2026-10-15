@@ -53,6 +53,7 @@ _PLAYOUT_GRACE = datetime.timedelta(seconds=2)
 _LOOKAHEAD = datetime.timedelta(seconds=1)
 _ENCODE_IDLE_TIMEOUT = datetime.timedelta(seconds=5)
 _ENROLL = datetime.timedelta(seconds=6)
+_STOP_TIMEOUT = datetime.timedelta(seconds=1)
 _MIN_ENROLL = datetime.timedelta(seconds=1.5)
 """The shortest copy of the bot's own voice worth learning from (above a voiceprint model's 0.3 s floor)."""
 
@@ -177,6 +178,22 @@ class OutputData(pydantic.BaseModel):
     channels: int = pydantic.Field(ge=1, description="Channel count of the played audio.", examples=[1])
 
 
+class StopData(pydantic.BaseModel):
+    """Stop the utterance named by the event id: flush the mouth and end with what has been played."""
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
+        frozen=True,
+        extra="forbid",
+        json_schema_extra={
+            "description": (
+                "Stop the utterance whose id this event carries: whatever the mouth has not played yet is dropped, "
+                "and the utterance ends stopped with what was already heard as spoken."
+            ),
+            "examples": [{}],
+        },
+    )
+
+
 class ProgressData(pydantic.BaseModel):
     """How far the utterance in progress has got: a sign of life for whoever asked for it."""
 
@@ -209,6 +226,13 @@ ProgressEvent = hsm.Event[ProgressData](
     schema=ProgressData,
 )
 """The utterance is moving: sent to its requester, with the input's id, as its first audio starts and audio plays."""
+
+StopEvent = hsm.Event[StopData](
+    name="bot.ability.speaking.stop",
+    kind=hsm.EventKind,
+    schema=StopData,
+)
+"""Stop the utterance this event's id names. Not model-callable: Communication's ``stop`` reaches it."""
 
 
 class EfferenceData(pydantic.BaseModel):
@@ -327,6 +351,14 @@ class _StreamEndedData(pydantic.BaseModel):
     utterance: int
 
 
+class _FlushCommandedData(pydantic.BaseModel):
+    """The mouth has been told to flush the utterance it was stopping; the stream can now be closed."""
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(frozen=True)
+
+    utterance: int
+
+
 class _EncodingFailedData(pydantic.BaseModel):
     """The utterance's stream failed."""
 
@@ -340,6 +372,12 @@ _CommandedEvent = hsm.Event[_CommandedData](name="bot.ability.speaking.commanded
 _StreamEndedEvent = hsm.Event[_StreamEndedData](name="bot.ability.speaking.stream.ended", schema=_StreamEndedData)
 _EncodingFailedEvent = hsm.Event[_EncodingFailedData](
     name="bot.ability.speaking.encoding.failed", schema=_EncodingFailedData
+)
+# A completion event: it runs before anything already queued, so nothing more is commanded once the flush has left.
+_FlushCommandedEvent = hsm.Event[_FlushCommandedData](
+    name="bot.ability.speaking.flush.commanded",
+    kind=hsm.CompletionEventKind,
+    schema=_FlushCommandedData,
 )
 _ConversationRecordedEvent = hsm.Event[OutputData](
     name="bot.ability.speaking.conversation.recorded",
@@ -429,6 +467,9 @@ class Speaking(ability.Ability[InputData, OutputData]):
     played (or dropped), and ``spoken`` is the aligned text of the played pieces. Audio the mouth drops unplayed
     ends the utterance ``failed``, never ``completed``. A stream that fails, or produces nothing for
     ``encode_idle_timeout``, ends the utterance as ``failed`` after what was already commanded has played.
+    A ``speaking.stop`` for the utterance flushes the mouth at once, then closes its pipe and its stream (provider
+    cancel), and ends it ``stopped`` once the mouth has reported the flush and the audio already playing (or after
+    ``stop_timeout``).
     """
 
     input_data_type: typing.ClassVar[type[object] | tuple[type[object], ...] | None] = InputData
@@ -439,8 +480,9 @@ class Speaking(ability.Ability[InputData, OutputData]):
     # answers fails Speaking's own attach, and its owner is told.
     _composite_attachment_lifecycle: typing.ClassVar[bool] = True
     # Detached (never attached, its mouth refused, or released), Speaking answers what it is asked to say with a
-    # failure rather than leave the requester waiting.
+    # failure rather than leave the requester waiting, and counts a stop it cannot serve.
     detached_requests: typing.ClassVar[tuple[hsm.Event[typing.Any], ...]] = (InputEvent,)
+    detached_notifications: typing.ClassVar[tuple[hsm.Event[typing.Any], ...]] = (StopEvent,)
 
     _encoder: vocal.speech.SpeechEncoder
     _speaker: audio.Speaker
@@ -458,6 +500,7 @@ class Speaking(ability.Ability[InputData, OutputData]):
     # buffer a whole provider chunk and always has the next piece queued while one plays.
     _piece_bytes: int
     _encode_idle_timeout: datetime.timedelta
+    _stop_timeout: datetime.timedelta
     _enroll_bytes: int
     _clock: collections.abc.Callable[[], float]
     # Durable: the utterance being spoken (None while idle), a counter that tells utterances apart, and whether
@@ -477,6 +520,7 @@ class Speaking(ability.Ability[InputData, OutputData]):
         lookahead: datetime.timedelta = _LOOKAHEAD,
         encode_idle_timeout: datetime.timedelta = _ENCODE_IDLE_TIMEOUT,
         enroll_seconds: datetime.timedelta = _ENROLL,
+        stop_timeout: datetime.timedelta = _STOP_TIMEOUT,
         clock: collections.abc.Callable[[], float] = time.monotonic,
     ) -> None:
         """Build a Speaking ability.
@@ -490,6 +534,8 @@ class Speaking(ability.Ability[InputData, OutputData]):
             lookahead: The most unplayed audio commanded ahead of the mouth before the next chunk is pulled.
             encode_idle_timeout: The longest an encoding stream may go without producing a chunk once pulled.
             enroll_seconds: The most of its own voice Speaking hands Listening to learn from (at least 1.5 s).
+            stop_timeout: The longest a stopped utterance waits for its mouth to report the flush and the audio
+                already playing before what it never reported counts as unspoken.
             clock: Monotonic seconds the first-audio latency and the encoding duration are measured on.
 
         Raises:
@@ -501,6 +547,8 @@ class Speaking(ability.Ability[InputData, OutputData]):
             raise ValueError(f"Speaking lookahead must be positive, got {lookahead}.")
         if encode_idle_timeout <= datetime.timedelta(0):
             raise ValueError(f"Speaking encode_idle_timeout must be positive, got {encode_idle_timeout}.")
+        if stop_timeout <= datetime.timedelta(0):
+            raise ValueError(f"Speaking stop_timeout must be positive, got {stop_timeout}.")
         if enroll_seconds < _MIN_ENROLL:
             raise ValueError(f"Speaking enroll_seconds must be at least {_MIN_ENROLL}, got {enroll_seconds}.")
         self._encoder = encoder
@@ -511,6 +559,7 @@ class Speaking(ability.Ability[InputData, OutputData]):
         self._conversation_targets = _normalize_conversation_targets(conversation)
         self._lookahead_seconds = lookahead.total_seconds()
         self._encode_idle_timeout = encode_idle_timeout
+        self._stop_timeout = stop_timeout
         pcm = encoder.format
         frame_bytes = _SAMPLE_BYTES * pcm.channels
         self._piece_bytes = max(1, int(lookahead.total_seconds() / 2 * pcm.sample_rate_hz)) * frame_bytes
@@ -777,6 +826,17 @@ class Speaking(ability.Ability[InputData, OutputData]):
         Speaking._efference(ctx, instance, utterance)
 
     @staticmethod
+    def _flushed(ctx: hsm.Context, instance: "Speaking", event: hsm.Event[typing.Any]) -> None:
+        """The mouth dropped this utterance's unplayed audio on its stop: that audio is unspoken."""
+
+        data = event.data
+        assert isinstance(data, audio.FlushedData)
+        utterance = instance._utterance
+        assert utterance is not None
+        Speaking._drop(utterance, data.marks)
+        Speaking._efference(ctx, instance, utterance)
+
+    @staticmethod
     def _overdue_delay(ctx: hsm.Context, instance: "Speaking", event: hsm.Event[typing.Any]) -> datetime.timedelta:
         """How long a mouth with audio still to play may go without reporting: the rest of it, plus a grace."""
 
@@ -956,6 +1016,92 @@ class Speaking(ability.Ability[InputData, OutputData]):
         assert utterance is not None
         utterance.encoding_outcome, utterance.failure, utterance.outcome = "failed", "timeout", "failed"
         utterance.failed_as = utterance.failed_as or utterance.failure
+
+    # ----- stopping --------------------------------------------------------------------------------------------
+
+    @staticmethod
+    def _is_current_stop(ctx: hsm.Context, instance: "Speaking", event: hsm.Event[typing.Any]) -> bool:
+        """A stop names its utterance by id; a stop for any other utterance is not this one's to act on."""
+
+        del ctx
+        utterance = instance._utterance
+        return isinstance(event.data, StopData) and utterance is not None and event.id == utterance.id
+
+    @staticmethod
+    def _stop(ctx: hsm.Context, instance: "Speaking", event: hsm.Event[typing.Any]) -> None:
+        """Nothing more is said; the mouth drops this utterance's unplayed audio at once and says what it dropped.
+
+        The flush leaves here, on the stop, so barge-in never waits on the provider: leaving ``streaming`` closes
+        the pipe and the stream (the provider's cancel), and that close is awaited only after the flush has left.
+        ``_FlushCommandedEvent`` is queued before the flush, so it is handled before the mouth's report of it, and
+        it is what leaves ``speaking``. The flush carries the utterance id, so the mouth's report of it is told
+        apart from an overflow report.
+        """
+
+        utterance = instance._utterance
+        assert utterance is not None
+        _ = hsm.dispatch(
+            ctx,
+            instance,
+            dataclasses.replace(
+                _FlushCommandedEvent.with_data(_FlushCommandedData(utterance=utterance.sequence)),
+                id=utterance.id,
+                source=hsm.id(instance),
+                target=hsm.id(instance),
+                metadata=dict(event.metadata),
+            ),
+        )
+        utterance.outcome = "stopped"
+        speaker = instance._speaker
+        _ = hsm.dispatch(
+            ctx,
+            speaker,
+            dataclasses.replace(
+                audio.FlushEvent.with_data(audio.FlushData()),
+                id=utterance.id,
+                source=hsm.id(instance),
+                target=hsm.id(speaker),
+                metadata=dict(event.metadata),
+            ),
+        )
+
+    @staticmethod
+    def _is_flush_commanded(ctx: hsm.Context, instance: "Speaking", event: hsm.Event[typing.Any]) -> bool:
+        del ctx
+        data = event.data
+        utterance = instance._utterance
+        return (
+            isinstance(data, _FlushCommandedData)
+            and utterance is not None
+            and data.utterance == utterance.sequence
+            and event.source == hsm.id(instance)
+        )
+
+    @staticmethod
+    def _is_stop_flushed(ctx: hsm.Context, instance: "Speaking", event: hsm.Event[typing.Any]) -> bool:
+        del ctx
+        utterance = instance._utterance
+        return (
+            isinstance(event.data, audio.FlushedData)
+            and utterance is not None
+            and event.id == utterance.id
+            and event.source == hsm.id(instance._speaker)
+        )
+
+    @staticmethod
+    def _stop_delay(ctx: hsm.Context, instance: "Speaking", event: hsm.Event[typing.Any]) -> datetime.timedelta:
+        del ctx, event
+        return instance._stop_timeout
+
+    @staticmethod
+    def _stop_overdue(ctx: hsm.Context, instance: "Speaking", event: hsm.Event[typing.Any]) -> None:
+        """The mouth never settled the stop: what it never reported played is unspoken, and nothing is left."""
+
+        del event
+        utterance = instance._utterance
+        assert utterance is not None
+        Speaking._drop(utterance, list(utterance.marks))
+        Speaking._efference(ctx, instance, utterance)
 
     # ----- the record and the terminal -------------------------------------------------------------------------
 
@@ -1233,6 +1379,13 @@ class Speaking(ability.Ability[InputData, OutputData]):
                     hsm.effect(_overflowed),
                     hsm.target("/Speaking/wired/speaking/drained"),
                 ),
+                # A stop flushes the mouth at once; the stream is closed only once the flush has left.
+                hsm.transition(hsm.on(StopEvent), hsm.guard(_is_current_stop), hsm.effect(_stop)),
+                hsm.transition(
+                    hsm.on(_FlushCommandedEvent),
+                    hsm.guard(_is_flush_commanded),
+                    hsm.target("/Speaking/wired/stopping"),
+                ),
                 # The utterance's one encoding stream is open exactly while it streams.
                 hsm.state(
                     "streaming",
@@ -1312,6 +1465,43 @@ class Speaking(ability.Ability[InputData, OutputData]):
                     ),
                 ),
             ),
+            # Stopped: the mouth is flushed; the utterance ends once the mouth has reported the flush and the audio
+            # that was already playing, or after ``stop_timeout`` if it never does.
+            hsm.state(
+                "stopping",
+                hsm.defer(InputEvent),
+                hsm.initial(hsm.target("flushing")),
+                hsm.transition(hsm.on(audio.PlayedEvent), hsm.guard(_is_our_mark), hsm.effect(_played)),
+                hsm.transition(
+                    hsm.after(_stop_delay),
+                    hsm.effect(_stop_overdue),
+                    hsm.target("/Speaking/wired/recording"),
+                ),
+                hsm.state(
+                    "flushing",
+                    hsm.transition(
+                        hsm.on(audio.FlushedEvent),
+                        hsm.guard(_is_stop_flushed),
+                        hsm.effect(_flushed),
+                        hsm.target("/Speaking/wired/stopping/settled"),
+                    ),
+                ),
+                hsm.choice(
+                    "settled",
+                    hsm.transition(hsm.guard(_is_drained), hsm.target("/Speaking/wired/recording")),
+                    hsm.transition(hsm.target("/Speaking/wired/stopping/draining")),
+                ),
+                # The slice already playing when the flush landed finishes; its report is the last one.
+                hsm.state(
+                    "draining",
+                    hsm.transition(
+                        hsm.on(audio.PlayedEvent),
+                        hsm.guard(_is_our_mark),
+                        hsm.effect(_played),
+                        hsm.target("/Speaking/wired/stopping/settled"),
+                    ),
+                ),
+            ),
             hsm.state(
                 "recording",
                 hsm.defer(InputEvent),
@@ -1349,4 +1539,6 @@ __all__ = [
     "ProgressData",
     "ProgressEvent",
     "Speaking",
+    "StopData",
+    "StopEvent",
 ]

@@ -11,6 +11,8 @@ from .speaking import (
     ProgressData,
     ProgressEvent,
     Speaking,
+    StopData,
+    StopEvent,
 )
 
 __all__ = [
@@ -24,4 +26,6 @@ __all__ = [
     "ProgressData",
     "ProgressEvent",
     "Speaking",
+    "StopData",
+    "StopEvent",
 ]

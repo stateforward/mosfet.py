@@ -43,6 +43,7 @@ VOICE_ID = "tts:warm"
 LOOKAHEAD = datetime.timedelta(seconds=1)
 ENCODE_IDLE_TIMEOUT = datetime.timedelta(seconds=5)
 ENROLL = datetime.timedelta(seconds=6)
+STOP_TIMEOUT = datetime.timedelta(seconds=1)
 
 
 def pcm(milliseconds: int) -> bytes:
@@ -239,8 +240,23 @@ class Stage:
             ),
         )
 
+    async def stop(self, *, id: str = "utterance-1") -> None:
+        _ = await hsm.dispatch(
+            self.environment,
+            self.speaking,
+            dataclasses.replace(
+                speaking.StopEvent.with_data(speaking.StopData()),
+                id=id,
+                source=hsm.id(self.requester),
+                target=hsm.id(self.speaking),
+            ),
+        )
+
     def outputs(self) -> list[speaking.OutputData]:
         return outputs(self.requester)
+
+    def progress(self) -> list[speaking.ProgressData]:
+        return [event.data for event in self.requester.events if isinstance(event.data, speaking.ProgressData)]
 
     def copies(self) -> list[speaking.EfferenceData]:
         return [event.data for event in self.ear.events if isinstance(event.data, speaking.EfferenceData)]
@@ -254,6 +270,7 @@ async def stage(
     lookahead: datetime.timedelta = LOOKAHEAD,
     encode_idle_timeout: datetime.timedelta = ENCODE_IDLE_TIMEOUT,
     enroll_seconds: datetime.timedelta = ENROLL,
+    stop_timeout: datetime.timedelta = STOP_TIMEOUT,
     mouth: RecordingSpeaker | None = None,
 ) -> Stage:
     environment = Environment()
@@ -272,6 +289,7 @@ async def stage(
         lookahead=lookahead,
         encode_idle_timeout=encode_idle_timeout,
         enroll_seconds=enroll_seconds,
+        stop_timeout=stop_timeout,
     )
     await start_ability_tree(environment, voice)
     await wait_until(lambda: (voice.state() or "").endswith("/wired/idle"))
@@ -308,12 +326,16 @@ def test_speaking_requires_ability_conversation_targets_and_sane_bounds() -> Non
         _ = speaking.Speaking(
             encoder=Script(), speaker=mouth, voice_id=VOICE_ID, enroll_seconds=datetime.timedelta(seconds=1)
         )
+    with pytest.raises(ValueError, match="stop_timeout"):
+        _ = speaking.Speaking(encoder=Script(), speaker=mouth, voice_id=VOICE_ID, stop_timeout=datetime.timedelta(0))
 
 
 def test_speaking_input_is_not_a_cognition_call_event() -> None:
     assert speaking.InputEvent.name == "bot.ability.speaking.input"
     assert speaking.InputEvent.kind == hsm.EventKind
     assert speaking.ProgressEvent.kind != processing.EventKind
+    assert speaking.StopEvent.name == "bot.ability.speaking.stop"
+    assert speaking.StopEvent.kind != processing.EventKind
     assert speaking.EfferenceEvent.kind != processing.EventKind
 
 
@@ -742,6 +764,170 @@ def test_a_mouth_that_stops_reporting_ends_the_utterance_unspoken(
     assert utterance_failure(finished_spans) == "timeout"
 
 
+def test_stop_flushes_the_mouth_and_ends_stopped_with_only_what_was_played() -> None:
+    class Flushes(RecordingSpeaker):
+        """A real speaker that also notes every flush it was commanded with."""
+
+        def __init__(self) -> None:
+            super().__init__(clock=time.monotonic)
+            self.flushes: list[hsm.Event[typing.Any]] = []
+
+        @typing.override
+        def dispatch(self, ctx: hsm.Context, event: hsm.Event[typing.Any]) -> collections.abc.Awaitable[bool]:
+            if isinstance(event.data, audio.FlushData):
+                self.flushes.append(event)
+            return super().dispatch(ctx, event)
+
+    async def run() -> tuple[Stage, Flushes, list[speaking.OutputData], int]:
+        # A real clock: 200 ms of audio per word, so the first word plays well before the rest.
+        mouth = Flushes()
+        voice = await stage(Script(chunk_ms=200), mouth=mouth)
+        await voice.say("First. Then a few more words. And more.")
+        await wait_until(lambda: any(item.spoken_seconds > 0.0 for item in voice.progress()))
+        await voice.stop()
+        await wait_until(lambda: bool(voice.outputs()))
+        commanded = len(voice.speaker.frames)
+        await asyncio.sleep(0.05)
+        return voice, mouth, voice.outputs(), commanded
+
+    voice, mouth, outputs, commanded = asyncio.run(run())
+
+    assert [(event.source, event.target) for event in mouth.flushes] == [(hsm.id(voice.speaking), hsm.id(mouth))]
+    assert outputs == [
+        speaking.OutputData(
+            text="First. Then a few more words. And more.",
+            spoken="First. ",
+            unspoken="Then a few more words. And more.",
+            outcome="stopped",
+            voice_id="tts:warm",
+            sample_rate_hz=RATE,
+            channels=1,
+        )
+    ]
+    terminal = voice.requester.named(speaking.OutputEvent)[0]
+    assert terminal.id == "utterance-1"
+    # Nothing more is commanded once stopped, and the ear is told the mouth has nothing left to say.
+    assert len(voice.speaker.frames) == commanded
+    assert voice.copies()[-1].duration == 0.0
+
+
+def test_stop_closes_the_pipe_and_the_stream_in_flight_and_ignores_a_stop_for_another_utterance() -> None:
+    async def run() -> tuple[str, list[speaking.OutputData], IteratorScript, str]:
+        voice = await stage(IteratorScript(stall_on="stuck"))
+        await voice.say("Said first. Then stuck here.")
+        await wait_until(lambda: voice.encoder.pulled == 3)
+        await wait_until(lambda: any(item.spoken_seconds >= 0.06 for item in voice.progress()))
+        await voice.stop(id="some-other-utterance")
+        await asyncio.sleep(0.02)
+        still = voice.speaking.state() or ""
+        await voice.stop()
+        await wait_until(lambda: bool(voice.outputs()))
+        await wait_until(lambda: (voice.speaking.state() or "").endswith("/wired/idle"))
+        return still, voice.outputs(), typing.cast(IteratorScript, voice.encoder), voice.speaking.state() or ""
+
+    still, outputs, script, state = asyncio.run(run())
+
+    assert still.endswith("/speaking/streaming/pulling")
+    assert outputs[0].outcome == "stopped"
+    # Fine alignment: what was said is exactly the words whose audio played.
+    assert (outputs[0].spoken, outputs[0].unspoken) == ("Said first. Then ", "stuck here.")
+    # The provider saw the stream closed, and it had read the whole pipe to its end.
+    assert script.aclosed == ["Said first. Then stuck here."]
+    assert script.closed == ["Said first. Then stuck here."]
+    assert state.endswith("/wired/idle")
+
+
+def test_a_stop_with_whole_text_alignment_says_nothing_was_said() -> None:
+    async def run() -> list[speaking.OutputData]:
+        # A real clock: 200 ms per word, and the text is said only once its last chunk plays.
+        voice = await stage(Script(chunk_ms=200, whole=True), mouth=RecordingSpeaker(clock=time.monotonic))
+        await voice.say("First. Then more.")
+        await wait_until(lambda: any(item.spoken_seconds > 0.0 for item in voice.progress()))
+        await voice.stop()
+        await wait_until(lambda: bool(voice.outputs()))
+        return voice.outputs()
+
+    outputs = asyncio.run(run())
+
+    assert (outputs[0].outcome, outputs[0].spoken, outputs[0].unspoken) == ("stopped", "", "First. Then more.")
+
+
+def test_a_stop_flushes_the_mouth_at_once_even_while_the_provider_takes_its_time_to_close() -> None:
+    """Barge-in is prompt: the flush leaves on the stop, not after the provider's ``aclose`` returns."""
+
+    class SlowClose(Script):
+        """Says audio forever once the text ends; closing takes a second (a stalled WebSocket close)."""
+
+        @typing.override
+        async def encode(
+            self, input: collections.abc.AsyncIterable[str]
+        ) -> collections.abc.AsyncIterator[vocal.speech.Audio]:
+            try:
+                async for _ in input:
+                    pass
+                while True:
+                    await asyncio.sleep(0.01)
+                    yield vocal.speech.Audio(pcm=pcm(100), text="")
+            finally:
+                await asyncio.sleep(1.0)
+
+    class Flushes(RecordingSpeaker):
+        def __init__(self) -> None:
+            super().__init__(clock=time.monotonic)
+            self.flushed_at: list[float] = []
+
+        @typing.override
+        def dispatch(self, ctx: hsm.Context, event: hsm.Event[typing.Any]) -> collections.abc.Awaitable[bool]:
+            if isinstance(event.data, audio.FlushData):
+                self.flushed_at.append(time.monotonic())
+            return super().dispatch(ctx, event)
+
+    async def run() -> tuple[float, list[speaking.OutputData]]:
+        mouth = Flushes()
+        voice = await stage(SlowClose(), mouth=mouth)
+        await voice.say("Hello there.")
+        await wait_until(lambda: len(voice.speaker.frames) >= 3)
+        stopped_at = time.monotonic()
+        await voice.stop()
+        await wait_until(lambda: bool(mouth.flushed_at))
+        flush_delay = mouth.flushed_at[0] - stopped_at
+        await wait_until(lambda: bool(voice.outputs()), timeout=5)
+        return flush_delay, voice.outputs()
+
+    flush_delay, outputs = asyncio.run(run())
+
+    assert flush_delay < 0.5
+    assert outputs[0].outcome == "stopped"
+
+
+def test_a_stop_the_mouth_never_settles_ends_stopped_at_stop_timeout() -> None:
+    class Mute(RecordingSpeaker):
+        """Takes the frames and never reports them played, so a flush finds nothing of them to drop."""
+
+        @typing.override
+        def dispatch(self, ctx: hsm.Context, event: hsm.Event[typing.Any]) -> collections.abc.Awaitable[bool]:
+            if isinstance(event.data, audio.OutputData):
+                self.frames.append(event)
+                done: asyncio.Future[bool] = asyncio.get_running_loop().create_future()
+                done.set_result(True)
+                return done
+            return super().dispatch(ctx, event)
+
+    async def run() -> tuple[list[speaking.OutputData], float]:
+        voice = await stage(mouth=Mute(clock=instant()), stop_timeout=datetime.timedelta(milliseconds=50))
+        await voice.say("Nobody hears this.")
+        await wait_until(lambda: bool(voice.speaker.frames))
+        await voice.stop()
+        await wait_until(lambda: bool(voice.outputs()))
+        return voice.outputs(), voice.copies()[-1].duration
+
+    outputs, last_copy = asyncio.run(run())
+
+    assert outputs[0].outcome == "stopped"
+    assert (outputs[0].spoken, outputs[0].unspoken) == ("", "Nobody hears this.")
+    assert last_copy == 0.0
+
+
 def test_one_utterance_at_a_time_the_next_waits_for_the_first_to_be_recorded() -> None:
     async def run() -> list[str]:
         voice = await stage()
@@ -814,20 +1000,24 @@ def test_utterances_and_first_audio_are_measured(tmp_path: pathlib.Path, monkeyp
         first_before = sum(point.count for point in reader.points("bot.speaking.first_audio.duration"))
 
         async def run() -> None:
-            voice = await stage(Script(fail_on="broken"))
+            voice = await stage(Script(fail_on="broken", stall_on="stuck"))
             await voice.say("Fine.", id="fine")
             await wait_until(lambda: len(voice.outputs()) == 1)
             await voice.say("Then broken.", id="broken")
             await wait_until(lambda: len(voice.outputs()) == 2)
+            await voice.say("Then stuck.", id="stuck")
+            await wait_until(lambda: voice.encoder.pulled == 3 and len(voice.speaker.frames) == 3)
+            await voice.stop(id="stuck")
+            await wait_until(lambda: len(voice.outputs()) == 3)
 
         asyncio.run(run())
         after = outcomes(reader.points("bot.speaking.utterance.count"))
         first_audio = reader.points("bot.speaking.first_audio.duration")
         encoding = reader.points("bot.speaking.encoding.duration")
 
-    assert after - before == collections.Counter({"completed": 1, "failed": 1})
-    assert sum(point.count for point in first_audio) - first_before == 2
-    assert {"completed", "failed"} <= {point.attributes["outcome"] for point in encoding}
+    assert after - before == collections.Counter({"completed": 1, "failed": 1, "stopped": 1})
+    assert sum(point.count for point in first_audio) - first_before == 3
+    assert {"completed", "failed", "cancelled"} <= {point.attributes["outcome"] for point in encoding}
 
 
 class Deaf(audio.Speaker):

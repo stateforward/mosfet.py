@@ -121,6 +121,30 @@ RespondEvent = hsm.Event[RespondData](
     schema=RespondData,
 )
 
+
+class StopData(pydantic.BaseModel):
+    """Stop the response being spoken now."""
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
+        frozen=True,
+        extra="forbid",
+        json_schema_extra={
+            "description": (
+                "Stop the response being spoken now. What has already been heard stays said; the rest of the "
+                "response is not said. Offered only while a response is being spoken, and it takes no arguments."
+            ),
+            "examples": [{}],
+        },
+    )
+
+
+StopEvent = hsm.Event[StopData](
+    name="bot.ability.communication.stop",
+    kind=event.EventKind,
+    schema=StopData,
+)
+"""Stop the response being spoken; offered only while Communication is ``responding``."""
+
 FailedEvent = hsm.Event[ability.FailureData](
     name="bot.ability.communication.failed",
     kind=hsm.ErrorEventKind,
@@ -210,8 +234,12 @@ class Communication(ability.Ability[TurnData, object]):
       ``speaking.input`` under the response id; Communication forwards Speaking's terminal for that
       id to its owner. ``waiting`` re-enters on every ``speaking.progress`` for the response, so a long
       spoken reply is never cut off; ``response_idle_timeout`` of silence from Speaking ends it as
-      failed. Leaving ``responding`` by any path retires the response id into a bounded ring of
-      finished ids, and a ``respond`` for a finished id is ignored and counted.
+      failed and stops it (``speaking.stop`` for the response id), so Speaking does not go on saying a
+      response whose failure was already reported. :data:`StopEvent` is enabled only here, so it is offered only while a response is being
+      spoken; it reaches Speaking as ``speaking.stop`` for the response id, and Speaking's terminal
+      (outcome ``stopped``) ends the response as any other. Leaving ``responding`` by any path retires the
+      response id into a bounded ring of finished ids, and a ``respond`` for a finished id is ignored and
+      counted.
 
     Construction is keyword-only (``active_conversation=``, ``conversations=``, ``speaking=``,
     ``response_idle_timeout=``). ``speaking`` is a required composition dependency and is never
@@ -378,6 +406,35 @@ class Communication(ability.Ability[TurnData, object]):
             )
 
     @staticmethod
+    def _has_stop(ctx: hsm.Context, instance: "Communication", event: hsm.Event[typing.Any]) -> bool:
+        del ctx, instance
+        return isinstance(event.data, StopData)
+
+    @staticmethod
+    def _stop_response(ctx: hsm.Context, instance: "Communication", event: hsm.Event[typing.Any]) -> None:
+        """Ask Speaking to stop the response being spoken, by the response id; its terminal follows as usual."""
+
+        target = instance._speaking
+        with span.operation(
+            "bot.communication.response.stop",
+            scope="bot.abilities.communication",
+            component="communication",
+            stage="response_stop",
+            context=telemetry.event_context(event),
+        ):
+            _ = hsm.dispatch(
+                ctx,
+                target,
+                dataclasses.replace(
+                    speaking.StopEvent.with_data(speaking.StopData()),
+                    id=instance._response_id,
+                    source=hsm.id(instance),
+                    target=hsm.id(target),
+                    metadata=dict(event.metadata),
+                ),
+            )
+
+    @staticmethod
     def _close_response(ctx: hsm.Context, instance: "Communication", event: hsm.Event[typing.Any]) -> None:
         """Every way out of ``responding`` retires the response id, so nothing late can match or reopen it."""
 
@@ -427,7 +484,9 @@ class Communication(ability.Ability[TurnData, object]):
         instance: "Communication",
         event: hsm.Event[typing.Any],
     ) -> None:
-        del event
+        """Give up on the response: Speaking is told to stop it, and the owner is told it failed."""
+
+        Communication._stop_response(ctx, instance, event)
         failure = ability.FailureData(message="Speaking response timed out.")
         with span.operation(
             "bot.communication.response.terminal",
@@ -602,6 +661,12 @@ class Communication(ability.Ability[TurnData, object]):
                     hsm.target("/Communication/responding/waiting"),
                 ),
                 hsm.transition(
+                    hsm.on(StopEvent),
+                    hsm.guard(_has_stop),
+                    hsm.effect(_stop_response),
+                    hsm.target("/Communication/responding/waiting"),
+                ),
+                hsm.transition(
                     hsm.after(_response_idle_delay),
                     hsm.effect(_dispatch_response_timeout),
                     hsm.target("/Communication/responding/expired"),
@@ -640,4 +705,6 @@ __all__ = [
     "RespondData",
     "RespondEvent",
     "FailedEvent",
+    "StopData",
+    "StopEvent",
 ]

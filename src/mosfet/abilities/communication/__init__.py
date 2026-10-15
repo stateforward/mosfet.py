@@ -10,6 +10,8 @@ from .communication import (
     InputEvent,
     RespondData,
     RespondEvent,
+    StopData,
+    StopEvent,
 )
 
 __all__ = [
@@ -20,6 +22,8 @@ __all__ = [
     "InputEvent",
     "RespondData",
     "RespondEvent",
+    "StopData",
+    "StopEvent",
     "behaviors",
     "communication",
     "conversation",
