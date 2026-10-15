@@ -1,9 +1,13 @@
 """Object detection: what things are in an image and where, through one injected detector.
 
 ``ObjectDetector`` is the plain, non-HSM capacity a provider implements (a classic CV network, an
-open-vocabulary model, a remote VLM). ``ObjectDetection`` is the HSM wrapper an owning ability
-attaches and addresses with typed events. Labels are model output: never a metric attribute, a
-routing key or anything the bot branches on.
+open-vocabulary model, a remote VLM). ``GenerativeDetector`` serves it over any image-capable
+``text.TextGenerator``. ``ObjectDetection`` is the HSM wrapper an owning ability attaches and
+addresses with typed events. Labels are model output: never a metric attribute, a routing key or
+anything the bot branches on.
+
+Telemetry (scope ``bot.abilities.vision``): ``bot.vision.detection.invalid`` counts the reply items
+a ``GenerativeDetector`` skipped because they were not a valid detected object; no attributes.
 """
 
 import abc
@@ -13,15 +17,35 @@ import typing
 import hsm
 import mosfet
 import pydantic
+from opentelemetry import metrics
 
 from mosfet import media
 
 from .. import ability
 from .. import classifying
+from ..language import text
 from . import geometry
 
 MAX_OBJECTS: typing.Final = 32
 """The most objects one detection reports."""
+
+DETECT_INSTRUCTIONS: typing.Final = (
+    "List the distinct objects you can see in this image. Answer with only a JSON array and no other text. "
+    'Each item is {"label": a short name for the object, "confidence": how sure you are from 0 to 1, or null, '
+    '"box": {"x": ..., "y": ..., "width": ..., "height": ...}}, where the box is normalized to the image: '
+    "0 to 1, measured from the top-left corner. Answer [] when you see no objects."
+)
+"""The default request ``GenerativeDetector`` sends with the image; a composition may override it."""
+
+_DEFAULT_MAX_REPLY_BYTES: typing.Final = 65_536
+_REPLY_ITEMS: typing.Final = pydantic.TypeAdapter(list[pydantic.JsonValue])
+
+_METER = metrics.get_meter("bot.abilities.vision")
+_INVALID_ITEMS = _METER.create_counter(
+    "bot.vision.detection.invalid",
+    unit="{item}",
+    description="Reply items a generative detector skipped because they were not a valid detected object.",
+)
 
 
 class InputData(pydantic.BaseModel):
@@ -108,6 +132,95 @@ class ObjectDetector(classifying.Classifier[InputData, OutputData], abc.ABC):
     ``classify`` raises on failure. A call that cannot be cancelled (a worker thread, a blocking
     SDK) keeps running after its owner gives up on it, so a provider bounds its own work.
     """
+
+
+class Error(RuntimeError):
+    """A detector could not find the objects in an image."""
+
+
+class GenerativeDetector(ObjectDetector):
+    """Finds objects by asking any image-capable text generator for a JSON array, once per image.
+
+    Not an actor: a plain collaborator over a ``text.TextGenerator``, called directly. Each item of
+    the reply is validated on its own; an item that is not a valid ``DetectedObject`` is skipped and
+    counted, and the first ``max_objects`` valid items, in reply order, are kept.
+    """
+
+    _generator: text.TextGenerator
+    _instructions: str
+    _max_objects: int
+    _max_reply_bytes: int
+
+    def __init__(
+        self,
+        *,
+        generator: text.TextGenerator,
+        instructions: str = DETECT_INSTRUCTIONS,
+        max_objects: int = MAX_OBJECTS,
+        max_reply_bytes: int = _DEFAULT_MAX_REPLY_BYTES,
+    ) -> None:
+        """Detect through ``generator``, asking with ``instructions`` placed before the image.
+
+        Raises:
+            ValueError: If ``instructions`` is blank, ``max_objects`` is outside 1..``MAX_OBJECTS``
+                or ``max_reply_bytes`` is not positive.
+        """
+
+        if not instructions.strip():
+            raise ValueError("GenerativeDetector instructions must not be blank.")
+        if not 1 <= max_objects <= MAX_OBJECTS:
+            raise ValueError(f"GenerativeDetector max_objects must be in 1..{MAX_OBJECTS}.")
+        if max_reply_bytes < 1:
+            raise ValueError("GenerativeDetector max_reply_bytes must be positive.")
+        self._generator = generator
+        self._instructions = instructions
+        self._max_objects = max_objects
+        self._max_reply_bytes = max_reply_bytes
+
+    @typing.override
+    async def classify(self, input: InputData) -> OutputData:
+        """Ask the generator what objects ``input.image`` holds; return the valid ones it named.
+
+        Raises:
+            Error: If the generator's model cannot take the image (checked before asking), the reply
+                is larger than ``max_reply_bytes``, or it is not a JSON array.
+        """
+
+        if self._generator.image_capacity.admit((input.image,)) != (None,):
+            raise Error("the generator's model cannot take this image")
+        reply = await self._generator.generate(
+            text.InputData(
+                messages=(
+                    text.TextMessage(
+                        role=text.TextRole.USER,
+                        content=(text.TextPart(text=self._instructions), text.ImagePart(image=input.image)),
+                    ),
+                ),
+                tool_selection=text.ToolSelectionPolicy.NONE,
+            )
+        )
+        size = len(reply.content.encode())
+        if size > self._max_reply_bytes:
+            raise Error(f"the reply of {size} bytes exceeds max_reply_bytes ({self._max_reply_bytes})")
+        answer = reply.content.strip()
+        if answer.startswith("```"):
+            # A model may fence its JSON as markdown: read what is inside the fence.
+            answer = answer.partition("\n")[2].removesuffix("```").strip()
+        try:
+            items = _REPLY_ITEMS.validate_json(answer)
+        except pydantic.ValidationError as error:
+            # The reply is model output: it never becomes the failure message.
+            raise Error("the reply is not a JSON array of objects") from error
+        found: list[DetectedObject] = []
+        skipped = 0
+        for item in items:
+            try:
+                found.append(DetectedObject.model_validate(item))
+            except pydantic.ValidationError:
+                skipped += 1
+        if skipped:
+            _INVALID_ITEMS.add(skipped)
+        return OutputData(objects=tuple(found[: self._max_objects]))
 
 
 _ApplyCompletedEvent = hsm.Event[OutputData](
@@ -209,8 +322,11 @@ class ObjectDetection(classifying.Classifying[InputData, OutputData]):
 
 
 __all__ = [
+    "DETECT_INSTRUCTIONS",
     "MAX_OBJECTS",
     "DetectedObject",
+    "Error",
+    "GenerativeDetector",
     "InputData",
     "ObjectDetection",
     "ObjectDetector",

@@ -18,9 +18,9 @@ Every sight, change or look, is followed by a full ``settle_after``.
 
 What a view shows is worked out by optional perception stages, each a plain injected capacity
 behind its own typed wrapper the eye owns: objects (``vision.detection.ObjectDetector``), faces
-(``vision.faces.FaceDetector``) and, when a face ``identification.Registry`` is composed, who each
-printed face is. Stages run only on views handed on, all views of a sight in parallel, each call
-bounded by ``stage_timeout``. A stage that fails or times out leaves only its own field ``None``.
+(``vision.faces.FaceDetector``), when a face ``identification.Registry`` is composed who each
+printed face is, and a plain description (``vision.description.Describer``). Stages run only on
+views handed on, all views of a sight in parallel, each call bounded by ``stage_timeout``. A stage that fails or times out leaves only its own field ``None``.
 A stage that timed out is stuck in its applying behavior; the eye recovers it by detaching and
 re-attaching it (typed events, each bounded by ``restart_timeout``), which cancels the stuck work.
 A stage whose recovery fails is skipped until the eye itself is detached and reattached.
@@ -38,12 +38,12 @@ Telemetry (scope ``bot.abilities.seeing``; every attribute value is a closed set
 * ``bot.seeing.change`` — the measured change (0..1) of every compared view, no attributes: 1 series.
 * ``bot.seeing.sight.count`` — ``cause`` {change, look}: 2 series.
 * ``bot.seeing.look.view.count`` — views handed on per look, no attributes: 1 series.
-* ``bot.seeing.stage.count`` — ``stage`` {objects, faces, identification} × ``bot.outcome``
-  {ok, failed, timeout}: at most 9 series.
+* ``bot.seeing.stage.count`` — ``stage`` {objects, faces, identification, description} ×
+  ``bot.outcome`` {ok, failed, timeout}: at most 12 series.
 * ``bot.seeing.object.count`` — objects found per view the object stage served, no attributes: 1 series.
 * ``bot.seeing.face.count`` — faces handed on, by ``recognized`` {true, false, none}: 3 series.
-* ``bot.seeing.stage.restart.count`` — stuck-stage recoveries, ``stage`` {objects, faces} ×
-  ``bot.outcome`` {ok, failed}: 4 series.
+* ``bot.seeing.stage.restart.count`` — stuck-stage recoveries, ``stage`` {objects, faces,
+  description} × ``bot.outcome`` {ok, failed}: 6 series.
 * Spans ``bot.seeing.measure``, ``bot.seeing.interpret`` and ``bot.seeing.handoff`` carry int and
   bool attributes, plus the closed ``bot.seeing.stage`` of an interpretation's first failure. A
   measure failure is ``measure_failed``, a measurement or stage call past its modeled deadline is
@@ -52,7 +52,7 @@ Telemetry (scope ``bot.abilities.seeing``; every attribute value is a closed set
   registry's own kind (FAILURE_KINDS.md).
 
 Never used as attributes, logs or captured payloads: source ids, participant refs, face ids,
-labels, boxes, prints, signatures, change values (outside the histogram), image sizes.
+labels, boxes, descriptions, prints, signatures, change values (outside the histogram), image sizes.
 """
 
 from __future__ import annotations
@@ -102,12 +102,12 @@ _DEFAULT_MAX_VIEW_AGE: typing.Final = datetime.timedelta(seconds=60)
 _DEFAULT_STAGE_TIMEOUT: typing.Final = datetime.timedelta(seconds=30)
 _DEFAULT_RESTART_TIMEOUT: typing.Final = datetime.timedelta(seconds=10)
 
-_Stage = typing.Literal["objects", "faces"]
+_Stage = typing.Literal["objects", "faces", "description"]
 """A perception stage the eye recovers when it is stuck (the face registry has its own deadline)."""
 # A recovery detaches then re-attaches each stuck stage, each step bounded by restart_timeout, so
 # the recovery as a whole is backstopped at that many restart_timeouts.
 _RECOVERY_STEPS: typing.Final = 2 * len(typing.get_args(_Stage))
-_StageName = typing.Literal["objects", "faces", "identification"]
+_StageName = typing.Literal["objects", "faces", "identification", "description"]
 """Every stage call the eye makes, as a closed metric and span value."""
 
 _LOGGER = logging.getLogger(__name__)
@@ -146,7 +146,10 @@ _LOOK_VIEWS = _METER.create_histogram(
 _STAGE_CALLS = _METER.create_counter(
     "bot.seeing.stage.count",
     unit="{call}",
-    description="Perception stage calls by stage (objects, faces, identification) and outcome (ok, failed, timeout).",
+    description=(
+        "Perception stage calls by stage (objects, faces, identification, description) and outcome "
+        "(ok, failed, timeout)."
+    ),
 )
 _OBJECTS = _METER.create_histogram(
     "bot.seeing.object.count",
@@ -251,6 +254,7 @@ class View(pydantic.BaseModel):
                         {"label": "cup", "confidence": 0.87, "box": {"x": 0.4, "y": 0.5, "width": 0.1, "height": 0.15}}
                     ],
                     "faces": [],
+                    "description": "A cup on a desk beside an open laptop.",
                 }
             ],
         },
@@ -302,6 +306,16 @@ class View(pydantic.BaseModel):
             "Faces in the view, largest first. Empty when the face stage found none; null when no face stage "
             "is composed or it could not answer."
         ),
+    )
+    description: str | None = pydantic.Field(
+        default=None,
+        min_length=1,
+        max_length=vision.description.MAX_DESCRIPTION_CHARS,
+        description=(
+            "A few plain sentences about what the view shows, as the describer put it; null when no describer "
+            "is composed or it could not answer."
+        ),
+        examples=["A cup on a desk beside an open laptop.", None],
     )
 
 
@@ -560,7 +574,7 @@ class Seeing(ability.Ability[VisualData, cognition.InputData]):
     A measure that fails or does not answer within ``measure_timeout`` hands nothing on, is
     counted, and is never replaced by another measure; a look still sees the view.
 
-    Composed stages fill each handed-on view's ``objects`` and ``faces``; a composed face
+    Composed stages fill each handed-on view's ``objects``, ``faces`` and ``description``; a composed face
     ``identification.Registry`` names who each printed face is and stamps ``face:<id>``. Each stage
     child serves one request at a time, so size ``stage_timeout`` to cover ``MAX_VIEWS`` times a
     stage's slowest healthy call: a queued request that times out sends a healthy stage through
@@ -582,6 +596,7 @@ class Seeing(ability.Ability[VisualData, cognition.InputData]):
     _object_detection: vision.detection.ObjectDetection | None
     _face_detection: vision.faces.FaceDetection | None
     _registry: identification.Registry | None
+    _description: vision.description.Description | None
     _stage_timeout: datetime.timedelta
     _restart_timeout: datetime.timedelta
     # Durable machine data; nothing here bridges one step to the next.
@@ -600,6 +615,7 @@ class Seeing(ability.Ability[VisualData, cognition.InputData]):
         object_detector: vision.detection.ObjectDetector | None = None,
         face_detector: vision.faces.FaceDetector | None = None,
         faces: identification.Registry | None = None,
+        describer: vision.description.Describer | None = None,
         change_threshold: float = 0.1,
         measure_every: datetime.timedelta = _DEFAULT_MEASURE_EVERY,
         measure_timeout: datetime.timedelta = _DEFAULT_MEASURE_TIMEOUT,
@@ -611,8 +627,8 @@ class Seeing(ability.Ability[VisualData, cognition.InputData]):
     ) -> None:
         """See through ``change``, the one measure of how much a view changed; there is no fallback.
 
-        ``object_detector`` and ``face_detector`` are optional perception stages, each wrapped in
-        the typed stage this eye owns. ``faces`` is an unstarted face ``identification.Registry``
+        ``object_detector``, ``face_detector`` and ``describer`` are optional perception stages,
+        each wrapped in the typed stage this eye owns. ``faces`` is an unstarted face ``identification.Registry``
         (constructed with ``kind="face"``) that this eye owns from here on: its composite group
         starts it and attaches it for the eye's attached lifetime. The composition root may keep it
         to send it ``identification.ForgetEvent``. ``clock`` is the timezone-aware clock view ages are
@@ -657,12 +673,17 @@ class Seeing(ability.Ability[VisualData, cognition.InputData]):
         )
         self._face_detection = None if face_detector is None else vision.faces.FaceDetection(classifier=face_detector)
         self._registry = faces
+        self._description = None if describer is None else vision.description.Description(decoder=describer)
         self._views = {}
         self._seen = {}
         self._look_pending = False
         self._unavailable = set()
         self._consecutive_recoveries = {}
-        stages = tuple(child for child in (self._object_detection, self._face_detection, faces) if child is not None)
+        stages = tuple(
+            child
+            for child in (self._object_detection, self._face_detection, faces, self._description)
+            if child is not None
+        )
         self._attachment_group = attachment.Group(*stages, *change.attachments)
 
     # Durable bookkeeping.
@@ -985,7 +1006,7 @@ class Seeing(ability.Ability[VisualData, cognition.InputData]):
         instance: "Seeing",
         stage: _Stage,
         child: ability.Ability[typing.Any, typing.Any],
-        request: pydantic.BaseModel,
+        request: object,
         expected: type[T],
         tally: _Interpretation,
         metadata: dict[str, typing.Any],
@@ -1059,7 +1080,7 @@ class Seeing(ability.Ability[VisualData, cognition.InputData]):
     async def _interpret_view(
         instance: "Seeing", view: View, tally: _Interpretation, metadata: dict[str, typing.Any]
     ) -> View:
-        """What one view shows: objects and faces in parallel, then who the printed faces are."""
+        """What one view shows: objects and faces in parallel, then who the printed faces are, then a description."""
 
         async def nothing() -> None:
             return None
@@ -1067,7 +1088,7 @@ class Seeing(ability.Ability[VisualData, cognition.InputData]):
         def ask[T](
             stage: _Stage,
             child: ability.Ability[typing.Any, typing.Any] | None,
-            request: pydantic.BaseModel,
+            request: object,
             expected: type[T],
         ) -> collections.abc.Awaitable[T | None]:
             if child is None:
@@ -1111,6 +1132,7 @@ class Seeing(ability.Ability[VisualData, cognition.InputData]):
                     )
                 )
             faces = tuple(seen)
+        description = await ask("description", instance._description, view.image, str)
         return View(
             image=view.image,
             kind=view.kind,
@@ -1119,6 +1141,7 @@ class Seeing(ability.Ability[VisualData, cognition.InputData]):
             age_ms=view.age_ms,
             objects=objects,
             faces=faces,
+            description=description,
         )
 
     @staticmethod
@@ -1228,7 +1251,12 @@ class Seeing(ability.Ability[VisualData, cognition.InputData]):
 
     @staticmethod
     def _stage_child(instance: "Seeing", stage: _Stage) -> ability.Ability[typing.Any, typing.Any]:
-        child = instance._object_detection if stage == "objects" else instance._face_detection
+        children: dict[_Stage, ability.Ability[typing.Any, typing.Any] | None] = {
+            "objects": instance._object_detection,
+            "faces": instance._face_detection,
+            "description": instance._description,
+        }
+        child = children[stage]
         assert child is not None
         return child
 

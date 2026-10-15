@@ -1,6 +1,6 @@
 """Vision ability primitives for stateforward.mosfet agents."""
 
-from . import change, classification, detection, faces, geometry
+from . import change, classification, description, detection, faces, geometry
 from .classification import (
     VisualClassification,
     InputData,
@@ -21,6 +21,7 @@ __all__ = [
     "VisualClassifier",
     "change",
     "classification",
+    "description",
     "detection",
     "faces",
     "geometry",

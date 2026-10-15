@@ -162,6 +162,20 @@ class FakeFaces(vision.faces.FaceDetector):
         return vision.faces.OutputData(faces=self.found)
 
 
+class FakeDescriber(vision.description.Describer):
+    said: str
+    script: Script
+
+    def __init__(self, said: str, *, script: Script | None = None) -> None:
+        self.said = said
+        self.script = Script() if script is None else script
+
+    @typing.override
+    async def decode(self, input: media.Image) -> str:
+        await self.script.step(input)
+        return f"{self.said} ({_label(input)})"
+
+
 class FakeIdentifier(identification.Identifier):
     """Answers every identify with ``recognitions`` (one per print by default)."""
 
@@ -471,6 +485,7 @@ async def _harness(
     object_detector: vision.detection.ObjectDetector | None = None,
     face_detector: vision.faces.FaceDetector | None = None,
     faces: identification.Registry | None = None,
+    describer: vision.description.Describer | None = None,
     stage_timeout: datetime.timedelta = _STAGE_TIMEOUT,
     restart_timeout: datetime.timedelta = _RESTART_TIMEOUT,
 ) -> Harness:
@@ -491,6 +506,7 @@ async def _harness(
         object_detector=object_detector,
         face_detector=face_detector,
         faces=faces,
+        describer=describer,
         stage_timeout=stage_timeout,
         restart_timeout=restart_timeout,
     )
@@ -555,7 +571,10 @@ def test_sight_and_view_are_bounded_frozen_values() -> None:
         _ = seeing.View(image=_jpeg("a"), age_ms=0, change=1.5)
     with pytest.raises(pydantic.ValidationError):
         _ = seeing.View.model_validate({"image": _jpeg("a"), "age_ms": 0, "labels": []})
-    assert view.objects is None and view.faces is None
+    assert view.objects is None and view.faces is None and view.description is None
+    for said in ("", "x" * (vision.description.MAX_DESCRIPTION_CHARS + 1)):
+        with pytest.raises(pydantic.ValidationError):
+            _ = seeing.View(image=_jpeg("a"), age_ms=0, description=said)
     found = vision.DetectedObject(label="cup", confidence=0.5, box=_BOX)
     with pytest.raises(pydantic.ValidationError):
         _ = seeing.View(image=_jpeg("a"), age_ms=0, objects=(found,) * (vision.detection.MAX_OBJECTS + 1))
@@ -1452,8 +1471,8 @@ def test_a_recovery_that_never_finishes_is_cut_by_its_backstop(
         waited, sights = asyncio.run(run())
         after = {name: reader.points(name) for name in _STAGE_METRICS}
 
-    # Two stages could be stuck: a detach and an attach each, every step within restart_timeout.
-    assert waited >= 4 * restart.total_seconds() - 0.1
+    # Three stages could be stuck: a detach and an attach each, every step within restart_timeout.
+    assert waited >= 6 * restart.total_seconds() - 0.1
     assert sights[1][2].views[0].objects is None
     assert len(objects.script.calls) == 1
     assert _delta(before, after, "bot.seeing.stage.restart.count") == {
@@ -1560,6 +1579,92 @@ def test_the_composition_root_can_forget_a_face_the_eye_enrolled() -> None:
     assert forgotten.data == identification.ForgottenData(id=first[0].face_id or "", forgotten=True)
     assert (first[0].recognized, second[0].recognized) == (False, False)
     assert second[0].face_id is not None and second[0].face_id != first[0].face_id
+
+
+def test_a_describer_fills_each_handed_on_views_description(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    describer = FakeDescriber("A cup on a desk")
+
+    async def run() -> list[tuple[float, hsm.Event[typing.Any], seeing.SightData]]:
+        harness = await _harness(FakeChange(lambda image: 0.0), describer=describer)
+        await harness.frame("camera-a", _jpeg("a"))
+        await harness.owner.until(lambda: len(harness.sights()) == 1)
+        await harness.frame("camera-b", _jpeg("b"))
+        await harness.owner.until(lambda: len(harness.sights()) == 2)
+        # Below the threshold: no description is asked for.
+        await harness.frame("camera-a", _jpeg("a2"))
+        await harness.until_calls(3)
+        await asyncio.sleep(0.1)
+        assert len(describer.script.calls) == 2
+        await harness.look()
+        await harness.owner.until(lambda: len(harness.sights("look")) == 1)
+        return harness.sights()
+
+    with metric_reader.recording(tmp_path, monkeypatch) as reader:
+        before = {name: reader.points(name) for name in _STAGE_METRICS}
+        sights = asyncio.run(run())
+        after = {name: reader.points(name) for name in _STAGE_METRICS}
+
+    (_, _, first), (_, _, second), (_, _, look) = sights
+    assert first.views[0].description == "A cup on a desk (a)"
+    assert second.views[0].description == "A cup on a desk (b)"
+    assert [view.description for view in look.views] == ["A cup on a desk (a2)", "A cup on a desk (b)"]
+    # No other stage is composed, so the description is the only stage field set.
+    assert all((view.objects, view.faces) == (None, None) for _, _, sight in sights for view in sight.views)
+    assert _delta(before, after, "bot.seeing.stage.count") == {(("bot.outcome", "ok"), ("stage", "description")): 4}
+
+
+def test_a_description_that_fails_leaves_only_the_description_empty(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def run() -> list[tuple[float, hsm.Event[typing.Any], seeing.SightData]]:
+        harness = await _harness(
+            object_detector=FakeObjects(_found("cup", 0.5)),
+            describer=FakeDescriber("unused", script=Script(fail=True)),
+        )
+        await harness.frame("camera-1", _jpeg("a"))
+        await harness.owner.until(lambda: len(harness.sights()) == 1)
+        return harness.sights()
+
+    with metric_reader.recording(tmp_path, monkeypatch) as reader:
+        before = {name: reader.points(name) for name in _STAGE_METRICS}
+        ((_, _, sight),) = asyncio.run(run())
+        after = {name: reader.points(name) for name in _STAGE_METRICS}
+
+    (view,) = sight.views
+    assert view.description is None
+    assert view.objects is not None and view.objects[0].label == "cup"
+    assert _delta(before, after, "bot.seeing.stage.count") == {
+        (("bot.outcome", "failed"), ("stage", "description")): 1,
+        (("bot.outcome", "ok"), ("stage", "objects")): 1,
+    }
+
+
+def test_a_stuck_describer_is_recovered_and_describes_again(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    describer = FakeDescriber("A lamp", script=Script(hang_first=True))
+
+    async def run() -> list[tuple[float, hsm.Event[typing.Any], seeing.SightData]]:
+        harness = await _harness(describer=describer, stage_timeout=datetime.timedelta(milliseconds=100))
+        await harness.frame("camera-1", _jpeg("a"))
+        await harness.owner.until(lambda: len(harness.sights()) == 1)
+        await harness.frame("camera-1", _jpeg("b"))
+        await harness.owner.until(lambda: len(harness.sights()) == 2)
+        return harness.sights()
+
+    with metric_reader.recording(tmp_path, monkeypatch) as reader:
+        before = {name: reader.points(name) for name in _STAGE_METRICS}
+        (_, _, stuck), (_, _, served) = asyncio.run(run())
+        after = {name: reader.points(name) for name in _STAGE_METRICS}
+
+    assert stuck.views[0].description is None
+    assert served.views[0].description == "A lamp (b)"
+    assert describer.script.calls[0].cancelled
+    assert _delta(before, after, "bot.seeing.stage.restart.count") == {
+        (("bot.outcome", "ok"), ("stage", "description")): 1
+    }
 
 
 class FakeBackend:
