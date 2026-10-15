@@ -126,6 +126,15 @@ Inbound carrier traffic in phone tests is a typed service event dispatched strai
 what a phone reports comes back through its own device paths (the holder told, the room hearing
 it), never through a stand-in carrier that records publishes.
 
+## Transform codecs and transport peers
+
+| Test | Source under test |
+| --- | --- |
+| `tests/protocols/transform/test_codec.py` | `src/mosfet/protocols/transform/codec.py` (`JsonCodec` is a `Codec` named `json`: a registered event round-trips as compact UTF-8 `{"name","data"}` validated with JSON semantics, keeps its kind, and comes back unstamped; decode refuses `oversize` before parsing, `malformed` envelopes (not UTF-8 JSON, not an object, missing or extra keys, non-text name, `NaN`, nesting past either parser), `unknown_event`, `schema_invalid`; encode refuses an unregistered name, wrong data or unwritable data as `schema_invalid` and a long message as `oversize`; construction refuses no events, a repeated name, a non-model schema, or a non-positive size) |
+| `tests/protocols/transform/test_events.py` | `src/mosfet/protocols/transform/events.py` (`protocol.transform.owned`/`ended` are not tools, carry the stream address at runtime only, name a `ChannelName` inside its pattern, and `ended` gives one closed reason) |
+| `tests/protocols/transform/test_telemetry.py` | `src/mosfet/protocols/transform/telemetry.py` (`bot.transform.message.count`, `.transfer.size`, `.decode.failed.count`, `.dropped.count` by the codec's own name, direction and closed reason only) |
+| `tests/protocols/transport/test_events.py` | `src/mosfet/protocols/transport/events.py` (peer connected/disconnected/accept/close names and closed reasons, none a tool; `PeerAttachData` is an `attachment.AttachData` whose channel table rides at runtime only and names each channel once; `ChannelData` keeps owner and codec off the wire; `PeerId`, connection id and `TransportName` bounds) |
+
 ## Intentional indirect coverage (do not "fix" by reaching in further)
 
 - `tests/bot/abilities/test_ability.py` subclasses `abilities.Ability` to
