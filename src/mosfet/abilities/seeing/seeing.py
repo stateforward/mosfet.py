@@ -16,6 +16,19 @@ Rates are bounded in topology, whatever the source's frame rate:
 
 Every sight, change or look, is followed by a full ``settle_after``.
 
+What a view shows is worked out by optional perception stages, each a plain injected capacity
+behind its own typed wrapper the eye owns: objects (``vision.detection.ObjectDetector``), faces
+(``vision.faces.FaceDetector``) and, when a face ``identification.Registry`` is composed, who each
+printed face is. Stages run only on views handed on, all views of a sight in parallel, each call
+bounded by ``stage_timeout``. A stage that fails or times out leaves only its own field ``None``.
+A stage that timed out is stuck in its applying behavior; the eye recovers it by detaching and
+re-attaching it (typed events, each bounded by ``restart_timeout``), which cancels the stuck work.
+A stage whose recovery fails is skipped until the eye itself is detached and reattached.
+
+Identified faces are stamped as ``face:<id>`` source participants. Biometric prints exist only in
+the face stage's output, the identify request and the interpretation's locals: never in a sight,
+a span, a metric or a log.
+
 Telemetry (scope ``bot.abilities.seeing``; every attribute value is a closed set from code):
 
 * ``bot.seeing.view.count`` — ``media_type`` (3) × ``bot.outcome`` {held, evicted, expired, dropped};
@@ -25,19 +38,30 @@ Telemetry (scope ``bot.abilities.seeing``; every attribute value is a closed set
 * ``bot.seeing.change`` — the measured change (0..1) of every compared view, no attributes: 1 series.
 * ``bot.seeing.sight.count`` — ``cause`` {change, look}: 2 series.
 * ``bot.seeing.look.view.count`` — views handed on per look, no attributes: 1 series.
+* ``bot.seeing.stage.count`` — ``stage`` {objects, faces, identification} × ``bot.outcome``
+  {ok, failed, timeout}: at most 9 series.
+* ``bot.seeing.object.count`` — objects found per view the object stage served, no attributes: 1 series.
+* ``bot.seeing.face.count`` — faces handed on, by ``recognized`` {true, false, none}: 3 series.
+* ``bot.seeing.stage.restart.count`` — stuck-stage recoveries, ``stage`` {objects, faces} ×
+  ``bot.outcome`` {ok, failed}: 4 series.
 * Spans ``bot.seeing.measure``, ``bot.seeing.interpret`` and ``bot.seeing.handoff`` carry int and
-  bool attributes only. A measure failure is ``measure_failed`` and a measurement past its modeled
-  deadline is ``timeout`` (FAILURE_KINDS.md).
+  bool attributes, plus the closed ``bot.seeing.stage`` of an interpretation's first failure. A
+  measure failure is ``measure_failed``, a measurement or stage call past its modeled deadline is
+  ``timeout``, a stage that answered with a failure is ``stage_failed``, a face registry that
+  answered for another kind is ``invalid_response``, and an identification failure carries the
+  registry's own kind (FAILURE_KINDS.md).
 
-Never used as attributes, logs or captured payloads: source ids, participant refs, signatures,
-change values (outside the histogram), image sizes.
+Never used as attributes, logs or captured payloads: source ids, participant refs, face ids,
+labels, boxes, prints, signatures, change values (outside the histogram), image sizes.
 """
 
 from __future__ import annotations
 
+import asyncio
 import collections.abc
 import dataclasses
 import datetime
+import logging
 import time
 import typing
 import uuid
@@ -56,6 +80,7 @@ from mosfet.protocols import attachment
 from mosfet.telemetry import span
 
 from .. import ability
+from .. import identification
 from .. import vision
 
 MAX_VIEWS: typing.Final = 4
@@ -67,10 +92,25 @@ _MAX_PARTICIPANTS: typing.Final = 32
 _SCOPE: typing.Final = "bot.abilities.seeing"
 _COMPONENT: typing.Final = "seeing"
 _MEASURE_FAILED: typing.Final = "measure_failed"
+_STAGE_FAILED: typing.Final = "stage_failed"
+_TIMEOUT: typing.Final = "timeout"
+_INVALID_RESPONSE: typing.Final = "invalid_response"
 _DEFAULT_MEASURE_EVERY: typing.Final = datetime.timedelta(milliseconds=500)
 _DEFAULT_MEASURE_TIMEOUT: typing.Final = datetime.timedelta(seconds=2)
 _DEFAULT_SETTLE_AFTER: typing.Final = datetime.timedelta(seconds=5)
 _DEFAULT_MAX_VIEW_AGE: typing.Final = datetime.timedelta(seconds=60)
+_DEFAULT_STAGE_TIMEOUT: typing.Final = datetime.timedelta(seconds=30)
+_DEFAULT_RESTART_TIMEOUT: typing.Final = datetime.timedelta(seconds=10)
+
+_Stage = typing.Literal["objects", "faces"]
+"""A perception stage the eye recovers when it is stuck (the face registry has its own deadline)."""
+# A recovery detaches then re-attaches each stuck stage, each step bounded by restart_timeout, so
+# the recovery as a whole is backstopped at that many restart_timeouts.
+_RECOVERY_STEPS: typing.Final = 2 * len(typing.get_args(_Stage))
+_StageName = typing.Literal["objects", "faces", "identification"]
+"""Every stage call the eye makes, as a closed metric and span value."""
+
+_LOGGER = logging.getLogger(__name__)
 
 _METER = metrics.get_meter(_SCOPE)
 _VIEWS = _METER.create_counter(
@@ -103,6 +143,90 @@ _LOOK_VIEWS = _METER.create_histogram(
     unit="{view}",
     description="Views handed on per look.",
 )
+_STAGE_CALLS = _METER.create_counter(
+    "bot.seeing.stage.count",
+    unit="{call}",
+    description="Perception stage calls by stage (objects, faces, identification) and outcome (ok, failed, timeout).",
+)
+_OBJECTS = _METER.create_histogram(
+    "bot.seeing.object.count",
+    unit="{object}",
+    description="Objects found per view the object stage served.",
+)
+_FACES = _METER.create_counter(
+    "bot.seeing.face.count",
+    unit="{face}",
+    description="Faces handed on, by whether identification recognized them (true, false, none).",
+)
+_RESTARTS = _METER.create_counter(
+    "bot.seeing.stage.restart.count",
+    unit="{recovery}",
+    description="Stuck-stage recoveries (detach then re-attach) by stage and outcome (ok, failed).",
+)
+
+
+class Face(pydantic.BaseModel):
+    """One face in a view: where it is and, when a face registry is composed, who it is."""
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
+        frozen=True,
+        extra="forbid",
+        json_schema_extra={
+            "description": (
+                "A face in view. face_id names who it is when identification ran: recognized=true is someone "
+                "seen before, recognized=false someone new whose id was just made. Null fields mean no "
+                "identification ran for this face."
+            ),
+            "examples": [
+                {
+                    "box": {"x": 0.42, "y": 0.18, "width": 0.12, "height": 0.2},
+                    "confidence": 0.93,
+                    "face_id": "3f2a9c",
+                    "recognized": True,
+                    "similarity": 0.82,
+                },
+                {
+                    "box": {"x": 0.1, "y": 0.2, "width": 0.1, "height": 0.15},
+                    "confidence": None,
+                    "face_id": None,
+                    "recognized": None,
+                    "similarity": None,
+                },
+            ],
+        },
+    )
+
+    box: vision.Box = pydantic.Field(description="Where the face is, in normalized image coordinates.")
+    confidence: float | None = pydantic.Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description="How sure the face detector was, 0..1; null when it does not rate faces.",
+        examples=[0.93, None],
+    )
+    face_id: identification.Id | None = pydantic.Field(
+        default=None,
+        description=(
+            "Who this face is, as the face registry's id; the same person seen again has the same id. Null "
+            "when no identification ran or it could not tell."
+        ),
+        examples=["3f2a9c", None],
+    )
+    recognized: bool | None = pydantic.Field(
+        default=None,
+        description=(
+            "True: this face matched someone seen before. False: nobody known; a new id was made for them now. "
+            "Null: no identification ran."
+        ),
+        examples=[True, False, None],
+    )
+    similarity: float | None = pydantic.Field(
+        default=None,
+        ge=-1.0,
+        le=1.0,
+        description="How close the face was to the matched (or nearest) known face, -1..1; null when none was compared.",
+        examples=[0.82, None],
+    )
 
 
 class View(pydantic.BaseModel):
@@ -123,6 +247,10 @@ class View(pydantic.BaseModel):
                     "participants": [],
                     "change": 0.42,
                     "age_ms": 120,
+                    "objects": [
+                        {"label": "cup", "confidence": 0.87, "box": {"x": 0.4, "y": 0.5, "width": 0.1, "height": 0.15}}
+                    ],
+                    "faces": [],
                 }
             ],
         },
@@ -158,6 +286,22 @@ class View(pydantic.BaseModel):
         ge=0,
         description="How long ago the view arrived, in milliseconds, when it was handed on.",
         examples=[0, 120],
+    )
+    objects: tuple[vision.DetectedObject, ...] | None = pydantic.Field(
+        default=None,
+        max_length=vision.detection.MAX_OBJECTS,
+        description=(
+            "Objects found in the view, most confident first. Empty when the object stage found nothing; "
+            "null when no object stage is composed or it could not answer."
+        ),
+    )
+    faces: tuple[Face, ...] | None = pydantic.Field(
+        default=None,
+        max_length=vision.faces.MAX_FACES,
+        description=(
+            "Faces in the view, largest first. Empty when the face stage found none; null when no face stage "
+            "is composed or it could not answer."
+        ),
     )
 
 
@@ -202,8 +346,11 @@ class SightData(pydantic.BaseModel):
     participants: tuple[mosfet.Participant, ...] = pydantic.Field(
         default=(),
         max_length=_MAX_PARTICIPANTS,
-        description="Ordered union of the views' participants, first occurrence first.",
-        examples=[[{"ref": "person-42", "role": "source"}]],
+        description=(
+            "Who is in this sight: the views' stamped participants, then face:<id> for every identified face, "
+            "first occurrence first."
+        ),
+        examples=[[{"ref": "person-42", "role": "source"}, {"ref": "face:3f2a9c", "role": "source"}]],
     )
 
     @pydantic.model_validator(mode="after")
@@ -275,6 +422,43 @@ class _InterpretData(pydantic.BaseModel):
     views: tuple[View, ...] = pydantic.Field(max_length=MAX_VIEWS, description="The views, newest first.")
 
 
+class _StageFailureData(pydantic.BaseModel):
+    """One stage call that did not answer with a result."""
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(frozen=True, extra="forbid")
+
+    stage: _StageName = pydantic.Field(description="The stage that was called.")
+    kind: str = pydantic.Field(min_length=1, max_length=64, description="Failure kind (FAILURE_KINDS.md).")
+
+
+class _InterpretedData(_InterpretData):
+    """Interpreted views, and how each stage fared while interpreting them."""
+
+    timed_out: frozenset[_Stage] = pydantic.Field(
+        default=frozenset(),
+        description="Stages a call timed out on: each is stuck in its applying behavior until recovered.",
+    )
+    served: frozenset[_Stage] = pydantic.Field(
+        default=frozenset(),
+        description="Stages that answered at least one call with a result.",
+    )
+    failures: tuple[_StageFailureData, ...] = pydantic.Field(
+        default=(),
+        description="Every stage call that did not answer with a result, in the order they ended.",
+    )
+
+
+class _RecoveredData(pydantic.BaseModel):
+    """How the recovery of stuck stages went."""
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(frozen=True, extra="forbid")
+
+    recovered: frozenset[_Stage] = pydantic.Field(description="Stages detached and re-attached: they serve again.")
+    failed: frozenset[_Stage] = pydantic.Field(
+        description="Stages whose detach or re-attach failed or did not answer: skipped until the eye is reattached.",
+    )
+
+
 _MeasuredEvent = hsm.Event[_MeasuredData](
     name="bot.ability.seeing.measure.completed",
     kind=hsm.CompletionEventKind,
@@ -293,11 +477,30 @@ _InterpretRequestedEvent = hsm.Event[_InterpretData](
     kind=hsm.CompletionEventKind,
     schema=_InterpretData,
 )
-_InterpretedEvent = hsm.Event[_InterpretData](
+_InterpretedEvent = hsm.Event[_InterpretedData](
     name="bot.ability.seeing.interpret.completed",
     kind=hsm.CompletionEventKind,
-    schema=_InterpretData,
+    schema=_InterpretedData,
 )
+_RecoveredEvent = hsm.Event[_RecoveredData](
+    name="bot.ability.seeing.recover.completed",
+    kind=hsm.CompletionEventKind,
+    schema=_RecoveredData,
+)
+
+
+@dataclasses.dataclass(slots=True)
+class _Interpretation:
+    """One interpretation's running tally across its parallel stage calls (activity locals only)."""
+
+    timed_out: set[_Stage] = dataclasses.field(default_factory=set[_Stage])
+    served: set[_Stage] = dataclasses.field(default_factory=set[_Stage])
+    failures: list[_StageFailureData] = dataclasses.field(default_factory=list[_StageFailureData])
+    skipped: int = 0
+
+    def fail(self, stage: _StageName, kind: str, outcome: typing.Literal["failed", "timeout"]) -> None:
+        self.failures.append(_StageFailureData(stage=stage, kind=kind))
+        _STAGE_CALLS.add(1, {"stage": stage, "bot.outcome": outcome})
 
 
 @dataclasses.dataclass(slots=True)
@@ -325,10 +528,20 @@ def _age_ms(now: datetime.datetime, then: datetime.datetime) -> int:
     return int(_age(now, then) / datetime.timedelta(milliseconds=1))
 
 
-def _merged_participants(views: collections.abc.Iterable[View]) -> tuple[mosfet.Participant, ...]:
-    """Ordered union of the views' stamped participants: first occurrence wins, bounded like the field."""
+def _merged_participants(views: collections.abc.Sequence[View]) -> tuple[mosfet.Participant, ...]:
+    """The views' stamped participants, then ``face:<id>`` for every identified face.
 
-    return tuple(dict.fromkeys(participant for view in views for participant in view.participants))[:_MAX_PARTICIPANTS]
+    First occurrence wins, bounded like the field.
+    """
+
+    stamped = (participant for view in views for participant in view.participants)
+    identified = (
+        identification.participant("face", face.face_id)
+        for view in views
+        for face in view.faces or ()
+        if face.face_id is not None
+    )
+    return tuple(dict.fromkeys((*stamped, *identified)))[:_MAX_PARTICIPANTS]
 
 
 class Seeing(ability.Ability[VisualData, cognition.InputData]):
@@ -346,6 +559,12 @@ class Seeing(ability.Ability[VisualData, cognition.InputData]):
 
     A measure that fails or does not answer within ``measure_timeout`` hands nothing on, is
     counted, and is never replaced by another measure; a look still sees the view.
+
+    Composed stages fill each handed-on view's ``objects`` and ``faces``; a composed face
+    ``identification.Registry`` names who each printed face is and stamps ``face:<id>``. Each stage
+    child serves one request at a time, so size ``stage_timeout`` to cover ``MAX_VIEWS`` times a
+    stage's slowest healthy call: a queued request that times out sends a healthy stage through
+    recovery.
     """
 
     input_event: typing.ClassVar[hsm.Event[VisualData]] = VisualEvent
@@ -360,30 +579,50 @@ class Seeing(ability.Ability[VisualData, cognition.InputData]):
     _settle_after: datetime.timedelta
     _max_view_age: datetime.timedelta
     _clock: collections.abc.Callable[[], datetime.datetime]
+    _object_detection: vision.detection.ObjectDetection | None
+    _face_detection: vision.faces.FaceDetection | None
+    _registry: identification.Registry | None
+    _stage_timeout: datetime.timedelta
+    _restart_timeout: datetime.timedelta
     # Durable machine data; nothing here bridges one step to the next.
     _views: dict[str, _View]
     _seen: dict[str, vision.change.Signature]
     _look_pending: bool
+    # Stages whose recovery failed: skipped until the eye is detached and reattached.
+    _unavailable: set[_Stage]
+    # Recoveries per stage since its last served call (D-10 counting).
+    _consecutive_recoveries: dict[_Stage, int]
 
     def __init__(
         self,
         *,
         change: vision.change.ChangeMeasure,
+        object_detector: vision.detection.ObjectDetector | None = None,
+        face_detector: vision.faces.FaceDetector | None = None,
+        faces: identification.Registry | None = None,
         change_threshold: float = 0.1,
         measure_every: datetime.timedelta = _DEFAULT_MEASURE_EVERY,
         measure_timeout: datetime.timedelta = _DEFAULT_MEASURE_TIMEOUT,
         settle_after: datetime.timedelta = _DEFAULT_SETTLE_AFTER,
         max_view_age: datetime.timedelta = _DEFAULT_MAX_VIEW_AGE,
+        stage_timeout: datetime.timedelta = _DEFAULT_STAGE_TIMEOUT,
+        restart_timeout: datetime.timedelta = _DEFAULT_RESTART_TIMEOUT,
         clock: collections.abc.Callable[[], datetime.datetime] | None = None,
     ) -> None:
         """See through ``change``, the one measure of how much a view changed; there is no fallback.
 
-        ``clock`` is the timezone-aware clock view ages are read from (UTC wall clock by default).
-        The actors ``change.attachments`` names are attached for Seeing's attached lifetime.
+        ``object_detector`` and ``face_detector`` are optional perception stages, each wrapped in
+        the typed stage this eye owns. ``faces`` is an unstarted face ``identification.Registry``
+        (constructed with ``kind="face"``) that this eye owns from here on: its composite group
+        starts it and attaches it for the eye's attached lifetime. The composition root may keep it
+        to send it ``identification.ForgetEvent``. ``clock`` is the timezone-aware clock view ages are
+        read from (UTC wall clock by default). The actors ``change.attachments`` names are attached
+        for Seeing's attached lifetime.
 
         Raises:
-            ValueError: If ``change_threshold`` is outside (0, 1], a duration is not positive, or
-                ``measure_every`` is longer than ``settle_after``.
+            ValueError: If ``change_threshold`` is outside (0, 1], a duration is not positive,
+                ``measure_every`` is longer than ``settle_after``, or ``faces`` is given without a
+                ``face_detector`` to print the faces it would identify.
         """
 
         if not 0.0 < change_threshold <= 1.0:
@@ -393,12 +632,16 @@ class Seeing(ability.Ability[VisualData, cognition.InputData]):
             "measure_timeout": measure_timeout,
             "settle_after": settle_after,
             "max_view_age": max_view_age,
+            "stage_timeout": stage_timeout,
+            "restart_timeout": restart_timeout,
         }
         for name, duration in durations.items():
             if duration <= datetime.timedelta(0):
                 raise ValueError(f"Seeing {name} must be positive.")
         if measure_every > settle_after:
             raise ValueError("Seeing measure_every cannot be longer than settle_after.")
+        if faces is not None and face_detector is None:
+            raise ValueError("Seeing faces needs a face_detector: a registry identifies the prints it detects.")
         super().__init__()
         self._change = change
         self._change_threshold = change_threshold
@@ -406,11 +649,21 @@ class Seeing(ability.Ability[VisualData, cognition.InputData]):
         self._measure_timeout = measure_timeout
         self._settle_after = settle_after
         self._max_view_age = max_view_age
+        self._stage_timeout = stage_timeout
+        self._restart_timeout = restart_timeout
         self._clock = _utc_now if clock is None else clock
+        self._object_detection = (
+            None if object_detector is None else vision.detection.ObjectDetection(classifier=object_detector)
+        )
+        self._face_detection = None if face_detector is None else vision.faces.FaceDetection(classifier=face_detector)
+        self._registry = faces
         self._views = {}
         self._seen = {}
         self._look_pending = False
-        self._attachment_group = attachment.Group(*change.attachments)
+        self._unavailable = set()
+        self._consecutive_recoveries = {}
+        stages = tuple(child for child in (self._object_detection, self._face_detection, faces) if child is not None)
+        self._attachment_group = attachment.Group(*stages, *change.attachments)
 
     # Durable bookkeeping.
 
@@ -481,6 +734,8 @@ class Seeing(ability.Ability[VisualData, cognition.InputData]):
         instance._views.clear()
         instance._seen.clear()
         instance._look_pending = False
+        instance._unavailable.clear()
+        instance._consecutive_recoveries.clear()
 
     # The next choice.
 
@@ -721,8 +976,158 @@ class Seeing(ability.Ability[VisualData, cognition.InputData]):
         return isinstance(event.data, _InterpretData)
 
     @staticmethod
+    def _is_interpreted(ctx: hsm.Context, instance: "Seeing", event: hsm.Event[typing.Any]) -> bool:
+        del ctx, instance
+        return isinstance(event.data, _InterpretedData)
+
+    @staticmethod
+    async def _ask_stage[T](
+        instance: "Seeing",
+        stage: _Stage,
+        child: ability.Ability[typing.Any, typing.Any],
+        request: pydantic.BaseModel,
+        expected: type[T],
+        tally: _Interpretation,
+        metadata: dict[str, typing.Any],
+    ) -> T | None:
+        """One stage call bounded by ``stage_timeout``: its result, or ``None`` (tallied) when it gave none."""
+
+        try:
+            terminal = await ability.run_terminal_operation(
+                instance.context(),
+                child=child,
+                request=dataclasses.replace(
+                    child.input_event.with_data_and_id(request, uuid.uuid4().hex), metadata=dict(metadata)
+                ),
+                terminals=(child.output_event, child.failed_event),
+                timeout=instance._stage_timeout,
+            )
+        except TimeoutError:
+            # The child is still applying the request: it is stuck until recovered.
+            tally.timed_out.add(stage)
+            tally.fail(stage, _TIMEOUT, "timeout")
+            return None
+        result = terminal.data
+        if not isinstance(result, expected):
+            tally.fail(stage, _STAGE_FAILED, "failed")
+            return None
+        tally.served.add(stage)
+        _STAGE_CALLS.add(1, {"stage": stage, "bot.outcome": "ok"})
+        return result
+
+    @staticmethod
+    async def _identify(
+        instance: "Seeing",
+        registry: identification.Registry,
+        prints: tuple[identification.Print, ...],
+        tally: _Interpretation,
+        metadata: dict[str, typing.Any],
+    ) -> tuple[identification.Recognition | None, ...] | None:
+        """Who each print is, in order; ``None`` (tallied) when the face registry gave no usable answer."""
+
+        try:
+            terminal = await ability.run_terminal_operation(
+                instance.context(),
+                child=registry,
+                request=dataclasses.replace(
+                    identification.IdentifyEvent.with_data_and_id(
+                        identification.IdentifyData(prints=prints), uuid.uuid4().hex
+                    ),
+                    metadata=dict(metadata),
+                ),
+                terminals=(identification.IdentifiedEvent, identification.FailedEvent),
+                timeout=instance._stage_timeout,
+            )
+        except TimeoutError:
+            tally.fail("identification", _TIMEOUT, "timeout")
+            return None
+        reply = terminal.data
+        if isinstance(reply, identification.FailureData):
+            tally.fail("identification", reply.kind.value, "failed")
+            return None
+        if not isinstance(reply, identification.IdentifiedData) or reply.kind != "face":
+            # A registry of another kind never files faces under its ids.
+            tally.fail("identification", _INVALID_RESPONSE, "failed")
+            return None
+        if len(reply.recognitions) != len(prints):
+            tally.fail("identification", _INVALID_RESPONSE, "failed")
+            return None
+        _STAGE_CALLS.add(1, {"stage": "identification", "bot.outcome": "ok"})
+        return reply.recognitions
+
+    @staticmethod
+    async def _interpret_view(
+        instance: "Seeing", view: View, tally: _Interpretation, metadata: dict[str, typing.Any]
+    ) -> View:
+        """What one view shows: objects and faces in parallel, then who the printed faces are."""
+
+        async def nothing() -> None:
+            return None
+
+        def ask[T](
+            stage: _Stage,
+            child: ability.Ability[typing.Any, typing.Any] | None,
+            request: pydantic.BaseModel,
+            expected: type[T],
+        ) -> collections.abc.Awaitable[T | None]:
+            if child is None:
+                return nothing()
+            if stage in instance._unavailable:
+                tally.skipped += 1
+                return nothing()
+            return Seeing._ask_stage(instance, stage, child, request, expected, tally, metadata)
+
+        found, detected = await asyncio.gather(
+            ask(
+                "objects",
+                instance._object_detection,
+                vision.detection.InputData(image=view.image),
+                vision.detection.OutputData,
+            ),
+            ask("faces", instance._face_detection, vision.faces.InputData(image=view.image), vision.faces.OutputData),
+        )
+        objects = None if found is None else found.objects
+        if objects is not None:
+            _OBJECTS.record(len(objects))
+        faces: tuple[Face, ...] | None = None
+        if detected is not None:
+            prints = tuple(face.print for face in detected.faces if face.print is not None)
+            recognitions: tuple[identification.Recognition | None, ...] = ()
+            if prints and instance._registry is not None:
+                recognitions = await Seeing._identify(instance, instance._registry, prints, tally, metadata) or ()
+            # Recognitions answer the printed faces in order; the prints themselves stay here.
+            answers = iter(recognitions)
+            seen: list[Face] = []
+            for face in detected.faces:
+                recognition = next(answers, None) if face.print is not None else None
+                _FACES.add(1, {"recognized": "none" if recognition is None else str(recognition.recognized).lower()})
+                seen.append(
+                    Face(
+                        box=face.box,
+                        confidence=face.confidence,
+                        face_id=None if recognition is None else recognition.id,
+                        recognized=None if recognition is None else recognition.recognized,
+                        similarity=None if recognition is None else recognition.similarity,
+                    )
+                )
+            faces = tuple(seen)
+        return View(
+            image=view.image,
+            kind=view.kind,
+            participants=view.participants,
+            change=view.change,
+            age_ms=view.age_ms,
+            objects=objects,
+            faces=faces,
+        )
+
+    @staticmethod
     async def _interpret(ctx: hsm.Context, instance: "Seeing", event: hsm.Event[typing.Any]) -> None:
-        """Work out what the requested views show; the request that entered this state is the only input."""
+        """Work out what the requested views show; the request that entered this state is the only input.
+
+        Views are interpreted in parallel. A stage that is not composed, failed, timed out or is
+        unavailable leaves only its own field ``None``.
+        """
 
         request = event.data
         assert isinstance(request, _InterpretData)
@@ -734,12 +1139,34 @@ class Seeing(ability.Ability[VisualData, cognition.InputData]):
             context=telemetry.event_context(event),
         ) as active:
             active.set_attribute("bot.seeing.view.count", len(request.views))
+            active.set_attribute(
+                "bot.seeing.stage.restart.consecutive", max(instance._consecutive_recoveries.values(), default=0)
+            )
+            tally = _Interpretation()
+            views = await asyncio.gather(
+                *(Seeing._interpret_view(instance, view, tally, dict(event.metadata)) for view in request.views)
+            )
+            active.set_attribute("bot.seeing.stage.skipped.count", tally.skipped)
+            if tally.failures:
+                first = tally.failures[0]
+                active.set_attribute("bot.seeing.stage", first.stage)
+                span.record_failure(active, first.kind)
             _ = hsm.dispatch(
                 ctx,
                 instance,
                 telemetry.inject_context(
                     dataclasses.replace(
-                        _InterpretedEvent.with_data_and_id(request, event.id or uuid.uuid4().hex),
+                        _InterpretedEvent.with_data_and_id(
+                            _InterpretedData(
+                                cause=request.cause,
+                                source=request.source,
+                                views=tuple(views),
+                                timed_out=frozenset(tally.timed_out),
+                                served=frozenset(tally.served),
+                                failures=tuple(tally.failures),
+                            ),
+                            event.id or uuid.uuid4().hex,
+                        ),
                         source=hsm.id(instance),
                         target=hsm.id(instance),
                         metadata=dict(event.metadata),
@@ -756,7 +1183,9 @@ class Seeing(ability.Ability[VisualData, cognition.InputData]):
         """
 
         interpreted = event.data
-        assert isinstance(interpreted, _InterpretData)
+        assert isinstance(interpreted, _InterpretedData)
+        for stage in interpreted.served:
+            _ = instance._consecutive_recoveries.pop(stage, None)
         with span.operation(
             "bot.seeing.handoff",
             scope=_SCOPE,
@@ -789,6 +1218,123 @@ class Seeing(ability.Ability[VisualData, cognition.InputData]):
             _SIGHTS.add(1, {"cause": interpreted.cause})
             _ = hsm.dispatch(ctx, instance, ability.TerminalOutputEvent.with_data(handoff))
 
+    # Recovering stuck stages.
+
+    @staticmethod
+    def _has_stuck_stage(ctx: hsm.Context, instance: "Seeing", event: hsm.Event[typing.Any]) -> bool:
+        del ctx
+        data = event.data
+        return isinstance(data, _InterpretedData) and bool(data.timed_out - instance._unavailable)
+
+    @staticmethod
+    def _stage_child(instance: "Seeing", stage: _Stage) -> ability.Ability[typing.Any, typing.Any]:
+        child = instance._object_detection if stage == "objects" else instance._face_detection
+        assert child is not None
+        return child
+
+    @staticmethod
+    async def _restart(instance: "Seeing", stage: _Stage) -> bool:
+        """Detach the stuck stage (leaving ``attached`` cancels its stuck work), then attach it again.
+
+        Both are typed requests to the child where it lives, each bounded by ``restart_timeout``.
+        """
+
+        child = Seeing._stage_child(instance, stage)
+        try:
+            detached = await ability.run_terminal_operation(
+                instance.context(),
+                child=child,
+                request=lambda operation: attachment.DetachEvent.with_data_and_id(
+                    attachment.DetachData(actor=instance, reply_to=operation, timeout=instance._restart_timeout),
+                    uuid.uuid4().hex,
+                ),
+                terminals=(attachment.DetachedEvent, attachment.DetachFailedEvent),
+                timeout=instance._restart_timeout,
+            )
+            if not isinstance(detached.data, attachment.DetachedData):
+                return False
+            attached = await ability.run_terminal_operation(
+                instance.context(),
+                child=child,
+                request=lambda operation: attachment.AttachEvent.with_data_and_id(
+                    attachment.AttachData(actor=instance, reply_to=operation, timeout=instance._restart_timeout),
+                    uuid.uuid4().hex,
+                ),
+                terminals=(attachment.AttachCompleteEvent, attachment.AttachFailedEvent),
+                timeout=instance._restart_timeout,
+            )
+        except TimeoutError:
+            return False
+        return isinstance(attached.data, attachment.AttachCompleteData)
+
+    @staticmethod
+    async def _recover_stages(ctx: hsm.Context, instance: "Seeing", event: hsm.Event[typing.Any]) -> None:
+        """Recover, one after another, the stages the interpretation that entered this state timed out on."""
+
+        interpreted = event.data
+        assert isinstance(interpreted, _InterpretedData)
+        stuck = frozenset(interpreted.timed_out - instance._unavailable)
+        recovered: set[_Stage] = set()
+        try:
+            for stage in sorted(stuck):
+                if await Seeing._restart(instance, stage):
+                    recovered.add(stage)
+        except asyncio.CancelledError:
+            # Cut short (the backstop, or the eye leaving perceiving): what did not come back failed.
+            _ = hsm.dispatch(
+                instance.context(),
+                instance,
+                _RecoveredEvent.with_data_and_id(
+                    _RecoveredData(recovered=frozenset(recovered), failed=stuck - recovered), uuid.uuid4().hex
+                ),
+            )
+            raise
+        _ = hsm.dispatch(
+            ctx,
+            instance,
+            _RecoveredEvent.with_data_and_id(
+                _RecoveredData(recovered=frozenset(recovered), failed=stuck - recovered), uuid.uuid4().hex
+            ),
+        )
+
+    @staticmethod
+    def _is_recovered(ctx: hsm.Context, instance: "Seeing", event: hsm.Event[typing.Any]) -> bool:
+        del ctx, instance
+        return isinstance(event.data, _RecoveredData)
+
+    @staticmethod
+    def _record_recoveries(ctx: hsm.Context, instance: "Seeing", event: hsm.Event[typing.Any]) -> None:
+        """A recovered stage serves again; a failed one is skipped until the eye is reattached."""
+
+        del ctx
+        data = event.data
+        assert isinstance(data, _RecoveredData)
+        for stage in sorted(data.recovered | data.failed):
+            failed = stage in data.failed
+            instance._consecutive_recoveries[stage] = instance._consecutive_recoveries.get(stage, 0) + 1
+            _RESTARTS.add(1, {"stage": stage, "bot.outcome": "failed" if failed else "ok"})
+            if failed:
+                instance._unavailable.add(stage)
+                _LOGGER.warning(
+                    "Seeing could not recover its %s stage; it is skipped until Seeing is detached and reattached.",
+                    stage,
+                )
+
+    @staticmethod
+    def _count_recovery_timeout(ctx: hsm.Context, instance: "Seeing", event: hsm.Event[typing.Any]) -> None:
+        del ctx, instance, event
+        _LOGGER.warning(
+            "Seeing stage recovery did not finish within its backstop; stages it had not recovered are skipped."
+        )
+
+    @staticmethod
+    def _recovery_backstop_delay(
+        ctx: hsm.Context, instance: "Seeing", event: hsm.Event[typing.Any]
+    ) -> datetime.timedelta:
+        # Constant: every stage detached and re-attached, each step within restart_timeout.
+        del ctx, event
+        return _RECOVERY_STEPS * instance._restart_timeout
+
     submodel: typing.ClassVar[hsm.Model | None] = mosfet.define(
         "Seeing",
         hsm.initial(hsm.target("/Seeing/initializing")),
@@ -810,6 +1356,8 @@ class Seeing(ability.Ability[VisualData, cognition.InputData]):
             # remembered. Internal: neither interrupts what the eye is doing.
             hsm.transition(hsm.on(input_event), hsm.guard(_is_visual), hsm.effect(_hold)),
             hsm.transition(hsm.on(LookEvent), hsm.guard(_is_look), hsm.effect(_request_look)),
+            # A recovery cut short reports after its state was left; what it reports still holds.
+            hsm.transition(hsm.on(_RecoveredEvent), hsm.guard(_is_recovered), hsm.effect(_record_recoveries)),
             hsm.state(
                 "watching",
                 hsm.transition(
@@ -868,9 +1416,9 @@ class Seeing(ability.Ability[VisualData, cognition.InputData]):
                 hsm.initial(hsm.target("/Seeing/perceiving/interpreting/requested")),
                 hsm.transition(
                     hsm.on(_InterpretedEvent),
-                    hsm.guard(_carries_views),
+                    hsm.guard(_is_interpreted),
                     hsm.effect(_perceive),
-                    hsm.target("/Seeing/perceiving/settling"),
+                    hsm.target("/Seeing/perceiving/recovering"),
                 ),
                 hsm.state(
                     "requested",
@@ -881,6 +1429,27 @@ class Seeing(ability.Ability[VisualData, cognition.InputData]):
                     ),
                 ),
                 hsm.state("running", hsm.activity(_interpret)),
+            ),
+            # A stage that timed out is stuck applying the request it never answered.
+            hsm.choice(
+                "recovering",
+                hsm.transition(hsm.guard(_has_stuck_stage), hsm.target("/Seeing/perceiving/recovering_stages")),
+                hsm.transition(hsm.target("/Seeing/perceiving/settling")),
+            ),
+            hsm.state(
+                "recovering_stages",
+                hsm.activity(_recover_stages),
+                hsm.transition(
+                    hsm.on(_RecoveredEvent),
+                    hsm.guard(_is_recovered),
+                    hsm.effect(_record_recoveries),
+                    hsm.target("/Seeing/perceiving/settling"),
+                ),
+                hsm.transition(
+                    hsm.after(_recovery_backstop_delay),
+                    hsm.effect(_count_recovery_timeout),
+                    hsm.target("/Seeing/perceiving/settling"),
+                ),
             ),
             # Every sight is followed by a full settle_after: at most one per settle_after, plus looks.
             hsm.state(
@@ -924,6 +1493,7 @@ class Seeing(ability.Ability[VisualData, cognition.InputData]):
 __all__ = [
     "MAX_VIEWS",
     "Cause",
+    "Face",
     "LookData",
     "LookEvent",
     "Seeing",

@@ -50,6 +50,7 @@ failed, not which library raised:
 | `store_failed` | a storage transaction failed and rolled back; nothing was changed |
 | `stale_lease` | a decision or release named a leased unit that is no longer leased |
 | `measure_failed` | a change measure could not measure a view; nothing was handed on; check the change measure's provider |
+| `stage_failed` | a perception stage (objects, faces) answered with a failure; the view's field for it is empty; the span's `bot.seeing.stage` says which stage |
 | `unknown` | derivation produced nothing usable — a bug in the call site |
 
 Add a kind only when an operator would act differently on it. Two kinds that

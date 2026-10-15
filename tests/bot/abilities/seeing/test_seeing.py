@@ -1,6 +1,7 @@
-"""HSM runtime tests for ``seeing.Seeing``: measured change, pacing, refractory, look, bounds."""
+"""HSM runtime tests for ``seeing.Seeing``: measured change, pacing, refractory, look, bounds, stages."""
 
 import asyncio
+import collections.abc
 import dataclasses
 import datetime
 import hashlib
@@ -12,12 +13,16 @@ import hsm
 import mosfet
 import pydantic
 import pytest
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
 from mosfet import abilities, environment, media
 from mosfet import event as event_contract
-from mosfet.abilities import cognition, processing, seeing
+from mosfet.abilities import cognition, identification, processing, seeing, vision
 from mosfet.abilities.vision import change
 from mosfet.protocols import attachment
+from mosfet.telemetry import span
 
 from tests import metric_reader
 
@@ -30,6 +35,9 @@ _MEASURE_EVERY = datetime.timedelta(milliseconds=20)
 _MEASURE_TIMEOUT = datetime.timedelta(seconds=2)
 _SETTLE_AFTER = datetime.timedelta(milliseconds=40)
 _MAX_VIEW_AGE = datetime.timedelta(seconds=60)
+_STAGE_TIMEOUT = datetime.timedelta(seconds=2)
+_RESTART_TIMEOUT = datetime.timedelta(seconds=2)
+_BOX = vision.Box(x=0.1, y=0.1, width=0.2, height=0.2)
 
 
 def _jpeg(label: str) -> media.Image:
@@ -89,6 +97,189 @@ class FakeChange(change.ChangeMeasure):
         if self.fail:
             raise change.Error("scripted failure")
         return change.Measurement(change=None if previous is None else self.score(image), signature=_signature(image))
+
+
+@dataclasses.dataclass
+class StageCall:
+    image: media.Image
+    cancelled: bool = False
+
+
+class Script:
+    """How a fake stage answers: hang on its first call, fail, or wait for a gate."""
+
+    calls: list[StageCall]
+    hang_first: bool
+    fail: bool
+    gate: asyncio.Event | None
+
+    def __init__(self, *, hang_first: bool = False, fail: bool = False, gate: asyncio.Event | None = None) -> None:
+        self.hang_first = hang_first
+        self.fail = fail
+        self.gate = gate
+        self.calls = []
+
+    async def step(self, image: media.Image) -> None:
+        call = StageCall(image=image)
+        self.calls.append(call)
+        if self.gate is not None:
+            _ = await self.gate.wait()
+        if self.hang_first and len(self.calls) == 1:
+            try:
+                _ = await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                call.cancelled = True
+                raise
+        if self.fail:
+            raise RuntimeError("scripted stage failure")
+
+
+class FakeObjects(vision.detection.ObjectDetector):
+    found: tuple[vision.DetectedObject, ...]
+    script: Script
+
+    def __init__(self, *found: vision.DetectedObject, script: Script | None = None) -> None:
+        self.found = found
+        self.script = Script() if script is None else script
+
+    @typing.override
+    async def classify(self, input: vision.detection.InputData) -> vision.detection.OutputData:
+        await self.script.step(input.image)
+        return vision.detection.OutputData(objects=self.found)
+
+
+class FakeFaces(vision.faces.FaceDetector):
+    found: tuple[vision.faces.DetectedFace, ...]
+    script: Script
+
+    def __init__(self, *found: vision.faces.DetectedFace, script: Script | None = None) -> None:
+        self.found = found
+        self.script = Script() if script is None else script
+
+    @typing.override
+    async def classify(self, input: vision.faces.InputData) -> vision.faces.OutputData:
+        await self.script.step(input.image)
+        return vision.faces.OutputData(faces=self.found)
+
+
+class FakeIdentifier(identification.Identifier):
+    """Answers every identify with ``recognitions`` (one per print by default)."""
+
+    identified: list[tuple[identification.Print, ...]]
+    recognitions: tuple[identification.Recognition | None, ...]
+
+    def __init__(self, *recognitions: identification.Recognition | None) -> None:
+        self.recognitions = recognitions
+        self.identified = []
+
+    @typing.override
+    async def identify(
+        self, kind: identification.Kind, prints: tuple[identification.Print, ...]
+    ) -> tuple[identification.Recognition | None, ...]:
+        del kind
+        self.identified.append(prints)
+        return self.recognitions
+
+    @typing.override
+    async def enroll(
+        self, kind: identification.Kind, id: identification.Id, print: identification.Print, own: bool
+    ) -> identification.Recognition:
+        del kind, print
+        return identification.Recognition(id=id, recognized=False, similarity=None, own=own)
+
+    @typing.override
+    async def forget(self, kind: identification.Kind, id: identification.Id) -> bool:
+        del kind, id
+        return False
+
+    @typing.override
+    async def prune(self, kind: identification.Kind, *, unseen_before: datetime.datetime, max_ids: int) -> int:
+        del kind, unseen_before, max_ids
+        return 0
+
+
+def _registry(identifier: identification.Identifier, kind: identification.Kind = "face") -> identification.Registry:
+    return identification.Registry(
+        identifier=identifier, kind=kind, max_unlinked_age=datetime.timedelta(days=30), max_ids=100
+    )
+
+
+def _found(label: str, confidence: float | None) -> vision.DetectedObject:
+    return vision.DetectedObject(label=label, confidence=confidence, box=_BOX)
+
+
+def _detected_face(size: float, print: identification.Print | None = None) -> vision.faces.DetectedFace:
+    return vision.faces.DetectedFace(box=vision.Box(x=0.0, y=0.0, width=size, height=size), confidence=0.9, print=print)
+
+
+def _print(*vector: float) -> identification.Print:
+    return identification.Print(vector=vector, model="face-model")
+
+
+class RecordingDetection(vision.detection.ObjectDetection):
+    """Object stage that records the lifecycle requests it receives; it may refuse or swallow one attach."""
+
+    lifecycle: list[hsm.Event[typing.Any]]
+    refuse_attach: int | None
+    swallow_attach: int | None
+
+    def __init__(
+        self,
+        *,
+        classifier: vision.detection.ObjectDetector,
+        refuse_attach: int | None = None,
+        swallow_attach: int | None = None,
+    ) -> None:
+        super().__init__(classifier=classifier)
+        self.lifecycle = []
+        self.refuse_attach = refuse_attach
+        self.swallow_attach = swallow_attach
+
+    def attaches(self) -> list[hsm.Event[typing.Any]]:
+        return [event for event in self.lifecycle if isinstance(event.data, attachment.AttachData)]
+
+    @typing.override
+    def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[bool]:
+        data = event.data
+        if isinstance(data, (attachment.AttachData, attachment.DetachData)):
+            self.lifecycle.append(event)
+        if isinstance(data, attachment.AttachData):
+            count = len(self.attaches())
+            if count == self.swallow_attach:
+                return asyncio.get_running_loop().create_future()
+            if count == self.refuse_attach:
+                reply_to = data.actor if data.reply_to is None else data.reply_to
+                return hsm.dispatch(
+                    ctx,
+                    reply_to,
+                    dataclasses.replace(
+                        attachment.AttachFailedEvent.with_data(
+                            attachment.FailedData(
+                                actor=data.actor, kind=attachment.FailureKind.INITIALIZATION, message="refused"
+                            )
+                        ),
+                        id=event.id,
+                        source=hsm.id(self),
+                        target=hsm.id(reply_to),
+                    ),
+                )
+        return super().dispatch(ctx, event)
+
+
+def _record_detections(
+    monkeypatch: pytest.MonkeyPatch, *, refuse_attach: int | None = None, swallow_attach: int | None = None
+) -> list[RecordingDetection]:
+    """Have Seeing build ``RecordingDetection`` object stages; returns the ones it built."""
+
+    built: list[RecordingDetection] = []
+
+    def build(*, classifier: vision.detection.ObjectDetector) -> RecordingDetection:
+        child = RecordingDetection(classifier=classifier, refuse_attach=refuse_attach, swallow_attach=swallow_attach)
+        built.append(child)
+        return child
+
+    monkeypatch.setattr(vision.detection, "ObjectDetection", build)
+    return built
 
 
 class ManualClock:
@@ -277,6 +468,11 @@ async def _harness(
     settle_after: datetime.timedelta = _SETTLE_AFTER,
     max_view_age: datetime.timedelta = _MAX_VIEW_AGE,
     clock: ManualClock | None = None,
+    object_detector: vision.detection.ObjectDetector | None = None,
+    face_detector: vision.faces.FaceDetector | None = None,
+    faces: identification.Registry | None = None,
+    stage_timeout: datetime.timedelta = _STAGE_TIMEOUT,
+    restart_timeout: datetime.timedelta = _RESTART_TIMEOUT,
 ) -> Harness:
     ctx = environment.Environment()
     owner = Owner()
@@ -292,6 +488,11 @@ async def _harness(
         settle_after=settle_after,
         max_view_age=max_view_age,
         clock=clock,
+        object_detector=object_detector,
+        face_detector=face_detector,
+        faces=faces,
+        stage_timeout=stage_timeout,
+        restart_timeout=restart_timeout,
     )
     harness = Harness(ctx=ctx, eye=eye, owner=owner, measure=fake)
     if attach:
@@ -328,6 +529,7 @@ def test_seeing_exports_its_contract() -> None:
         "LookData",
         "LookEvent",
         "Cause",
+        "Face",
         "MAX_VIEWS",
     }
     assert seeing.LookData.model_fields == {}
@@ -352,10 +554,22 @@ def test_sight_and_view_are_bounded_frozen_values() -> None:
     with pytest.raises(pydantic.ValidationError):
         _ = seeing.View(image=_jpeg("a"), age_ms=0, change=1.5)
     with pytest.raises(pydantic.ValidationError):
-        _ = seeing.View.model_validate({"image": _jpeg("a"), "age_ms": 0, "objects": []})
+        _ = seeing.View.model_validate({"image": _jpeg("a"), "age_ms": 0, "labels": []})
+    assert view.objects is None and view.faces is None
+    found = vision.DetectedObject(label="cup", confidence=0.5, box=_BOX)
+    with pytest.raises(pydantic.ValidationError):
+        _ = seeing.View(image=_jpeg("a"), age_ms=0, objects=(found,) * (vision.detection.MAX_OBJECTS + 1))
+    face = seeing.Face(box=_BOX)
+    assert (face.face_id, face.recognized, face.similarity, face.confidence) == (None, None, None, None)
+    with pytest.raises(pydantic.ValidationError):
+        _ = seeing.View(image=_jpeg("a"), age_ms=0, faces=(face,) * (vision.faces.MAX_FACES + 1))
+    with pytest.raises(pydantic.ValidationError):
+        _ = seeing.Face(box=_BOX, face_id="Not An Id")
+    with pytest.raises(pydantic.ValidationError):
+        _ = seeing.Face.model_validate({"box": _BOX, "print": None})
     with pytest.raises(pydantic.ValidationError):
         _ = seeing.LookData.model_validate({"anything": 1})
-    for model in (seeing.View, seeing.SightData, seeing.LookData):
+    for model in (seeing.View, seeing.SightData, seeing.LookData, seeing.Face):
         assert model.model_config.get("frozen") is True
 
 
@@ -380,6 +594,12 @@ def test_construction_requires_a_change_measure_and_valid_settings() -> None:
         _ = seeing.Seeing(
             change=measure, measure_every=datetime.timedelta(seconds=2), settle_after=datetime.timedelta(seconds=1)
         )
+    with pytest.raises(ValueError, match="stage_timeout"):
+        _ = seeing.Seeing(change=measure, stage_timeout=zero)
+    with pytest.raises(ValueError, match="restart_timeout"):
+        _ = seeing.Seeing(change=measure, restart_timeout=zero)
+    with pytest.raises(ValueError, match="face_detector"):
+        _ = seeing.Seeing(change=measure, faces=_registry(FakeIdentifier()))
     assert isinstance(seeing.Seeing(change=measure, change_threshold=1.0), abilities.Ability)
 
 
@@ -918,6 +1138,485 @@ def test_the_change_measures_attachments_are_attached_for_the_eyes_attached_life
     assert asyncio.run(run()) == (1, 0, 1)
 
 
+# Stages
+
+
+def test_stages_fill_each_views_objects_and_faces_in_contract_order(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    objects = FakeObjects(_found("cup", 0.5), _found("person", 0.9))
+    faces = FakeFaces(_detected_face(0.1), _detected_face(0.4))
+
+    async def run() -> list[tuple[float, hsm.Event[typing.Any], seeing.SightData]]:
+        harness = await _harness(object_detector=objects, face_detector=faces)
+        await harness.frame("camera-1", _jpeg("a"), participants=(_PERSON,))
+        await harness.owner.until(lambda: len(harness.sights()) == 1)
+        objects.found, faces.found = (), ()
+        await harness.frame("camera-1", _jpeg("b"))
+        await harness.owner.until(lambda: len(harness.sights()) == 2)
+        return harness.sights()
+
+    with metric_reader.recording(tmp_path, monkeypatch) as reader:
+        before = {name: reader.points(name) for name in _STAGE_METRICS}
+        sights = asyncio.run(run())
+        after = {name: reader.points(name) for name in _STAGE_METRICS}
+
+    (_, _, first), (_, _, second) = sights
+    (view,) = first.views
+    assert view.objects is not None and [found.label for found in view.objects] == ["person", "cup"]
+    assert view.faces == (
+        seeing.Face(box=vision.Box(x=0.0, y=0.0, width=0.4, height=0.4), confidence=0.9),
+        seeing.Face(box=vision.Box(x=0.0, y=0.0, width=0.1, height=0.1), confidence=0.9),
+    )
+    # No registry composed: no face is identified and no face participant is stamped.
+    assert first.participants == (_PERSON,)
+    assert (second.views[0].objects, second.views[0].faces) == ((), ())
+    assert [call.image for call in objects.script.calls] == [_jpeg("a"), _jpeg("b")]
+    assert _delta(before, after, "bot.seeing.stage.count") == {
+        (("bot.outcome", "ok"), ("stage", "faces")): 2,
+        (("bot.outcome", "ok"), ("stage", "objects")): 2,
+    }
+    assert _delta(before, after, "bot.seeing.face.count") == {(("recognized", "none"),): 2}
+    histogram = [point for point in after["bot.seeing.object.count"] if point.count]
+    assert (
+        sum(point.count for point in histogram) - sum(point.count for point in before["bot.seeing.object.count"]) == 2
+    )
+
+
+def test_stages_run_only_on_views_handed_on_and_on_every_view_a_look_hands_on() -> None:
+    objects = FakeObjects()
+
+    async def run() -> list[tuple[float, hsm.Event[typing.Any], seeing.SightData]]:
+        harness = await _harness(FakeChange(lambda image: 0.0), object_detector=objects)
+        await harness.frame("camera-a", _jpeg("a"))
+        await harness.owner.until(lambda: len(harness.sights()) == 1)
+        await harness.frame("camera-b", _jpeg("b"))
+        await harness.owner.until(lambda: len(harness.sights()) == 2)
+        await harness.frame("camera-a", _jpeg("a2"))
+        await harness.until_calls(3)
+        await asyncio.sleep(0.1)
+        assert len(objects.script.calls) == 2
+        await harness.look()
+        await harness.owner.until(lambda: len(harness.sights("look")) == 1)
+        return harness.sights("look")
+
+    ((_, _, look),) = asyncio.run(run())
+
+    assert [call.image for call in objects.script.calls[2:]] == [_jpeg("a2"), _jpeg("b")]
+    assert [view.objects for view in look.views] == [(), ()]
+
+
+def test_identified_faces_are_stamped_as_face_participants() -> None:
+    identifier = FakeIdentifier(
+        identification.Recognition(id="a", recognized=True, similarity=0.9, own=False),
+        identification.Recognition(id="b", recognized=False, similarity=None, own=False),
+    )
+    first, second = _print(1.0, 0.0), _print(0.0, 1.0)
+    faces = FakeFaces(_detected_face(0.2, second), _detected_face(0.4, first))
+
+    async def run() -> list[tuple[float, hsm.Event[typing.Any], seeing.SightData]]:
+        harness = await _harness(face_detector=faces, faces=_registry(identifier))
+        await harness.frame("camera-1", _jpeg("a"), participants=(_PERSON,))
+        await harness.owner.until(lambda: len(harness.sights()) == 1)
+        return harness.sights()
+
+    ((_, handoff, sight),) = asyncio.run(run())
+
+    assert identifier.identified == [(first, second)]
+    (view,) = sight.views
+    assert view.faces is not None
+    assert [(face.face_id, face.recognized, face.similarity) for face in view.faces] == [
+        ("a", True, 0.9),
+        ("b", False, None),
+    ]
+    assert sight.participants == (
+        _PERSON,
+        mosfet.Participant(ref="face:a", role=mosfet.ParticipantRole.SOURCE),
+        mosfet.Participant(ref="face:b", role=mosfet.ParticipantRole.SOURCE),
+    )
+    data = handoff.data
+    assert isinstance(data, cognition.InputData)
+    assert data.participants == sight.participants
+
+
+def test_a_face_without_a_print_or_a_recognition_has_no_id_and_no_participant() -> None:
+    identifier = FakeIdentifier(None, identification.Recognition(id="c", recognized=True, similarity=0.7, own=False))
+    large, medium = _print(1.0, 0.0), _print(0.0, 1.0)
+    faces = FakeFaces(_detected_face(0.5, large), _detected_face(0.1), _detected_face(0.3, medium))
+
+    async def run() -> list[tuple[float, hsm.Event[typing.Any], seeing.SightData]]:
+        harness = await _harness(face_detector=faces, faces=_registry(identifier))
+        await harness.frame("camera-1", _jpeg("a"))
+        await harness.owner.until(lambda: len(harness.sights()) == 1)
+        return harness.sights()
+
+    ((_, _, sight),) = asyncio.run(run())
+
+    # Only printed faces are identified, in face order.
+    assert identifier.identified == [(large, medium)]
+    assert sight.views[0].faces is not None
+    assert [(face.face_id, face.recognized, face.similarity) for face in sight.views[0].faces] == [
+        (None, None, None),
+        ("c", True, 0.7),
+        (None, None, None),
+    ]
+    assert sight.participants == (mosfet.Participant(ref="face:c", role=mosfet.ParticipantRole.SOURCE),)
+
+
+def test_no_print_vector_or_signature_reaches_a_sight() -> None:
+    vector = (0.123456, 0.654321)
+    face_print = _print(*vector)
+    identifier = FakeIdentifier(identification.Recognition(id="a", recognized=False, similarity=None, own=False))
+
+    async def run() -> list[tuple[float, hsm.Event[typing.Any], seeing.SightData]]:
+        harness = await _harness(
+            object_detector=FakeObjects(_found("cup", 0.5)),
+            face_detector=FakeFaces(_detected_face(0.3, face_print)),
+            faces=_registry(identifier),
+        )
+        await harness.frame("camera-1", _jpeg("a"))
+        await harness.owner.until(lambda: len(harness.sights()) == 1)
+        await harness.frame("camera-1", _jpeg("b"))
+        await harness.owner.until(lambda: len(harness.sights()) == 2)
+        return harness.sights()
+
+    sights = asyncio.run(run())
+
+    numbers = {round(value, 4) for value in (*vector, *face_print.vector)}
+
+    def walk(value: object) -> collections.abc.Iterator[tuple[str, object]]:
+        if isinstance(value, dict):
+            for key, item in typing.cast(dict[str, object], value).items():
+                yield key, item
+                yield from walk(item)
+        elif isinstance(value, (list, tuple)):
+            for item in typing.cast(collections.abc.Sequence[object], value):
+                yield "", item
+                yield from walk(item)
+
+    for _, handoff, sight in sights:
+        dumped = list(walk(sight.model_dump()))
+        assert not {"print", "vector", "signature", "digest", "values"} & {key for key, _ in dumped}
+        floats = {round(item, 4) for _, item in dumped if isinstance(item, float)}
+        assert not numbers & floats
+        assert "Signature" not in repr(handoff.data)
+
+
+def test_a_stage_failure_or_timeout_leaves_only_its_own_field_empty(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def run() -> list[tuple[float, hsm.Event[typing.Any], seeing.SightData]]:
+        failing = await _harness(
+            object_detector=FakeObjects(script=Script(fail=True)), face_detector=FakeFaces(_detected_face(0.2))
+        )
+        await failing.frame("camera-1", _jpeg("a"))
+        await failing.owner.until(lambda: len(failing.sights()) == 1)
+        stuck = FakeFaces(script=Script(hang_first=True))
+        hanging = await _harness(
+            object_detector=FakeObjects(_found("cup", 0.5)),
+            face_detector=stuck,
+            stage_timeout=datetime.timedelta(milliseconds=100),
+        )
+        await hanging.frame("camera-1", _jpeg("a"))
+        await hanging.owner.until(lambda: len(hanging.sights()) == 1)
+        # The next sight comes after the stuck stage's recovery: nothing is left in flight at the end.
+        await hanging.frame("camera-1", _jpeg("b"))
+        await hanging.owner.until(lambda: len(hanging.sights()) == 2)
+        assert stuck.script.calls[0].cancelled
+        return failing.sights() + hanging.sights()[:1]
+
+    with metric_reader.recording(tmp_path, monkeypatch) as reader:
+        before = {name: reader.points(name) for name in _STAGE_METRICS}
+        (_, _, failed), (_, _, timed_out) = asyncio.run(run())
+        after = {name: reader.points(name) for name in _STAGE_METRICS}
+
+    assert failed.views[0].objects is None
+    assert failed.views[0].faces == (seeing.Face(box=vision.Box(x=0.0, y=0.0, width=0.2, height=0.2), confidence=0.9),)
+    assert timed_out.views[0].faces is None
+    assert timed_out.views[0].objects is not None and [found.label for found in timed_out.views[0].objects] == ["cup"]
+    assert _delta(before, after, "bot.seeing.stage.count") == {
+        (("bot.outcome", "failed"), ("stage", "objects")): 1,
+        (("bot.outcome", "ok"), ("stage", "faces")): 2,
+        (("bot.outcome", "ok"), ("stage", "objects")): 2,
+        (("bot.outcome", "timeout"), ("stage", "faces")): 1,
+    }
+
+
+def test_a_stuck_stage_is_detached_and_reattached_and_serves_again(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    built = _record_detections(monkeypatch)
+    objects = FakeObjects(_found("cup", 0.5), script=Script(hang_first=True))
+
+    async def run() -> tuple[Harness, list[tuple[float, hsm.Event[typing.Any], seeing.SightData]]]:
+        harness = await _harness(object_detector=objects, stage_timeout=datetime.timedelta(milliseconds=100))
+        await harness.frame("camera-1", _jpeg("a"))
+        await harness.owner.until(lambda: len(harness.sights()) == 1)
+        async with asyncio.timeout(_WAIT):
+            while len(built[0].attaches()) < 2:
+                await asyncio.sleep(0.005)
+        await asyncio.sleep(0.1)
+        await harness.frame("camera-1", _jpeg("b"))
+        await harness.owner.until(lambda: len(harness.sights()) == 2)
+        return harness, harness.sights()
+
+    with metric_reader.recording(tmp_path, monkeypatch) as reader:
+        before = {name: reader.points(name) for name in _STAGE_METRICS}
+        harness, sights = asyncio.run(run())
+        after = {name: reader.points(name) for name in _STAGE_METRICS}
+
+    (_, _, stuck), (_, _, served) = sights
+    assert stuck.views[0].objects is None
+    assert served.views[0].objects is not None and served.views[0].objects[0].label == "cup"
+    # The stuck call's context was cancelled when the detach left attached.
+    assert objects.script.calls[0].cancelled
+    (child,) = built
+    group_attach, detach, reattach = child.lifecycle
+    assert isinstance(group_attach.data, attachment.AttachData)
+    assert isinstance(detach.data, attachment.DetachData) and detach.data.actor is harness.eye
+    assert isinstance(reattach.data, attachment.AttachData) and reattach.data.actor is harness.eye
+    # Each recovery request names its own one-shot operation as its reply address.
+    assert detach.data.reply_to is not None and reattach.data.reply_to is not None
+    assert detach.data.reply_to is not reattach.data.reply_to
+    assert _delta(before, after, "bot.seeing.stage.restart.count") == {(("bot.outcome", "ok"), ("stage", "objects")): 1}
+
+
+def test_a_stage_whose_recovery_fails_is_skipped_until_the_eye_is_reattached(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Attach 1 is the group's; attach 2 is the recovery's and is refused; attach 3 is the reattach.
+    built = _record_detections(monkeypatch, refuse_attach=2)
+    objects = FakeObjects(_found("cup", 0.5), script=Script(hang_first=True))
+    settle = datetime.timedelta(milliseconds=300)
+
+    async def run() -> list[tuple[float, hsm.Event[typing.Any], seeing.SightData]]:
+        harness = await _harness(
+            object_detector=objects, stage_timeout=datetime.timedelta(milliseconds=100), settle_after=settle
+        )
+        await harness.frame("camera-1", _jpeg("a"))
+        await harness.owner.until(lambda: len(harness.sights()) == 1)
+        async with asyncio.timeout(_WAIT):
+            while len(built[0].attaches()) < 2:
+                await asyncio.sleep(0.005)
+        await harness.frame("camera-1", _jpeg("b"))
+        await harness.owner.until(lambda: len(harness.sights()) == 2)
+        assert len(objects.script.calls) == 1
+        # A look left pending and an unavailable stage do not survive a detach.
+        await harness.look("pending")
+        await harness.detached()
+        await harness.attached("reattach")
+        await harness.frame("camera-1", _jpeg("c"))
+        await harness.owner.until(lambda: len(harness.sights()) == 3)
+        await asyncio.sleep(settle.total_seconds() + 0.1)
+        return harness.sights()
+
+    with metric_reader.recording(tmp_path, monkeypatch) as reader:
+        before = {name: reader.points(name) for name in _STAGE_METRICS}
+        sights = asyncio.run(run())
+        after = {name: reader.points(name) for name in _STAGE_METRICS}
+
+    assert [sight.cause for _, _, sight in sights] == ["change", "change", "change"]
+    assert [sight.views[0].objects for _, _, sight in sights[:2]] == [None, None]
+    assert sights[2][2].views[0].objects is not None and sights[2][2].views[0].objects[0].label == "cup"
+    assert [call.image for call in objects.script.calls] == [_jpeg("a"), _jpeg("c")]
+    # The reattach was not refused as a conflict: the stage's attachments stayed consistent.
+    assert len(built[0].attaches()) == 3
+    assert _delta(before, after, "bot.seeing.stage.restart.count") == {
+        (("bot.outcome", "failed"), ("stage", "objects")): 1
+    }
+
+
+def test_a_recovery_that_never_finishes_is_cut_by_its_backstop(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    built = _record_detections(monkeypatch, swallow_attach=2)
+    objects = FakeObjects(_found("cup", 0.5), script=Script(hang_first=True))
+    restart = datetime.timedelta(milliseconds=50)
+
+    async def run() -> tuple[float, list[tuple[float, hsm.Event[typing.Any], seeing.SightData]]]:
+        harness = await _harness(
+            object_detector=objects, stage_timeout=datetime.timedelta(milliseconds=100), restart_timeout=restart
+        )
+        await harness.frame("camera-1", _jpeg("a"))
+        await harness.owner.until(lambda: len(harness.sights()) == 1)
+        async with asyncio.timeout(_WAIT):
+            while len(built[0].attaches()) < 2:
+                await asyncio.sleep(0.002)
+        swallowed = asyncio.get_running_loop().time()
+        await harness.frame("camera-1", _jpeg("b"))
+        await harness.owner.until(lambda: len(harness.sights()) == 2)
+        return harness.sights()[1][0] - swallowed, harness.sights()
+
+    with metric_reader.recording(tmp_path, monkeypatch) as reader:
+        before = {name: reader.points(name) for name in _STAGE_METRICS}
+        waited, sights = asyncio.run(run())
+        after = {name: reader.points(name) for name in _STAGE_METRICS}
+
+    # Two stages could be stuck: a detach and an attach each, every step within restart_timeout.
+    assert waited >= 4 * restart.total_seconds() - 0.1
+    assert sights[1][2].views[0].objects is None
+    assert len(objects.script.calls) == 1
+    assert _delta(before, after, "bot.seeing.stage.restart.count") == {
+        (("bot.outcome", "failed"), ("stage", "objects")): 1
+    }
+
+
+def test_a_look_during_interpretation_is_served_after_it() -> None:
+    gate = asyncio.Event()
+    objects = FakeObjects(_found("cup", 0.5), script=Script(gate=gate))
+
+    async def run() -> list[tuple[float, hsm.Event[typing.Any], seeing.SightData]]:
+        harness = await _harness(object_detector=objects)
+        await harness.frame("camera-1", _jpeg("a"))
+        async with asyncio.timeout(_WAIT):
+            while not objects.script.calls:
+                await asyncio.sleep(0.002)
+        await harness.look()
+        await asyncio.sleep(0.05)
+        gate.set()
+        await harness.owner.until(lambda: len(harness.sights()) == 2)
+        return harness.sights()
+
+    (_, _, change_sight), (_, _, look) = asyncio.run(run())
+
+    assert change_sight.cause == "change"
+    assert look.cause == "look"
+    assert [view.image for view in look.views] == [_jpeg("a")]
+    assert [view.objects for view in look.views] == [(_found("cup", 0.5),)]
+    assert len(objects.script.calls) == 2
+
+
+def test_a_face_registry_of_another_kind_is_an_invalid_response(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    monkeypatch.setattr(span, "tracer_provider", lambda: provider)
+    identifier = FakeIdentifier(identification.Recognition(id="v", recognized=True, similarity=0.9, own=False))
+
+    async def run() -> list[tuple[float, hsm.Event[typing.Any], seeing.SightData]]:
+        harness = await _harness(
+            face_detector=FakeFaces(_detected_face(0.3, _print(1.0, 0.0))), faces=_registry(identifier, "voice")
+        )
+        await harness.frame("camera-1", _jpeg("a"))
+        await harness.owner.until(lambda: len(harness.sights()) == 1)
+        return harness.sights()
+
+    with metric_reader.recording(tmp_path, monkeypatch) as reader:
+        before = {name: reader.points(name) for name in _STAGE_METRICS}
+        ((_, _, sight),) = asyncio.run(run())
+        after = {name: reader.points(name) for name in _STAGE_METRICS}
+
+    assert sight.views[0].faces is not None
+    assert [(face.face_id, face.recognized) for face in sight.views[0].faces] == [(None, None)]
+    assert sight.participants == ()
+    assert _delta(before, after, "bot.seeing.stage.count") == {
+        (("bot.outcome", "ok"), ("stage", "faces")): 1,
+        (("bot.outcome", "failed"), ("stage", "identification")): 1,
+    }
+    (interpret,) = [recorded for recorded in exporter.get_finished_spans() if recorded.name == "bot.seeing.interpret"]
+    attributes = dict(interpret.attributes or {})
+    assert attributes["bot.failure.kind"] == "invalid_response"
+    assert attributes["bot.seeing.stage"] == "identification"
+    assert all(isinstance(value, (bool, int, str)) for value in attributes.values())
+
+
+def test_the_composition_root_can_forget_a_face_the_eye_enrolled() -> None:
+    face_print = _print(0.6, 0.8)
+    registry = identification.Registry(
+        identifier=identification.Matcher(
+            store=identification.InProcessStore(max_ids=10),
+            policy=identification.MatchPolicy(threshold=0.5, margin=0.05, refine_threshold=0.65),
+        ),
+        kind="face",
+        max_unlinked_age=datetime.timedelta(days=30),
+        max_ids=10,
+    )
+
+    async def run() -> tuple[list[tuple[float, hsm.Event[typing.Any], seeing.SightData]], hsm.Event[typing.Any]]:
+        harness = await _harness(face_detector=FakeFaces(_detected_face(0.3, face_print)), faces=registry)
+        await harness.frame("camera-1", _jpeg("a"))
+        await harness.owner.until(lambda: len(harness.sights()) == 1)
+        faces = harness.sights()[0][2].views[0].faces
+        assert faces is not None and faces[0].face_id is not None
+        forgotten = await abilities.run_terminal_operation(
+            harness.ctx,
+            child=registry,
+            request=identification.ForgetEvent.with_data_and_id(
+                identification.ForgetData(id=faces[0].face_id), "forget-1"
+            ),
+            terminals=(identification.ForgottenEvent, identification.FailedEvent),
+            timeout=datetime.timedelta(seconds=2),
+        )
+        await harness.frame("camera-1", _jpeg("b"))
+        await harness.owner.until(lambda: len(harness.sights()) == 2)
+        return harness.sights(), forgotten
+
+    sights, forgotten = asyncio.run(run())
+
+    first, second = (sight.views[0].faces for _, _, sight in sights)
+    assert first is not None and second is not None
+    assert forgotten.data == identification.ForgottenData(id=first[0].face_id or "", forgotten=True)
+    assert (first[0].recognized, second[0].recognized) == (False, False)
+    assert second[0].face_id is not None and second[0].face_id != first[0].face_id
+
+
+class FakeBackend:
+    """One model that serves two roles: it detects objects and faces from the same call."""
+
+    calls: list[str]
+
+    def __init__(self) -> None:
+        self.calls = []
+
+    async def look(self, role: str) -> None:
+        self.calls.append(role)
+
+
+class FakeObjectAdapter(vision.detection.ObjectDetector):
+    backend: FakeBackend
+
+    def __init__(self, backend: FakeBackend) -> None:
+        self.backend = backend
+
+    @typing.override
+    async def classify(self, input: vision.detection.InputData) -> vision.detection.OutputData:
+        del input
+        await self.backend.look("objects")
+        return vision.detection.OutputData(objects=(_found("lamp", 0.8),))
+
+
+class FakeFaceAdapter(vision.faces.FaceDetector):
+    backend: FakeBackend
+
+    def __init__(self, backend: FakeBackend) -> None:
+        self.backend = backend
+
+    @typing.override
+    async def classify(self, input: vision.faces.InputData) -> vision.faces.OutputData:
+        del input
+        await self.backend.look("faces")
+        return vision.faces.OutputData(faces=(_detected_face(0.2),))
+
+
+def test_one_backend_serves_both_stages_through_per_role_adapters() -> None:
+    backend = FakeBackend()
+
+    async def run() -> list[tuple[float, hsm.Event[typing.Any], seeing.SightData]]:
+        harness = await _harness(object_detector=FakeObjectAdapter(backend), face_detector=FakeFaceAdapter(backend))
+        await harness.frame("camera-1", _jpeg("a"))
+        await harness.owner.until(lambda: len(harness.sights()) == 1)
+        return harness.sights()
+
+    ((_, _, sight),) = asyncio.run(run())
+
+    assert sorted(backend.calls) == ["faces", "objects"]
+    (view,) = sight.views
+    assert view.objects is not None and view.objects[0].label == "lamp"
+    assert view.faces is not None and len(view.faces) == 1
+
+
 # Metric helpers
 
 
@@ -943,6 +1642,27 @@ def _changes(
     }
     assert all(set(point.attributes) == {attribute} for point in after)
     return {name: value for name, value in changes.items() if value}
+
+
+_STAGE_METRICS = (
+    "bot.seeing.stage.count",
+    "bot.seeing.object.count",
+    "bot.seeing.face.count",
+    "bot.seeing.stage.restart.count",
+)
+
+
+def _delta(
+    before: dict[str, tuple[metric_reader.Point, ...]],
+    after: dict[str, tuple[metric_reader.Point, ...]],
+    name: str,
+) -> dict[tuple[tuple[str, object], ...], float]:
+    def key(point: metric_reader.Point) -> tuple[tuple[str, object], ...]:
+        return tuple(sorted(point.attributes.items()))
+
+    previous = {key(point): point.value for point in before[name]}
+    changes = {key(point): point.value - previous.get(key(point), 0.0) for point in after[name]}
+    return {attributes: value for attributes, value in changes.items() if value}
 
 
 def _outcomes(before: tuple[metric_reader.Point, ...], after: tuple[metric_reader.Point, ...]) -> dict[str, float]:

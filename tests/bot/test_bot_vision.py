@@ -5,12 +5,13 @@ from __future__ import annotations
 import asyncio
 import collections.abc
 import dataclasses
+import datetime
 import typing
 
 import hsm
 
 from mosfet import media
-from mosfet.abilities import ability, cognition, memory, processing, seeing, vision
+from mosfet.abilities import ability, cognition, identification, memory, processing, seeing, vision
 from mosfet.abilities.language import text
 from mosfet.environment import VisualData, VisualEvent
 from tests.bot.test_bot import AbilityAgent, start_bot_with_devices, wait_until
@@ -71,8 +72,19 @@ class RecordingSeeing(seeing.Seeing):
 
     looks: list[hsm.Event[typing.Any]]
 
-    def __init__(self) -> None:
-        super().__init__(change=vision.change.ByteIdentity())
+    def __init__(
+        self,
+        *,
+        object_detector: vision.detection.ObjectDetector | None = None,
+        face_detector: vision.faces.FaceDetector | None = None,
+        faces: identification.Registry | None = None,
+    ) -> None:
+        super().__init__(
+            change=vision.change.ByteIdentity(),
+            object_detector=object_detector,
+            face_detector=face_detector,
+            faces=faces,
+        )
         self.looks = []
 
     @typing.override
@@ -82,9 +94,11 @@ class RecordingSeeing(seeing.Seeing):
         return super().dispatch(ctx, event)
 
 
-async def _see(processor: RecordingProcessor, *, turns: int) -> tuple[RecordingCognition, RecordingSeeing]:
+async def _see(
+    processor: RecordingProcessor, *, turns: int, eye: RecordingSeeing | None = None
+) -> tuple[RecordingCognition, RecordingSeeing]:
     mind = RecordingCognition(processor)
-    eye = RecordingSeeing()
+    eye = RecordingSeeing() if eye is None else eye
     body = AbilityAgent(devices={}, cognition=mind, input=(eye,))
     _ = await start_bot_with_devices(body)
     still = dataclasses.replace(VisualEvent.with_data(VisualData(image=_PNG, kind="camera")), source="camera-1")
@@ -131,3 +145,60 @@ def test_a_selected_look_is_a_second_turn_under_its_own_request_id() -> None:
     assert len(turns) == 2 and all(turns) and len(set(turns)) == 2
     # The look carries the selecting turn's operation id; the turn it causes never reuses it.
     assert look.id and look.id not in {turns[1], second.input.id}
+
+
+_VECTOR = (0.1234567, 0.7654321)
+_BOX = vision.Box(x=0.25, y=0.1, width=0.2, height=0.35)
+
+
+class Lamp(vision.detection.ObjectDetector):
+    @typing.override
+    async def classify(self, input: vision.detection.InputData) -> vision.detection.OutputData:
+        del input
+        return vision.detection.OutputData(
+            objects=(vision.DetectedObject(label="desk lamp", confidence=0.8, box=_BOX),)
+        )
+
+
+class OneFace(vision.faces.FaceDetector):
+    @typing.override
+    async def classify(self, input: vision.faces.InputData) -> vision.faces.OutputData:
+        del input
+        face = vision.faces.DetectedFace(
+            box=_BOX, confidence=0.9, print=identification.Print(vector=_VECTOR, model="face-model")
+        )
+        return vision.faces.OutputData(faces=(face,))
+
+
+def test_what_the_stages_saw_reaches_the_model_with_face_participants_and_no_print() -> None:
+    registry = identification.Registry(
+        identifier=identification.Matcher(
+            store=identification.InProcessStore(max_ids=10),
+            policy=identification.MatchPolicy(threshold=0.5, margin=0.05, refine_threshold=0.65),
+        ),
+        kind="face",
+        max_unlinked_age=datetime.timedelta(days=30),
+        max_ids=10,
+    )
+    eye = RecordingSeeing(object_detector=Lamp(), face_detector=OneFace(), faces=registry)
+    processor = RecordingProcessor()
+    mind, _ = asyncio.run(_see(processor, turns=1, eye=eye))
+
+    (entry,) = processor.inputs
+    sight = entry.input
+    assert isinstance(sight, hsm.Event) and isinstance(sight.data, seeing.SightData)
+    ((face,),) = [view.faces for view in sight.data.views if view.faces is not None]
+    assert face.face_id is not None and face.recognized is False
+    ref = identification.ref("face", face.face_id)
+    (handoff,) = mind.input_events
+    assert isinstance(handoff.data, cognition.InputData)
+    assert [participant.ref for participant in handoff.data.participants] == [ref]
+    (rendered,) = entry.model_facing_content(media.ImageCapacity())
+    assert isinstance(rendered, text.TextPart)
+    assert "desk lamp" in rendered.text
+    assert face.face_id in rendered.text
+    assert "recognized" in rendered.text
+    # The print never leaves the face stage: no vector number reaches the model.
+    printed = identification.Print(vector=_VECTOR, model="face-model").vector
+    assert not [value for value in (*_VECTOR, *printed) if f"{value:.4f}"[:6] in rendered.text]
+    assert "face-model" not in rendered.text
