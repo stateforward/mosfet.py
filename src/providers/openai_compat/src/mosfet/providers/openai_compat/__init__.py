@@ -11,6 +11,7 @@ from .client import (
 )
 from .embedder import Embedder
 from .processing import Processor, ProcessingError
+from .speech import SpeechDecoder, SpeechDecodingError, SpeechEncoder
 from .text_generator import TextGenerationError, TextGenerator
 from .client import ReasoningEffort, ResponsesClient
 from .text_generator import ResponsesTextGenerator, UnsupportedReasoningEffortError
@@ -32,6 +33,9 @@ __all__ = [
     "RequestError",
     "ResponsesClient",
     "ResponsesTextGenerator",
+    "SpeechDecoder",
+    "SpeechDecodingError",
+    "SpeechEncoder",
     "TextGenerationError",
     "TextGenerator",
     "UnsupportedReasoningEffortError",

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import collections.abc
+import contextlib
 import dataclasses
 import enum
 import os
@@ -94,10 +95,50 @@ class AsyncOpenAIChatResource(typing.Protocol):
     completions: AsyncOpenAIChatCompletionsResource
 
 
+class AsyncSpeechStream(typing.Protocol):
+    """An OpenAI SDK streamed binary response (``with_streaming_response``): headers, then bytes as they arrive."""
+
+    headers: collections.abc.Mapping[str, str]
+
+    def iter_bytes(self, chunk_size: int | None = None) -> collections.abc.AsyncIterator[bytes]:
+        """Iterate the response body as it arrives."""
+        ...
+
+
+class AsyncOpenAISpeechStreamingResource(typing.Protocol):
+    """OpenAI SDK ``audio.speech.with_streaming_response``: opening it sends the request; leaving it closes it."""
+
+    def create(self, **kwargs: object) -> contextlib.AbstractAsyncContextManager[AsyncSpeechStream]:
+        """Request speech with SDK-compatible keyword arguments; the response streams inside the context."""
+        ...
+
+
+class AsyncOpenAISpeechResource(typing.Protocol):
+    """OpenAI SDK async ``audio.speech`` resource used for streamed speech encoding."""
+
+    with_streaming_response: AsyncOpenAISpeechStreamingResource
+
+
+class AsyncOpenAITranscriptionsResource(typing.Protocol):
+    """OpenAI SDK async ``audio.transcriptions`` resource used for batch transcription."""
+
+    async def create(self, **kwargs: object) -> object:
+        """Transcribe an uploaded audio file with SDK-compatible keyword arguments."""
+        ...
+
+
+class AsyncOpenAIAudioResource(typing.Protocol):
+    """OpenAI SDK async ``audio`` resource: speech encoding and transcription."""
+
+    speech: AsyncOpenAISpeechResource
+    transcriptions: AsyncOpenAITranscriptionsResource
+
+
 class AsyncOpenAIClient(typing.Protocol):
-    """OpenAI SDK async client shape (``openai.AsyncOpenAI``) used for streamed chat completions."""
+    """OpenAI SDK async client shape (``openai.AsyncOpenAI``): streamed chat completions, speech and transcription."""
 
     chat: AsyncOpenAIChatResource
+    audio: AsyncOpenAIAudioResource
 
 
 class OpenAIEmbeddingsResource(typing.Protocol):
@@ -257,7 +298,7 @@ def _normalized_base_url(value: str) -> str:
     return value.rstrip("/")
 
 
-def _sdk(
+def sdk(
     *,
     base_url: str,
     api_key: str | None,
@@ -265,7 +306,10 @@ def _sdk(
     default_headers: collections.abc.Mapping[str, str],
     asynchronous: bool = False,
 ) -> object:
-    """Build the OpenAI SDK client the clients use; never sends ``OPENAI_API_KEY`` to another endpoint."""
+    """Build the OpenAI SDK client this package's clients use; never sends ``OPENAI_API_KEY`` to another endpoint.
+
+    Shared by the chat, embeddings and speech paths of this package; not part of the exported ``client`` contract.
+    """
 
     key: str | None = api_key
     if key is None and _normalized_base_url(base_url) == _normalized_base_url(_DEFAULT_OPENAI_BASE_URL):
@@ -427,7 +471,7 @@ class ChatClient(ChatCompletionClient, ResponsesClient):
             return self._sdk_client
         sdk_client = typing.cast(
             OpenAIClient,
-            _sdk(
+            sdk(
                 base_url=self.base_url,
                 api_key=self.api_key,
                 timeout_seconds=self.timeout_seconds,
@@ -444,7 +488,7 @@ class ChatClient(ChatCompletionClient, ResponsesClient):
             return self._async_sdk_client
         sdk_client = typing.cast(
             AsyncOpenAIClient,
-            _sdk(
+            sdk(
                 base_url=self.base_url,
                 api_key=self.api_key,
                 timeout_seconds=self.timeout_seconds,
@@ -499,7 +543,7 @@ class EmbeddingClient(EmbeddingsClient):
         if sdk_client is None:
             sdk_client = typing.cast(
                 OpenAIEmbeddingsSDK,
-                _sdk(
+                sdk(
                     base_url=self.base_url,
                     api_key=self.api_key,
                     timeout_seconds=self.timeout_seconds,

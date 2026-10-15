@@ -242,7 +242,7 @@ studio (publishes topology into the `web/` studio for inspection) with `BOT_MODE
 |---|---|
 | `mosfet-provider-livekit` | realtime SFU transport + room audio for the Phone |
 | `mosfet-provider-websocket` | a device-agnostic yamux-over-WebSocket transport: the shared `Server`, one `Connection` per socket, HMAC peer tokens |
-| `mosfet-provider-openai-compat` | chat clients / processors for any OpenAI-compatible endpoint |
+| `mosfet-provider-openai-compat` | chat clients / processors, a streaming `SpeechEncoder` (`/v1/audio/speech`) and a `SpeechDecoder` (`/v1/audio/transcriptions`) for any OpenAI-compatible endpoint |
 | `mosfet-provider-gemini` | Gemini text generation & processing |
 | `mosfet-provider-elevenlabs`, `mosfet-provider-mlx-audio`, `mosfet-provider-moonshine` | speech encoding & recognition (cloud / Apple-Silicon-local / on-device) |
 | `mosfet-provider-mlx-vlm` | local VLM reading (Apple Silicon) |

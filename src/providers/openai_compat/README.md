@@ -134,6 +134,33 @@ MOSFET_LIVE_VLM_MODEL=served-model-name \
 `Processing` turns a stateforward.mosfet `InputData` frame into a typed output by asking the model to return JSON
 that validates against the provided Pydantic/type schema.
 
+## Speech
+
+`SpeechEncoder` is a `vocal.speech.SpeechEncoder` over an OpenAI-compatible `/v1/audio/speech` endpoint (for example
+Breeze TTS). The endpoint takes one whole `input`, so it reads the utterance's text to its end (joining the pieces in
+order is its only buffering; there are no chunking rules) and sends one request; closing it before the text ends sends
+none. It asks for `response_format="pcm"` and streams the raw s16le body through the SDK's `with_streaming_response`,
+yielding whole frames as they arrive with whole-text alignment: every chunk carries `""` but the last, which carries
+the whole text (so a stop before the end records nothing as said). Closing the iterator closes the response, which is
+how such a server cancels. `sample_rate_hz` and `channels` declare what the server sends: an `X-Sample-Rate` or
+`X-Sample-Format` header that disagrees is `encoding.Error("invalid_response")`. `voice` is the provider voice the
+text is spoken in; without one the request names no voice.
+
+`SpeechDecoder` is a `hearing.speech.SpeechDecoder` over `/v1/audio/transcriptions`: raw PCM at `sample_rate_hz` and
+`channels` is wrapped as WAV (a WAV input is sent as is) and uploaded as multipart `file`; the stripped `text` comes
+back as UTF-8 bytes, and blank text raises `SpeechDecodingError("decode_failed")`.
+
+```python
+from mosfet.providers import openai_compat
+
+encoder = openai_compat.SpeechEncoder(model="tts", base_url=config.tts_base_url, voice="warm")
+decoder = openai_compat.SpeechDecoder(model="stt", base_url=config.stt_base_url, language="en")
+```
+
+Both map a 4xx answer to `invalid_input`, a 5xx answer or an unreachable server to `unavailable` and an SDK timeout to
+`timeout`. `tests/test_speech_live.py` checks served endpoints when `BOT_OPENAI_COMPAT_SPEECH_BASE_URL` is set
+(`-m live`).
+
 ## Embeddings
 
 `Embedder` implements the core `embedding.Embedder` against a remote `/v1/embeddings` endpoint, so an
