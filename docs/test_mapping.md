@@ -187,6 +187,7 @@ it), never through a stand-in carrier that records publishes.
 | Test | Source under test |
 | --- | --- |
 | `tests/bot/abilities/vision/test_classification.py` | `src/mosfet/abilities/vision/classification.py` (`InputData.content` is non-empty text or a typed `media.Image`; raw bytes, empty text and a `kind` field are rejected; JSON round trip of the image) |
+| `tests/bot/abilities/vision/test_change.py` | `src/mosfet/abilities/vision/change.py` (`Signature`/`Measurement` bounds; `ByteIdentity` digest equality and foreign-signature refusal; `EmbeddingChange` JPEG capacity required, one image item with the caller's context, clamped one-minus-cosine, non-admitted image and embedder failure as `change.Error`, attachments carried; `Cascade` below the cheap threshold answers 0.0 without the expensive measure and keeps its signature, first view computes both, non-cascade previous refused, attachments concatenated, `bot.vision.change.cascade.count` outcomes) |
 | `tests/bot/abilities/test_reading.py` (typed-image cases) | `src/mosfet/abilities/reading/reading.py` (`InputData` like classification; the image route hands the image decoder the same `media.Image`; a text classification of an image is refused as a route mismatch) |
 | `src/providers/mlx_vlm/tests/test_image_decoder.py`, `test_visual_classifier.py` | `mlx_vlm/image_decoder.py`, `_image_file.py`, `visual_classifier.py` (the temporary file is named by media type: `.png`, `.jpg`, `.webp`; no configurable suffix; routing by typed content, blank text unreadable) |
 
