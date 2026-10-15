@@ -2,7 +2,9 @@ import asyncio
 import base64
 import collections.abc
 import dataclasses
+import datetime
 import json
+import math
 import pathlib
 import typing
 
@@ -13,9 +15,10 @@ import pydantic
 import pytest
 from opentelemetry import _logs
 
-from mosfet import media
-from mosfet.abilities import embedding
+from mosfet import abilities, environment, media
+from mosfet.abilities import embedding, identification
 from mosfet.abilities.language import text
+from mosfet.protocols import attachment
 from mosfet.telemetry import capture
 from mosfet.telemetry.configure import logger_provider, tracer_provider
 
@@ -359,3 +362,54 @@ def test_full_capture_never_writes_a_biometric_vector_from_a_dispatched_event(
     }
     logged = pathlib.Path("otel-logs.jsonl").read_text(encoding="utf-8")
     assert all(str(value) not in logged for value in _VECTOR)
+
+
+def test_full_capture_of_an_invalid_print_failure_writes_no_vector_and_no_validation_text(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("BOT_OTEL_CAPTURE", "full")
+    assert mosfet.telemetry.configure() is True
+
+    async def run() -> hsm.Event[typing.Any]:
+        scope = environment.Environment()
+        owner = _Ear()
+        _ = await mosfet.started(scope, owner, owner.model)
+        registry = identification.Registry(
+            identifier=identification.Matcher(
+                store=identification.InProcessStore(max_ids=8),
+                policy=identification.MatchPolicy(threshold=0.5, margin=0.05, refine_threshold=0.65),
+            ),
+            kind="voice",
+            max_unlinked_age=datetime.timedelta(days=30),
+            max_ids=8,
+        )
+        _ = await registry.attach(
+            scope, attachment.AttachEvent.with_data_and_id(attachment.AttachData(actor=owner), "attach")
+        )
+        invalid = {"prints": [{"vector": [math.inf, *_VECTOR], "model": "voice-model"}]}
+        return await abilities.run_terminal_operation(
+            scope,
+            child=registry,
+            request=identification.IdentifyEvent.with_data_and_id(
+                typing.cast(identification.IdentifyData, typing.cast(object, invalid)), "invalid-print"
+            ),
+            terminals=(identification.IdentifiedEvent, identification.FailedEvent),
+            timeout=datetime.timedelta(seconds=2),
+        )
+
+    reply = asyncio.run(run())
+
+    assert reply.name == identification.FailedEvent.name
+    failed = [
+        record
+        for record in _records()
+        if record["attributes"].get("hsm.event.name") == identification.FailedEvent.name
+        and record["body"]["occurrence"] == "event"
+    ]
+    assert failed
+    for record in failed:
+        body = json.dumps(record["body"])
+        assert record["body"]["event"]["data"]["kind"] == "invalid_input"
+        assert not set(_VECTOR) & set(_floats(record["body"]))
+        assert "validation error" not in body.lower()
+        assert "inf" not in record["body"]["event"]["data"]["message"]

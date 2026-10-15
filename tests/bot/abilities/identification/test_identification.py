@@ -1,0 +1,192 @@
+"""Pure contract tests for ``identification``: ids and refs, prints, the match policy and ``decide``."""
+
+import math
+import typing
+
+import hsm
+import mosfet
+import mosfet.event
+import pydantic
+import pytest
+
+from mosfet.abilities import ability, identification
+from mosfet.telemetry import capture
+
+_POLICY = identification.MatchPolicy(threshold=0.50, margin=0.05, refine_threshold=0.65)
+_POLICIES = pydantic.TypeAdapter[identification.MatchPolicy](identification.MatchPolicy)
+
+
+def _neighbor(id: str, similarity: float, *, own: bool = False) -> identification.Neighbor:
+    return identification.Neighbor(id=id, similarity=similarity, own=own)
+
+
+_DECISIONS: list[tuple[str, list[identification.Neighbor], identification.Decision]] = [
+    ("no-neighbors-mints", [], identification.Mint(similarity=None)),
+    ("below-threshold-mints", [_neighbor("a", 0.49)], identification.Mint(similarity=0.49)),
+    ("margin-tie-mints", [_neighbor("a", 0.60), _neighbor("b", 0.58)], identification.Mint(similarity=0.60)),
+    ("equal-best-mints", [_neighbor("a", 0.70), _neighbor("b", 0.70)], identification.Mint(similarity=0.70)),
+    (
+        "match-between-thresholds",
+        [_neighbor("b", 0.40), _neighbor("a", 0.55)],
+        identification.Match(id="a", similarity=0.55, own=False),
+    ),
+    (
+        "refine-at-refine-threshold",
+        [_neighbor("a", 0.65, own=True)],
+        identification.Refine(id="a", similarity=0.65, own=True),
+    ),
+    (
+        "refine-above-with-clear-margin",
+        [_neighbor("a", 0.90), _neighbor("b", 0.80)],
+        identification.Refine(id="a", similarity=0.90, own=False),
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("neighbors", "expected"), [case[1:] for case in _DECISIONS], ids=[case[0] for case in _DECISIONS]
+)
+def test_decide_matches_refines_or_mints(
+    neighbors: list[identification.Neighbor], expected: identification.Decision
+) -> None:
+    assert identification.decide(neighbors, _POLICY) == expected
+
+
+def test_decide_does_not_depend_on_the_weight_cap() -> None:
+    capped = identification.MatchPolicy(threshold=0.50, margin=0.05, refine_threshold=0.65, refine_weight_cap=1)
+
+    assert _POLICY.refine_weight_cap == 50
+    assert identification.decide([_neighbor("a", 0.9)], capped) == identification.decide([_neighbor("a", 0.9)], _POLICY)
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"threshold": 1.5, "margin": 0.05, "refine_threshold": 0.65},
+        {"threshold": 0.5, "margin": -0.1, "refine_threshold": 0.65},
+        {"threshold": 0.7, "margin": 0.05, "refine_threshold": 0.65},
+        {"threshold": 0.5, "margin": 0.05, "refine_threshold": 0.65, "refine_weight_cap": 0},
+    ],
+    ids=["threshold-range", "negative-margin", "refine-below-threshold", "weight-cap-zero"],
+)
+def test_match_policy_rejects_inconsistent_numbers(fields: dict[str, float]) -> None:
+    with pytest.raises(pydantic.ValidationError):
+        _ = _POLICIES.validate_python(fields)
+
+
+def test_match_policy_has_no_default_thresholds() -> None:
+    with pytest.raises(pydantic.ValidationError):
+        _ = _POLICIES.validate_python({"threshold": 0.5, "margin": 0.05})
+
+
+def test_ref_names_the_kind_and_participant_stamps_a_source() -> None:
+    longest = "a" * 128
+
+    assert identification.ref("voice", "tts:warm") == "voice:tts:warm"
+    assert identification.ref("face", "3f2a9c") == "face:3f2a9c"
+    assert len(identification.ref("voice", longest)) == 134
+    assert identification.participant("voice", "tts:warm") == mosfet.Participant(
+        ref="voice:tts:warm", role=mosfet.ParticipantRole.SOURCE
+    )
+
+
+@pytest.mark.parametrize(
+    ("kind", "id"),
+    [("voice", "a" * 129), ("voice", "Upper"), ("voice", ":leading"), ("voice", ""), ("hand", "abc")],
+    ids=["too-long", "uppercase", "leading-colon", "empty", "unknown-kind"],
+)
+def test_ref_rejects_an_invalid_kind_or_id(kind: str, id: str) -> None:
+    with pytest.raises(pydantic.ValidationError):
+        _ = identification.ref(typing.cast(identification.Kind, kind), id)
+
+
+def test_id_and_ref_types_validate_their_patterns() -> None:
+    ids = pydantic.TypeAdapter[str](identification.Id)
+    refs = pydantic.TypeAdapter[str](identification.Ref)
+
+    assert ids.validate_python("tts:warm") == "tts:warm"
+    assert refs.validate_python("face:" + "a" * 128) == "face:" + "a" * 128
+    with pytest.raises(pydantic.ValidationError):
+        _ = refs.validate_python("person:abc")
+    with pytest.raises(pydantic.ValidationError):
+        _ = ids.validate_python("a" * 129)
+
+
+def test_print_is_biometric_and_stores_a_unit_vector() -> None:
+    print = identification.Print(vector=(3.0, 4.0), model="m")
+
+    assert isinstance(print, capture.Biometric)
+    assert print.vector == (0.6, 0.8)
+    assert math.isclose(math.fsum(value * value for value in print.vector), 1.0)
+    assert capture.jsonable(print) == "<biometric:Print>"
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"vector": (), "model": "m"},
+        {"vector": (0.0, 0.0), "model": "m"},
+        {"vector": (math.nan, 1.0), "model": "m"},
+        {"vector": (math.inf, 1.0), "model": "m"},
+        {"vector": (1.0,) * 4097, "model": "m"},
+        {"vector": (1.0,), "model": ""},
+        {"vector": (1.0,), "model": "m" * 129},
+        {"vector": (1.0,), "model": "m", "extra": 1},
+    ],
+    ids=["empty", "zero", "nan", "inf", "too-many-dimensions", "no-model", "long-model", "extra-field"],
+)
+def test_print_rejects_vectors_it_cannot_normalize(fields: dict[str, object]) -> None:
+    with pytest.raises(pydantic.ValidationError):
+        _ = identification.Print.model_validate(fields)
+
+
+def test_recognition_bounds_similarity() -> None:
+    assert identification.Recognition(id="a", recognized=False, similarity=None, own=False).similarity is None
+    with pytest.raises(pydantic.ValidationError):
+        _ = identification.Recognition(id="a", recognized=True, similarity=1.5, own=False)
+
+
+def test_identify_carries_one_to_sixteen_prints() -> None:
+    print = identification.Print(vector=(1.0,), model="m")
+
+    assert len(identification.IdentifyData(prints=(print,) * 16).prints) == 16
+    with pytest.raises(pydantic.ValidationError):
+        _ = identification.IdentifyData(prints=())
+    with pytest.raises(pydantic.ValidationError):
+        _ = identification.IdentifyData(prints=(print,) * 17)
+
+
+def test_events_are_named_in_the_identification_domain_and_never_model_tools() -> None:
+    events = [
+        (identification.IdentifyEvent, "bot.ability.identification.identify"),
+        (identification.IdentifiedEvent, "bot.ability.identification.identified"),
+        (identification.EnrollEvent, "bot.ability.identification.enroll"),
+        (identification.EnrolledEvent, "bot.ability.identification.enrolled"),
+        (identification.ForgetEvent, "bot.ability.identification.forget"),
+        (identification.ForgottenEvent, "bot.ability.identification.forgotten"),
+        (identification.FailedEvent, "bot.ability.identification.failed"),
+    ]
+
+    for event, name in events:
+        assert event.name == name
+        assert not hsm.kind.Is(event.kind, mosfet.event.EventKind)
+    assert identification.Registry.failed_event is identification.FailedEvent
+    assert identification.Registry.detached_requests == (
+        identification.IdentifyEvent,
+        identification.EnrollEvent,
+        identification.ForgetEvent,
+    )
+
+
+def test_failure_kinds_reuse_the_shared_failure_strings() -> None:
+    assert {kind.value for kind in identification.FailureKind} == {
+        "invalid_input",
+        "unavailable",
+        "store_failed",
+        "timeout",
+    }
+    failure = identification.FailureData(kind=identification.FailureKind.TIMEOUT, message="late")
+    assert isinstance(failure, ability.FailureData)
+    error = identification.StoreError(identification.FailureKind.STORE_FAILED, "disk full")
+    assert error.kind is identification.FailureKind.STORE_FAILED
+    assert str(error) == "disk full"
