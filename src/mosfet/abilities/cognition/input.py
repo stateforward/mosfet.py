@@ -67,8 +67,9 @@ class InputData(pydantic.BaseModel):
         exclude=True,
         repr=False,
         description=(
-            "Named HSM instances available for snapshot and dispatch: devices, innate/acquired abilities, "
-            "not ability-owned child machines. Body input/output ports are internal composition wiring and are excluded."
+            "Named HSM instances available for snapshot and dispatch: devices, innate/acquired abilities, and input "
+            "abilities (sense organs cognition may direct through what their live topology enables). Output ports "
+            "and ability-owned child machines are composition wiring and are excluded."
         ),
     )
     focus: str | None = pydantic.Field(

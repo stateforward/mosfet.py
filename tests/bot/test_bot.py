@@ -2207,6 +2207,95 @@ def test_bot_fans_out_visual_event_to_input_without_cognition() -> None:
     assert state.endswith("/active/unfocused")
 
 
+class _GlanceData(pydantic.BaseModel):
+    """Glance around now; what you see arrives as your next observation."""
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(frozen=True, extra="forbid")
+
+
+class _GestureData(pydantic.BaseModel):
+    """Make a gesture."""
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(frozen=True, extra="forbid")
+
+
+_GlanceEvent = hsm.Event[_GlanceData](name="tests.bot.glance", kind=event_contract.EventKind, schema=_GlanceData)
+_GestureEvent = hsm.Event[_GestureData](name="tests.bot.gesture", kind=event_contract.EventKind, schema=_GestureData)
+
+
+def _accept_offered(ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event[typing.Any]) -> None:
+    del ctx, instance, event
+
+
+class Glancing(abilities.Ability[typing.Any, typing.Any]):
+    """A test sense organ whose live topology enables one model-callable event."""
+
+    submodel: typing.ClassVar[hsm.Model | None] = mosfet.define(
+        "Glancing",
+        hsm.initial(hsm.target("idle")),
+        hsm.state("idle", hsm.transition(hsm.on(_GlanceEvent), hsm.effect(_accept_offered))),
+    )
+
+
+class Gesturing(abilities.Ability[typing.Any, typing.Any]):
+    """A test output port whose live topology enables one model-callable event."""
+
+    submodel: typing.ClassVar[hsm.Model | None] = mosfet.define(
+        "Gesturing",
+        hsm.initial(hsm.target("idle")),
+        hsm.state("idle", hsm.transition(hsm.on(_GestureEvent), hsm.effect(_accept_offered))),
+    )
+
+
+def test_bot_offers_input_abilities_to_cognition_as_sense_organs() -> None:
+    """An input ability is cognition-addressable; an output port never is."""
+
+    async def run() -> tuple[list[processing.InputData], Glancing, Gesturing]:
+        ability = IgnoreAbility()
+        eye = Glancing()
+        hand = Gesturing()
+        active_bot = AbilityAgent(devices=configured_devices("phone"), cognition=ability, input=(eye,), output=(hand,))
+        _ = await start_bot_with_devices(active_bot)
+        _ = await active_bot.dispatch(
+            active_bot.context(),
+            mosfet.InputEvent.with_data(mosfet.InputEventData(target_device="phone", priority=3)),
+        )
+        await wait_until(lambda: len(ability.calls) == 1)
+        return ability.calls, eye, hand
+
+    calls, eye, hand = asyncio.run(run())
+
+    offered = {event.name for event in calls[0].schemas}
+    assert calls[0].actors["glancing"] is eye
+    assert _GlanceEvent.name in offered
+    assert calls[0].actor_events[_GlanceEvent.name] == ("glancing",)
+    assert all(actor is not hand for actor in calls[0].actors.values())
+    assert _GestureEvent.name not in offered
+
+
+def test_bot_maps_an_ability_composed_as_acquired_and_input_once() -> None:
+    """One actor has one key, so its events are offered from one target."""
+
+    async def run() -> list[processing.InputData]:
+        ability = IgnoreAbility()
+        eye = Glancing()
+        active_bot = AbilityAgent(
+            devices=configured_devices("phone"), cognition=ability, input=(eye,), acquired_abilities=(eye,)
+        )
+        _ = await start_bot_with_devices(active_bot)
+        _ = await active_bot.dispatch(
+            active_bot.context(),
+            mosfet.InputEvent.with_data(mosfet.InputEventData(target_device="phone", priority=3)),
+        )
+        await wait_until(lambda: len(ability.calls) == 1)
+        return ability.calls
+
+    calls = asyncio.run(run())
+
+    assert [key for key, actor in calls[0].actors.items() if isinstance(actor, Glancing)] == ["glancing"]
+    assert calls[0].actor_events[_GlanceEvent.name] == ("glancing",)
+
+
 class RestRecordingConsolidation(memory.Consolidation):
     """Consolidation that records the rest and wake notices Cognition sends it (test-only observation)."""
 

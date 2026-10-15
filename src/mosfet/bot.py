@@ -885,17 +885,22 @@ class Bot(Traced, abc.ABC):
 
     @staticmethod
     def _dispatch_actors(instance: "Bot") -> dict[str, hsm.Instance]:
-        """Map cognition-visible devices, innate abilities, and acquired abilities.
+        """Map cognition-visible devices, innate and acquired abilities, and input abilities.
 
-        Body input/output ports and ability-owned child machines are composition wiring and
-        never enter this cognition inventory.
+        Input abilities are sense organs cognition may direct; what a turn may select from them
+        is only what their live topology enables. Output ports and ability-owned child machines
+        are composition wiring and never enter this map.
         """
 
         actors: dict[str, hsm.Instance] = {"bot": instance, **instance._devices}
         for ability in (
             *instance._innate_ability_instances,
             *instance._acquired_abilities,
+            *instance._input,
         ):
+            # One actor, one key: an ability composed both as acquired and as input is offered once.
+            if any(actor is ability for actor in actors.values()):
+                continue
             key = conversation.ability_actor_key(ability, actors)
             actors[key] = ability
         return actors
