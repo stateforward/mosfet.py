@@ -110,6 +110,7 @@ def test_observed_bot_event_keeps_binary_python_dump_but_canonical_omits_media()
         "media_type": "audio/pcm",
         "sample_rate_hz": 48_000,
         "channels": 1,
+        "mark": None,
     }
 
     canonical = object_dict(event.event_json_value(payload.input))
@@ -117,6 +118,7 @@ def test_observed_bot_event_keeps_binary_python_dump_but_canonical_omits_media()
         "media_type": "audio/pcm",
         "sample_rate_hz": 48_000,
         "channels": 1,
+        "mark": None,
     }
     assert "playback-audio" not in repr(canonical)
 

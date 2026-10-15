@@ -2340,6 +2340,10 @@ class Ears(hsm.Instance):
     )
 
 
+_VOICE_CONTROLLER = "voice-controller"
+"""The voice's controller, stamped as the source of what the test plays through it."""
+
+
 async def _handset_on_a_call(
     environment: Environment,
 ) -> tuple[phone_device.Phone, audio_device.Speaker, Ears]:
@@ -2364,7 +2368,10 @@ async def _handset_on_a_call(
     # Speaking is this speaker's controller in production; a transducer needs one to emit.
     controller = hsm.Instance()
     _ = await mosfet.started(
-        environment, controller, mosfet.define("Controller", hsm.initial(hsm.target("s")), hsm.state("s"))
+        environment,
+        controller,
+        mosfet.define("Controller", hsm.initial(hsm.target("s")), hsm.state("s")),
+        hsm.Config(id=_VOICE_CONTROLLER),
     )
     await voice.attach(environment, attachment.AttachEvent.with_data(attachment.AttachData(actor=controller)))
 
@@ -2398,7 +2405,7 @@ def test_far_end_audio_does_not_come_back_up_the_wire(monkeypatch: pytest.Monkey
             phone,
             phone_device.ServiceAudioReceivedEvent.with_data(
                 phone_device.ServiceAudioData(
-                    call_id="call-1", audio=b"far-end", media_type="audio/pcm", sample_rate_hz=16_000, channels=1
+                    call_id="call-1", audio=b"far-end!", media_type="audio/pcm", sample_rate_hz=16_000, channels=1
                 )
             ),
         )
@@ -2421,7 +2428,7 @@ def test_the_robot_hears_its_own_earpiece() -> None:
             phone,
             phone_device.ServiceAudioReceivedEvent.with_data(
                 phone_device.ServiceAudioData(
-                    call_id="call-1", audio=b"far-end", media_type="audio/pcm", sample_rate_hz=16_000, channels=1
+                    call_id="call-1", audio=b"far-end!", media_type="audio/pcm", sample_rate_hz=16_000, channels=1
                 )
             ),
         )
@@ -2443,10 +2450,13 @@ def test_the_robots_own_voice_goes_up_the_wire(monkeypatch: pytest.MonkeyPatch) 
 
         await voice.dispatch(
             Environment.from_context(voice.context()),
-            audio_device.OutputEvent.with_data(
-                audio_device.OutputData(
-                    audio=b"local speech", media_type="audio/pcm", sample_rate_hz=16_000, channels=1
-                )
+            dataclasses.replace(
+                audio_device.OutputEvent.with_data(
+                    audio_device.OutputData(
+                        audio=b"local speech", media_type="audio/pcm", sample_rate_hz=16_000, channels=1
+                    )
+                ),
+                source=_VOICE_CONTROLLER,
             ),
         )
         await wait_until(lambda: uplinks(spans) > 0)

@@ -54,6 +54,7 @@ from tests.hsm_instance_state import (
     device_firmware,
     bot_has_focus,
     device_bots,
+    phone_firmware,
     phone_microphone,
     phone_speaker,
     start_ability_tree,
@@ -2422,8 +2423,12 @@ def test_bot_does_not_send_speaker_environment_sound_to_cognition() -> None:
         await wait_until(lambda: len(ability.calls) == 1 and active_bot.state() == "/Bot/active/focused")
         ability.calls.clear()
         active_bot.actions.clear()
-        # Signal into the speaker; the speaker is the transducer that makes it environment sound.
-        await phone_speaker(phone).dispatch(environment, audio.OutputEvent.with_data(data))
+        # Signal into the speaker from its controller (the phone's firmware); the speaker is the
+        # transducer that makes it environment sound.
+        await phone_speaker(phone).dispatch(
+            environment,
+            dataclasses.replace(audio.OutputEvent.with_data(data), source=hsm.id(phone_firmware(phone))),
+        )
         await wait_until(lambda: len(ability.calls) == 1 and active_bot.state() == "/Bot/active/focused")
 
         return (
@@ -2472,8 +2477,12 @@ def test_same_environment_sibling_bots_do_not_send_speaker_sound_to_cognition() 
         owner_ability.calls.clear()
         owning_agent.actions.clear()
 
-        # Signal into the speaker; the speaker is the transducer that makes it environment sound.
-        await phone_speaker(phone).dispatch(environment, audio.OutputEvent.with_data(data))
+        # Signal into the speaker from its controller (the phone's firmware); the speaker is the
+        # transducer that makes it environment sound.
+        await phone_speaker(phone).dispatch(
+            environment,
+            dataclasses.replace(audio.OutputEvent.with_data(data), source=hsm.id(phone_firmware(phone))),
+        )
         await wait_until(lambda: len(owner_ability.calls) == 1 and owning_agent.state() == "/Bot/active/focused")
 
         return (
@@ -4448,7 +4457,7 @@ def test_bot_activation_starts_phone_peripherals_in_agent_environment() -> None:
     # bring-up, so they sit attached for the life of the phone. Call state gates the uplink in
     # firmware topology, not the wiring.
     assert microphone_state == "/DeviceMicrophone/attached"
-    assert speaker_state == "/DeviceSpeaker/attached"
+    assert speaker_state == "/DeviceSpeaker/attached/silent"
     assert agent_scope
     assert phone_scope
     assert mic_scope

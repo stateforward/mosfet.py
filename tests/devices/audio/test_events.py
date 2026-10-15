@@ -43,3 +43,34 @@ def test_audio_event_data_rejects_empty_audio() -> None:
         pass
     else:
         raise AssertionError("Audio output data should reject empty audio chunks.")
+
+
+def test_speaker_control_events_use_pydantic_schemas() -> None:
+    assert (audio.FlushEvent.name, audio.FlushEvent.schema) == ("devices.audio.flush", audio.FlushData)
+    assert (audio.PlayedEvent.name, audio.PlayedEvent.schema) == ("devices.audio.played", audio.PlayedData)
+    assert (audio.FlushedEvent.name, audio.FlushedEvent.schema) == ("devices.audio.flushed", audio.FlushedData)
+    assert object_dict(audio.PlayedData.model_json_schema())["required"] == ["mark"]
+    assert audio.FlushedData(dropped_seconds=0.2, marks=("u1.1", "u1.2")).marks == ("u1.1", "u1.2")
+
+
+def test_output_mark_is_an_optional_bounded_label() -> None:
+    assert audio.OutputData(audio=b"\x00\x00").mark is None
+    assert audio.OutputData(audio=b"\x00\x00", mark="u1.1").mark == "u1.1"
+    for mark in ("", "m" * 65):
+        try:
+            _ = audio.OutputData(audio=b"\x00\x00", mark=mark)
+        except ValueError:
+            continue
+        raise AssertionError(f"OutputData should reject the mark {mark!r}.")
+
+
+def test_speaker_reports_reject_negative_durations_and_empty_marks() -> None:
+    for build in (
+        lambda: audio.FlushedData(dropped_seconds=-0.1, marks=()),
+        lambda: audio.PlayedData(mark=""),
+    ):
+        try:
+            _ = build()
+        except ValueError:
+            continue
+        raise AssertionError("Speaker reports should validate their fields.")

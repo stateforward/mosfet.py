@@ -49,6 +49,10 @@ def test_pcm_codec_encodes_output_as_header_then_pcm() -> None:
     assert audio.PcmCodec().encode(_output()) == struct.pack("!IH", 48_000, 2) + PCM
 
 
+def test_pcm_codec_never_puts_a_playout_mark_on_the_wire() -> None:
+    assert audio.PcmCodec().encode(_output(mark="u1.1")) == audio.PcmCodec().encode(_output())
+
+
 @pytest.mark.parametrize(
     ("message", "reason"),
     [

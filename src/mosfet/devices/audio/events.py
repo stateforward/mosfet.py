@@ -69,6 +69,62 @@ class InputData(FrameData):
 class OutputData(FrameData):
     """Audio requested for output and dispatched to an audio output implementation."""
 
+    mark: str | None = pydantic.Field(
+        default=None,
+        min_length=1,
+        max_length=64,
+        description=(
+            "Optional opaque label the commanding controller puts on this chunk to learn when it has been "
+            "played: the speaker answers devices.audio.played with the same mark once the chunk's last frame "
+            "has finished playing, or lists it in devices.audio.flushed if it was dropped unplayed. It is "
+            "never encoded on a wire."
+        ),
+        examples=["u1.3"],
+    )
+
+
+class FlushData(pydantic.BaseModel):
+    """Controller command to a speaker: drop everything this controller commanded that has not played yet."""
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
+        frozen=True, extra="forbid", json_schema_extra={"examples": [{}]}
+    )
+
+
+class PlayedData(pydantic.BaseModel):
+    """Speaker report to the commanding controller: the chunk that carried ``mark`` has finished playing."""
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
+        frozen=True, extra="forbid", json_schema_extra={"examples": [{"mark": "u1.3"}]}
+    )
+
+    mark: str = pydantic.Field(
+        min_length=1,
+        max_length=64,
+        description="The mark of the devices.audio.output chunk whose last frame has just finished playing.",
+        examples=["u1.3"],
+    )
+
+
+class FlushedData(pydantic.BaseModel):
+    """Speaker report to a controller: audio it commanded was dropped unplayed, by a flush or by overflow."""
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
+        frozen=True,
+        extra="forbid",
+        json_schema_extra={"examples": [{"dropped_seconds": 0.4, "marks": ["u1.4", "u1.5"]}]},
+    )
+
+    dropped_seconds: float = pydantic.Field(
+        ge=0.0,
+        description="Playout time, in seconds, of this controller's audio that was dropped without playing.",
+        examples=[0.4],
+    )
+    marks: tuple[str, ...] = pydantic.Field(
+        description="Marks of the dropped chunks, in the order they would have played; empty when none carried one.",
+        examples=[["u1.4", "u1.5"]],
+    )
+
 
 InputEvent = hsm.Event[InputData](
     name="devices.audio.input",
@@ -77,6 +133,18 @@ InputEvent = hsm.Event[InputData](
 OutputEvent = hsm.Event[OutputData](
     name="devices.audio.output",
     schema=OutputData,
+)
+FlushEvent = hsm.Event[FlushData](
+    name="devices.audio.flush",
+    schema=FlushData,
+)
+PlayedEvent = hsm.Event[PlayedData](
+    name="devices.audio.played",
+    schema=PlayedData,
+)
+FlushedEvent = hsm.Event[FlushedData](
+    name="devices.audio.flushed",
+    schema=FlushedData,
 )
 
 

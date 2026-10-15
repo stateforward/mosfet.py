@@ -2,15 +2,32 @@
 
 from . import codec, microphone, speaker
 from .codec import PcmCodec
-from .events import InputEvent, OutputEvent, InputData, OutputData
+from .events import (
+    FlushData,
+    FlushEvent,
+    FlushedData,
+    FlushedEvent,
+    InputData,
+    InputEvent,
+    OutputData,
+    OutputEvent,
+    PlayedData,
+    PlayedEvent,
+)
 from .microphone import Microphone
 from .speaker import Speaker
 
 __all__ = [
     "InputEvent",
     "OutputEvent",
+    "FlushEvent",
+    "PlayedEvent",
+    "FlushedEvent",
     "InputData",
     "OutputData",
+    "FlushData",
+    "PlayedData",
+    "FlushedData",
     "PcmCodec",
     "Microphone",
     "Speaker",
