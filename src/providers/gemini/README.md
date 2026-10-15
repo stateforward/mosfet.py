@@ -49,6 +49,30 @@ output = await generator.generate(
 
 `Processing` turns a stateforward.mosfet deliberative frame into typed JSON / operation tool calls.
 
+## Vision stages
+
+The same generator serves `seeing.Seeing`'s describer and object detector through the core
+generative stages; its default `image_capacity` already admits one image per request:
+
+```python
+import datetime
+
+from mosfet.abilities import seeing, vision
+
+eye = seeing.Seeing(
+    change=change_measure,
+    describer=vision.description.GenerativeDescriber(generator=generator),
+    object_detector=vision.detection.GenerativeDetector(generator=generator),
+    # A look interprets up to seeing.MAX_VIEWS (4) views at once through one-at-a-time stages:
+    # cover four of the slowest healthy calls.
+    stage_timeout=datetime.timedelta(seconds=40),
+)
+```
+
+The instructions (`DESCRIBE_INSTRUCTIONS`, `DETECT_INSTRUCTIONS`) are overridable defaults; see the
+`mosfet-provider-openai-compat` README for what each stage sends and the live check, which works
+the same against any image-capable generator.
+
 ## Speech (TTS / STT)
 
 Current docs use `client.interactions.create` (not the legacy generateContent-only speech path):

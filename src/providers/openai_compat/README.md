@@ -75,6 +75,54 @@ output = await generator.generate(
 )
 ```
 
+## Vision stages
+
+`vision.description.GenerativeDescriber` and `vision.detection.GenerativeDetector` serve
+`seeing.Seeing`'s describer and object detector over any image-capable text generator, so a
+vision-language model served behind an OpenAI-compatible endpoint (for example Qwen3.6 on vLLM)
+describes and detects for the bot. Give the generator the capacity of that endpoint; both stages
+refuse an image the capacity does not admit before calling it. Endpoint and model come from
+configuration.
+
+```python
+import datetime
+
+from mosfet import media
+from mosfet.abilities import seeing, vision
+from mosfet.providers import openai_compat
+
+vlm = openai_compat.TextGenerator(
+    client=openai_compat.ChatClient(base_url=config.vlm_base_url, model=config.vlm_model, api_key=config.vlm_api_key),
+    image_capacity=media.ImageCapacity(
+        max_images=1, max_total_bytes=8 * 1024 * 1024, media_types=frozenset({"image/png", "image/jpeg"})
+    ),
+)
+eye = seeing.Seeing(
+    change=change_measure,
+    describer=vision.description.GenerativeDescriber(generator=vlm),
+    object_detector=vision.detection.GenerativeDetector(generator=vlm),
+    # Each stage serves one request at a time and a look interprets up to seeing.MAX_VIEWS (4) views
+    # at once: cover four of the endpoint's slowest healthy calls.
+    stage_timeout=datetime.timedelta(seconds=40),
+)
+```
+
+Both stages send one user message (their instructions, then the image) with tools off. The
+instructions (`DESCRIBE_INSTRUCTIONS`, `DETECT_INSTRUCTIONS`) are overridable defaults. The
+detector asks for a JSON array of `{label, confidence, box}` with boxes normalized to the image;
+items that are not valid objects are skipped and counted on `bot.vision.detection.invalid`.
+
+Live check against a served model (prints what the model said, never pins it):
+
+```sh
+MOSFET_LIVE_VLM_BASE_URL=http://vlm.example:8000/v1 \
+MOSFET_LIVE_VLM_MODEL=served-model-name \
+  uv run --package mosfet-provider-openai-compat --group dev python -m pytest \
+  src/providers/openai_compat/tests/test_vision_live.py -m live -v -s
+```
+
+`MOSFET_LIVE_VLM_API_KEY` is passed to the client when set.
+
 `Processing` turns a stateforward.mosfet `InputData` frame into a typed output by asking the model to return JSON
 that validates against the provided Pydantic/type schema.
 

@@ -32,6 +32,9 @@ stateforward-mosfet = { workspace = true }
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+  "live: uses the real cv2 and the OpenCV Zoo model files named by MOSFET_LIVE_OPENCV_MODELS (skipped by default)",
+]
 
 [tool.ruff]
 line-length = 120
