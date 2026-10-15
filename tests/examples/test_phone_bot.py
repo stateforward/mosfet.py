@@ -97,6 +97,8 @@ def test_phone_bot_example_is_provider_package_example() -> None:
     assert "sample_rate_hz=config.input_sample_rate_hz" in source
     assert "_pyannote_voice_classifier" in source
     assert "voice_classifier=classifier" in source
+    assert "registry=_voice_registry()" in source
+    assert "policy=identification.MatchPolicy(threshold=0.50, margin=0.05, refine_threshold=0.65)" in source
     assert "KindSoundClassifier" in source
     assert "from mosfet.devices import phone as phone_device" in source
     assert "from mosfet.providers.livekit import PhoneService" in source
@@ -1139,9 +1141,9 @@ async def main() -> None:
         sample_rate_hz=16_000,
         channels=1,
         media_type="audio/pcm",
-        source_ids=frozenset({(0.12, -0.08, 0.31)}),
+        source_ids=frozenset({"voice:3f2a9c"}),
     )
-    assert speech.source_ids == frozenset({(0.12, -0.08, 0.31)})
+    assert speech.source_ids == frozenset({"voice:3f2a9c"})
 
     conversation_ability = conversation.Conversation()
     ctx = hsm.Context()
@@ -1174,7 +1176,7 @@ async def main() -> None:
     )
     await wait_until(lambda: "/active/" in (conversation_ability.state() or ""))
     print(bool(speech.source_ids))
-    print(list(next(iter(speech.source_ids))))
+    print(next(iter(speech.source_ids)))
     print("/active/" in (conversation_ability.state() or ""))
     print(seeded.name)
 
@@ -1185,7 +1187,7 @@ asyncio.run(main())
     assert _run_phone_bot_python(code) == "\n".join(
         [
             "True",
-            "[0.12, -0.08, 0.31]",
+            "voice:3f2a9c",
             "True",
             "SpeechHeard",
         ]

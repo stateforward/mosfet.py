@@ -164,7 +164,7 @@ def test_response_model_facing_content_renders_terminal_event_without_causal_anc
         sample_rate_hz=16_000,
         channels=1,
         media_type="audio/pcm",
-        source_ids=frozenset({"caller"}),
+        source_ids=frozenset({"voice:caller"}),
         parent=mosfet.StimulusData.from_event(sound_event),
     )
     speech_event = dataclasses.replace(
@@ -255,7 +255,7 @@ def test_nested_cognition_event_renders_typed_stimulus_without_hsm_metadata() ->
         sample_rate_hz=16_000,
         channels=1,
         media_type="audio/pcm",
-        source_ids=frozenset({"caller"}),
+        source_ids=frozenset({"voice:caller"}),
         parent=mosfet.StimulusData.from_event(SoundEvent.with_data_and_id(sound, "sound-1")),
     )
     cognition_input = cognition.InputData(

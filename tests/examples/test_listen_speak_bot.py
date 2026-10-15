@@ -1,6 +1,7 @@
 from mosfet import abilities
 from mosfet.abilities import cognition
 from mosfet.abilities import encoding
+from mosfet.abilities import identification
 from mosfet.abilities import listening
 from mosfet.abilities import speaking
 from mosfet.abilities import vocal
@@ -13,6 +14,7 @@ from mosfet.providers import pyannote
 import asyncio
 import collections.abc
 import dataclasses
+import datetime
 import io
 import json
 import pathlib
@@ -36,6 +38,18 @@ else:
         "listen_speak_bot_example",
         reason="listen_speak_bot example package not installed (run via the examples/listen_speak_bot project env)",
     ).ListenSpeakBot
+
+
+def _voice_registry() -> identification.Registry:
+    return identification.Registry(
+        identifier=identification.Matcher(
+            store=identification.InProcessStore(max_ids=8),
+            policy=identification.MatchPolicy(threshold=0.50, margin=0.05, refine_threshold=0.65),
+        ),
+        kind="voice",
+        max_unlinked_age=datetime.timedelta(days=1),
+        max_ids=8,
+    )
 
 
 class _FixedVoiceActivityClassifier(voice.detection.VoiceActivityClassifier):
@@ -92,10 +106,12 @@ class _RecordingListening(listening.Listening):
             voice.identification.InputData,
             voice.identification.OutputData,
         ],
+        registry: identification.Registry,
     ) -> None:
         super().__init__(
             voice_activity_classifier=voice_activity_classifier,
             voice_classifier=voice_classifier,
+            registry=registry,
         )
         self.handoffs = []
 
@@ -790,6 +806,8 @@ def test_listen_speak_example_uses_configured_silero_vad_and_real_silence_bounda
     assert "stt_model_id: str | None = None" in source
     assert "voice_activity_classifier: voice.detection.VoiceActivityClassifier | None = None" in source
     assert "voice_classifier=classifier" in source
+    assert "registry=_voice_registry()" in source
+    assert "policy=identification.MatchPolicy(threshold=0.50, margin=0.05, refine_threshold=0.65)" in source
     assert "voice_identity_model_id: str = DEFAULT_PYANNOTE_VOICE_IDENTITY_MODEL" in source
     assert '"BOT_PYANNOTE_VOICE_IDENTITY_MODEL",' in source
     assert "speech_decoder=None" in source
@@ -833,7 +851,7 @@ def test_listen_speak_example_uses_configured_silero_vad_and_real_silence_bounda
     assert 'return 0 if summary.get("status") == "ok" else 1' in source
     assert "status: incomplete" in readme
     assert "real PyAnnote speaker classifier" in readme
-    assert "provider-neutral source embedding" in readme
+    assert "turns\neach embedding into an opaque voice id" in readme
     assert "`communication.respond` action" in readme
 
 
@@ -851,7 +869,7 @@ def test_listen_speak_reads_pyannote_model_override_without_credentials(tmp_path
     assert config.voice_identity_model_id == "local/test-speaker-model"
 
 
-def test_listen_speak_injects_pyannote_classifier_and_emits_source_embedding() -> None:
+def test_listen_speak_injects_pyannote_classifier_and_emits_the_heard_voice_ref() -> None:
     async def run() -> tuple[object, _RecordingInference, list[str]]:
         inference = _RecordingInference()
         loaded_models: list[str] = []
@@ -867,6 +885,7 @@ def test_listen_speak_injects_pyannote_classifier_and_emits_source_embedding() -
         listening_ability = _RecordingListening(
             voice_activity_classifier=_FixedVoiceActivityClassifier(),
             voice_classifier=classifier,
+            registry=_voice_registry(),
         )
         from tests.hsm_instance_state import start_ability_tree
 
@@ -904,7 +923,9 @@ def test_listen_speak_injects_pyannote_classifier_and_emits_source_embedding() -
     assert len(inference.calls) == 1
     assert loaded_models == ["local/test-speaker-model"]
     assert isinstance(stimulus, listening.SpeechData)
-    assert stimulus.source_ids == frozenset({(0.12, -0.08, 0.31)})
+    (heard,) = stimulus.voices
+    assert heard.recognition.recognized is False
+    assert stimulus.source_ids == frozenset({identification.ref("voice", heard.recognition.id)})
 
 
 def test_listen_speak_operator_summary_excludes_raw_provider_and_content_data(

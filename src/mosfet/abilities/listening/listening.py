@@ -13,6 +13,7 @@ it cannot change what an arrival was worth.
 
 from __future__ import annotations
 
+from . import enrollment
 from . import interpretation
 from . import sensitivity
 from .. import ability
@@ -32,6 +33,7 @@ from mosfet.protocols import attachment
 
 import mosfet
 from mosfet.abilities import cognition
+from mosfet.abilities import identification
 from mosfet import telemetry
 from mosfet.telemetry import span
 from mosfet.environment import SoundData, SoundEvent
@@ -88,6 +90,9 @@ class Listening(ability.Ability[SoundData, cognition.InputData]):
     _composite_attachment_lifecycle: typing.ClassVar[bool] = True
     _sensitivity: sensitivity.Sensitivity
     _interpretation: interpretation.Interpretation
+    # The voice registry this ear owns (its group starts, attaches and stops it), or None when it does not
+    # identify voices.
+    _registry: identification.Registry | None
 
     def __init__(
         self,
@@ -101,8 +106,22 @@ class Listening(ability.Ability[SoundData, cognition.InputData]):
             voice.identification.OutputData,
         ]
         | None = None,
+        registry: identification.Registry | None = None,
+        recognize_timeout: datetime.timedelta = interpretation.DEFAULT_RECOGNIZE_TIMEOUT,
         product_threshold_db: float = interpretation.DEFAULT_PRODUCT_THRESHOLD_DB,
     ) -> None:
+        """Hear through the given classifiers.
+
+        ``voice_classifier`` and ``registry`` identify voices and come together: ``registry`` is an
+        unstarted ``identification.Registry`` constructed with ``kind="voice"``, which this ear owns
+        from here on (its group starts it, attaches it for the ear's attached lifetime, and stops
+        it). ``recognize_timeout`` bounds each wait for the registry's answer.
+
+        Raises:
+            ValueError: If only one of ``voice_classifier`` and ``registry`` is given, or as
+                ``Interpretation`` raises for its own arguments.
+        """
+
         super().__init__()
         self._sensitivity = sensitivity.Sensitivity()
         self._interpretation = interpretation.Interpretation(
@@ -111,9 +130,13 @@ class Listening(ability.Ability[SoundData, cognition.InputData]):
             speech_decoder=speech_decoder,
             voice_diarizer=voice_diarizer,
             voice_classifier=voice_classifier,
+            registry=registry,
+            recognize_timeout=recognize_timeout,
             product_threshold_db=product_threshold_db,
         )
-        self._attachment_group = attachment.Group(self._sensitivity, self._interpretation)
+        self._registry = registry
+        owned = (self._sensitivity, self._interpretation, *(() if registry is None else (registry,)))
+        self._attachment_group = attachment.Group(*owned)
 
     @staticmethod
     def _has_sensed_sound(ctx: hsm.Context, instance: "Listening", event: hsm.Event[typing.Any]) -> bool:
@@ -154,6 +177,25 @@ class Listening(ability.Ability[SoundData, cognition.InputData]):
         """
 
         target = instance._sensitivity
+        _ = hsm.dispatch(
+            ctx,
+            target,
+            dataclasses.replace(event, target=hsm.id(target), metadata=dict(event.metadata)),
+        )
+
+    @staticmethod
+    def _has_enrollment(ctx: hsm.Context, instance: "Listening", event: hsm.Event[typing.Any]) -> bool:
+        del ctx
+        return instance._registry is not None and isinstance(event.data, enrollment.EnrollData)
+
+    @staticmethod
+    def _forward_enrollment(ctx: hsm.Context, instance: "Listening", event: hsm.Event[typing.Any]) -> None:
+        """Carry the mouth's copy of the bot's own voice to the stage that identifies voices.
+
+        A nerve like the efference copy: nothing here reads, ranks or decides anything about it.
+        """
+
+        target = instance._interpretation
         _ = hsm.dispatch(
             ctx,
             target,
@@ -337,6 +379,13 @@ class Listening(ability.Ability[SoundData, cognition.InputData]):
                 hsm.on(EfferenceEvent),
                 hsm.guard(_has_efference_copy),
                 hsm.effect(_forward_efference_copy),
+            ),
+            # The mouth's copy of the bot's own voice, to the stage that learns voices. An ear that
+            # does not identify voices refuses it in the guard, so the copy is ignored.
+            hsm.transition(
+                hsm.on(enrollment.EnrollEvent),
+                hsm.guard(_has_enrollment),
+                hsm.effect(_forward_enrollment),
             ),
             # Interpretation's terminals, on their way out through this ability's own.
             hsm.transition(

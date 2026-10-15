@@ -16,10 +16,26 @@ Whether a scored sound is worth a turn is still decided here, and deliberately a
 voice detection and speech decoding run on the bot's own voice and the transcript is produced.
 Nothing is filtered — the only thing that changes is whether any of it becomes something to
 answer.
+
+Who spoke is perceived, never inferred: with a voice classifier and an ``identification.Registry``
+composed, each voice heard is embedded and identified, and the product carries the recognitions
+(``SpeechData.voices``) and stamps a ``voice:<id>`` participant for every voice, the bot's own
+included. Only voices that are not the bot's own become ``source_ids``. A segment the classifier
+could not fingerprint (no voiceprint, W3-13) stays unidentified; its content is still heard and the
+other segments are still identified. The embedding itself never
+leaves this step. The bot's own voice is enrolled from what its mouth said (``listening.EnrollEvent``).
+
+Telemetry: ``bot.listening.voice.own.count`` counts products whose voice was recognized as the bot's
+own (no attributes). ``bot.identification.count`` (``bot.identification.kind="voice"``,
+``bot.outcome="failed"``, ``bot.failure.kind`` ``timeout`` or ``invalid_input``) counts embeddings
+this ear could not identify: one the registry did not answer within ``recognize_timeout``, or one
+that could not be printed (no model, or an invalid vector). Failures the registry answers it counts
+itself. A segment given no voiceprint is counted as ``bot.outcome="skipped"`` (``bot.failure.kind="none"``).
 """
 
 from __future__ import annotations
 
+from . import enrollment
 from . import sensitivity
 from .. import ability
 from .. import classifying
@@ -32,6 +48,7 @@ import dataclasses
 import collections.abc
 import datetime
 import io
+import logging
 import math
 import typing
 import uuid
@@ -42,8 +59,10 @@ import mosfet
 
 from mosfet.protocols import attachment
 import pydantic
+from opentelemetry import metrics
 
 from mosfet.abilities import cognition
+from mosfet.abilities import identification
 from mosfet.environment import SoundData, SoundEvent
 from mosfet import telemetry
 from mosfet.telemetry import span
@@ -52,6 +71,22 @@ _SCOPE = "bot.abilities.listening"
 _COMPONENT = "listening.interpretation"
 _STAGE_OPERATION_TIMEOUT = datetime.timedelta(seconds=30)
 _MAX_PARTICIPANTS = 32
+_MAX_VOICES = 8
+_MAX_PRINTS = 16
+_LOGGER = logging.getLogger(__name__)
+_METER = metrics.get_meter(_SCOPE)
+_OWN_VOICE = _METER.create_counter(
+    "bot.listening.voice.own.count",
+    unit="{utterance}",
+    description="Heard speech products whose voice was recognized as the bot's own.",
+)
+# The same instrument identification's Registry records on; this ear adds only the prints it could not
+# have identified: an answer that did not come in time, or an embedding that could not be printed.
+_IDENTIFICATION = _METER.create_counter(
+    "bot.identification.count",
+    unit="{print}",
+    description="Prints identified or enrolled, by kind and outcome; failed requests count once.",
+)
 
 DEFAULT_PRODUCT_THRESHOLD_DB = 3.0
 """How loud what is left of an arrival must be, in dB, to be worth handing on.
@@ -60,6 +95,9 @@ Three decibels is a doubling of acoustic intensity — the smallest level differ
 treated as a real one rather than as measurement slop. This is the single place a level becomes a
 yes or a no, and every contributor that reduces a perceived level is compared against it here.
 """
+
+DEFAULT_RECOGNIZE_TIMEOUT = datetime.timedelta(seconds=2)
+"""How long the ear waits for the voice registry to say who was heard before handing the product on without voices."""
 
 ListeningStage: typing.TypeAlias = typing.Literal[
     "sensitivity",
@@ -126,7 +164,11 @@ class _VoiceDiarizationCompletedEventData(pydantic.BaseModel):
 
 
 class _VoiceIdentificationCompletedEventData(pydantic.BaseModel):
-    """Private completion payload for direct voice identification inside Listening."""
+    """Private completion payload for voice identification inside Listening.
+
+    ``voices`` holds one entry per segment, in order: who was heard there, or ``None`` when that
+    voice could not be identified. The embeddings never leave the identification step.
+    """
 
     model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
         frozen=True,
@@ -137,7 +179,15 @@ class _VoiceIdentificationCompletedEventData(pydantic.BaseModel):
     sensed: sensitivity.OutputData
     voice_detection: voice.detection.ApplyData
     segments: tuple[voice.VoiceSegment, ...]
-    embeddings: tuple[voice.identification.VoiceEmbedding, ...]
+    voices: tuple[voice.HeardVoice | None, ...]
+
+
+class _EnrollmentEndedData(pydantic.BaseModel):
+    """Private completion payload: an own-voice enrollment ended, with the failure kind when it failed."""
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(frozen=True)
+
+    failure: str | None = None
 
 
 class _SpeechDecodingCompletedEventData(pydantic.BaseModel):
@@ -269,27 +319,31 @@ class SpeechData(pydantic.BaseModel):
         description="Optional diarizer confidence for this clipped speech segment.",
         examples=[0.87],
     )
-    voice_embedding: voice.identification.VoiceEmbedding | None = pydantic.Field(
-        default=None,
-        description="Optional voice embedding produced by the configured classifier.",
-    )
-
-    source_ids: value.IdentitySet = pydantic.Field(
-        default_factory=frozenset,
+    voices: tuple[voice.HeardVoice, ...] = pydantic.Field(
+        default=(),
+        max_length=_MAX_VOICES,
         description=(
-            "Opaque source identities for this speech observation. Empty source_ids are permitted when "
-            "Listening has speech evidence but no identity classifier result; Conversation rejects them."
+            "The voices identified in this observation: each voice id, whether it was recognized (heard before) "
+            "or is new, and whether it is the bot's own voice. Empty when no voice was identified."
         ),
-        examples=[[], [[0.12, -0.08, 0.31]]],
+    )
+    source_ids: frozenset[identification.Ref] = pydantic.Field(
+        default_factory=frozenset,
+        max_length=value.MAX_IDENTITY_SET_SIZE,
+        description=(
+            "The voice refs of who spoke, other than the bot itself (at most 4, earliest voice first). Empty when "
+            "no voice was identified or the only voice is the bot's own; such speech is not a conversation turn."
+        ),
+        examples=[[], ["voice:3f2a9c"]],
     )
     participants: tuple[mosfet.Participant, ...] = pydantic.Field(
         default=(),
         max_length=_MAX_PARTICIPANTS,
         description=(
-            "Who produced the sound this speech was decoded from, copied from the admitted environment.sound "
-            "chunks. Listening never works out who someone is; it only carries what the device stamped."
+            "Who produced the sound this speech was decoded from: what the device stamped on the admitted "
+            "environment.sound chunks, then a voice:<id> source for every voice identified, the bot's own included."
         ),
-        examples=[[], [{"ref": "person-42", "role": "source"}]],
+        examples=[[], [{"ref": "person-42", "role": "source"}, {"ref": "voice:3f2a9c", "role": "source"}]],
     )
     voice_detection: voice.detection.ApplyData = pydantic.Field(
         description="Voice spans from VoiceDetection relative to the start of this observation.",
@@ -332,15 +386,8 @@ class SpeechData(pydantic.BaseModel):
             raise ValueError("end_seconds must be greater than start_seconds.")
         return self
 
-    @pydantic.field_validator("source_ids", mode="before")
-    @classmethod
-    def validate_source_ids(cls, raw_value: object) -> value.IdentitySet:
-        """Canonicalize named or embedding source identities."""
-
-        return value.normalize_identity_set(raw_value, field_name="source_ids", allow_empty=True)
-
     @pydantic.field_serializer("source_ids", when_used="json")
-    def serialize_source_ids(self, identities: value.IdentitySet) -> list[str | list[float]]:
+    def serialize_source_ids(self, identities: frozenset[str]) -> list[str]:
         return value.identities_json(identities)
 
 
@@ -381,6 +428,11 @@ _ListeningStageFailedEvent = hsm.Event[FailedEventData](
     name="bot.ability.listening.stage.failed",
     kind=hsm.ErrorEventKind,
     schema=FailedEventData,
+)
+_EnrollmentEndedEvent = hsm.Event[_EnrollmentEndedData](
+    name="bot.ability.listening.enrollment.ended",
+    kind=hsm.CompletionEventKind,
+    schema=_EnrollmentEndedData,
 )
 
 
@@ -597,17 +649,33 @@ def _merged_participants(*groups: tuple[mosfet.Participant, ...]) -> tuple[mosfe
     return tuple(dict.fromkeys(participant for group in groups for participant in group))[:_MAX_PARTICIPANTS]
 
 
+def _voice_stamps(
+    voices: tuple[voice.HeardVoice, ...],
+) -> tuple[frozenset[str], tuple[mosfet.Participant, ...]]:
+    """What a product stamps for the voices heard in it, earliest first.
+
+    Every voice is a ``voice:<id>`` participant, the bot's own included, so hearing itself resolves
+    to itself; only the others are ``source_ids``, at most ``MAX_IDENTITY_SET_SIZE`` of them.
+    """
+
+    ordered = sorted(voices, key=lambda heard: heard.start_seconds)
+    others = dict.fromkeys(
+        identification.ref("voice", heard.recognition.id) for heard in ordered if not heard.recognition.own
+    )
+    participants = tuple(identification.participant("voice", heard.recognition.id) for heard in ordered)
+    return frozenset(tuple(others)[: value.MAX_IDENTITY_SET_SIZE]), participants
+
+
 def _speech_from_sensed(
     *,
     sensed: sensitivity.OutputData,
     voice_detection: voice.detection.ApplyData,
-    source_ids: value.IdentitySet | None = None,
-    voice_embedding: voice.identification.VoiceEmbedding | None = None,
+    voices: tuple[voice.HeardVoice, ...] = (),
     participants: tuple[mosfet.Participant, ...] = (),
 ) -> SpeechData | None:
     """Build a public PCM speech product; unsupported or incomplete formats fail closed."""
 
-    identities = typing.cast(value.IdentitySet, source_ids if source_ids is not None else frozenset())
+    source_ids, heard = _voice_stamps(voices)
     sound = sensed.sound
     sample_rate_hz = sound.sample_rate_hz
     channels = sound.channels if sound.channels is not None else 1
@@ -619,9 +687,9 @@ def _speech_from_sensed(
         sample_rate_hz=sample_rate_hz,
         channels=channels,
         media_type="audio/pcm",
-        source_ids=identities,
-        voice_embedding=voice_embedding,
-        participants=_merged_participants(participants, sound.participants),
+        source_ids=source_ids,
+        voices=voices,
+        participants=_merged_participants(participants, sound.participants, heard),
         parent=sensed.parent,
     )
     return speech
@@ -631,8 +699,7 @@ def _speech_from_voice_segment(
     *,
     sensed: sensitivity.OutputData,
     segment: voice.VoiceSegment,
-    source_ids: value.IdentitySet | None = None,
-    voice_embedding: voice.identification.VoiceEmbedding | None = None,
+    voices: tuple[voice.HeardVoice, ...] = (),
     voice_detection: voice.detection.ApplyData | None = None,
     participants: tuple[mosfet.Participant, ...] = (),
 ) -> SpeechData | None:
@@ -642,7 +709,7 @@ def _speech_from_voice_segment(
     listening-stage failure instead of silently dropping a product.
     """
 
-    identities = typing.cast(value.IdentitySet, source_ids if source_ids is not None else frozenset())
+    source_ids, heard = _voice_stamps(voices)
     sound = sensed.sound
     if sound.media_type != "audio/pcm" or sound.sample_rate_hz is None:
         raise ValueError("voice segment speech requires source audio/pcm with a sample rate.")
@@ -680,9 +747,9 @@ def _speech_from_voice_segment(
         start_seconds=segment.start_seconds,
         end_seconds=segment.end_seconds,
         confidence=diarization_confidence,
-        source_ids=identities,
-        voice_embedding=voice_embedding,
-        participants=_merged_participants(participants, sound.participants),
+        source_ids=source_ids,
+        voices=voices,
+        participants=_merged_participants(participants, sound.participants, heard),
         parent=sensed.parent,
     )
 
@@ -800,14 +867,14 @@ def _dispatch_product_cognition_input_with_operation(
             )
         return
     if isinstance(completion, _VoiceIdentificationCompletedEventData):
-        if len(completion.segments) != len(completion.embeddings):
+        if len(completion.segments) != len(completion.voices):
             _dispatch_listening_terminal_failure_with_operation(
                 ctx,
                 instance,
                 event,
                 FailedEventData(
                     stage="voice_identification",
-                    message="Voice identification returned one embedding per voice segment; requirement unmet.",
+                    message="Voice identification returned one result per voice segment; requirement unmet.",
                 ),
                 operation_id=operation_id,
             )
@@ -817,12 +884,11 @@ def _dispatch_product_cognition_input_with_operation(
                 _speech_from_voice_segment(
                     sensed=completion.sensed,
                     segment=segment,
-                    voice_embedding=embedding,
-                    source_ids=frozenset({embedding.embedding}),
+                    voices=() if heard is None else (heard,),
                     voice_detection=completion.voice_detection,
                     participants=participants,
                 )
-                for segment, embedding in zip(completion.segments, completion.embeddings, strict=True)
+                for segment, heard in zip(completion.segments, completion.voices, strict=True)
             )
         except Exception as error:
             _dispatch_listening_terminal_failure_with_operation(
@@ -919,6 +985,9 @@ class Interpretation(ability.Ability[sensitivity.OutputData, cognition.InputData
     _speech_decoding: speech.SpeechDecoding | None
     _voice_diarization: voice.diarization.VoiceDiarization | None
     _voice_identification: voice.identification.VoiceIdentification | None
+    # The address of the voice registry Listening owns: dispatched to, never started or stopped here.
+    _registry: identification.Registry | None
+    _recognize_timeout: datetime.timedelta
     # Open utterance PCM while HearingSpeech (machine-owned sticky stream, not peer coordination).
     _open_speech_audio: bytearray
     _open_speech_sample_rate_hz: int | None
@@ -927,11 +996,14 @@ class Interpretation(ability.Ability[sensitivity.OutputData, cognition.InputData
     _open_speech_sensed: sensitivity.OutputData | None
     _open_speech_format_error: str | None
     _open_speech_wav: bool
-    _active_source_ids: value.IdentitySet
+    # Who was heard opening the open utterance (direct identification); every product of the window carries it.
+    _active_voices: tuple[voice.HeardVoice, ...]
     # Union of participants stamped on the sound admitted into the open utterance (machine-owned, reset with it).
     _active_participants: tuple[mosfet.Participant, ...]
-    _active_voice_embedding: voice.identification.VoiceEmbedding | None
     _active_operation_id: str | None
+    # The completion whose voices are being identified (the opening VAD span, or the diarized utterance), held
+    # only while an identifying state waits, so its modeled deadline can hand the utterance on without voices.
+    _identifying: _VoiceDetectionCompletedEventData | _VoiceDiarizationCompletedEventData | None
 
     def __init__(
         self,
@@ -945,11 +1017,28 @@ class Interpretation(ability.Ability[sensitivity.OutputData, cognition.InputData
             voice.identification.OutputData,
         ]
         | None = None,
+        registry: identification.Registry | None = None,
+        recognize_timeout: datetime.timedelta = DEFAULT_RECOGNIZE_TIMEOUT,
         product_threshold_db: float = DEFAULT_PRODUCT_THRESHOLD_DB,
     ) -> None:
+        """Interpret scored sound with the given classifiers.
+
+        ``voice_classifier`` embeds voices and ``registry`` (an unstarted voice
+        ``identification.Registry`` its owner starts and attaches) tells who each is; they come
+        together or not at all. ``recognize_timeout`` bounds the wait for the registry's answer: a
+        product it does not cover carries no voices.
+
+        Raises:
+            ValueError: If ``product_threshold_db`` is negative, ``recognize_timeout`` is not positive,
+                ``voice_classifier`` is combined with ``speech_decoder``, or only one of
+                ``voice_classifier`` and ``registry`` is given.
+        """
+
         super().__init__()
         if product_threshold_db < 0.0:
             raise ValueError("product_threshold_db must not be negative.")
+        if recognize_timeout <= datetime.timedelta(0):
+            raise ValueError("recognize_timeout must be positive.")
         self._product_threshold_db = product_threshold_db
         self._voice_detection = voice.detection.VoiceDetection(classifier=voice_activity_classifier)
         self._sound_classification = (
@@ -965,11 +1054,15 @@ class Interpretation(ability.Ability[sensitivity.OutputData, cognition.InputData
             raise ValueError(
                 "voice_classifier cannot be combined with speech_decoder because embedding correlation would be lost."
             )
+        if (voice_classifier is None) != (registry is None):
+            raise ValueError("voice_classifier and registry must be given together: one embeds, the other identifies.")
         self._voice_identification = (
             voice.identification.VoiceIdentification(classifier=voice_classifier)
             if voice_classifier is not None
             else None
         )
+        self._registry = registry
+        self._recognize_timeout = recognize_timeout
         children: list[hsm.Instance] = [self._voice_detection]
         if self._sound_classification is not None:
             children.append(self._sound_classification)
@@ -987,10 +1080,10 @@ class Interpretation(ability.Ability[sensitivity.OutputData, cognition.InputData
         self._open_speech_sensed = None
         self._open_speech_format_error = None
         self._open_speech_wav = False
-        self._active_source_ids = frozenset()
+        self._active_voices = ()
         self._active_participants = ()
-        self._active_voice_embedding = None
         self._active_operation_id = None
+        self._identifying = None
 
     @staticmethod
     def _dispatch_listening_cognition_input(
@@ -1220,9 +1313,8 @@ class Interpretation(ability.Ability[sensitivity.OutputData, cognition.InputData
         instance._open_speech_sensed = None
         instance._open_speech_format_error = None
         instance._open_speech_wav = False
-        instance._active_source_ids = frozenset()
+        instance._active_voices = ()
         instance._active_participants = ()
-        instance._active_voice_embedding = None
 
     @staticmethod
     def _append_open_speech(
@@ -1344,8 +1436,7 @@ class Interpretation(ability.Ability[sensitivity.OutputData, cognition.InputData
             speech = _speech_from_sensed(
                 sensed=sensed,
                 voice_detection=completion.voice_detection,
-                source_ids=instance._active_source_ids,
-                voice_embedding=instance._active_voice_embedding,
+                voices=instance._active_voices,
                 participants=instance._active_participants,
             )
             if speech is None:
@@ -1378,29 +1469,76 @@ class Interpretation(ability.Ability[sensitivity.OutputData, cognition.InputData
         Interpretation._emit_speech_product(ctx, instance, event, completion)
 
     @staticmethod
+    def _identify_delay(
+        ctx: hsm.Context, instance: "Interpretation", event: hsm.Event[typing.Any]
+    ) -> datetime.timedelta:
+        """An utterance waits for its voices at most this long: the embedding, then the registry's answer."""
+
+        del ctx, event
+        return _STAGE_OPERATION_TIMEOUT + instance._recognize_timeout
+
+    @staticmethod
+    def _hold_identifying(ctx: hsm.Context, instance: "Interpretation", event: hsm.Event[typing.Any]) -> None:
+        del ctx
+        held = event.data
+        assert isinstance(held, _VoiceDetectionCompletedEventData | _VoiceDiarizationCompletedEventData)
+        instance._identifying = held
+
+    @staticmethod
+    def _release_identifying(ctx: hsm.Context, instance: "Interpretation", event: hsm.Event[typing.Any]) -> None:
+        del ctx, event
+        instance._identifying = None
+
+    @staticmethod
+    def _identify_nobody(ctx: hsm.Context, instance: "Interpretation", event: hsm.Event[typing.Any]) -> None:
+        """Nobody was recognized in time: identification completes as usual, with no voice for any segment."""
+
+        held = instance._identifying
+        assert held is not None
+        if isinstance(held, _VoiceDiarizationCompletedEventData):
+            segments: tuple[voice.VoiceSegment, ...] = held.segments
+        else:
+            # The opening span the identification was clipped from; it was clipped before anything was awaited.
+            segments = (_voice_segment_from_detection(sensed=held.sensed, segment=held.voice_detection.segments[0]),)
+        Interpretation._unidentified(len(segments), identification.FailureKind.TIMEOUT)
+        unidentified = _VoiceIdentificationCompletedEventData(
+            sensed=Interpretation._open_speech_sensed_or(instance, held.sensed),
+            voice_detection=held.voice_detection,
+            segments=segments,
+            voices=(None,) * len(segments),
+        )
+        _ = hsm.dispatch(
+            ctx,
+            instance,
+            _listening_event_with_context(
+                _VoiceIdentificationCompletedEvent.with_data(unidentified),
+                event,
+                operation_id=instance._active_operation_id,
+            ),
+        )
+
+    @staticmethod
     def _enter_hearing_speech_from_identification(
         ctx: hsm.Context,
         instance: "Interpretation",
         event: hsm.Event[typing.Any],
     ) -> None:
-        """Commit the first-segment identity before emitting the opening product."""
+        """Commit who opened the utterance before emitting the opening product."""
 
         completion = event.data
-        if not isinstance(completion, _VoiceIdentificationCompletedEventData) or not completion.embeddings:
+        if not isinstance(completion, _VoiceIdentificationCompletedEventData) or not completion.voices:
             Interpretation._dispatch_stage_failure(
                 ctx,
                 instance,
                 event,
                 stage="voice_identification",
-                message="Voice identification produced no opening embedding.",
+                message="Voice identification produced no result for the opening voice.",
             )
             return
-        embedding = completion.embeddings[0]
         source_was_wav = instance._open_speech_wav
         Interpretation._clear_open_speech(ctx, instance, event)
         instance._open_speech_wav = source_was_wav
-        instance._active_voice_embedding = embedding
-        instance._active_source_ids = frozenset({embedding.embedding})
+        instance._active_voices = tuple(heard for heard in completion.voices[:1] if heard is not None)
         detection = _VoiceDetectionCompletedEventData(
             sensed=completion.sensed,
             voice_detection=completion.voice_detection,
@@ -1777,18 +1915,22 @@ class Interpretation(ability.Ability[sensitivity.OutputData, cognition.InputData
                     event,
                     stage="voice_identification",
                     message=(
-                        "Voice identification must return exactly one embedding per voice segment; "
+                        "Voice identification must return exactly one entry per voice segment; "
                         f"received {len(output.embeddings)} for {len(segments)} segments."
                     ),
                 )
                 return
             active.set_attribute("bot.voice.segment.count", len(segments))
-            active.set_attribute("bot.voice.embedding.count", len(output.embeddings))
+            active.set_attribute(
+                "bot.voice.embedding.count", sum(embedding is not None for embedding in output.embeddings)
+            )
+            voices = await Interpretation._recognize(instance, event, segments, output.embeddings)
+            active.set_attribute("bot.voice.identified.count", sum(heard is not None for heard in voices))
             identified = _VoiceIdentificationCompletedEventData(
                 sensed=Interpretation._open_speech_sensed_or(instance, completion.sensed),
                 voice_detection=voice_detection or voice.detection.ApplyData(),
                 segments=segments,
-                embeddings=output.embeddings,
+                voices=voices,
             )
             _ = hsm.dispatch(
                 ctx,
@@ -1799,6 +1941,190 @@ class Interpretation(ability.Ability[sensitivity.OutputData, cognition.InputData
                     operation_id=instance._active_operation_id,
                 ),
             )
+
+    @staticmethod
+    def _unidentified(count: int, failure: identification.FailureKind) -> None:
+        """Count prints this ear could not have identified; the registry counts the failures it answers."""
+
+        if count:
+            _IDENTIFICATION.add(
+                count,
+                {"bot.identification.kind": "voice", "bot.outcome": "failed", "bot.failure.kind": failure.value},
+            )
+
+    @staticmethod
+    def _skipped(count: int) -> None:
+        """Count segments the classifier gave no voiceprint: unidentified by design, not by failure."""
+
+        if count:
+            _IDENTIFICATION.add(
+                count, {"bot.identification.kind": "voice", "bot.outcome": "skipped", "bot.failure.kind": "none"}
+            )
+
+    @staticmethod
+    def _print(embedding: voice.identification.VoiceEmbedding) -> identification.Print | None:
+        """The print an embedding identifies by, or ``None`` when it has no model or no valid vector."""
+
+        if embedding.model is None:
+            return None
+        try:
+            return identification.Print(vector=embedding.embedding, model=embedding.model)
+        except pydantic.ValidationError:
+            return None
+
+    @staticmethod
+    async def _recognize(
+        instance: "Interpretation",
+        event: hsm.Event[typing.Any],
+        segments: tuple[voice.VoiceSegment, ...],
+        embeddings: tuple[voice.identification.VoiceEmbedding | None, ...],
+    ) -> tuple[voice.HeardVoice | None, ...]:
+        """Who was heard in each segment, in order: one identify request to the registry, bounded by
+        ``recognize_timeout``. A segment with no voiceprint, whose embedding cannot be printed, or that the
+        registry does not answer in time, is ``None``. The embeddings and prints stay here.
+        """
+
+        registry = instance._registry
+        assert registry is not None, "a voice classifier is always composed with a registry"
+        fingerprinted = [(index, embedding) for index, embedding in enumerate(embeddings) if embedding is not None]
+        Interpretation._skipped(len(embeddings) - len(fingerprinted))
+        printed = [(index, Interpretation._print(embedding)) for index, embedding in fingerprinted]
+        indexed = [(index, print_) for index, print_ in printed if print_ is not None][:_MAX_PRINTS]
+        Interpretation._unidentified(len(fingerprinted) - len(indexed), identification.FailureKind.INVALID_INPUT)
+        voices: list[voice.HeardVoice | None] = [None] * len(segments)
+        if not indexed:
+            return tuple(voices)
+        operation_id = f"{instance._active_operation_id or event.id or uuid.uuid4().hex}:recognize:{uuid.uuid4().hex}"
+        try:
+            terminal = await ability.run_terminal_operation(
+                instance.context(),
+                child=registry,
+                request=dataclasses.replace(
+                    identification.IdentifyEvent.with_data_and_id(
+                        identification.IdentifyData(prints=tuple(print_ for _, print_ in indexed)), operation_id
+                    ),
+                    metadata=dict(event.metadata),
+                ),
+                terminals=(identification.IdentifiedEvent, identification.FailedEvent),
+                timeout=instance._recognize_timeout,
+            )
+        except TimeoutError:
+            Interpretation._unidentified(len(indexed), identification.FailureKind.TIMEOUT)
+            return tuple(voices)
+        reply = terminal.data
+        if (
+            not isinstance(reply, identification.IdentifiedData)
+            or reply.kind != "voice"
+            or len(reply.recognitions) != len(indexed)
+        ):
+            # A FailedEvent was counted by the registry; a reply from a registry of another kind names nobody here.
+            return tuple(voices)
+        for (index, _), recognition in zip(indexed, reply.recognitions, strict=True):
+            if recognition is not None:
+                segment = segments[index]
+                voices[index] = voice.HeardVoice(
+                    recognition=recognition, start_seconds=segment.start_seconds, end_seconds=segment.end_seconds
+                )
+        if own := sum(heard is not None and heard.recognition.own for heard in voices):
+            _OWN_VOICE.add(own)
+        return tuple(voices)
+
+    @staticmethod
+    def _has_enrollment(ctx: hsm.Context, instance: "Interpretation", event: hsm.Event[typing.Any]) -> bool:
+        del ctx
+        return instance._registry is not None and isinstance(event.data, enrollment.EnrollData)
+
+    @staticmethod
+    def _has_ended_enrollment(ctx: hsm.Context, instance: "Interpretation", event: hsm.Event[typing.Any]) -> bool:
+        del ctx
+        return _has_current_operation(instance._active_operation_id, event) and isinstance(
+            event.data, _EnrollmentEndedData
+        )
+
+    @staticmethod
+    async def _enroll(
+        instance: "Interpretation", event: hsm.Event[typing.Any], copy: enrollment.EnrollData
+    ) -> identification.FailureKind | None:
+        """Embed the copy of the bot's own voice and enroll it, as its own, under the voice id it speaks as."""
+
+        registry = instance._registry
+        embedder = instance._voice_identification
+        assert registry is not None and embedder is not None, "a registry is always composed with a voice classifier"
+        operation_id = instance._active_operation_id or event.id or uuid.uuid4().hex
+        try:
+            embedded = await ability.run_terminal_operation(
+                instance.context(),
+                child=embedder,
+                request=dataclasses.replace(
+                    embedder.input_event.with_data_and_id(
+                        voice.identification.InputData(segments=(copy.segment,)),
+                        f"{operation_id}:enroll_embedding:{uuid.uuid4().hex}",
+                    ),
+                    metadata=dict(event.metadata),
+                ),
+                terminals=(embedder.output_event, embedder.failed_event),
+                timeout=_STAGE_OPERATION_TIMEOUT,
+            )
+        except TimeoutError:
+            return identification.FailureKind.TIMEOUT
+        output = embedded.data
+        embedding = (
+            output.embeddings[0]
+            if isinstance(output, voice.identification.OutputData) and len(output.embeddings) == 1
+            else None
+        )
+        print_ = None if embedding is None else Interpretation._print(embedding)
+        if print_ is None:
+            return identification.FailureKind.INVALID_INPUT
+        try:
+            enrolled = await ability.run_terminal_operation(
+                instance.context(),
+                child=registry,
+                request=dataclasses.replace(
+                    identification.EnrollEvent.with_data_and_id(
+                        identification.EnrollData(id=copy.voice_id, print=print_, own=True),
+                        f"{operation_id}:enroll:{uuid.uuid4().hex}",
+                    ),
+                    metadata=dict(event.metadata),
+                ),
+                terminals=(identification.EnrolledEvent, identification.FailedEvent),
+                timeout=_STAGE_OPERATION_TIMEOUT,
+            )
+        except TimeoutError:
+            return identification.FailureKind.TIMEOUT
+        reply = enrolled.data
+        if isinstance(reply, identification.FailureData):
+            return reply.kind
+        return None
+
+    @staticmethod
+    async def _run_enrollment(ctx: hsm.Context, instance: "Interpretation", event: hsm.Event[typing.Any]) -> None:
+        """Learn the bot's own voice from the copy its mouth sent, then go back to interpreting."""
+
+        copy = event.data
+        assert isinstance(copy, enrollment.EnrollData)
+        with span.operation(
+            "bot.listening.enroll_voice",
+            scope=_SCOPE,
+            component=_COMPONENT,
+            stage="voice_enrollment",
+            context=telemetry.event_context(event),
+        ) as active:
+            failure = await Interpretation._enroll(instance, event, copy)
+            if failure is not None:
+                span.record_failure(active, failure.value)
+                _LOGGER.warning("Own-voice enrollment failed (%s); the bot's own voice stays unknown.", failure.value)
+        _ = hsm.dispatch(
+            ctx,
+            instance,
+            _listening_event_with_context(
+                _EnrollmentEndedEvent.with_data(
+                    _EnrollmentEndedData(failure=None if failure is None else failure.value)
+                ),
+                event,
+                operation_id=instance._active_operation_id,
+            ),
+        )
 
     @staticmethod
     async def _run_detected_speech_decoding(
@@ -2090,12 +2416,30 @@ class Interpretation(ability.Ability[sensitivity.OutputData, cognition.InputData
                 hsm.effect(_begin_operation),
                 hsm.target("/Interpretation/Working/DetectingVoice"),
             ),
+            hsm.transition(
+                hsm.on(enrollment.EnrollEvent),
+                hsm.guard(_has_enrollment),
+                hsm.effect(_begin_operation),
+                hsm.target("/Interpretation/Enrolling"),
+            ),
+        ),
+        # Learning the bot's own voice is serial work like any other: sounds wait behind it.
+        hsm.state(
+            "Enrolling",
+            hsm.defer(input_event, enrollment.EnrollEvent),
+            hsm.activity(_run_enrollment),
+            hsm.transition(
+                hsm.on(_EnrollmentEndedEvent),
+                hsm.guard(_has_ended_enrollment),
+                hsm.effect(_clear_operation),
+                hsm.target("/Interpretation/Idle"),
+            ),
         ),
         # One busy region: serial queue + stage failure policy live once (HI-01), not on every stage.
         hsm.state(
             "Working",
             hsm.initial(hsm.target("/Interpretation/Working/DetectingVoice")),
-            hsm.defer(input_event),
+            hsm.defer(input_event, enrollment.EnrollEvent),
             hsm.transition(
                 hsm.on(_ListeningStageFailedEvent),
                 hsm.guard(_has_listening_stage_failure),
@@ -2240,9 +2584,13 @@ class Interpretation(ability.Ability[sensitivity.OutputData, cognition.InputData
                     hsm.target("/Interpretation/Working/HandingOff"),
                 ),
             ),
+            # Identification waits for the embedding and then the registry's answer, and no longer than that: when
+            # its deadline passes, identification completes as usual with nobody recognized (internal transition).
             hsm.state(
                 "IdentifyingVoiceDirect",
                 # Identify the assembled VAD utterance directly, without a diarization pass.
+                hsm.entry(_hold_identifying),
+                hsm.exit(_release_identifying),
                 hsm.activity(_run_voice_identification),
                 hsm.transition(
                     hsm.on(_VoiceIdentificationCompletedEvent),
@@ -2250,15 +2598,19 @@ class Interpretation(ability.Ability[sensitivity.OutputData, cognition.InputData
                     hsm.effect(_enter_hearing_speech_from_identification),
                     hsm.target("/Interpretation/Working/HearingSpeech"),
                 ),
+                hsm.transition(hsm.after(_identify_delay), hsm.effect(_identify_nobody)),
             ),
             hsm.state(
                 "IdentifyingVoice",
+                hsm.entry(_hold_identifying),
+                hsm.exit(_release_identifying),
                 hsm.activity(_run_voice_identification),
                 hsm.transition(
                     hsm.on(_VoiceIdentificationCompletedEvent),
                     hsm.guard(_has_voice_identification_completion),
                     hsm.target("/Interpretation/Working/HandingOff"),
                 ),
+                hsm.transition(hsm.after(_identify_delay), hsm.effect(_identify_nobody)),
             ),
             hsm.state(
                 "DecodingSpeech",
@@ -2301,6 +2653,7 @@ class Interpretation(ability.Ability[sensitivity.OutputData, cognition.InputData
 
 __all__ = [
     "DEFAULT_PRODUCT_THRESHOLD_DB",
+    "DEFAULT_RECOGNIZE_TIMEOUT",
     "FailedEventData",
     "Interpretation",
     "ListeningFailedEvent",

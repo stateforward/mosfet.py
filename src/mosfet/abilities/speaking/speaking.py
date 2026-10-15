@@ -1368,6 +1368,8 @@ class Speaking(ability.Ability[InputData, OutputData]):
                         target_ids=frozenset(),
                         content=data.spoken,
                         content_type="text/plain",
+                        # The producer stamps whose voice said it; a heard echo of it resolves to the same ref.
+                        participants=(identification.participant("voice", instance._voice_id),),
                         provenance=conversation.MessageProvenance(event=conversation.AppendEvent.name),
                     )
                     _ = await hsm.dispatch(

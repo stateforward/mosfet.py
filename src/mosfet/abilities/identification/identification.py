@@ -11,9 +11,10 @@ and no failure message carries a payload. Telemetry (every attribute is a closed
 ids are never attributes):
 
 * ``bot.identification.count`` — ``bot.identification.kind`` {voice, face} × ``bot.outcome``
-  {recognized, minted, failed} × ``bot.failure.kind`` (``FailureKind`` or ``none``): one point per
-  print identified or enrolled, one per failed request, and one per print an identifier could not
-  identify (``failed`` with ``none``): at most 14 series.
+  {recognized, minted, failed, skipped} × ``bot.failure.kind`` (``FailureKind`` or ``none``): one
+  point per print identified or enrolled, one per failed request, one per print an identifier could
+  not identify (``failed`` with ``none``), and, from the ear, one per voice segment its classifier
+  gave no voiceprint (``skipped`` with ``none``, voice only): at most 15 series.
 * ``bot.identification.pruned`` — ids pruned by retention, by kind: 2 series.
 * ``bot.identification.prune.failed`` — prunes that failed or timed out, by kind ×
   ``bot.failure.kind`` (``FailureKind``): at most 8 series.
@@ -143,7 +144,12 @@ class Print(capture.Biometric):
 
 @pydantic.dataclasses.dataclass(frozen=True, kw_only=True)
 class Recognition:
-    """Who a print is: an existing id it matched, or the id minted for it now."""
+    """Who a print is: an existing id it matched, or the id minted for it now.
+
+    Shown to a model, a recognition is its id, ``recognized`` and ``own``; the similarity score is not.
+    """
+
+    __model_facing_excluded_fields__: typing.ClassVar[frozenset[str]] = frozenset({"similarity"})
 
     id: Id
     recognized: bool

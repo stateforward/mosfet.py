@@ -1179,6 +1179,8 @@ def test_speaking_records_what_the_room_heard_as_one_trusted_outbound_message() 
     assert message.provenance.event == conversation.AppendEvent.name
     assert message.provenance.source == speaker_id
     assert message.provenance.target == conversation_id
+    # The producer stamps whose voice said it: the bot's own voice ref, which a heard echo resolves to too.
+    assert message.participants == (mosfet.Participant(ref="voice:tts:warm", role=mosfet.ParticipantRole.SOURCE),)
 
 
 def test_own_voice_is_enrolled_once_from_the_first_utterance_long_enough() -> None:

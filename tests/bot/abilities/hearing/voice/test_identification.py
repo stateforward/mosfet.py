@@ -1,5 +1,7 @@
 from mosfet import abilities
+from mosfet.abilities import identification
 from mosfet.abilities.hearing import voice
+from mosfet.telemetry import capture
 
 import asyncio
 import collections.abc
@@ -9,6 +11,7 @@ import typing
 from typing import override
 
 import hsm
+import pydantic
 import pytest
 
 from tests.bot.abilities.support import start_abilities_for_test
@@ -168,9 +171,21 @@ def test_voice_identification_output_records_voice_signature() -> None:
     output = voice.identification.OutputData(embeddings=(embedding,))
 
     assert output.embeddings == (embedding,)
-    assert output.embeddings[0].embedding == (0.12, -0.08, 0.31)
-    assert output.embeddings[0].model == "voice-embedding-v1"
-    assert output.embeddings[0].confidence == 0.91
+    (recorded,) = output.embeddings
+    assert recorded is not None
+    assert recorded.embedding == (0.12, -0.08, 0.31)
+    assert recorded.model == "voice-embedding-v1"
+    assert recorded.confidence == 0.91
+
+
+def test_a_segment_the_classifier_cannot_fingerprint_has_no_voiceprint() -> None:
+    embedding = voice.identification.VoiceEmbedding(embedding=(0.6, 0.8), model="voice-embedding-v1")
+
+    output = voice.identification.OutputData(embeddings=(None, embedding))
+    unprintable = voice.identification.OutputData(embeddings=(None, None))
+
+    assert output.embeddings == (None, embedding)
+    assert unprintable.embeddings == (None, None)
 
 
 def test_voice_identification_output_rejects_invalid_signatures() -> None:
@@ -202,7 +217,8 @@ def test_voice_identification_uses_injected_identifier() -> None:
 
     outputs = asyncio.run(run())
 
-    assert outputs[0].embeddings[0].embedding == (0.12, -0.08, 0.31)
+    (embedded,) = outputs[0].embeddings
+    assert embedded is not None and embedded.embedding == (0.12, -0.08, 0.31)
 
 
 def test_voice_identification_events_use_concrete_pydantic_schemas() -> None:
@@ -239,3 +255,20 @@ def _segment() -> voice.VoiceSegment:
         start_seconds=0.0,
         end_seconds=0.25,
     )
+
+
+def test_a_voice_embedding_is_biometric_and_full_capture_never_writes_it() -> None:
+    embedding = voice.identification.VoiceEmbedding(embedding=(0.12, -0.08, 0.31), model="voice-embedding-v1")
+
+    assert isinstance(embedding, capture.Biometric)
+    assert capture.jsonable({"embedding": embedding}) == {"embedding": "<biometric:VoiceEmbedding>"}
+
+
+def test_a_heard_voice_names_a_recognition_and_where_it_was_heard() -> None:
+    recognition = identification.Recognition(id="tts:warm", recognized=True, similarity=0.9, own=True)
+    heard = voice.HeardVoice(recognition=recognition, start_seconds=0.5, end_seconds=1.25)
+
+    assert heard.recognition == recognition
+    assert voice.HeardVoice.model_validate_json(heard.model_dump_json()) == heard
+    with pytest.raises(pydantic.ValidationError):
+        _ = voice.HeardVoice(recognition=recognition, start_seconds=1.25, end_seconds=0.5)

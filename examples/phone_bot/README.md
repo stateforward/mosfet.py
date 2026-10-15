@@ -81,8 +81,8 @@ Every line you type is **said out loud** in the robot's room. A mouth — the sa
 `bot.devices.audio.Speaker` the robot uses for its own voice — stands a metre in front of it,
 renders your words locally with macOS `say`, and broadcasts them through `Environment.broadcast`
 at 60 dB from where it is standing. The robot hears them the way it hears anything: environment
-sound → its ears (its placement's `threshold_db`) → Listening (VAD + pyannote voice embeddings for
-`source_ids`) → participant-owned TurnDetector TurnStart/TurnUpdate/TurnPause/TurnEnd + STT while
+sound → its ears (its placement's `threshold_db`) → Listening (VAD + pyannote voice embeddings, identified
+as `voice:<id>` source refs by a voice registry) → participant-owned TurnDetector TurnStart/TurnUpdate/TurnPause/TurnEnd + STT while
 the turn is open → TurnComplete Conversation product → cognition when the turn closes. Step far enough away,
 or raise its hearing floor, and it genuinely does not hear you. Nothing is dispatched at the
 body.
@@ -121,8 +121,9 @@ Any other `vocal.speech.SpeechEncoder` drops in — the Moonshine `SpeechEncoder
 
 Room join alone does not require model keys; full agent talk does. VAD is local Silero
 (`mlx-community/silero-vad` via `mosfet-provider-mlx-audio`). Voice identity is local pyannote
-speaker embeddings (`pyannote/wespeaker-voxceleb-resnet34-LM` via `mosfet-provider-pyannote`) so
-Listening speech products carry non-empty `source_ids` into Conversation. STT/TTS stay off-device
+speaker embeddings (`pyannote/wespeaker-voxceleb-resnet34-LM` via `mosfet-provider-pyannote`), identified by
+an in-process voice `identification.Registry`, so Listening speech products carry `voice:<id>` `source_ids`
+into Conversation. STT/TTS stay off-device
 Gemini (`gemini-3.5-flash` STT + `gemini-3.1-flash-tts-preview` TTS by default; override with
 `BOT_GEMINI_STT_MODEL` / `BOT_GEMINI_TTS_MODEL` / `BOT_SILERO_VAD_MODEL` /
 `BOT_PYANNOTE_VOICE_IDENTITY_MODEL`). Live pyannote weights use the Hugging Face/pyannote auth

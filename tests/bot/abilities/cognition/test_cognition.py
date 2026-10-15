@@ -3459,7 +3459,7 @@ def _speech_event_stimulus() -> hsm.Event[object]:
         sample_rate_hz=16_000,
         channels=1,
         media_type="audio/pcm",
-        source_ids=frozenset({(0.12, -0.08, 0.31)}),
+        source_ids=frozenset({"voice:3f2a9c"}),
     )
     return listening.SpeechEvent.with_data(speech)
 
@@ -3527,7 +3527,7 @@ def test_autonomy_native_seed_preserves_acoustic_speech_for_conversation() -> No
             sample_rate_hz=16_000,
             channels=1,
             media_type="audio/pcm",
-            source_ids=frozenset({(0.12, -0.08, 0.31)}),
+            source_ids=frozenset({"voice:3f2a9c"}),
         )
         turn = cognition.InputData(
             stimulus=listening.SpeechEvent.with_data(speech),
@@ -3564,7 +3564,7 @@ def test_autonomy_native_seed_preserves_acoustic_speech_for_conversation() -> No
     assert selected[0].data.content_type == "audio/pcm"
     assert selected[0].data.sample_rate_hz == 16_000
     assert selected[0].data.channels == 1
-    assert selected[0].data.source_ids == frozenset({(0.12, -0.08, 0.31)})
+    assert selected[0].data.source_ids == frozenset({"voice:3f2a9c"})
     assert selected[0].data.parent is not None
     assert selected[0].data.parent.event == listening.SpeechEvent.name
     assert '"content"' not in selected[0].model_dump_json()

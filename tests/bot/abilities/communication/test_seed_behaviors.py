@@ -6,6 +6,7 @@ and the admit/reject behavior through public ability seams only.
 """
 
 from mosfet.abilities import cognition
+from mosfet.abilities import identification
 from mosfet.abilities import communication
 from mosfet.abilities import listening
 from mosfet.abilities import processing
@@ -19,7 +20,9 @@ import typing
 from tests.bot.abilities.support import dispatch_ability_for_test, shared_hsm_context, start_abilities_for_test
 
 
-def _speech(*, source_ids: typing.Any, content: str = "hello") -> listening.SpeechData:
+def _speech(
+    *, source_ids: typing.Any, content: str = "hello", voices: tuple[voice.HeardVoice, ...] = ()
+) -> listening.SpeechData:
     return listening.SpeechData(
         content=content,
         content_type="text/plain",
@@ -30,6 +33,8 @@ def _speech(*, source_ids: typing.Any, content: str = "hello") -> listening.Spee
         media_type="audio/pcm",
         channels=1,
         source_ids=source_ids,
+        voices=voices,
+        participants=tuple(identification.participant("voice", heard.recognition.id) for heard in voices),
     )
 
 
@@ -53,7 +58,7 @@ def test_speech_heard_seed_descriptor_is_stable() -> None:
     assert isinstance(first, communication.SpeechHeard)
     assert isinstance(second, communication.SpeechHeard)
     assert first is not second
-    adapted_input = _seed_input(_speech(source_ids=frozenset({(0.12, -0.08, 0.31)})))
+    adapted_input = _seed_input(_speech(source_ids=frozenset({"voice:3f2a9c"})))
     assert seed.input_adapter is not None
     assert seed.input_adapter(adapted_input) is adapted_input
 
@@ -64,7 +69,7 @@ def test_speech_heard_admits_identified_speech_into_communication() -> None:
         heard = typing.cast(communication.SpeechHeard, seed.factory())
         ctx = shared_hsm_context()
         await start_abilities_for_test(ctx, heard)
-        speech = _speech(source_ids=frozenset({(0.12, -0.08, 0.31)}), content="answer the phone")
+        speech = _speech(source_ids=frozenset({"voice:3f2a9c"}), content="answer the phone")
         return await dispatch_ability_for_test(heard, ctx, _seed_input(speech))
 
     output = asyncio.run(run())
@@ -74,7 +79,7 @@ def test_speech_heard_admits_identified_speech_into_communication() -> None:
     selected = output.events[0]
     assert selected.event == communication.InputEvent.name
     assert isinstance(selected.data, conversation.TurnData)
-    assert selected.data.source_ids == frozenset({(0.12, -0.08, 0.31)})
+    assert selected.data.source_ids == frozenset({"voice:3f2a9c"})
     assert selected.data.content == "answer the phone"
     assert selected.data.content_type == "text/plain"
     assert selected.data.sample_rate_hz == 16_000
@@ -91,5 +96,27 @@ def test_speech_heard_declines_speech_without_source_identity() -> None:
 
     output = asyncio.run(run())
 
+    assert output.handled is False
+    assert output.events == ()
+
+
+def test_speech_heard_declines_the_bots_own_voice_and_leaves_it_to_deliberation() -> None:
+    own = voice.HeardVoice(
+        recognition=identification.Recognition(id="tts:warm", recognized=True, similarity=0.93, own=True),
+        start_seconds=0.0,
+        end_seconds=0.1,
+    )
+
+    async def run() -> processing.OutputData:
+        seed = communication.speech_heard_seed()
+        heard = typing.cast(communication.SpeechHeard, seed.factory())
+        ctx = shared_hsm_context()
+        await start_abilities_for_test(ctx, heard)
+        speech = _speech(source_ids=frozenset(), voices=(own,))
+        return await dispatch_ability_for_test(heard, ctx, _seed_input(speech))
+
+    output = asyncio.run(run())
+
+    # An echo of its own voice is never a conversation turn; the fact goes on unhandled.
     assert output.handled is False
     assert output.events == ()

@@ -95,14 +95,25 @@ def test_segments_are_resampled_to_sixteen_kilohertz_mono() -> None:
     assert len(requests[0].content) == 8_000 * 2
 
 
-def test_a_segment_shorter_than_the_server_floor_is_refused_without_a_request() -> None:
+def test_a_segment_shorter_than_the_server_floor_has_no_voiceprint_and_is_never_sent() -> None:
     requests: list[httpx.Request] = []
-    data = _input(_segment(start=0.0, end=0.5), _segment(start=0.5, end=0.75))
+    backchannel, long = _segment(start=0.0, end=0.2), _segment(start=0.2, end=1.2)
 
-    failure = _failure(_answer(requests), data)
+    output = _classify(_answer(requests), _input(backchannel, long))
 
-    assert failure.kind == "invalid_input"
+    assert [sent.content for sent in requests] == [long.audio]
+    assert output == voice.identification.OutputData(
+        embeddings=(None, voice.VoiceEmbedding(embedding=tuple(_VECTOR), model="wespeaker-resnet34"))
+    )
+
+
+def test_an_input_of_only_short_segments_is_not_an_error_and_sends_nothing() -> None:
+    requests: list[httpx.Request] = []
+
+    output = _classify(_answer(requests), _input(_segment(start=0.0, end=0.2), _segment(start=0.2, end=0.45)))
+
     assert requests == []
+    assert output == voice.identification.OutputData(embeddings=(None, None))
 
 
 @pytest.mark.parametrize(

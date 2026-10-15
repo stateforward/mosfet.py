@@ -15,7 +15,6 @@ from ...identity import value
 from . import turn_detector
 
 import asyncio
-import collections.abc
 import dataclasses
 import datetime
 import json
@@ -57,10 +56,12 @@ _HISTORY_IMAGE_RELEASED = metrics.get_meter("bot.abilities.communication").creat
 _PARTICIPANT_UNSTAMPED = metrics.get_meter("bot.abilities.communication").create_counter(
     "bot.memory.participant.unstamped.count",
     unit="{identity}",
-    description="Turn identities (vectors, over-long refs) a cognition handoff could not stamp as participants.",
+    description="Turn identities a cognition handoff could not stamp: participant strings over the ref bound.",
 )
 _MAX_PARTICIPANTS = 32
 _MAX_PARTICIPANT_REF_LENGTH = 200
+_MAX_OUTBOUND_PARTICIPANTS = 8
+"""Most participants of the bot's own outbound messages Conversation carries into its next handoff."""
 
 
 def _default_turn_detector(session_ref: str, track_ref: TrackRef) -> turn_detector.TurnDetector:
@@ -72,8 +73,6 @@ def _default_turn_detector(session_ref: str, track_ref: TrackRef) -> turn_detect
 
 MAX_IDENTITY_SET_SIZE = value.MAX_IDENTITY_SET_SIZE
 """Maximum source or target identities accepted by Conversation input."""
-MAX_EMBEDDING_DIMENSION = value.MAX_EMBEDDING_DIMENSION
-"""Maximum embedding dimension accepted by Conversation input."""
 
 
 _INPUT_EXAMPLE: JsonDict = {
@@ -212,9 +211,6 @@ class TurnData(pydantic.BaseModel):
             raise ValueError(
                 f"{field_name} contains {len(identities)} identities; the maximum is {MAX_IDENTITY_SET_SIZE}."
             )
-        for identity in identities:
-            if not isinstance(identity, str):
-                _ = value.normalize_embedding(identity, field_name=field_name)
         return identities
 
     @pydantic.model_validator(mode="after")
@@ -238,7 +234,7 @@ class TurnData(pydantic.BaseModel):
         return self
 
     @pydantic.field_serializer("source_ids", "target_ids", when_used="json")
-    def serialize_ids(self, identities: IdentitySet) -> list[str | list[float]]:
+    def serialize_ids(self, identities: IdentitySet) -> list[str]:
         return value.identities_json(identities)
 
 
@@ -340,6 +336,15 @@ class Message(pydantic.BaseModel):
             "budget; an older image whose bytes were released stays as metadata only."
         ),
     )
+    participants: tuple[mosfet.Participant, ...] = pydantic.Field(
+        default=(),
+        max_length=_MAX_PARTICIPANTS,
+        description=(
+            "Who produced or was addressed by this message, stamped by its producer and never inferred: Speaking "
+            "stamps the bot's own voice ref on what it said."
+        ),
+        examples=[[], [{"ref": "voice:tts:warm", "role": "source"}]],
+    )
     provenance: MessageProvenance = pydantic.Field(description="Typed event provenance for this committed message.")
 
     @pydantic.field_validator("source_ids", "target_ids", mode="before")
@@ -348,7 +353,7 @@ class Message(pydantic.BaseModel):
         return value.normalize_identity_set(raw_value, field_name=info.field_name or "identity set", allow_empty=True)
 
     @pydantic.field_serializer("source_ids", "target_ids", when_used="json")
-    def serialize_ids(self, identities: IdentitySet) -> list[str | list[float]]:
+    def serialize_ids(self, identities: IdentitySet) -> list[str]:
         return value.identities_json(identities)
 
 
@@ -659,9 +664,6 @@ _TurnFailedEvent = hsm.Event[_TurnFailedData](
 class _ParticipantProfile:
     track_ref: TrackRef
     source_id: IdentityValue
-    centroid: value.Embedding | None = None
-    vector_sum: value.Embedding | None = None
-    count: int = 0
     detector: turn_detector.TurnDetector | None = None
 
 
@@ -679,160 +681,15 @@ def _new_relationship_ref(context_ref: str) -> str:
     return f"relationship-{context_ref}"
 
 
-def _new_track_ref(source_id: IdentityValue) -> TrackRef:
-    normalized = value.normalize_embedding(source_id)
-    return f"track-{value.identity_json_value(normalized)}"
-
-
-def _stable_identity_basis(
-    identities: collections.abc.Iterable[IdentityValue],
-) -> tuple[IdentityValue, ...]:
-    named = tuple(sorted(identity for identity in identities if isinstance(identity, str)))
-    vectors = tuple(
-        sorted(
-            (value.normalize_embedding(identity) for identity in identities if not isinstance(identity, str)),
-            key=value.identity_sort_key,
-        )
-    )
-    return (*named, *vectors)
-
-
 def _stable_context_ref(data: TurnData) -> str:
     """A stable canonical JSON reference for the relationship between the turn's identity sets.
 
-    Order-independent and direction-agnostic; vector identities are normalized so a scaled vector
-    names the same relationship.
+    Order-independent and direction-agnostic.
     """
 
-    def normalized(identities: collections.abc.Collection[IdentityValue], *, field_name: str) -> IdentitySet:
-        checked = value.normalize_identity_set(
-            identities, field_name=field_name, allow_empty=field_name == "target_ids"
-        )
-        return frozenset(
-            identity if isinstance(identity, str) else value.normalize_embedding(identity) for identity in checked
-        )
-
-    groups = value.identity_groups(
-        normalized(_stable_identity_basis(data.source_ids), field_name="source_ids"),
-        normalized(_stable_identity_basis(data.target_ids), field_name="target_ids"),
-    )
-    basis = {"identity_groups": [value.identities_json(group) for group in groups]}
+    groups = value.identity_groups(data.source_ids, data.target_ids)
+    basis = {"identity_groups": [list(group) for group in groups]}
     return json.dumps(basis, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
-
-
-def _identity_collection_score(
-    observed: tuple[IdentityValue, ...],
-    expected: tuple[IdentityValue, ...],
-    *,
-    threshold: float,
-    margin: float,
-) -> float | None:
-    """Match one relationship identity group without hashing vector identities."""
-
-    if len(observed) != len(expected):
-        return None
-    observed_order = tuple(sorted(observed, key=value.identity_sort_key))
-    expected_order = tuple(sorted(expected, key=value.identity_sort_key))
-    score_matrix: list[list[float | None]] = []
-    for observed_identity in observed_order:
-        row: list[float | None] = []
-        for expected_identity in expected_order:
-            if isinstance(observed_identity, str) or isinstance(expected_identity, str):
-                row.append(1.0 if observed_identity == expected_identity else None)
-                continue
-            try:
-                score = value.cosine_similarity(observed_identity, expected_identity)
-            except (TypeError, ValueError):
-                score = None
-            row.append(score if score is not None and score >= threshold else None)
-        score_matrix.append(row)
-
-    best = _maximum_identity_assignment(score_matrix)
-    if best is None:
-        return None
-    best_score, best_assignment = best
-    second_best: float | None = None
-    for row_index, column in enumerate(best_assignment):
-        alternative = _maximum_identity_assignment(score_matrix, forbidden={(row_index, column)})
-        if alternative is not None and (second_best is None or alternative[0] > second_best):
-            second_best = alternative[0]
-    if second_best is not None and best_score - second_best <= margin:
-        return None
-    return best_score / len(best_assignment)
-
-
-def _maximum_identity_assignment(
-    scores: list[list[float | None]],
-    *,
-    forbidden: collections.abc.Set[tuple[int, int]] | None = None,
-) -> tuple[float, tuple[int, ...]] | None:
-    """Return a deterministic maximum-weight perfect assignment in O(n³).
-
-    ``None`` edges are below the similarity threshold and cannot be assigned.
-    The optional forbidden edge set is used to find the best assignment other
-    than a known optimum without enumerating permutations.
-    """
-
-    if forbidden is None:
-        forbidden = frozenset()
-    size = len(scores)
-    if size == 0 or any(len(row) != size for row in scores):
-        return None
-    potentials_row = [0.0] * (size + 1)
-    potentials_column = [0.0] * (size + 1)
-    matched_column = [0] * (size + 1)
-    predecessor = [0] * (size + 1)
-    for row_index in range(1, size + 1):
-        matched_column[0] = row_index
-        column_zero = 0
-        minimum_cost = [float("inf")] * (size + 1)
-        used = [False] * (size + 1)
-        while True:
-            used[column_zero] = True
-            row_zero = matched_column[column_zero]
-            delta = float("inf")
-            column_one = 0
-            for column_index in range(1, size + 1):
-                if used[column_index] or (row_zero - 1, column_index - 1) in forbidden:
-                    continue
-                score = scores[row_zero - 1][column_index - 1]
-                if score is None:
-                    continue
-                cost = -score - potentials_row[row_zero] - potentials_column[column_index]
-                if cost < minimum_cost[column_index]:
-                    minimum_cost[column_index] = cost
-                    predecessor[column_index] = column_zero
-                if minimum_cost[column_index] < delta:
-                    delta = minimum_cost[column_index]
-                    column_one = column_index
-            if delta == float("inf"):
-                return None
-            for column_index in range(size + 1):
-                if used[column_index]:
-                    potentials_row[matched_column[column_index]] += delta
-                    potentials_column[column_index] -= delta
-                else:
-                    minimum_cost[column_index] -= delta
-            column_zero = column_one
-            if matched_column[column_zero] == 0:
-                break
-        while True:
-            column_one = predecessor[column_zero]
-            matched_column[column_zero] = matched_column[column_one]
-            column_zero = column_one
-            if column_zero == 0:
-                break
-
-    assignment = [0] * size
-    for column_index in range(1, size + 1):
-        row_index = matched_column[column_index]
-        if row_index == 0:
-            return None
-        assignment[row_index - 1] = column_index - 1
-    assigned_scores = [scores[row][column] for row, column in enumerate(assignment)]
-    if any(score is None for score in assigned_scores):
-        return None
-    return sum(typing.cast(float, score) for score in assigned_scores), tuple(assignment)
 
 
 def _operation_id(event: hsm.Event[typing.Any]) -> str:
@@ -979,10 +836,10 @@ def _cognition_ready(message: Message) -> bool:
 def turn_participants(turn: TurnData) -> tuple[mosfet.Participant, ...]:
     """Participants a cognition handoff stamps for the inbound turn that caused it.
 
-    String identities become participants: ``source_ids`` as sources, ``target_ids`` as targets, followed by
-    whatever the turn's Listening speech parent already carries. Vector identities (and strings longer than a
-    participant ref allows) are not producer-stable refs, so they are counted and never stamped. Deduplicated
-    (first occurrence wins) and bounded at 32.
+    Identities become participants: ``source_ids`` as sources, ``target_ids`` as targets, followed by
+    whatever the turn's Listening speech parent already carries. A speech turn's ``source_ids`` are the
+    ``voice:`` refs Listening stamped, so both name one participant. A string longer than a participant ref
+    allows is counted and never stamped. Deduplicated (first occurrence wins) and bounded at 32.
     """
 
     identities = (
@@ -992,7 +849,7 @@ def turn_participants(turn: TurnData) -> tuple[mosfet.Participant, ...]:
     stamped = tuple(
         mosfet.Participant(ref=identity, role=role)
         for identity, role in identities
-        if isinstance(identity, str) and len(identity) <= _MAX_PARTICIPANT_REF_LENGTH
+        if len(identity) <= _MAX_PARTICIPANT_REF_LENGTH
     )
     if unstamped := len(identities) - len(stamped):
         _PARTICIPANT_UNSTAMPED.add(unstamped)
@@ -1007,8 +864,15 @@ def _terminal_output(
     output: Messages,
     *,
     turn: TurnData,
+    outbound: tuple[mosfet.Participant, ...],
     reply_target: str | None,
-) -> None:
+) -> bool:
+    """Emit the history terminal; whether it handed cognition the turn (and so carried ``outbound``).
+
+    ``outbound`` are the participants stamped on the bot's own messages since the last handoff:
+    they follow the turn's own participants, deduplicated and bounded.
+    """
+
     history_event = dataclasses.replace(
         _with_operation(instance.output_event.with_data(output), event),
         source=hsm.id(instance),
@@ -1019,19 +883,19 @@ def _terminal_output(
         # Text or image-attachment contributions hand body cognition a typed history stimulus.
         # Audio and structured products remain bare Conversation output terminals, preserving the
         # audio trust boundary.
+        participants = tuple(dict.fromkeys((*turn_participants(turn), *outbound)))[:_MAX_PARTICIPANTS]
         handoff = dataclasses.replace(
             _with_operation(
-                cognition.InputEvent.with_data(
-                    cognition.InputData(stimulus=history_event, participants=turn_participants(turn))
-                ),
+                cognition.InputEvent.with_data(cognition.InputData(stimulus=history_event, participants=participants)),
                 event,
             ),
             source=hsm.id(instance),
             target=reply_target,
         )
         _ = hsm.dispatch(ctx, instance, ability.TerminalOutputEvent.with_data(handoff))
-        return
+        return True
     _ = hsm.dispatch(ctx, instance, ability.TerminalOutputEvent.with_data(history_event))
+    return False
 
 
 def _terminal_failure(
@@ -1083,13 +947,14 @@ class Conversation(ability.Ability[TurnData, Messages]):
     _turn_detector_factory: TurnDetectorFactory
     _detectors: dict[tuple[str, TrackRef], turn_detector.TurnDetector]
     _relationships: list[_RelationshipProfile]
-    _similarity_threshold: float
-    _similarity_margin: float
     _typing: language.TextGeneration | None
     _encoding: encoding_module.Encoding[typing.Any, str | bytes] | None
     _history: list[Message]
     _history_parent: mosfet.StimulusData[TurnData] | None
     _image_retention: media.ImageRetention
+    # Durable, bounded: participants stamped on outbound messages committed since the last cognition handoff,
+    # carried into the next one and then cleared.
+    _outbound_participants: list[mosfet.Participant]
 
     def __init__(
         self,
@@ -1099,14 +964,8 @@ class Conversation(ability.Ability[TurnData, Messages]):
         typing: language.TextGeneration | None = None,
         encoding: encoding_module.Encoding[typing.Any, str | bytes] | None = None,
         encoder: encoding_module.Encoder[typing.Any, str | bytes] | None = None,
-        similarity_threshold: float = 0.85,
-        similarity_margin: float = 0.05,
         image_retention: media.ImageRetention = _DEFAULT_IMAGE_RETENTION,
     ) -> None:
-        if not 0.0 <= similarity_threshold <= 1.0:
-            raise ValueError("similarity_threshold must be between 0.0 and 1.0.")
-        if similarity_margin < 0.0 or similarity_margin > 1.0:
-            raise ValueError("similarity_margin must be between 0.0 and 1.0.")
         if turn_detector is not None and turn_detector_factory is not None:
             raise ValueError("Conversation accepts turn_detector or turn_detector_factory, not both.")
         if turn_detector is not None:
@@ -1125,11 +984,10 @@ class Conversation(ability.Ability[TurnData, Messages]):
         super().__init__()
         self._detectors = {}
         self._relationships = []
-        self._similarity_threshold = similarity_threshold
-        self._similarity_margin = similarity_margin
         self._history = []
         self._history_parent = None
         self._image_retention = image_retention
+        self._outbound_participants = []
 
     @property
     def typing(self) -> language.TextGeneration | None:
@@ -1147,7 +1005,7 @@ class Conversation(ability.Ability[TurnData, Messages]):
             for participant in relationship.participants
             if participant.detector is not None
         ]
-        return tuple(sorted(refs, key=lambda item: (item[0], value.identity_sort_key(item[1]))))
+        return tuple(sorted(refs))
 
     @property
     def session_refs(self) -> tuple[str, ...]:
@@ -1164,98 +1022,51 @@ class Conversation(ability.Ability[TurnData, Messages]):
         return len(self._detectors)
 
     def _relationship_for_input(self, data: TurnData) -> _RelationshipProfile:
+        """The relationship a turn belongs to: the same identity sets in either direction, or a new one.
+
+        A targetless turn joins the one ambient relationship. A turn addressed to a participant of
+        the ambient relationship joins it when no relationship matches its identity sets exactly.
+        """
+
         observed_sources = value.sorted_identities(data.source_ids)
         observed_targets = value.sorted_identities(data.target_ids)
         observed_groups = value.identity_groups(data.source_ids, data.target_ids)
-        if not observed_targets:
+        if observed_targets:
+            exact = next(
+                (
+                    relationship
+                    for relationship in self._relationships
+                    if relationship.identity_groups == observed_groups
+                ),
+                None,
+            )
+            if exact is not None:
+                return exact
+            addressed = sorted(
+                (
+                    relationship
+                    for relationship in self._relationships
+                    if not relationship.target_ids
+                    and any(participant.source_id in observed_targets for participant in relationship.participants)
+                ),
+                key=lambda relationship: relationship.session_ref,
+            )
+            if addressed:
+                return addressed[0]
+        else:
             ambient = next(
                 (relationship for relationship in self._relationships if not relationship.target_ids),
                 None,
             )
             if ambient is not None:
                 return ambient
-            relationship = _RelationshipProfile(
-                session_ref=_new_relationship_ref(_stable_context_ref(data)),
-                source_ids=observed_sources,
-                target_ids=observed_targets,
-                identity_groups=observed_groups,
-                context_ref=_stable_context_ref(data),
-                participants=[],
-            )
-            self._relationships.append(relationship)
-            return relationship
-
-        candidates: list[tuple[float, _RelationshipProfile]] = []
-        for relationship in self._relationships:
-            if not relationship.target_ids and any(
-                (
-                    isinstance(target_id, str)
-                    and isinstance(participant.source_id, str)
-                    and target_id == participant.source_id
-                )
-                or (
-                    not isinstance(target_id, str)
-                    and not isinstance(participant.source_id, str)
-                    and (value.cosine_similarity(target_id, participant.source_id) or 0.0) >= self._similarity_threshold
-                )
-                for target_id in observed_targets
-                for participant in relationship.participants
-            ):
-                candidates.append((self._similarity_threshold, relationship))
-                continue
-            direct_source_score = _identity_collection_score(
-                observed_sources,
-                relationship.source_ids,
-                threshold=self._similarity_threshold,
-                margin=self._similarity_margin,
-            )
-            direct_target_score = _identity_collection_score(
-                observed_targets,
-                relationship.target_ids,
-                threshold=self._similarity_threshold,
-                margin=self._similarity_margin,
-            )
-            direct_score = (
-                min(direct_source_score, direct_target_score)
-                if direct_source_score is not None and direct_target_score is not None
-                else None
-            )
-
-            reverse_source_score = _identity_collection_score(
-                observed_sources,
-                relationship.target_ids,
-                threshold=self._similarity_threshold,
-                margin=self._similarity_margin,
-            )
-            reverse_target_score = _identity_collection_score(
-                observed_targets,
-                relationship.source_ids,
-                threshold=self._similarity_threshold,
-                margin=self._similarity_margin,
-            )
-            reverse_score = (
-                min(reverse_source_score, reverse_target_score)
-                if reverse_source_score is not None and reverse_target_score is not None
-                else None
-            )
-            score = (
-                direct_score
-                if reverse_score is None
-                else reverse_score
-                if direct_score is None
-                else max(direct_score, reverse_score)
-            )
-            if score is not None:
-                candidates.append((score, relationship))
-        if candidates:
-            candidates.sort(key=lambda item: (-item[0], item[1].session_ref))
-            return candidates[0][1]
+        context_ref = _stable_context_ref(data)
         relationship = _RelationshipProfile(
-            session_ref=_new_relationship_ref(_stable_context_ref(data)),
+            session_ref=_new_relationship_ref(context_ref),
             source_ids=observed_sources,
             target_ids=observed_targets,
             identity_groups=observed_groups,
-            context_ref=_stable_context_ref(data),
+            context_ref=context_ref,
             participants=[],
         )
         self._relationships.append(relationship)
@@ -1267,63 +1078,21 @@ class Conversation(ability.Ability[TurnData, Messages]):
         source_id: IdentityValue,
         used_tracks: frozenset[TrackRef],
     ) -> _ParticipantProfile:
-        candidates = [
-            participant for participant in relationship.participants if participant.track_ref not in used_tracks
-        ]
-        if isinstance(source_id, str):
-            exact = next(
-                (participant for participant in candidates if participant.source_id == source_id),
-                None,
-            )
-            if exact is not None:
-                return exact
-        else:
-            vector_candidates = sorted(
-                (participant for participant in candidates if participant.centroid is not None),
-                key=lambda participant: participant.track_ref,
-            )
-            matched_index = value.match_vector(
-                source_id,
-                (participant.centroid for participant in vector_candidates),
-                threshold=self._similarity_threshold,
-                margin=self._similarity_margin,
-            )
-            if matched_index is not None:
-                return vector_candidates[matched_index]
+        """The source's track in the relationship: the source's own identity, created on first sight."""
 
-        track_ref = source_id if isinstance(source_id, str) else _new_track_ref(source_id)
-        participant = _ParticipantProfile(track_ref=track_ref, source_id=source_id)
+        existing = next(
+            (
+                participant
+                for participant in relationship.participants
+                if participant.track_ref not in used_tracks and participant.source_id == source_id
+            ),
+            None,
+        )
+        if existing is not None:
+            return existing
+        participant = _ParticipantProfile(track_ref=source_id, source_id=source_id)
         relationship.participants.append(participant)
         return participant
-
-    @staticmethod
-    def _profile_update(
-        profile: _ParticipantProfile,
-        source_id: IdentityValue,
-    ) -> tuple[IdentityValue, value.Embedding | None, value.Embedding | None, int]:
-        if isinstance(source_id, str):
-            return source_id, profile.centroid, profile.vector_sum, profile.count
-        observation = value.normalize_embedding(source_id)
-        if profile.count == 0:
-            return source_id, observation, observation, 1
-        if profile.vector_sum is None:
-            raise RuntimeError("A completed vector profile is missing its centroid.")
-        if len(profile.vector_sum) != len(observation):
-            raise ValueError(
-                f"embedding dimension {len(observation)} does not match profile dimension {len(profile.vector_sum)}."
-            )
-        vector_sum = tuple(
-            accumulated_component + observation_component
-            for accumulated_component, observation_component in zip(
-                profile.vector_sum,
-                observation,
-                strict=True,
-            )
-        )
-        centroid = value.normalize_embedding(
-            vector_sum,
-        )
-        return source_id, centroid, vector_sum, profile.count + 1
 
     @staticmethod
     def _has_input(ctx: hsm.Context, instance: "Conversation", event: hsm.Event[typing.Any]) -> bool:
@@ -1371,6 +1140,9 @@ class Conversation(ability.Ability[TurnData, Messages]):
             )
             committed = message.model_copy(update={"sequence": len(instance._history), "provenance": provenance})
             instance._history.append(committed)
+            # Producer-stamped (the bot's own voice on what it said): carried into the next handoff, bounded.
+            carried = dict.fromkeys((*instance._outbound_participants, *committed.participants))
+            instance._outbound_participants = list(carried)[:_MAX_OUTBOUND_PARTICIPANTS]
         output = Messages(parent=instance._history_parent, messages=tuple(instance._history))
         terminal = dataclasses.replace(
             instance.output_event.with_data(output),
@@ -1449,17 +1221,7 @@ class Conversation(ability.Ability[TurnData, Messages]):
         relationship_ref = relationship.session_ref
         relationship_provisional = not any(candidate is relationship for candidate in relationships_before)
         original_participants = tuple(relationship.participants)
-        profile_snapshots = tuple(
-            (
-                participant,
-                participant.source_id,
-                participant.centroid,
-                participant.vector_sum,
-                participant.count,
-                participant.detector,
-            )
-            for participant in original_participants
-        )
+        detector_snapshots = tuple((participant, participant.detector) for participant in original_participants)
         operation_detectors: dict[tuple[str, TrackRef], turn_detector.TurnDetector] = {}
         provisional_detector_keys: set[tuple[str, TrackRef]] = set()
         failed_detector_keys: set[tuple[str, TrackRef]] = set()
@@ -1488,11 +1250,7 @@ class Conversation(ability.Ability[TurnData, Messages]):
                     stopped_keys.add(detector_key)
                 except BaseException as error:
                     cleanup_failures.append(f"failed to stop detector {detector_key[1]!r}: {error}")
-            for participant, source_id, centroid, vector_sum, count, detector in profile_snapshots:
-                participant.source_id = source_id
-                participant.centroid = centroid
-                participant.vector_sum = vector_sum
-                participant.count = count
+            for participant, detector in detector_snapshots:
                 participant.detector = None if (relationship_ref, participant.track_ref) in stopped_keys else detector
             for participant in relationship.participants:
                 if (relationship_ref, participant.track_ref) in stopped_keys:
@@ -1678,15 +1436,6 @@ class Conversation(ability.Ability[TurnData, Messages]):
                     terminals.append(terminal.data)
                     active_turn_detector_keys.discard(detector_key)
 
-            staged_profiles = tuple(
-                (participant, instance._profile_update(participant, source_id)) for source_id, participant in detectors
-            )
-
-            for participant, (source_id, centroid, vector_sum, count) in staged_profiles:
-                participant.source_id = source_id
-                participant.centroid = centroid
-                participant.vector_sum = vector_sum
-                participant.count = count
             committed = True
 
             await hsm.dispatch(
@@ -1915,16 +1664,19 @@ class Conversation(ability.Ability[TurnData, Messages]):
         instance._history.append(inbound)
         Conversation._retain_history_images(instance._history, instance._image_retention)
         instance._history_parent = parent
-        _terminal_output(
+        handed_off = _terminal_output(
             ctx,
             instance,
             event,
             Messages(parent=parent, messages=tuple(instance._history)),
             turn=input_data,
+            outbound=tuple(instance._outbound_participants),
             reply_target=(
                 parent.source if parent is not None and parent.target == hsm.id(instance) and parent.source else None
             ),
         )
+        if handed_off:
+            instance._outbound_participants = []
 
     @staticmethod
     def _retain_history_images(history: list[Message], retention: media.ImageRetention) -> None:

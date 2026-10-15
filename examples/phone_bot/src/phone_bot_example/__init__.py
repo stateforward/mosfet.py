@@ -4,6 +4,7 @@ from mosfet import abilities
 import mosfet
 from mosfet.abilities import ability
 from mosfet.abilities import cognition
+from mosfet.abilities import identification
 from mosfet.abilities import listening
 from mosfet.abilities import memory
 from mosfet.abilities.communication.conversation import turn_detector
@@ -67,6 +68,10 @@ DEFAULT_GEMINI_TTS_MODEL = "gemini-3.1-flash-tts-preview"
 DEFAULT_GEMINI_TTS_VOICE = "Kore"
 DEFAULT_SILERO_VAD_MODEL = "mlx-community/silero-vad"
 DEFAULT_PYANNOTE_VOICE_IDENTITY_MODEL = "pyannote/wespeaker-voxceleb-resnet34-LM"
+_MAX_VOICE_IDS = 1000
+"""Most voice ids this example remembers."""
+_VOICE_RETENTION = datetime.timedelta(days=30)
+"""How long a voice never linked to a person is remembered after it was last heard."""
 DEFAULT_LIVEKIT_TRACK_NAME = "5550141"
 DEFAULT_LIVEKIT_INPUT_SAMPLE_RATE_HZ = 48_000
 # Gemini TTS default playout rate (speaker / LiveKit metadata).
@@ -608,7 +613,7 @@ def _pyannote_voice_classifier(
     inference: SpeakerEmbeddingInference | None = None,
     load_inference: SpeakerEmbeddingInferenceLoader | None = None,
 ) -> PyannoteVoiceClassifier:
-    """Local pyannote speaker embeddings so Listening speech products carry source_ids.
+    """Local pyannote speaker embeddings, so Listening can tell who each heard voice is.
 
     Production loads weights lazily through the provider default loader (HF/pyannote auth is the
     runtime's business). Tests inject ``inference`` or ``load_inference`` so proof stays off-network.
@@ -621,6 +626,20 @@ def _pyannote_voice_classifier(
             load_inference=load_inference,
         )
     return PyannoteVoiceClassifier(model_id=config.voice_identity_model_id, inference=inference)
+
+
+def _voice_registry() -> identification.Registry:
+    """Who each heard voice is: WeSpeaker's operating point over an in-process store, as memory is in process too."""
+
+    return identification.Registry(
+        identifier=identification.Matcher(
+            store=identification.InProcessStore(max_ids=_MAX_VOICE_IDS),
+            policy=identification.MatchPolicy(threshold=0.50, margin=0.05, refine_threshold=0.65),
+        ),
+        kind="voice",
+        max_unlinked_age=_VOICE_RETENTION,
+        max_ids=_MAX_VOICE_IDS,
+    )
 
 
 def _conversation(speech_config: SpeechConfig | None = None) -> ExampleConversation:
@@ -668,6 +687,7 @@ def _listening(
         sound_classifier=sound_hearing.classification.KindSoundClassifier(),
         speech_decoder=None,
         voice_classifier=classifier,
+        registry=_voice_registry(),
     )
 
 

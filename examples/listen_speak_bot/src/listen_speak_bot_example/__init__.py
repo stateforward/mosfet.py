@@ -45,6 +45,7 @@ from mosfet.abilities import ability
 from mosfet.abilities import communication
 from mosfet.abilities import decoding
 from mosfet.abilities import encoding
+from mosfet.abilities import identification
 from mosfet.abilities import listening
 from mosfet.abilities import memory
 from mosfet.abilities import speaking
@@ -85,6 +86,10 @@ DEFAULT_MERCURY_MODEL = "mercury-2"
 DEFAULT_MERCURY_BASE_URL = "https://api.inceptionlabs.ai/v1"
 DEFAULT_SILERO_VAD_MODEL = "mlx-community/silero-vad"
 DEFAULT_PYANNOTE_VOICE_IDENTITY_MODEL = "pyannote/wespeaker-voxceleb-resnet34-LM"
+_MAX_VOICE_IDS = 1000
+"""Most voice ids this example remembers."""
+_VOICE_RETENTION = datetime.timedelta(days=30)
+"""How long a voice never linked to a person is remembered after it was last heard."""
 
 
 def _configure_logging(*, verbose: bool = False) -> None:
@@ -462,6 +467,20 @@ def _pyannote_voice_classifier(
             load_inference=load_inference,
         )
     return PyannoteVoiceClassifier(model_id=model_id, inference=inference)
+
+
+def _voice_registry() -> identification.Registry:
+    """Who each heard voice is: WeSpeaker's operating point over an in-process store, as memory is in process too."""
+
+    return identification.Registry(
+        identifier=identification.Matcher(
+            store=identification.InProcessStore(max_ids=_MAX_VOICE_IDS),
+            policy=identification.MatchPolicy(threshold=0.50, margin=0.05, refine_threshold=0.65),
+        ),
+        kind="voice",
+        max_unlinked_age=_VOICE_RETENTION,
+        max_ids=_MAX_VOICE_IDS,
+    )
 
 
 def _conversation(*, speech_decoder: SpeechDecoder) -> conversation.Conversation:
@@ -978,6 +997,7 @@ class ListenSpeakBot(Bot):
             voice_activity_classifier=selected_voice_activity_classifier,
             speech_decoder=None,
             voice_classifier=classifier,
+            registry=_voice_registry(),
         )
         self._conversation = _conversation(speech_decoder=self._decoder)
         # The bot's mouth: Speaking powers it, attaches to it, and streams the encoded PCM through it.

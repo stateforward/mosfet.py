@@ -23,6 +23,7 @@ from .diarization import (
     VoiceDiarizer,
 )
 from .identification import (
+    HeardVoice,
     VoiceIdentification,
     VoiceEmbedding,
 )
@@ -32,6 +33,7 @@ __all__ = [
     "ApplyData",
     "EndData",
     "EndEvent",
+    "HeardVoice",
     "OutputEvent",
     "StartData",
     "StartEvent",

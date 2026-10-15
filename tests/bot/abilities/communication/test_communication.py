@@ -933,7 +933,7 @@ def test_speech_heard_dispatches_one_terminal_output_without_self_output_dispatc
             sample_rate_hz=16_000,
             channels=1,
             media_type="audio/pcm",
-            source_ids=frozenset({"caller"}),
+            source_ids=frozenset({"voice:caller"}),
         )
         await instance.apply(cognition.InputData(stimulus=listening.SpeechEvent.with_data(speech)), ctx=ctx)
         return tuple(dispatched)
@@ -1009,7 +1009,7 @@ def test_routed_hsm_payload_preserves_nested_stimulus_event_chain() -> None:
         sample_rate_hz=16_000,
         channels=1,
         media_type="audio/pcm",
-        source_ids=frozenset({"caller"}),
+        source_ids=frozenset({"voice:caller"}),
         parent=StimulusData.from_event(SoundEvent.with_data_and_id(sound, "sound-1")),
     )
     input_data = conversation.TurnData(

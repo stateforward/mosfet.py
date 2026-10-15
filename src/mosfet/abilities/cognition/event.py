@@ -435,7 +435,9 @@ def _fill_field(
         _set_attribute(element, name, str(serialized), budget)
         return
     if dataclasses.is_dataclass(value) and not isinstance(value, type):
-        _fill_field(element, name, dataclasses.asdict(value), serialized, budget)
+        excluded = _excluded_field_names(type(value))
+        fields = {key: item for key, item in dataclasses.asdict(value).items() if key not in excluded}
+        _fill_field(element, name, fields, serialized, budget)
         return
     if isinstance(value, collections.abc.Mapping):
         child = _subelement(element, name, budget)

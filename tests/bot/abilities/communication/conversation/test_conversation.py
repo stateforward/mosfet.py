@@ -1,6 +1,8 @@
 from mosfet import media
 from mosfet.abilities.communication import conversation
 from mosfet.abilities import ability, cognition, decoding
+from mosfet.abilities import identification
+from mosfet.abilities import memory
 from mosfet.abilities import processing
 from mosfet.abilities.hearing import voice
 from mosfet.abilities.listening import interpretation
@@ -85,15 +87,8 @@ def run_input(
 
 def started_conversation(
     factory: conversation.TurnDetectorFactory | None = None,
-    *,
-    similarity_threshold: float = 0.85,
-    similarity_margin: float = 0.05,
 ) -> tuple[conversation.Conversation, hsm.Context]:
-    ability = conversation.Conversation(
-        turn_detector_factory=factory,
-        similarity_threshold=similarity_threshold,
-        similarity_margin=similarity_margin,
-    )
+    ability = conversation.Conversation(turn_detector_factory=factory)
     context = hsm.Context()
     asyncio.run(start_ability_tree(context, ability))
     return ability, context
@@ -140,7 +135,7 @@ def test_input_parent_is_hidden_from_model_schema_but_validated_as_typed_provena
         sample_rate_hz=16_000,
         channels=1,
         media_type="audio/pcm",
-        source_ids=frozenset({"caller"}),
+        source_ids=frozenset({"voice:caller"}),
     )
     parent = mosfet.StimulusData[interpretation.SpeechData](
         event="bot.ability.listening.speech.output",
@@ -180,7 +175,7 @@ def test_message_content_recursive_alias_preserves_schema_and_validation() -> No
 
     schema = conversation.Message.model_json_schema()
     schema_hash = hashlib.sha256(json.dumps(schema, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-    assert schema_hash == "ecd2edfbeb59bf03aa6967c168802c3f64720f92b9eb2529e38132ab15104a9e"
+    assert schema_hash == "dea9c00486c9c0201b41911762b4acb96d38024e8b03dc8e6f057604d9313369"
 
     payload = {
         "sequence": 0,
@@ -211,7 +206,7 @@ def test_model_dispatch_rejects_producer_stamped_conversation_parent() -> None:
             sample_rate_hz=16_000,
             channels=1,
             media_type="audio/pcm",
-            source_ids=frozenset({"caller"}),
+            source_ids=frozenset({"voice:caller"}),
         )
         input_data = conversation.TurnData(
             parent=mosfet.StimulusData[interpretation.SpeechData](
@@ -247,12 +242,12 @@ def test_model_dispatch_rejects_producer_stamped_conversation_parent() -> None:
     asyncio.run(run())
 
 
-def test_zero_vector_is_rejected_at_the_input_boundary() -> None:
-    with pytest.raises(pydantic.ValidationError, match="zero vector"):
+def test_a_vector_is_not_an_identity() -> None:
+    with pytest.raises(pydantic.ValidationError):
         conversation.TurnData(
-            source_ids=frozenset({(0.0, 0.0)}),
+            source_ids=typing.cast(typing.Any, frozenset({(0.6, 0.8)})),
             target_ids=frozenset({"bot"}),
-            content="invalid voice identity",
+            content="a voiceprint is never an identity",
             content_type="text/plain",
         )
 
@@ -282,19 +277,7 @@ def test_input_rejects_identity_sets_above_the_provider_neutral_limit(field_name
         conversation.TurnData.model_validate(fields)
 
 
-def test_input_rejects_embeddings_above_the_provider_neutral_dimension_limit() -> None:
-    oversized = (1.0,) * (value.MAX_EMBEDDING_DIMENSION + 1)
-
-    with pytest.raises(pydantic.ValidationError, match="exceeds the maximum of 2048"):
-        conversation.TurnData(
-            source_ids=frozenset({oversized}),
-            target_ids=frozenset(),
-            content="embedding too large",
-            content_type="application/octet-stream",
-        )
-
-
-def test_source_only_embedding_turns_share_session_and_create_detectors() -> None:
+def test_source_only_voice_turns_share_session_and_create_one_detector_per_voice() -> None:
     created: list[tuple[str, conversation.TrackRef]] = []
 
     def factory(session_ref: str, source_id: conversation.TrackRef) -> turn_detector.TurnDetector:
@@ -306,40 +289,24 @@ def test_source_only_embedding_turns_share_session_and_create_detectors() -> Non
         )
 
     ability, context = started_conversation(factory)
-    first = run_input(
-        ability,
-        context,
-        source_ids=frozenset({(1.0, 0.0)}),
-        target_ids=frozenset(),
-        content="first speaker",
-        content_type="application/octet-stream",
-    )
-    second = run_input(
-        ability,
-        context,
-        source_ids=frozenset({(0.0, 1.0)}),
-        target_ids=frozenset(),
-        content="second speaker",
-        content_type="application/octet-stream",
-    )
-    third = run_input(
-        ability,
-        context,
-        source_ids=frozenset({(1.0, 1.0)}),
-        target_ids=frozenset(),
-        content="bot speaker",
-        content_type="application/octet-stream",
-    )
+    results = [
+        run_input(
+            ability,
+            context,
+            source_ids=frozenset({ref}),
+            target_ids=frozenset(),
+            content=f"{ref} speaking",
+            content_type="application/octet-stream",
+        )
+        for ref in ("voice:a1", "voice:b2", "voice:c3")
+    ]
 
-    assert first.session_ref == second.session_ref == third.session_ref
-    assert len(created) == 3
-    assert {session_ref for session_ref, _ in created} == {first.session_ref}
-    assert len({source_id for _, source_id in created}) == 3
-    assert all(source_id.startswith("track-") for _, source_id in created)
-    assert ability.session_refs == (first.session_ref,)
+    assert len({result.session_ref for result in results}) == 1
+    # A track is the voice ref itself: nothing is derived from a vector.
+    assert created == [(results[0].session_ref, ref) for ref in ("voice:a1", "voice:b2", "voice:c3")]
+    assert ability.session_refs == (results[0].session_ref,)
     assert ability.detector_count == 3
-    assert len(ability.detector_refs) == 3
-    assert third.input.target_ids == frozenset()
+    assert results[-1].input.target_ids == frozenset()
 
 
 def test_four_party_source_set_is_within_the_input_bound() -> None:
@@ -347,14 +314,7 @@ def test_four_party_source_set_is_within_the_input_bound() -> None:
     result = run_input(
         ability,
         context,
-        source_ids=frozenset(
-            {
-                (1.0, 0.0, 0.0, 0.0),
-                (0.0, 1.0, 0.0, 0.0),
-                (0.0, 0.0, 1.0, 0.0),
-                (0.0, 0.0, 0.0, 1.0),
-            }
-        ),
+        source_ids=frozenset({"voice:a1", "voice:b2", "voice:c3", "voice:d4"}),
         target_ids=frozenset(),
         content="four-party input",
         content_type="application/octet-stream",
@@ -364,19 +324,13 @@ def test_four_party_source_set_is_within_the_input_bound() -> None:
     assert ability.detector_count == 4
 
 
-def test_four_party_embedding_assignment_reuses_the_relationship() -> None:
-    ability, context = started_conversation(similarity_threshold=0.8, similarity_margin=0.02)
+def test_the_same_four_voices_reuse_the_relationship() -> None:
+    ability, context = started_conversation()
+    voices = ("voice:a1", "voice:b2", "voice:c3", "voice:d4")
     first = run_input(
         ability,
         context,
-        source_ids=frozenset(
-            {
-                (1.0, 0.0),
-                (0.0, 1.0),
-                (1.0, 1.0),
-                (-1.0, 1.0),
-            }
-        ),
+        source_ids=frozenset(voices),
         target_ids=frozenset({"bot"}),
         content="first four-party turn",
         content_type="text/plain",
@@ -384,14 +338,7 @@ def test_four_party_embedding_assignment_reuses_the_relationship() -> None:
     second = run_input(
         ability,
         context,
-        source_ids=frozenset(
-            {
-                (0.98, 0.02),
-                (0.02, 0.98),
-                (1.01, 0.99),
-                (-0.98, 1.02),
-            }
-        ),
+        source_ids=frozenset(reversed(voices)),
         target_ids=frozenset({"bot"}),
         content="second four-party turn",
         content_type="text/plain",
@@ -399,28 +346,6 @@ def test_four_party_embedding_assignment_reuses_the_relationship() -> None:
 
     assert second.session_ref == first.session_ref
     assert ability.detector_count == 4
-
-
-def test_global_embedding_assignment_reuses_relationship_without_row_margin() -> None:
-    ability, context = started_conversation(similarity_threshold=0.0)
-    first = run_input(
-        ability,
-        context,
-        source_ids=frozenset({(1.0, 0.0), (0.0, 1.0)}),
-        target_ids=frozenset({"bot"}),
-        content="first",
-        content_type="text/plain",
-    )
-    second = run_input(
-        ability,
-        context,
-        source_ids=frozenset({(0.8, 0.6), (0.999, 0.0447)}),
-        target_ids=frozenset({"bot"}),
-        content="second",
-        content_type="text/plain",
-    )
-
-    assert second.session_ref == first.session_ref
 
 
 def test_same_relationship_reuses_detector_without_a_session_registry() -> None:
@@ -493,43 +418,7 @@ def test_different_relationship_gets_a_new_detector() -> None:
     assert created == [(first.session_ref, "alice"), (second.session_ref, "alice")]
 
 
-def test_small_voice_vector_drift_reuses_one_detector_and_preserves_raw_source() -> None:
-    created: list[tuple[str, str]] = []
-
-    def factory(session_ref: str, track_ref: str) -> turn_detector.TurnDetector:
-        created.append((session_ref, track_ref))
-        return turn_detector.TurnDetector(
-            participant_ref=track_ref,
-            conversation_ref=session_ref,
-            end_of_turn_silence_seconds=0.01,
-        )
-
-    ability, context = started_conversation(factory)
-    first = run_input(
-        ability,
-        context,
-        source_ids=frozenset({(3.0, 4.0)}),
-        target_ids=frozenset({"bot"}),
-        content="first",
-        content_type="text/plain",
-    )
-    second = run_input(
-        ability,
-        context,
-        source_ids=frozenset({(0.6, 0.8)}),
-        target_ids=frozenset({"bot"}),
-        content="second",
-        content_type="text/plain",
-    )
-
-    assert first.session_ref == second.session_ref
-    assert len(created) == 1
-    assert created[0][1].startswith("track-")
-    assert first.input.source_ids == frozenset({(3.0, 4.0)})
-    assert second.input.source_ids == frozenset({(0.6, 0.8)})
-
-
-def test_three_voice_observations_reuse_one_detector_track() -> None:
+def test_three_observations_of_one_voice_reuse_one_detector_track() -> None:
     created: list[str] = []
 
     def factory(session_ref: str, track_ref: str) -> turn_detector.TurnDetector:
@@ -545,81 +434,19 @@ def test_three_voice_observations_reuse_one_detector_track() -> None:
         run_input(
             ability,
             context,
-            source_ids=frozenset({vector}),
+            source_ids=frozenset({"voice:a1"}),
             target_ids=frozenset({"bot"}),
             content="observation",
             content_type="text/plain",
         )
-        for vector in ((1.0, 0.0), (0.98, 0.2), (0.96, 0.28))
+        for _ in range(3)
     ]
 
-    assert len(created) == 1
+    assert created == ["voice:a1"]
     assert len({result.session_ref for result in results}) == 1
 
 
-def test_vector_context_basis_is_scale_invariant_and_collision_safe() -> None:
-    ability, context = started_conversation()
-    first = run_input(
-        ability,
-        context,
-        source_ids=frozenset({"alice"}),
-        target_ids=frozenset({(3.0, 4.0)}),
-        content="first",
-        content_type="text/plain",
-    )
-    drifted = run_input(
-        ability,
-        context,
-        source_ids=frozenset({(0.6, 0.8)}),
-        target_ids=frozenset({"alice"}),
-        content="drifted",
-        content_type="text/plain",
-    )
-    separate = run_input(
-        ability,
-        context,
-        source_ids=frozenset({"alice"}),
-        target_ids=frozenset({(0.0, 1.0)}),
-        content="separate",
-        content_type="text/plain",
-    )
-
-    assert first.session_ref == drifted.session_ref
-    assert first.session_ref != separate.session_ref
-
-
-def test_mixed_named_vector_direction_requires_matching_vector() -> None:
-    ability, context = started_conversation()
-    forward = run_input(
-        ability,
-        context,
-        source_ids=frozenset({"alice"}),
-        target_ids=frozenset({(3.0, 4.0)}),
-        content="forward",
-        content_type="text/plain",
-    )
-    reverse = run_input(
-        ability,
-        context,
-        source_ids=frozenset({(0.6, 0.8)}),
-        target_ids=frozenset({"alice"}),
-        content="reverse",
-        content_type="text/plain",
-    )
-    unrelated = run_input(
-        ability,
-        context,
-        source_ids=frozenset({"alice"}),
-        target_ids=frozenset({(0.0, 1.0)}),
-        content="unrelated",
-        content_type="text/plain",
-    )
-
-    assert forward.session_ref == reverse.session_ref
-    assert unrelated.session_ref != forward.session_ref
-
-
-def test_unrelated_voice_vector_creates_another_relationship() -> None:
+def test_another_voice_creates_another_relationship() -> None:
     created: list[str] = []
 
     def factory(session_ref: str, track_ref: str) -> turn_detector.TurnDetector:
@@ -634,7 +461,7 @@ def test_unrelated_voice_vector_creates_another_relationship() -> None:
     first = run_input(
         ability,
         context,
-        source_ids=frozenset({(1.0, 0.0)}),
+        source_ids=frozenset({"voice:a1"}),
         target_ids=frozenset({"bot"}),
         content="first",
         content_type="text/plain",
@@ -642,18 +469,17 @@ def test_unrelated_voice_vector_creates_another_relationship() -> None:
     second = run_input(
         ability,
         context,
-        source_ids=frozenset({(0.0, 1.0)}),
+        source_ids=frozenset({"voice:b2"}),
         target_ids=frozenset({"bot"}),
         content="second",
         content_type="text/plain",
     )
 
     assert first.session_ref != second.session_ref
-    assert len(created) == 2
-    assert len(set(created)) == 2
+    assert created == ["voice:a1", "voice:b2"]
 
 
-def test_vector_profile_updates_only_after_a_completed_turn() -> None:
+def test_a_failed_turns_track_is_not_kept_for_the_next_turn() -> None:
     created: list[str] = []
 
     class FailingDecoder(decoding.Decoder[turn_detector.ParticipationStimulus, str]):
@@ -675,7 +501,7 @@ def test_vector_profile_updates_only_after_a_completed_turn() -> None:
         run_input(
             ability,
             context,
-            source_ids=frozenset({(1.0, 0.0)}),
+            source_ids=frozenset({"voice:a1"}),
             target_ids=frozenset({"bot"}),
             content="failed",
             content_type="text/plain",
@@ -684,39 +510,14 @@ def test_vector_profile_updates_only_after_a_completed_turn() -> None:
     completed = run_input(
         ability,
         context,
-        source_ids=frozenset({(0.99, 0.01)}),
+        source_ids=frozenset({"voice:a1"}),
         target_ids=frozenset({"bot"}),
         content="completed",
         content_type="text/plain",
     )
 
-    assert len(created) == 2
-    assert completed.input.source_ids == frozenset({(0.99, 0.01)})
-
-
-def test_ambiguous_or_dimension_mismatched_vectors_create_new_tracks() -> None:
-    created: list[str] = []
-
-    def factory(session_ref: str, track_ref: str) -> turn_detector.TurnDetector:
-        created.append(track_ref)
-        return turn_detector.TurnDetector(
-            participant_ref=track_ref,
-            conversation_ref=session_ref,
-            end_of_turn_silence_seconds=0.01,
-        )
-
-    ability, context = started_conversation(factory, similarity_threshold=0.99, similarity_margin=0.05)
-    for vector in ((1.0, 0.0), (0.0, 1.0), (0.7071, 0.7071), (1.0, 0.0, 0.0)):
-        run_input(
-            ability,
-            context,
-            source_ids=frozenset({vector}),
-            target_ids=frozenset({"bot"}),
-            content="vector",
-            content_type="text/plain",
-        )
-
-    assert len(created) == 4
+    assert created == ["voice:a1", "voice:a1"]
+    assert completed.input.source_ids == frozenset({"voice:a1"})
 
 
 def test_multi_valued_sources_create_one_detector_per_source() -> None:
@@ -764,7 +565,7 @@ def test_bot_initiated_input_creates_relationship_from_explicit_sets() -> None:
     assert result.input.target_ids == frozenset({"alice"})
 
 
-def test_source_only_embedding_turns_share_ambient_session_and_preserve_empty_targets() -> None:
+def test_source_only_voice_turns_share_the_ambient_session_and_preserve_empty_targets() -> None:
     created: list[tuple[str, conversation.IdentityValue]] = []
 
     def factory(session_ref: str, source_id: conversation.TrackRef) -> turn_detector.TurnDetector:
@@ -775,25 +576,17 @@ def test_source_only_embedding_turns_share_ambient_session_and_preserve_empty_ta
             end_of_turn_silence_seconds=0.01,
         )
 
-    input_data = conversation.TurnData(
-        source_ids=frozenset({(1.0, 0.0, 0.0)}),
-        target_ids=frozenset(),
-        content="ambient turn",
-        content_type="text/plain",
-    )
-    assert input_data.target_ids == frozenset()
-
     ability, context = started_conversation(factory)
     results = [
         run_input(
             ability,
             context,
-            source_ids=frozenset({embedding}),
+            source_ids=frozenset({ref}),
             target_ids=frozenset(),
             content="ambient turn",
             content_type="text/plain",
         )
-        for embedding in ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0))
+        for ref in ("voice:a1", "voice:b2", "voice:c3")
     ]
 
     assert len({result.session_ref for result in results}) == 1
@@ -1126,7 +919,7 @@ def test_conversation_input_rehydrates_audio_bytes_from_base64_selection() -> No
 
     audio = bytes((0, 1, 2, 3, 4, 5, 6, 7)) * 20
     raw = {
-        "source_ids": [[0.12, -0.08, 0.31]],
+        "source_ids": ["voice:3f2a9c"],
         "target_ids": [],
         "content": base64.urlsafe_b64encode(audio).decode("ascii"),
         "content_type": "audio/raw",
@@ -1209,7 +1002,7 @@ def test_conversation_input_rehydrates_pydantic_urlsafe_speech_audio() -> None:
         sample_rate_hz=16_000,
         channels=1,
         media_type="audio/pcm",
-        source_ids=frozenset({tuple(-0.03482 + i * 0.001 for i in range(16))}),
+        source_ids=frozenset({"voice:3f2a9c"}),
     )
     dumped = speech.model_dump(mode="json")
     # Real admit path: the established Pydantic JSON contract carries the encoded audio payload.
@@ -1243,7 +1036,7 @@ def test_processing_dispatch_accepts_typed_event_data_instance() -> None:
 
     audio = bytes((9, 8, 7, 6)) * 200
     typed = conversation.TurnData(
-        source_ids=frozenset({(0.1, 0.2, 0.3)}),
+        source_ids=frozenset({"voice:a1"}),
         target_ids=frozenset(),
         content=audio,
         content_type="audio/raw",
@@ -1335,7 +1128,7 @@ def test_processing_dispatch_delivers_typed_audio_bytes_to_conversation() -> Non
                 event=conversation.InputEvent.name,
                 target=None,
                 data={
-                    "source_ids": [[0.12, -0.08, 0.31]],
+                    "source_ids": ["voice:3f2a9c"],
                     "target_ids": [],
                     "content": base64.urlsafe_b64encode(audio).decode("ascii"),
                     "content_type": "audio/raw",
@@ -1920,7 +1713,10 @@ def test_cognition_handoff_stamps_string_identities_as_source_and_target_partici
     )
 
 
-def test_cognition_handoff_copies_its_speech_parents_participants_deduplicated() -> None:
+def _speech_turn(*voices: str, own: str | None = None) -> tuple[conversation.TurnData, tuple[mosfet.Participant, ...]]:
+    """A speech turn as SpeechHeard builds it from what Listening stamped: voice refs, own voice never a source."""
+
+    stamped = tuple(identification.participant("voice", voice_id) for voice_id in (*voices, *((own,) if own else ())))
     ada = mosfet.Participant(ref="ada", role=mosfet.ParticipantRole.SOURCE)
     speech = interpretation.SpeechData(
         content="hello",
@@ -1929,27 +1725,118 @@ def test_cognition_handoff_copies_its_speech_parents_participants_deduplicated()
         sample_rate_hz=16_000,
         channels=1,
         media_type="audio/pcm",
-        source_ids=frozenset({"caller"}),
-        participants=(ada, _CALLER),
+        source_ids=frozenset(identification.ref("voice", voice_id) for voice_id in voices),
+        participants=(ada, *stamped),
     )
+    turn = conversation.TurnData(
+        parent=mosfet.StimulusData[interpretation.SpeechData](event="bot.ability.listening.speech.output", data=speech),
+        source_ids=speech.source_ids,
+        target_ids=frozenset({"bot"}),
+        content="hello",
+        content_type="text/plain",
+    )
+    return turn, (ada, *stamped)
+
+
+def test_cognition_handoff_copies_its_speech_parents_participants_deduplicated() -> None:
+    turn, (ada, heard) = _speech_turn("3f2a9c")
     target, context = started_conversation()
 
-    terminal = run_terminal(
-        target,
-        context,
-        conversation.TurnData(
-            parent=mosfet.StimulusData[interpretation.SpeechData](
-                event="bot.ability.listening.speech.output",
-                data=speech,
+    terminal = run_terminal(target, context, turn)
+
+    assert _handoff(terminal).participants == (heard, _BOT, ada)
+
+
+def test_a_speech_turns_participants_are_the_voice_refs_listening_stamped_and_no_bare_voice_id() -> None:
+    turn, (ada, first, second) = _speech_turn("3f2a9c", "7d01be")
+    target, context = started_conversation()
+
+    participants = _handoff(run_terminal(target, context, turn)).participants
+
+    assert participants == (first, second, _BOT, ada)
+    assert not {"3f2a9c", "7d01be"} & {participant.ref for participant in participants}
+
+
+def _append_outbound(
+    target: conversation.Conversation, context: hsm.Context, *participants: mosfet.Participant
+) -> None:
+    message = conversation.Message(
+        sequence=0,
+        direction="outbound",
+        source_ids=frozenset(),
+        target_ids=frozenset(),
+        content="I said this.",
+        content_type="text/plain",
+        participants=participants,
+        provenance=conversation.MessageProvenance(event=conversation.AppendEvent.name),
+    )
+    asyncio.run(
+        ability.run_terminal_operation(
+            context,
+            child=target,
+            request=conversation.AppendEvent.with_data_and_id(
+                conversation.AppendData(message=message), uuid.uuid4().hex
             ),
-            source_ids=frozenset({"caller"}),
-            target_ids=frozenset({"bot"}),
-            content="hello",
-            content_type="text/plain",
-        ),
+            terminals=(conversation.OutputEvent, conversation.FailedEvent),
+            timeout=datetime.timedelta(seconds=5),
+        )
     )
 
-    assert _handoff(terminal).participants == (_CALLER, _BOT, ada)
+
+_OWN_VOICE = identification.participant("voice", "tts:warm")
+
+
+def test_the_bots_own_voice_on_what_it_said_reaches_the_next_cognition_handoff_once() -> None:
+    target, context = started_conversation()
+    _append_outbound(target, context, _OWN_VOICE)
+    _append_outbound(target, context, _OWN_VOICE)
+    turn, (ada, heard) = _speech_turn("3f2a9c")
+
+    first = _handoff(run_terminal(target, context, turn)).participants
+    second = _handoff(run_terminal(target, context, turn)).participants
+
+    # Producer-stamped on the outbound message, copied into the next handoff after the turn's own, then cleared.
+    assert first == (heard, _BOT, ada, _OWN_VOICE)
+    assert second == (heard, _BOT, ada)
+    history = asyncio.run(conversation.append_conversation_message(target, _outbound(), ctx=context))
+    assert history.messages[0].participants == (_OWN_VOICE,)
+
+
+def _outbound() -> conversation.Message:
+    return conversation.Message(
+        sequence=0,
+        direction="outbound",
+        source_ids=frozenset(),
+        target_ids=frozenset(),
+        content="and this",
+        content_type="text/plain",
+        provenance=conversation.MessageProvenance(event=conversation.AppendEvent.name),
+    )
+
+
+@pytest.mark.parametrize("echo", [False, True], ids=["headset", "echo-heard"])
+def test_the_bots_voice_and_its_heard_echo_are_one_person_in_memory(echo: bool) -> None:
+    target, context = started_conversation()
+    _append_outbound(target, context, _OWN_VOICE)
+    turn, _ = _speech_turn("3f2a9c", own="tts:warm" if echo else None)
+    participants = _handoff(run_terminal(target, context, turn)).participants
+
+    engine = memory.store.open_sqlite_engine()
+    _ = memory.graph.write_episode(
+        engine,
+        memory.EpisodeData(
+            turn_id="turn-1",
+            parts=(text.TextPart(text="hello"),),
+            outcome=memory.Outcome.COMPLETED,
+            participants=participants,
+        ),
+        at=datetime.datetime(2026, 10, 15, tzinfo=datetime.UTC),
+    )
+    with engine.connect() as connection:
+        persons = connection.exec_driver_sql("SELECT key FROM bot_memory_node WHERE kind = 'person'").scalars().all()
+    engine.dispose()
+
+    assert sorted(persons) == ["ada", "bot", "voice:3f2a9c", "voice:tts:warm"]
 
 
 def _unstamped(metrics: metric_reader.Reader) -> int:
@@ -1958,28 +1845,6 @@ def _unstamped(metrics: metric_reader.Reader) -> int:
         assert point.attributes == {}
         total += int(point.value)
     return total
-
-
-def test_cognition_handoff_never_stamps_vector_identities_and_counts_them(
-    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    with metric_reader.recording(tmp_path, monkeypatch) as metrics:
-        before = _unstamped(metrics)
-        target, context = started_conversation()
-
-        terminal = run_terminal(
-            target,
-            context,
-            conversation.TurnData(
-                source_ids=frozenset({(1.0, 0.0)}),
-                target_ids=frozenset({"bot", (0.0, 1.0)}),
-                content="hello",
-                content_type="text/plain",
-            ),
-        )
-
-        assert _handoff(terminal).participants == (_BOT,)
-        assert _unstamped(metrics) - before == 2
 
 
 def test_turn_participants_counts_a_ref_too_long_to_stamp_instead_of_failing_the_turn(

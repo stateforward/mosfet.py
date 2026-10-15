@@ -93,7 +93,8 @@ def test_classifier_unwraps_sliding_window_feature_data() -> None:
 
     output = asyncio.run(_await_output(classifier.classify(_input())))
 
-    assert output.embeddings[0].embedding == (0.1, 0.2, 0.3)
+    (embedded,) = output.embeddings
+    assert embedded is not None and embedded.embedding == (0.1, 0.2, 0.3)
 
 
 def test_classifier_uses_injected_loader_and_preserves_input_order() -> None:
@@ -109,7 +110,7 @@ def test_classifier_uses_injected_loader_and_preserves_input_order() -> None:
 
     output = asyncio.run(_await_output(classifier.classify(_input(segment_count=2))))
 
-    assert [embedding.embedding for embedding in output.embeddings] == [(0.1,), (0.2,)]
+    assert [None if embedding is None else embedding.embedding for embedding in output.embeddings] == [(0.1,), (0.2,)]
     assert len(inferences) == 1
 
 
@@ -119,7 +120,8 @@ def test_classifier_is_awaitable() -> None:
     output = classifier.classify(_input())
 
     assert isinstance(output, collections.abc.Coroutine)
-    assert asyncio.run(output).embeddings[0].embedding == (0.1,)
+    (embedded,) = asyncio.run(output).embeddings
+    assert embedded is not None and embedded.embedding == (0.1,)
 
 
 def test_classifier_failure_names_underlying_inference_error() -> None:

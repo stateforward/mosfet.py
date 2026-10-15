@@ -35,16 +35,19 @@ That command will:
 1. Render *Hey I'm Gabe how are you* with `say` into `assets/hey_gabe.wav`
 2. Activate a bot with **no devices**, input=`Listening`, and an internal `Speaking` port
 3. Dispatch the WAV as `environment.sound`
-4. MLX Audio Silero VAD + the real PyAnnote speaker classifier → provider-neutral source embedding
+4. MLX Audio Silero VAD + the real PyAnnote speaker classifier → a voice registry → a `voice:<id>` source ref
    with the speech product; Conversation retains the MLX Audio Whisper STT path
 5. Configure Autonomy with Communication's seeded speech-admission behavior
 6. Run Mercury 2 intuition (then Gemini reasoning if needed) over the available cognition inputs
 7. Report `status: ok` and the reply WAV when cognition selects `communication.respond`; otherwise
    report `status: incomplete` because no response was selected
 
-The PyAnnote adapter loads `pyannote/wespeaker-voxceleb-resnet34-LM` lazily and emits embeddings as
-Conversation `source_ids`; it does not fabricate human-readable identities. The example therefore
-has the identity capability needed for Conversation admission, but this source-only run does not
+The PyAnnote adapter loads `pyannote/wespeaker-voxceleb-resnet34-LM` lazily and embeds each heard voice; a
+voice `identification.Registry` (WeSpeaker's 0.50/0.05/0.65 operating point over an in-process store) turns
+each embedding into an opaque voice id, and the speech product carries `voice:<id>` as its source. The
+embedding never leaves Listening, and nothing fabricates human-readable identities. The bot's own voice is
+enrolled from what it says, so its echo is stamped `voice:tts:say` and never admitted as a turn. The example
+therefore has the identity capability needed for Conversation admission, but this source-only run does not
 claim a reply until run-time model access selects `communication.respond`. The CLI exits nonzero for
 the explicit incomplete status; this is a cognition-selection result, not a claim that PyAnnote
 lacks an identity path.
@@ -86,7 +89,7 @@ example credential file wins over a stub key in the shell).
 | Stage | Implementation |
 |---|---|
 | Heard audio | macOS `say` → WAV |
-| Input ability | `Listening` (MLX Audio Silero VAD + PyAnnote source embeddings) |
+| Input ability | `Listening` (MLX Audio Silero VAD + PyAnnote voice embeddings identified as `voice:<id>` refs) |
 | Cognition | Communication autonomy + Mercury 2 intuition + Gemini reasoning (`gemini-3.5-flash`) |
 | Conversation STT | MLX Audio Whisper, after identity-correlated admission |
 | Output route | `communication.respond` → Communication → injected Speaking |

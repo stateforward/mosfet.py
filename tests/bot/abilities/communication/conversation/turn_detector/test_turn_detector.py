@@ -362,20 +362,19 @@ def test_turn_detector_emits_structured_content_without_text_or_audio() -> None:
     assert data.content_type == "application/x-sign-language"
 
 
-def test_turn_detector_boundaries_canonicalize_embedding_participant_references() -> None:
-    embedding = (0.1, -0.2)
+def test_turn_detector_boundaries_canonicalize_participant_references_and_refuse_vectors() -> None:
     data = turn_detector.TurnStartData(
         turn_ref=TURN_REF,
-        self_participant_ref=embedding,
-        source_participant_ref=embedding,
-        content=turn_detector.TextStimulus(source_participant_ref=embedding, content="hello"),
+        self_participant_ref=" bot ",
+        source_participant_ref="voice:3f2a9c",
+        content=turn_detector.TextStimulus(source_participant_ref=" voice:3f2a9c ", content="hello"),
     )
 
-    assert data.self_participant_ref == (0.1, -0.2)
-    assert data.source_participant_ref == (0.1, -0.2)
+    assert data.self_participant_ref == "bot"
     assert isinstance(data.content, turn_detector.TextStimulus)
-    assert data.content.source_participant_ref == (0.1, -0.2)
-    assert data.model_dump_json().count("[0.1,-0.2]") == 3
+    assert data.content.source_participant_ref == "voice:3f2a9c"
+    with pytest.raises(pydantic.ValidationError):
+        _ = turn_detector.TextStimulus(source_participant_ref=typing.cast(typing.Any, (0.1, -0.2)), content="hello")
 
 
 @pytest.mark.parametrize(

@@ -42,25 +42,34 @@ class Point:
 
 
 def exported(path: pathlib.Path, name: str) -> tuple[Point, ...]:
-    """The newest points for the instrument ``name`` in the JSONL metric file at ``path``, if any."""
+    """The newest points for the instrument ``name`` in the JSONL metric file at ``path``, if any.
 
-    latest: list[dict[str, object]] = []
+    An instrument is identified by its scope and name, so two scopes may record on the same name (one
+    owner counts what it serves, a consumer what it could not ask for). Like a backend that aggregates
+    by name, the newest points of every scope are summed per attribute set.
+    """
+
+    latest: dict[object, list[dict[str, object]]] = {}
     if path.exists():
         for line in path.read_text(encoding="utf-8").splitlines():
             if not line:
                 continue
             payload = typing.cast(dict[str, typing.Any], json.loads(line))
             if payload["name"] == name:
-                latest = typing.cast(list[dict[str, object]], payload["data"]["data_points"])
-    return tuple(
-        Point(
-            attributes=typing.cast(dict[str, object], point.get("attributes") or {}),
-            value=float(typing.cast(float, point.get("value", 0.0))),
-            count=int(typing.cast(int, point.get("count", 0))),
-            sum=float(typing.cast(float, point.get("sum", 0.0))),
-        )
-        for point in latest
-    )
+                latest[payload.get("scope")] = typing.cast(list[dict[str, object]], payload["data"]["data_points"])
+    merged: dict[str, Point] = {}
+    for points in latest.values():
+        for point in points:
+            attributes = typing.cast(dict[str, object], point.get("attributes") or {})
+            key = json.dumps(attributes, sort_keys=True)
+            prior = merged.get(key, Point(attributes=attributes))
+            merged[key] = Point(
+                attributes=attributes,
+                value=prior.value + float(typing.cast(float, point.get("value", 0.0))),
+                count=prior.count + int(typing.cast(int, point.get("count", 0))),
+                sum=prior.sum + float(typing.cast(float, point.get("sum", 0.0))),
+            )
+    return tuple(merged.values())
 
 
 @dataclasses.dataclass(frozen=True)

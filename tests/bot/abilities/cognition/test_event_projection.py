@@ -7,6 +7,7 @@ from mosfet.abilities.language import text
 from mosfet.environment import SoundData, SoundEvent
 
 import base64
+import dataclasses
 import datetime
 import pathlib
 import typing
@@ -46,6 +47,29 @@ def _text(parts: tuple[text.ContentPart, ...]) -> str:
 
 def _images(parts: tuple[text.ContentPart, ...]) -> tuple[media.Image, ...]:
     return tuple(part.image for part in parts if isinstance(part, text.ImagePart))
+
+
+@dataclasses.dataclass(frozen=True)
+class _Scored:
+    __model_facing_excluded_fields__: typing.ClassVar[frozenset[str]] = frozenset({"score"})
+
+    name: str
+    score: float
+
+
+class _Holder(pydantic.BaseModel):
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(frozen=True)
+
+    scored: _Scored
+
+
+def test_a_dataclass_value_leaves_out_the_fields_it_excludes_from_the_model() -> None:
+    rendered = _text(
+        cognition.event.model_facing_content(_Holder(scored=_Scored(name="ada", score=0.875)), capacity=_TEXT_ONLY)
+    )
+
+    assert "ada" in rendered
+    assert 'key="score"' not in rendered and "0.875" not in rendered
 
 
 def test_model_facing_content_stamps_envelope_identity() -> None:

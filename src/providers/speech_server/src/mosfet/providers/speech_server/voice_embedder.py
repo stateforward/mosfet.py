@@ -3,8 +3,8 @@
 Each voice segment is resampled to 16 kHz mono (:mod:`resample`) and posted raw, one request per segment in input
 order. The answer ``{embedding, model, ...}`` becomes ``voice.VoiceEmbedding(embedding, model)``: the server's model
 name is always set, which identification needs to keep one vector space per model. The server refuses audio under
-:data:`MIN_SEGMENT_SECONDS`, and the core result needs exactly one embedding per segment, so an input holding a
-shorter segment is refused as ``invalid_input`` before any request is sent.
+:data:`MIN_SEGMENT_SECONDS`, so a shorter segment is never sent: it has no voiceprint (``None`` in its place), and
+core leaves it unidentified (W3-13). An input of only short segments is not an error; every entry is ``None``.
 """
 
 from __future__ import annotations
@@ -50,20 +50,19 @@ class VoiceEmbedder(classifying.Classifier[voice.identification.InputData, voice
 
     @typing.override
     async def classify(self, input: voice.identification.InputData) -> voice.identification.OutputData:
-        """Embed every segment of ``input``, in order.
+        """Embed every segment of ``input``, in order; a segment under ``MIN_SEGMENT_SECONDS`` is ``None``, unsent.
 
         Raises:
-            request.RequestError: A segment is shorter than ``MIN_SEGMENT_SECONDS`` or was refused
-                (``invalid_input``), the server was unreachable or failing (``unavailable``) or slow (``timeout``),
-                or it answered without a valid embedding (``invalid_response``).
+            request.RequestError: A segment was refused (``invalid_input``), the server was unreachable or failing
+                (``unavailable``) or slow (``timeout``), or it answered without a valid embedding
+                (``invalid_response``).
         """
 
-        if any(segment.duration_seconds < MIN_SEGMENT_SECONDS for segment in input.segments):
-            raise request.RequestError(
-                "invalid_input", f"voice embedding needs segments of at least {MIN_SEGMENT_SECONDS} s."
-            )
-        embeddings: list[voice.VoiceEmbedding] = []
+        embeddings: list[voice.VoiceEmbedding | None] = []
         for segment in input.segments:
+            if segment.duration_seconds < MIN_SEGMENT_SECONDS:
+                embeddings.append(None)
+                continue
             mono = await asyncio.to_thread(
                 resample.to_mono, segment.audio, sample_rate_hz=segment.sample_rate_hz, channels=segment.channels
             )

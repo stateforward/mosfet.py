@@ -55,6 +55,7 @@ def test_served_voice_embedder_returns_a_named_finite_vector() -> None:
 
     [embedding] = asyncio.run(embedder.classify(voice.identification.InputData(segments=(segment,)))).embeddings
 
+    assert embedding is not None
     print(f"model={embedding.model} dimensions={len(embedding.embedding)}")
     assert embedding.model
     assert all(math.isfinite(value) for value in embedding.embedding)

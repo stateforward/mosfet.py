@@ -1,3 +1,10 @@
+"""Voice identification: embed segmented voice audio, and the voices a heard product names.
+
+A ``VoiceEmbedding`` is biometric: it never leaves the hearing step that made it. What a heard
+product carries instead is a ``HeardVoice``, the shared ``identification.Recognition`` of a voice
+and where in the product it was heard.
+"""
+
 from ... import ability
 from ... import classifying
 from . import segment
@@ -9,6 +16,9 @@ import typing
 import hsm
 import mosfet
 import pydantic
+
+from mosfet.abilities import identification
+from mosfet.telemetry import capture
 
 
 class InputData(pydantic.BaseModel):
@@ -66,8 +76,12 @@ class InputData(pydantic.BaseModel):
         return self
 
 
-class VoiceEmbedding(pydantic.BaseModel):
-    """Provider-neutral embedding value returned for an identified voice segment."""
+class VoiceEmbedding(capture.Biometric):
+    """Provider-neutral embedding value returned for an identified voice segment.
+
+    Biometric: full capture renders it as ``<biometric:VoiceEmbedding>``, and it never rides on a
+    heard product, a cognition input, memory or telemetry.
+    """
 
     model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
         frozen=True,
@@ -117,7 +131,13 @@ class VoiceEmbedding(pydantic.BaseModel):
 
 
 class OutputData(pydantic.BaseModel):
-    """Voice embeddings identified from segmented voice audio."""
+    """Voice embeddings identified from segmented voice audio: exactly one entry per input segment.
+
+    An entry is ``None`` when the classifier could not fingerprint that segment (for example audio
+    shorter than its model accepts). That segment stays unidentified; its content is still heard and
+    the other segments are still identified. An input where no segment could be fingerprinted is not
+    a failure: every entry is ``None``.
+    """
 
     model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
         frozen=True,
@@ -125,30 +145,83 @@ class OutputData(pydantic.BaseModel):
             "examples": [
                 {
                     "embeddings": [
+                        None,
                         {
                             "embedding": [0.12, -0.08, 0.31],
                             "model": "voice-embedding-v1",
                             "confidence": 0.91,
-                        }
+                        },
                     ]
                 }
             ],
         },
     )
 
-    embeddings: tuple[VoiceEmbedding, ...] = pydantic.Field(
+    embeddings: tuple[VoiceEmbedding | None, ...] = pydantic.Field(
         min_length=1,
-        description="Voice embeddings identified for the input voice segments, in input order.",
+        description=(
+            "One voice embedding per input voice segment, in input order; null for a segment the classifier "
+            "could not fingerprint, which then stays unidentified."
+        ),
         examples=[
             [
+                None,
                 {
                     "embedding": [0.12, -0.08, 0.31],
                     "model": "voice-embedding-v1",
                     "confidence": 0.91,
-                }
+                },
             ]
         ],
     )
+
+
+class HeardVoice(pydantic.BaseModel):
+    """One voice heard in a speech product: who it is, and where in the product it was heard.
+
+    ``recognition`` is the shared identification result: the voice id, whether it matched a voice
+    heard before (``recognized``) or was minted now, and whether it is the bot's own voice. A voice
+    id is not a person: linking ids to people is memory's business. Shown to a model, a heard voice
+    is its id, ``recognized`` and ``own``; never a vector or a similarity score.
+    """
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
+        frozen=True,
+        extra="forbid",
+        json_schema_extra={
+            "description": (
+                "A voice heard in a speech product: its voice id, whether it was recognized or new, whether it is "
+                "the bot's own voice, and the span it was heard in."
+            ),
+            "examples": [
+                {
+                    "recognition": {"id": "3f2a9c", "recognized": True, "similarity": 0.82, "own": False},
+                    "start_seconds": 0.0,
+                    "end_seconds": 1.25,
+                }
+            ],
+        },
+    )
+
+    recognition: identification.Recognition = pydantic.Field(
+        description="Who the voice is: an id it matched (recognized) or the id minted for it now, and whether it is own.",
+    )
+    start_seconds: float = pydantic.Field(
+        ge=0.0,
+        description="Start of the span the voice was heard in, in seconds, within the source audio.",
+        examples=[0.0],
+    )
+    end_seconds: float = pydantic.Field(
+        ge=0.0,
+        description="End of the span the voice was heard in, in seconds, within the source audio.",
+        examples=[1.25],
+    )
+
+    @pydantic.model_validator(mode="after")
+    def _ordered(self) -> typing.Self:
+        if self.end_seconds < self.start_seconds:
+            raise ValueError("end_seconds cannot be before start_seconds.")
+        return self
 
 
 _VoiceIdentificationApplyCompletedEvent = hsm.Event[OutputData](

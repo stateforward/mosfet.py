@@ -1,7 +1,10 @@
 from mosfet import StimulusData
 from mosfet import abilities
 from mosfet.abilities import cognition
+from mosfet.abilities import identification
 from mosfet.abilities import listening
+from mosfet.abilities.language import text
+from mosfet import media
 from mosfet.abilities.hearing import sound as sound_hearing
 from mosfet.abilities.hearing import speech
 from mosfet.abilities.hearing import voice
@@ -24,6 +27,7 @@ import pytest
 
 from mosfet.abilities.speaking import EfferenceData, EfferenceEvent
 from mosfet.environment import SoundData, SoundEvent
+from tests import metric_reader
 from tests.hsm_instance_state import ability_terminal_owner, start_ability_tree
 from tests.type_helpers import model_view, object_dict
 
@@ -217,9 +221,9 @@ class FixedVoiceDiarizer(voice.diarization.VoiceDiarizer):
 
 class FixedVoiceClassifier(abilities.Classifier[voice.identification.InputData, voice.identification.OutputData]):
     calls: list[voice.identification.InputData]
-    embeddings: tuple[voice.identification.VoiceEmbedding, ...]
+    embeddings: tuple[voice.identification.VoiceEmbedding | None, ...]
 
-    def __init__(self, *embeddings: voice.identification.VoiceEmbedding) -> None:
+    def __init__(self, *embeddings: voice.identification.VoiceEmbedding | None) -> None:
         self.calls = []
         self.embeddings = embeddings
 
@@ -227,6 +231,58 @@ class FixedVoiceClassifier(abilities.Classifier[voice.identification.InputData, 
     async def classify(self, input: voice.identification.InputData) -> voice.identification.OutputData:
         self.calls.append(input)
         return voice.identification.OutputData(embeddings=self.embeddings)
+
+
+_POLICY = identification.MatchPolicy(threshold=0.50, margin=0.05, refine_threshold=0.65)
+
+
+def voice_registry(identifier: identification.Identifier | None = None) -> identification.Registry:
+    """An unstarted voice registry over an in-process store, as a composition passes it to Listening."""
+
+    return identification.Registry(
+        identifier=(
+            identifier
+            if identifier is not None
+            else identification.Matcher(store=identification.InProcessStore(max_ids=16), policy=_POLICY)
+        ),
+        kind="voice",
+        max_unlinked_age=datetime.timedelta(days=1),
+        max_ids=16,
+    )
+
+
+class SilentIdentifier(identification.Identifier):
+    """An identifier that never answers, so the ear's own deadline is the only thing that ends a wait."""
+
+    @override
+    async def identify(
+        self, kind: identification.Kind, prints: tuple[identification.Print, ...]
+    ) -> tuple[identification.Recognition | None, ...]:
+        del kind, prints
+        _ = await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+    @override
+    async def enroll(
+        self, kind: identification.Kind, id: str, print: identification.Print, own: bool
+    ) -> identification.Recognition:
+        del kind, id, print, own
+        _ = await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+    @override
+    async def forget(self, kind: identification.Kind, id: str) -> bool:
+        del kind, id
+        return False
+
+    @override
+    async def prune(self, kind: identification.Kind, *, unseen_before: datetime.datetime, max_ids: int) -> int:
+        del kind, unseen_before, max_ids
+        return 0
+
+
+def _voice_ref(recognition: identification.Recognition) -> mosfet.Participant:
+    return identification.participant("voice", recognition.id)
 
 
 class FixedSoundClassifier(sound_hearing.classification.SoundClassifier):
@@ -271,6 +327,8 @@ class RecordingListening(listening.Listening):
             voice.identification.OutputData,
         ]
         | None = None,
+        registry: identification.Registry | None = None,
+        recognize_timeout: datetime.timedelta = datetime.timedelta(seconds=2),
         product_threshold_db: float | None = None,
     ) -> None:
         thresholds = {} if product_threshold_db is None else {"product_threshold_db": product_threshold_db}
@@ -280,6 +338,8 @@ class RecordingListening(listening.Listening):
             speech_decoder=speech_decoder,
             voice_diarizer=voice_diarizer,
             voice_classifier=voice_classifier,
+            registry=registry,
+            recognize_timeout=recognize_timeout,
             **thresholds,
         )
         # Filled by the terminal mirror from what this ability emits. Not from dispatch: the
@@ -436,11 +496,13 @@ def test_listening_events_use_concrete_pydantic_schemas() -> None:
     assert "start_seconds" in speech_properties
     assert "end_seconds" in speech_properties
     assert "confidence" in speech_properties
-    assert "voice_embedding" in speech_properties
+    assert "voices" in speech_properties
     assert "source_ids" in speech_properties
+    # No raw voiceprint ever rides on a heard product: the embedding stays inside identification.
+    assert "voice_embedding" not in speech_properties
 
 
-def test_listening_pairs_diarized_segments_with_voice_embeddings_in_order() -> None:
+def test_listening_identifies_each_diarized_segment_in_order() -> None:
     async def run() -> tuple[list[cognition.InputData], list[voice.identification.InputData]]:
         diarizer = FixedVoiceDiarizer(
             segments=(
@@ -463,13 +525,14 @@ def test_listening_pairs_diarized_segments_with_voice_embeddings_in_order() -> N
             )
         )
         identifier = FixedVoiceClassifier(
-            voice.identification.VoiceEmbedding(embedding=(0.1, 0.2), model="fixture"),
-            voice.identification.VoiceEmbedding(embedding=(0.3, 0.4), model="fixture"),
+            voice.identification.VoiceEmbedding(embedding=(1.0, 0.0), model="fixture"),
+            voice.identification.VoiceEmbedding(embedding=(0.0, 1.0), model="fixture"),
         )
         listening_ability = RecordingListening(
             voice_activity_classifier=SequenceVoiceActivityClassifier(_VOICE_APPLY, _SILENCE_APPLY),
             voice_diarizer=diarizer,
             voice_classifier=identifier,
+            registry=voice_registry(),
         )
         await start_ability_tree(None, listening_ability)
         await wait_until(lambda: (listening_ability.state() or "").endswith("/Listening"))
@@ -487,27 +550,94 @@ def test_listening_pairs_diarized_segments_with_voice_embeddings_in_order() -> N
     ]
     observations = [_stimulus(handoff).data for handoff in handoffs]
     assert all(stimulus.name == listening.SpeechEvent.name for stimulus in [_stimulus(handoff) for handoff in handoffs])
-    assert all(isinstance(observation, listening.SpeechData) for observation in observations)
-    ordered_observations = sorted(
+    ordered = sorted(
         (observation for observation in observations if isinstance(observation, listening.SpeechData)),
         key=lambda observation: observation.start_seconds or 0.0,
     )
-    assert [observation.voice_embedding for observation in ordered_observations] == [
-        voice.identification.VoiceEmbedding(embedding=(0.1, 0.2), model="fixture"),
-        voice.identification.VoiceEmbedding(embedding=(0.3, 0.4), model="fixture"),
-    ]
-    assert [(observation.start_seconds, observation.end_seconds) for observation in ordered_observations] == [
+    assert [(observation.start_seconds, observation.end_seconds) for observation in ordered] == [
         (0.0, 1.25),
         (1.25, 2.5),
     ]
-    assert all(observation.source_ids for observation in ordered_observations)
-    assert len({next(iter(observation.source_ids)) for observation in ordered_observations}) == len(
-        ordered_observations
+    heard = [observation.voices for observation in ordered]
+    assert [len(voices) for voices in heard] == [1, 1]
+    first, second = heard[0][0], heard[1][0]
+    # Two voices never heard before: each is minted its own id, and neither is the bot's own.
+    assert first.recognition.id != second.recognition.id
+    assert not first.recognition.recognized and not second.recognition.recognized
+    assert not first.recognition.own and not second.recognition.own
+    assert (first.start_seconds, first.end_seconds, second.start_seconds, second.end_seconds) == (0.0, 1.25, 1.25, 2.5)
+    for observation, voices in zip(ordered, heard, strict=True):
+        ref = identification.ref("voice", voices[0].recognition.id)
+        assert observation.source_ids == frozenset({ref})
+        assert _voice_ref(voices[0].recognition) in observation.participants
+
+
+def test_a_backchannel_too_short_to_fingerprint_is_heard_unidentified_beside_an_identified_voice(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    backchannel = b"\x02\x00" * 9_600  # 0.2 s at 48 kHz
+    long = b"\x01\x00" * 60_000
+
+    async def run() -> list[cognition.InputData]:
+        diarizer = FixedVoiceDiarizer(
+            segments=(
+                voice.diarization.VoiceDiarizationSegment(
+                    audio=backchannel,
+                    media_type="audio/pcm",
+                    sample_rate_hz=48_000,
+                    channels=1,
+                    start_seconds=0.0,
+                    end_seconds=0.2,
+                ),
+                voice.diarization.VoiceDiarizationSegment(
+                    audio=long,
+                    media_type="audio/pcm",
+                    sample_rate_hz=48_000,
+                    channels=1,
+                    start_seconds=0.2,
+                    end_seconds=1.45,
+                ),
+            )
+        )
+        # The classifier could not fingerprint the backchannel: no voiceprint for it, one for the long voice.
+        identifier = FixedVoiceClassifier(
+            None, voice.identification.VoiceEmbedding(embedding=(0.0, 1.0), model="fixture")
+        )
+        listening_ability = RecordingListening(
+            voice_activity_classifier=SequenceVoiceActivityClassifier(_VOICE_APPLY, _SILENCE_APPLY),
+            voice_diarizer=diarizer,
+            voice_classifier=identifier,
+            registry=voice_registry(),
+        )
+        await start_ability_tree(None, listening_ability)
+        await wait_until(lambda: (listening_ability.state() or "").endswith("/Listening"))
+        await _apply_utterance(listening_ability, b"voice")
+        await wait_until(lambda: len(listening_ability.handoffs) == 2)
+        return listening_ability.handoffs
+
+    skipped = {"bot.identification.kind": "voice", "bot.outcome": "skipped", "bot.failure.kind": "none"}
+    failed = {"bot.identification.kind": "voice", "bot.outcome": "failed"}
+    with metric_reader.recording(tmp_path, monkeypatch) as reader:
+        before_skipped, before_failed = (
+            _sum(reader, "bot.identification.count", **skipped),
+            _sum(reader, "bot.identification.count", **failed),
+        )
+        handoffs = asyncio.run(run())
+        assert _sum(reader, "bot.identification.count", **skipped) - before_skipped == 1
+        assert _sum(reader, "bot.identification.count", **failed) - before_failed == 0
+
+    speech_data = sorted(
+        (data for data in (_stimulus(handoff).data for handoff in handoffs) if isinstance(data, listening.SpeechData)),
+        key=lambda data: data.start_seconds or 0.0,
     )
-    assert [next(iter(observation.source_ids)) for observation in ordered_observations] == [
-        (0.1, 0.2),
-        (0.3, 0.4),
-    ]
+    short, identified = speech_data
+    # The backchannel is still heard and admitted, by nobody in particular.
+    assert short.content == backchannel
+    assert short.voices == () and short.source_ids == frozenset()
+    # The long voice is identified as usual.
+    (heard,) = identified.voices
+    assert (heard.start_seconds, heard.end_seconds) == (0.2, 1.45)
+    assert identified.source_ids == frozenset({identification.ref("voice", heard.recognition.id)})
 
 
 def test_listening_identifies_first_vad_segment_and_carries_id_through_window() -> None:
@@ -518,6 +648,7 @@ def test_listening_identifies_first_vad_segment_and_carries_id_through_window() 
         listening_ability = RecordingListening(
             voice_activity_classifier=SequenceVoiceActivityClassifier(_VOICE_APPLY, _SILENCE_APPLY),
             voice_classifier=identifier,
+            registry=voice_registry(),
         )
         await start_ability_tree(None, listening_ability)
         await _apply_utterance(listening_ability, b"\x01\x00" * 240, silence=b"\x00\x00" * 240)
@@ -540,10 +671,11 @@ def test_listening_identifies_first_vad_segment_and_carries_id_through_window() 
     assert stimulus.data.content == segment.audio
     assert stimulus.data.confidence is None
     assert stimulus.data.voice_detection.segments[0].confidence == 0.91
-    assert stimulus.data.voice_embedding == voice.identification.VoiceEmbedding(
-        embedding=(0.1, 0.2), model="fixture", confidence=0.95
-    )
-    assert stimulus.data.source_ids == frozenset({(0.1, 0.2)})
+    (heard,) = stimulus.data.voices
+    assert (heard.start_seconds, heard.end_seconds) == (0.0, pytest.approx(240 / 48_000))
+    assert stimulus.data.source_ids == frozenset({identification.ref("voice", heard.recognition.id)})
+    assert stimulus.data.participants == (_voice_ref(heard.recognition),)
+    assert handoffs[0].participants == stimulus.data.participants
 
 
 def test_listening_identifies_ambient_wav_sound_without_speech_decoder() -> None:
@@ -562,6 +694,7 @@ def test_listening_identifies_ambient_wav_sound_without_speech_decoder() -> None
         listening_ability = RecordingListening(
             voice_activity_classifier=SequenceVoiceActivityClassifier(_VOICE_APPLY, _SILENCE_APPLY),
             voice_classifier=identifier,
+            registry=voice_registry(),
             speech_decoder=None,
         )
         await start_ability_tree(None, listening_ability)
@@ -595,10 +728,8 @@ def test_listening_identifies_ambient_wav_sound_without_speech_decoder() -> None
     assert observation.sample_rate_hz == sample_rate_hz
     assert observation.channels == 1
     assert observation.content == pcm_voice
-    assert observation.source_ids == frozenset({(0.11, -0.07, 0.33)})
-    assert observation.voice_embedding == voice.identification.VoiceEmbedding(
-        embedding=(0.11, -0.07, 0.33), model="fixture", confidence=0.94
-    )
+    (heard,) = observation.voices
+    assert observation.source_ids == frozenset({identification.ref("voice", heard.recognition.id)})
 
 
 def test_listening_calls_direct_classifier_once_and_reuses_id_for_each_vad_product() -> None:
@@ -607,6 +738,7 @@ def test_listening_calls_direct_classifier_once_and_reuses_id_for_each_vad_produ
         listening_ability = RecordingListening(
             voice_activity_classifier=SequenceVoiceActivityClassifier(_VOICE_APPLY, _VOICE_APPLY, _SILENCE_APPLY),
             voice_classifier=identifier,
+            registry=voice_registry(),
         )
         await start_ability_tree(None, listening_ability)
         for _ in range(3):
@@ -620,16 +752,18 @@ def test_listening_calls_direct_classifier_once_and_reuses_id_for_each_vad_produ
     assert calls[0].segments[0].audio == b"\x01\x00" * 240
     assert all(isinstance(observation, listening.SpeechData) for observation in observations)
     speech = [observation for observation in observations if isinstance(observation, listening.SpeechData)]
+    assert len({observation.voices for observation in speech}) == 1
     assert len({observation.source_ids for observation in speech}) == 1
-    assert speech[0].source_ids == frozenset({(0.1, 0.2)})
+    assert len(speech[0].source_ids) == 1
 
 
 def test_listening_direct_identification_uses_open_utterance_level_after_quiet_vad_end() -> None:
     async def run() -> list[cognition.InputData]:
-        identifier = FixedVoiceClassifier(voice.identification.VoiceEmbedding(embedding=(0.1, 0.2)))
+        identifier = FixedVoiceClassifier(voice.identification.VoiceEmbedding(embedding=(0.1, 0.2), model="fixture"))
         listening_ability = RecordingListening(
             voice_activity_classifier=SequenceVoiceActivityClassifier(_VOICE_APPLY, _SILENCE_APPLY),
             voice_classifier=identifier,
+            registry=voice_registry(),
         )
         await start_ability_tree(None, listening_ability)
         await listening_ability.apply(sound(b"\x01\x00" * 240, received_level_db=6.0))
@@ -651,10 +785,11 @@ def test_listening_reports_typed_failure_for_invalid_direct_identification_pcm()
         list[cognition.InputData],
         list[voice.identification.InputData],
     ]:
-        identifier = FixedVoiceClassifier(voice.identification.VoiceEmbedding(embedding=(0.1,)))
+        identifier = FixedVoiceClassifier(voice.identification.VoiceEmbedding(embedding=(0.1,), model="fixture"))
         listening_ability = RecordingListening(
             voice_activity_classifier=SequenceVoiceActivityClassifier(_VOICE_APPLY, _SILENCE_APPLY),
             voice_classifier=identifier,
+            registry=voice_registry(),
         )
         await start_ability_tree(None, listening_ability)
         await _apply_utterance(listening_ability, b"voice", silence=b"silence!")
@@ -683,9 +818,253 @@ def test_listening_rejects_voice_classifier_with_speech_decoder() -> None:
             voice_activity_classifier=FixedVoiceActivityClassifier(_VOICE_APPLY),
             speech_decoder=RecordingSpeechDecoder(),
             voice_classifier=FixedVoiceClassifier(
-                voice.identification.VoiceEmbedding(embedding=(0.1, 0.2)),
+                voice.identification.VoiceEmbedding(embedding=(0.1, 0.2), model="fixture"),
+            ),
+            registry=voice_registry(),
+        )
+
+
+def test_listening_takes_a_voice_classifier_and_a_registry_together_or_neither() -> None:
+    classifier = FixedVoiceClassifier(voice.identification.VoiceEmbedding(embedding=(0.1, 0.2), model="fixture"))
+    with pytest.raises(ValueError, match="voice_classifier and registry"):
+        _ = listening.Listening(
+            voice_activity_classifier=FixedVoiceActivityClassifier(_VOICE_APPLY), voice_classifier=classifier
+        )
+    with pytest.raises(ValueError, match="voice_classifier and registry"):
+        _ = listening.Listening(
+            voice_activity_classifier=FixedVoiceActivityClassifier(_VOICE_APPLY), registry=voice_registry()
+        )
+
+
+def _identified_utterance(
+    *embeddings: voice.identification.VoiceEmbedding,
+    registry: identification.Registry | None = None,
+    enroll_as: str | None = None,
+    recognize_timeout: datetime.timedelta = datetime.timedelta(seconds=2),
+) -> tuple[list[cognition.InputData], list[voice.identification.InputData]]:
+    """Hear one direct-identified utterance; first, when asked, enroll the same voice as the bot's own."""
+
+    async def run() -> tuple[list[cognition.InputData], list[voice.identification.InputData]]:
+        identifier = FixedVoiceClassifier(*embeddings)
+        listening_ability = RecordingListening(
+            voice_activity_classifier=SequenceVoiceActivityClassifier(_VOICE_APPLY, _SILENCE_APPLY),
+            voice_classifier=identifier,
+            registry=registry if registry is not None else voice_registry(),
+            recognize_timeout=recognize_timeout,
+        )
+        ctx = hsm.Context()
+        await start_ability_tree(ctx, listening_ability)
+        if enroll_as is not None:
+            copy = listening.EnrollData(
+                voice_id=enroll_as,
+                segment=voice.VoiceSegment(
+                    audio=b"\x02\x00" * 24_000,
+                    media_type="audio/pcm",
+                    sample_rate_hz=16_000,
+                    channels=1,
+                    start_seconds=0.0,
+                    end_seconds=1.5,
+                ),
+            )
+            _ = await hsm.dispatch(
+                ctx,
+                listening_ability,
+                dataclasses.replace(
+                    listening.EnrollEvent.with_data_and_id(copy, "enroll-own-voice"),
+                    source="speaking",
+                    target=hsm.id(listening_ability),
+                ),
+            )
+            await wait_until(lambda: len(identifier.calls) == 1)
+        await _apply_utterance(listening_ability, b"\x01\x00" * 240, silence=b"\x00\x00" * 240)
+        await wait_until(lambda: len(listening_ability.handoffs) == 1)
+        return listening_ability.handoffs, identifier.calls
+
+    return asyncio.run(run())
+
+
+def test_a_heard_voice_is_a_voice_ref_source_and_participant_after_the_device_stamped_ones() -> None:
+    handoffs, _ = _identified_utterance(voice.identification.VoiceEmbedding(embedding=(0.6, 0.8), model="fixture"))
+
+    speech_data = _stimulus(handoffs[0]).data
+    assert isinstance(speech_data, listening.SpeechData)
+    (heard,) = speech_data.voices
+    assert heard.recognition.recognized is False
+    assert heard.recognition.own is False
+    ref = identification.ref("voice", heard.recognition.id)
+    assert speech_data.source_ids == frozenset({ref})
+    assert speech_data.participants == (mosfet.Participant(ref=ref, role=mosfet.ParticipantRole.SOURCE),)
+    assert handoffs[0].participants == speech_data.participants
+
+
+def test_the_bots_own_voice_is_stamped_as_itself_but_is_never_a_source() -> None:
+    handoffs, calls = _identified_utterance(
+        voice.identification.VoiceEmbedding(embedding=(0.6, 0.8), model="fixture"),
+        enroll_as="tts:warm",
+    )
+
+    # One embedding for the enrollment copy, one for the heard utterance.
+    assert len(calls) == 2
+    assert calls[0].segments[0].audio == b"\x02\x00" * 24_000
+    speech_data = _stimulus(handoffs[0]).data
+    assert isinstance(speech_data, listening.SpeechData)
+    (heard,) = speech_data.voices
+    assert heard.recognition.id == "tts:warm"
+    assert heard.recognition.own is True
+    assert heard.recognition.recognized is True
+    # Hearing itself resolves to itself, and an echo is never a source the seed would admit as a turn.
+    assert speech_data.participants == (identification.participant("voice", "tts:warm"),)
+    assert speech_data.source_ids == frozenset()
+    assert handoffs[0].participants == (identification.participant("voice", "tts:warm"),)
+
+
+def test_enrollment_is_ignored_by_an_ear_that_does_not_identify_voices() -> None:
+    async def run() -> list[cognition.InputData]:
+        listening_ability = RecordingListening(
+            voice_activity_classifier=SequenceVoiceActivityClassifier(_VOICE_APPLY, _SILENCE_APPLY),
+        )
+        ctx = hsm.Context()
+        await start_ability_tree(ctx, listening_ability)
+        copy = listening.EnrollData(
+            voice_id="tts:warm",
+            segment=voice.VoiceSegment(
+                audio=b"\x02\x00" * 24_000,
+                media_type="audio/pcm",
+                sample_rate_hz=16_000,
+                channels=1,
+                start_seconds=0.0,
+                end_seconds=1.5,
             ),
         )
+        _ = await hsm.dispatch(ctx, listening_ability, listening.EnrollEvent.with_data_and_id(copy, "enroll"))
+        await _apply_utterance(listening_ability, b"\x01\x00" * 240, silence=b"\x00\x00" * 240)
+        await wait_until(lambda: len(listening_ability.handoffs) == 2)
+        return listening_ability.handoffs
+
+    handoffs = asyncio.run(run())
+
+    assert len(handoffs) == 2
+    assert all(typing.cast(listening.SpeechData, _stimulus(h).data).voices == () for h in handoffs)
+
+
+def test_an_unanswered_identification_leaves_the_product_without_voices() -> None:
+    handoffs, _ = _identified_utterance(
+        voice.identification.VoiceEmbedding(embedding=(0.6, 0.8), model="fixture"),
+        registry=voice_registry(SilentIdentifier()),
+        recognize_timeout=datetime.timedelta(milliseconds=20),
+    )
+
+    speech_data = _stimulus(handoffs[0]).data
+    assert isinstance(speech_data, listening.SpeechData)
+    assert speech_data.voices == ()
+    assert speech_data.source_ids == frozenset()
+    assert speech_data.participants == ()
+
+
+class MuteVoiceClassifier(abilities.Classifier[voice.identification.InputData, voice.identification.OutputData]):
+    """A voice classifier that never answers, so only the ear's modeled deadline ends the wait for it."""
+
+    @override
+    async def classify(self, input: voice.identification.InputData) -> voice.identification.OutputData:
+        del input
+        _ = await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+
+@pytest.mark.parametrize("diarized", [False, True], ids=["direct", "diarized"])
+def test_a_voice_classifier_that_never_answers_leaves_the_utterance_without_voices(
+    monkeypatch: pytest.MonkeyPatch, diarized: bool
+) -> None:
+    # The embedding's own bound, shortened: after it and the registry's, the ear stops waiting for voices.
+    monkeypatch.setattr(listening.interpretation, "_STAGE_OPERATION_TIMEOUT", datetime.timedelta(milliseconds=30))
+    opening = b"\x01\x00" * 240
+
+    async def run() -> list[cognition.InputData]:
+        listening_ability = RecordingListening(
+            voice_activity_classifier=SequenceVoiceActivityClassifier(_VOICE_APPLY, _SILENCE_APPLY),
+            voice_diarizer=FixedVoiceDiarizer() if diarized else None,
+            voice_classifier=MuteVoiceClassifier(),
+            registry=voice_registry(),
+            recognize_timeout=datetime.timedelta(milliseconds=20),
+        )
+        await start_ability_tree(hsm.Context(), listening_ability)
+        await _apply_utterance(listening_ability, opening, silence=b"\x00\x00" * 240)
+        await wait_until(lambda: bool(listening_ability.handoffs))
+        return listening_ability.handoffs
+
+    handoffs = asyncio.run(run())
+
+    speech = [_stimulus(handoff).data for handoff in handoffs]
+    assert all(isinstance(data, listening.SpeechData) for data in speech)
+    speech_data = typing.cast(list[listening.SpeechData], speech)
+    # The utterance is still heard: its opening words directly, or each diarized voice.
+    expected = DIARIZED_AUDIO if diarized else opening
+    assert speech_data[0].content == expected
+    assert all(data.voices == () and data.source_ids == frozenset() for data in speech_data)
+
+
+def test_an_embedding_without_its_model_is_not_identified() -> None:
+    handoffs, calls = _identified_utterance(voice.identification.VoiceEmbedding(embedding=(0.6, 0.8)))
+
+    assert len(calls) == 1
+    speech_data = _stimulus(handoffs[0]).data
+    assert isinstance(speech_data, listening.SpeechData)
+    assert speech_data.voices == ()
+    assert speech_data.source_ids == frozenset()
+
+
+def _sum(reader: metric_reader.Reader, name: str, **attributes: str) -> float:
+    return sum(
+        point.value
+        for point in reader.points(name)
+        if all(point.attributes.get(key) == wanted for key, wanted in attributes.items())
+    )
+
+
+def test_the_ear_counts_its_own_voice_and_the_voices_it_could_not_identify(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    printed = voice.identification.VoiceEmbedding(embedding=(0.6, 0.8), model="fixture")
+    failed = {"bot.identification.kind": "voice", "bot.outcome": "failed"}
+    with metric_reader.recording(tmp_path, monkeypatch) as reader:
+        own = _sum(reader, "bot.listening.voice.own.count")
+        invalid = _sum(reader, "bot.identification.count", **failed, **{"bot.failure.kind": "invalid_input"})
+        late = _sum(reader, "bot.identification.count", **failed, **{"bot.failure.kind": "timeout"})
+
+        _ = _identified_utterance(printed, enroll_as="tts:warm")
+        _ = _identified_utterance(voice.identification.VoiceEmbedding(embedding=(0.6, 0.8)))
+        _ = _identified_utterance(
+            printed,
+            registry=voice_registry(SilentIdentifier()),
+            recognize_timeout=datetime.timedelta(milliseconds=20),
+        )
+
+        assert _sum(reader, "bot.listening.voice.own.count") - own == 1
+        assert (
+            _sum(reader, "bot.identification.count", **failed, **{"bot.failure.kind": "invalid_input"}) - invalid == 1
+        )
+        assert _sum(reader, "bot.identification.count", **failed, **{"bot.failure.kind": "timeout"}) - late == 1
+
+
+def test_no_voiceprint_rides_on_a_heard_product_or_reaches_the_model() -> None:
+    handoffs, _ = _identified_utterance(voice.identification.VoiceEmbedding(embedding=(0.28, 0.96), model="fixture"))
+
+    speech_data = _stimulus(handoffs[0]).data
+    assert isinstance(speech_data, listening.SpeechData)
+    dumped = repr(speech_data.model_dump(mode="json"))
+    assert "0.28" not in dumped and "0.96" not in dumped
+    (heard,) = speech_data.voices
+    # What the model is shown of a heard voice: its id, whether it was recognized, whether it is the bot's own.
+    text_speech = speech_data.model_copy(update={"content": "hello", "content_type": "text/plain"})
+    (part,) = cognition.event.model_facing_content(
+        listening.SpeechEvent.with_data(text_speech), capacity=media.ImageCapacity()
+    )
+    assert isinstance(part, text.TextPart)
+    rendered = part.text
+    assert heard.recognition.id in rendered
+    assert "recognized" in rendered and "own" in rendered
+    assert "similarity" not in rendered
+    assert "0.28" not in rendered and "0.96" not in rendered
 
 
 def test_listening_builds_one_group_for_minimum_and_maximum_children_and_waits_for_readiness(
