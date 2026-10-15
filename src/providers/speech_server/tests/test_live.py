@@ -1,11 +1,12 @@
-"""Live check of ``speech_server.VoiceEmbedder`` and ``Diarizer`` against served speech-server endpoints.
+"""Live check of ``speech_server.VoiceEmbedder``, ``Diarizer`` and ``AffectClassifier`` against served endpoints.
 
-``BOT_SPEECH_SERVER_URL`` names the server; ``BOT_SPEECH_SERVER_EMBED_URL`` and ``BOT_SPEECH_SERVER_DIARIZE_URL``
-override it per endpoint when they are served on different ports. Diarization needs real speech, so it runs only
-with ``BOT_SPEECH_SERVER_WAV`` (a 16-bit PCM WAV file)::
+``BOT_SPEECH_SERVER_URL`` names the server; ``BOT_SPEECH_SERVER_EMBED_URL``, ``BOT_SPEECH_SERVER_DIARIZE_URL`` and
+``BOT_SPEECH_SERVER_EMOTION_URL`` override it per endpoint when they are served on different ports. Diarization
+needs real speech, so it runs only with ``BOT_SPEECH_SERVER_WAV`` (a 16-bit PCM WAV file)::
 
     BOT_SPEECH_SERVER_EMBED_URL=http://lab.local:8003 \\
     BOT_SPEECH_SERVER_DIARIZE_URL=http://lab.local:8005 \\
+    BOT_SPEECH_SERVER_EMOTION_URL=http://lab.local:8004 \\
     BOT_SPEECH_SERVER_WAV=/path/to/two-speakers.wav \\
       uv run --package mosfet-provider-speech-server --group dev python -m pytest \\
       src/providers/speech_server/tests/test_live.py -m live -v -s
@@ -59,6 +60,27 @@ def test_served_voice_embedder_returns_a_named_finite_vector() -> None:
     print(f"model={embedding.model} dimensions={len(embedding.embedding)}")
     assert embedding.model
     assert all(math.isfinite(value) for value in embedding.embedding)
+
+
+def test_served_affect_classifier_returns_a_bounded_affect() -> None:
+    rate = 16_000
+    tone = array.array("h", (round(8_000 * math.sin(2 * math.pi * 220 * index / rate)) for index in range(rate)))
+    if sys.byteorder == "big":
+        tone.byteswap()
+    segment = voice.VoiceSegment(
+        audio=tone.tobytes(),
+        media_type="audio/pcm",
+        sample_rate_hz=rate,
+        channels=1,
+        start_seconds=0.0,
+        end_seconds=1.0,
+    )
+    classifier = speech_server.AffectClassifier(base_url=_url("BOT_SPEECH_SERVER_EMOTION_URL"))
+
+    affect = asyncio.run(classifier.classify(segment))
+
+    print(f"label={affect.label} valence={affect.valence} confidence={affect.confidence} classes={len(affect.scores)}")
+    assert affect.label
 
 
 def test_served_diarizer_returns_ordered_segments_of_the_input() -> None:

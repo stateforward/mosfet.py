@@ -22,7 +22,7 @@ from mosfet.abilities.hearing import voice
 from . import request, resample
 
 MIN_SEGMENT_SECONDS: typing.Final = 0.3
-"""The shortest audio the embedding server accepts."""
+"""The shortest audio the embedding and emotion servers accept."""
 
 _MAX_DIMENSIONS: typing.Final = 4096
 

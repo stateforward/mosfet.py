@@ -199,9 +199,14 @@ class StreamingListening(listening.Listening):
         voice_classifier: FixedVoiceClassifier | None = None,
         registry: identification.Registry | None = None,
         voice_diarizer: voice.diarization.VoiceDiarizer | None = None,
+        affect_classifier: voice.AffectClassifier | None = None,
     ) -> None:
         super().__init__(
-            transcription=sessions, voice_classifier=voice_classifier, registry=registry, voice_diarizer=voice_diarizer
+            transcription=sessions,
+            voice_classifier=voice_classifier,
+            registry=registry,
+            voice_diarizer=voice_diarizer,
+            affect_classifier=affect_classifier,
         )
         self.handoffs = []
         self.failures = []
@@ -259,9 +264,14 @@ async def _ear(
     voice_classifier: FixedVoiceClassifier | None = None,
     registry: identification.Registry | None = None,
     voice_diarizer: voice.diarization.VoiceDiarizer | None = None,
+    affect_classifier: voice.AffectClassifier | None = None,
 ) -> StreamingListening:
     ear = StreamingListening(
-        sessions, voice_classifier=voice_classifier, registry=registry, voice_diarizer=voice_diarizer
+        sessions,
+        voice_classifier=voice_classifier,
+        registry=registry,
+        voice_diarizer=voice_diarizer,
+        affect_classifier=affect_classifier,
     )
     await start_ability_tree(None, ear)
     return ear
@@ -647,6 +657,29 @@ def test_a_diarizing_ear_identifies_each_speaker_of_the_turn() -> None:
     assert [(item.start_seconds, item.end_seconds) for item in speech.voices] == [(0.0, 0.5), (0.5, 1.0)]
 
 
+_CHEERFUL = voice.Affect(label="happy", scores={"happy": 0.7, "neutral": 0.3}, valence=0.6, confidence=0.7)
+
+
+class FixedAffectClassifier(voice.AffectClassifier):
+    calls: list[voice.VoiceSegment]
+
+    def __init__(self) -> None:
+        self.calls = []
+
+    @typing.override
+    async def classify(self, input: voice.VoiceSegment) -> voice.Affect:
+        self.calls.append(input)
+        return _CHEERFUL
+
+
+class HangingAffectClassifier(voice.AffectClassifier):
+    @typing.override
+    async def classify(self, input: voice.VoiceSegment) -> voice.Affect:
+        del input
+        _ = await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+
 class UnevenSpeakers(voice.diarization.VoiceDiarizer):
     """Two speakers: the first a fifth of the turn, the second the rest."""
 
@@ -692,3 +725,87 @@ def test_a_turns_backchannel_too_short_to_fingerprint_leaves_the_rest_identified
     (identified,) = speech.voices
     assert (identified.start_seconds, identified.end_seconds) == (pytest.approx(0.2), pytest.approx(1.0))
     assert speech.source_ids == frozenset({identification.ref("voice", identified.recognition.id)})
+
+
+async def _toned_turn(ear: StreamingListening, sessions: Sessions, tenths: int) -> None:
+    await arrives(ear, heard(tenths))
+    await _wait(lambda: len(sessions.made) == 1 and bool(sessions.made[0].controllers))
+    await sessions.made[0].say(stream.TurnEndedEvent.with_data(stream.TurnEndedData(at_seconds=1.0, text="lovely")))
+    await _wait(lambda: bool(ear.handoffs))
+
+
+def test_a_turn_carries_the_tone_of_its_voice() -> None:
+    async def run() -> tuple[StreamingListening, FixedAffectClassifier]:
+        sessions = Sessions()
+        classifier = FixedAffectClassifier()
+        ear = await _ear(sessions, affect_classifier=classifier)
+        await _toned_turn(ear, sessions, 5)
+        return ear, classifier
+
+    ear, classifier = asyncio.run(run())
+    (speech,) = _speech(ear)
+    assert speech.content == "lovely"
+    assert speech.affect == _CHEERFUL
+    (segment,) = classifier.calls
+    assert (segment.audio, segment.sample_rate_hz) == (_TENTH * 5, 16_000)
+
+
+def test_a_diarized_turn_is_heard_in_the_tone_of_its_longest_voice() -> None:
+    async def run() -> tuple[StreamingListening, FixedAffectClassifier]:
+        sessions = Sessions()
+        classifier = FixedAffectClassifier()
+        ear = await _ear(sessions, voice_diarizer=UnevenSpeakers(), affect_classifier=classifier)
+        await _toned_turn(ear, sessions, 10)
+        return ear, classifier
+
+    ear, classifier = asyncio.run(run())
+    (speech,) = _speech(ear)
+    assert speech.affect == _CHEERFUL
+    (segment,) = classifier.calls
+    assert segment.audio == (_TENTH * 10)[len(_TENTH * 10) // 5 :]
+
+
+class TonedTranscription(listening.Transcription):
+    handoffs: list[cognition.InputData]
+
+    def __init__(self, sessions: Sessions, *, affect_classifier: voice.AffectClassifier) -> None:
+        super().__init__(
+            session=sessions, affect_classifier=affect_classifier, embed_timeout=datetime.timedelta(milliseconds=50)
+        )
+        self.handoffs = []
+
+
+def test_a_tone_not_classified_in_time_leaves_the_turn_without_one(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def run() -> TonedTranscription:
+        sessions = Sessions()
+        hearing = TonedTranscription(sessions, affect_classifier=HangingAffectClassifier())
+        await start_ability_tree(None, hearing)
+        await scored(hearing, heard(5))
+        await _wait(lambda: len(sessions.made) == 1 and bool(sessions.made[0].controllers))
+        await sessions.made[0].say(stream.TurnEndedEvent.with_data(stream.TurnEndedData(at_seconds=0.5, text="lovely")))
+        await _wait(lambda: bool(hearing.handoffs))
+        return hearing
+
+    timeout = {"bot.outcome": "failed", "bot.failure.kind": "timeout"}
+
+    def timed_out(reader: metric_reader.Reader) -> float:
+        return sum(
+            point.value
+            for point in reader.points("bot.listening.affect.count")
+            if all(point.attributes.get(key) == value for key, value in timeout.items())
+        )
+
+    with metric_reader.recording(tmp_path, monkeypatch) as reader:
+        before = timed_out(reader)
+        hearing = asyncio.run(run())
+        after = timed_out(reader)
+
+    (handoff,) = hearing.handoffs
+    assert isinstance(handoff.stimulus, hsm.Event)
+    speech = handoff.stimulus.data
+    assert isinstance(speech, listening.SpeechData)
+    assert speech.content == "lovely"
+    assert speech.affect is None
+    assert after - before == 1

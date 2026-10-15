@@ -112,6 +112,7 @@ class Listening(ability.Ability[SoundData, cognition.InputData]):
         ]
         | None = None,
         registry: identification.Registry | None = None,
+        affect_classifier: voice.AffectClassifier | None = None,
         recognize_timeout: datetime.timedelta = interpretation.DEFAULT_RECOGNIZE_TIMEOUT,
         product_threshold_db: float = interpretation.DEFAULT_PRODUCT_THRESHOLD_DB,
         overlap_min_voiced: datetime.timedelta = interpretation.DEFAULT_OVERLAP_MIN_VOICED,
@@ -129,7 +130,9 @@ class Listening(ability.Ability[SoundData, cognition.InputData]):
         from here on (its group starts it, attaches it for the ear's attached lifetime, and stops
         it). ``recognize_timeout`` bounds each wait for the registry's answer. ``overlap_min_voiced``
         is how long another voice must have been going while the bot's mouth is producing before the
-        ear states it as a ``listening.OverlapEvent`` fact.
+        ear states it as a ``listening.OverlapEvent`` fact. ``affect_classifier`` hears the tone each
+        text speech product was said in (``SpeechData.affect``); on the local path it needs
+        ``speech_decoder``, since only decoded speech is text.
 
         Raises:
             ValueError: If not exactly one of ``voice_activity_classifier`` and ``transcription`` is
@@ -151,6 +154,7 @@ class Listening(ability.Ability[SoundData, cognition.InputData]):
                 voice_diarizer=voice_diarizer,
                 voice_classifier=voice_classifier,
                 registry=registry,
+                affect_classifier=affect_classifier,
                 recognize_timeout=recognize_timeout,
                 product_threshold_db=product_threshold_db,
                 overlap_min_voiced=overlap_min_voiced,
@@ -164,6 +168,7 @@ class Listening(ability.Ability[SoundData, cognition.InputData]):
                 voice_diarizer=voice_diarizer,
                 voice_classifier=voice_classifier,
                 registry=registry,
+                affect_classifier=affect_classifier,
                 recognize_timeout=recognize_timeout,
                 product_threshold_db=product_threshold_db,
             )

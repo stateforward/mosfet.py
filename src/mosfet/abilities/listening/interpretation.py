@@ -30,6 +30,11 @@ Another voice heard while the bot's own mouth is producing is a fact of its own
 ``overlap_min_voiced``, after it was recognized when voice identification is composed, and never for
 a voice recognized as the bot's own. It is perception, not a decision: nothing here stops anything.
 
+How a voice sounded is perceived too: with an affect classifier composed, decoded speech carries the
+tone of its longest voice (``SpeechData.affect``, see :mod:`~mosfet.abilities.listening.tone`), heard
+while the words are decoded. Only decoded speech carries one; an acoustic product is not what a model
+reads, and a streamed chunk is too short to have a tone.
+
 Telemetry: ``bot.listening.voice.own.count`` counts products whose voice was recognized as the bot's
 own (no attributes). ``bot.listening.overlap.count`` (``bot.listening.overlap.path="local"``) counts
 the overlap facts stated. ``bot.identification.count`` (``bot.identification.kind="voice"``,
@@ -45,6 +50,7 @@ from . import enrollment
 from . import overlap
 from . import recognition
 from . import sensitivity
+from . import tone
 from .. import ability
 from .. import classifying
 from ..hearing import sound
@@ -52,6 +58,7 @@ from ..hearing import speech
 from ..hearing import voice
 from ..identity import value
 
+import asyncio
 import dataclasses
 import collections.abc
 import datetime
@@ -78,6 +85,9 @@ from mosfet.telemetry import span
 _SCOPE = "bot.abilities.listening"
 _COMPONENT = "listening.interpretation"
 _STAGE_OPERATION_TIMEOUT = datetime.timedelta(seconds=30)
+# How long decoded speech waits for its tone, heard while the words are decoded; affect classifiers
+# answer in tens of milliseconds.
+_AFFECT_TIMEOUT = datetime.timedelta(seconds=3)
 _MAX_VOICES = 8
 _LOGGER = logging.getLogger(__name__)
 _METER = metrics.get_meter(_SCOPE)
@@ -221,6 +231,7 @@ class _SpeechDecodingCompletedEventData(pydantic.BaseModel):
     voice_detection: voice.detection.ApplyData
     speech: bytes
     participants: tuple[mosfet.Participant, ...] = ()
+    affect: voice.Affect | None = None
 
 
 class _SoundClassificationCompletedEventData(pydantic.BaseModel):
@@ -365,6 +376,14 @@ class SpeechData(pydantic.BaseModel):
     )
     voice_detection: voice.detection.ApplyData = pydantic.Field(
         description="Voice spans from VoiceDetection relative to the start of this observation.",
+    )
+    affect: voice.Affect | None = pydantic.Field(
+        default=None,
+        description=(
+            "The tone this speech was said in, heard in its longest voice: an affect label with the "
+            "classifier's scores, valence and confidence. Present only on decoded (text) speech when an "
+            "affect classifier is composed and answered in time; a perception, not a judgment."
+        ),
     )
     sample_rate_hz: int = pydantic.Field(
         ge=1,
@@ -836,6 +855,7 @@ def _dispatch_product_cognition_input_with_operation(
                     participants=recognition.merge(
                         participants, completion.participants, completion.sensed.sound.participants
                     ),
+                    affect=completion.affect,
                     parent=completion.sensed.parent,
                 )
             ),
@@ -985,6 +1005,8 @@ class Interpretation(ability.Ability[sensitivity.OutputData, cognition.InputData
     _speech_decoding: speech.SpeechDecoding | None
     _voice_diarization: voice.diarization.VoiceDiarization | None
     _voice_identification: voice.identification.VoiceIdentification | None
+    # The affect classifier, heard alongside speech decoding.
+    _affect: tone.Classification | None
     # The address of the voice registry Listening owns: dispatched to, never started or stopped here.
     _registry: identification.Registry | None
     _recognize_timeout: datetime.timedelta
@@ -1021,6 +1043,7 @@ class Interpretation(ability.Ability[sensitivity.OutputData, cognition.InputData
         ]
         | None = None,
         registry: identification.Registry | None = None,
+        affect_classifier: voice.AffectClassifier | None = None,
         recognize_timeout: datetime.timedelta = DEFAULT_RECOGNIZE_TIMEOUT,
         product_threshold_db: float = DEFAULT_PRODUCT_THRESHOLD_DB,
         overlap_min_voiced: datetime.timedelta = DEFAULT_OVERLAP_MIN_VOICED,
@@ -1032,11 +1055,13 @@ class Interpretation(ability.Ability[sensitivity.OutputData, cognition.InputData
         together or not at all. ``recognize_timeout`` bounds the wait for the registry's answer: a
         product it does not cover carries no voices. ``overlap_min_voiced`` is how long another voice
         must have been going while the bot's mouth is producing before it is an overlap fact.
+        ``affect_classifier`` hears the tone of decoded speech, so it needs ``speech_decoder``.
 
         Raises:
             ValueError: If ``product_threshold_db`` is negative, ``recognize_timeout`` or
                 ``overlap_min_voiced`` is not positive, ``voice_classifier`` is combined with
-                ``speech_decoder``, or only one of ``voice_classifier`` and ``registry`` is given.
+                ``speech_decoder``, only one of ``voice_classifier`` and ``registry`` is given, or
+                ``affect_classifier`` is given without ``speech_decoder``.
         """
 
         super().__init__()
@@ -1071,6 +1096,13 @@ class Interpretation(ability.Ability[sensitivity.OutputData, cognition.InputData
         )
         self._registry = registry
         self._recognize_timeout = recognize_timeout
+        if affect_classifier is not None and speech_decoder is None:
+            raise ValueError("affect_classifier hears the tone of decoded speech, so it needs a speech_decoder.")
+        self._affect = (
+            classifying.Classifying[voice.VoiceSegment, voice.Affect](classifier=affect_classifier)
+            if affect_classifier is not None
+            else None
+        )
         children: list[hsm.Instance] = [self._voice_detection]
         if self._sound_classification is not None:
             children.append(self._sound_classification)
@@ -1080,6 +1112,8 @@ class Interpretation(ability.Ability[sensitivity.OutputData, cognition.InputData
             children.append(self._voice_identification)
         if self._speech_decoding is not None:
             children.append(self._speech_decoding)
+        if self._affect is not None:
+            children.append(self._affect)
         self._attachment_group: attachment.Group | None = attachment.Group(*children)
         self._open_speech_audio = bytearray()
         self._open_speech_sample_rate_hz = None
@@ -2220,12 +2254,30 @@ class Interpretation(ability.Ability[sensitivity.OutputData, cognition.InputData
                 message="speech decoding requires a voice-detection completion.",
             )
             return
+        # The whole utterance is the one voice it holds; its tone is heard in all of it.
+        rate, channels = instance._open_speech_sample_rate_hz, instance._open_speech_channels
+        frames = len(instance._open_speech_audio) // (2 * channels)
+        utterance = (
+            (
+                voice.VoiceSegment(
+                    audio=bytes(instance._open_speech_audio[: frames * 2 * channels]),
+                    media_type="audio/pcm",
+                    sample_rate_hz=rate,
+                    channels=channels,
+                    start_seconds=0.0,
+                    end_seconds=frames / rate,
+                ),
+            )
+            if rate is not None and frames > 0 and instance._open_speech_format_error is None
+            else ()
+        )
         await Interpretation._decode_speech(
             ctx,
             instance,
             event,
             sensed=Interpretation._open_speech_sensed_or(instance, detection.sensed),
             voice_detection=detection.voice_detection,
+            voices=utterance,
         )
 
     @staticmethod
@@ -2250,6 +2302,7 @@ class Interpretation(ability.Ability[sensitivity.OutputData, cognition.InputData
             event,
             sensed=completion.sensed,
             voice_detection=completion.voice_detection,
+            voices=completion.segments,
         )
 
     @staticmethod
@@ -2260,7 +2313,10 @@ class Interpretation(ability.Ability[sensitivity.OutputData, cognition.InputData
         *,
         sensed: sensitivity.OutputData,
         voice_detection: voice.detection.ApplyData,
+        voices: tuple[voice.VoiceSegment, ...],
     ) -> None:
+        """Decode the open utterance into words while hearing the tone of the longest of its ``voices``."""
+
         with span.operation(
             "bot.listening.decode_speech",
             scope=_SCOPE,
@@ -2281,13 +2337,23 @@ class Interpretation(ability.Ability[sensitivity.OutputData, cognition.InputData
             utterance = Interpretation._speech_decoder_input(instance)
             decode_audio = utterance if utterance else sensed.sound.audio
             active.set_attribute("bot.audio.byte.count", len(decode_audio))
-            output = await Interpretation._await_child_output(
-                ctx,
-                instance,
-                event,
-                child=speech_decoding,
-                child_input=decode_audio,
-                stage="speech_decoding",
+            output, affect = await asyncio.gather(
+                Interpretation._await_child_output(
+                    ctx,
+                    instance,
+                    event,
+                    child=speech_decoding,
+                    child_input=decode_audio,
+                    stage="speech_decoding",
+                ),
+                tone.classify(
+                    instance.context(),
+                    instance._affect,
+                    voices,
+                    timeout=_AFFECT_TIMEOUT,
+                    operation_id=instance._active_operation_id or event.id or uuid.uuid4().hex,
+                    metadata=event.metadata,
+                ),
             )
             if output is None:
                 return
@@ -2306,6 +2372,7 @@ class Interpretation(ability.Ability[sensitivity.OutputData, cognition.InputData
                 voice_detection=voice_detection,
                 speech=output,
                 participants=instance._active_participants,
+                affect=affect,
             )
             Interpretation._clear_open_speech(ctx, instance, event)
             _ = hsm.dispatch(

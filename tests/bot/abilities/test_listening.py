@@ -329,6 +329,7 @@ class RecordingListening(listening.Listening):
         ]
         | None = None,
         registry: identification.Registry | None = None,
+        affect_classifier: voice.AffectClassifier | None = None,
         recognize_timeout: datetime.timedelta = datetime.timedelta(seconds=2),
         product_threshold_db: float | None = None,
     ) -> None:
@@ -339,6 +340,7 @@ class RecordingListening(listening.Listening):
             voice_diarizer=voice_diarizer,
             voice_classifier=voice_classifier,
             registry=registry,
+            affect_classifier=affect_classifier,
             recognize_timeout=recognize_timeout,
             product_threshold_db=(
                 listening.interpretation.DEFAULT_PRODUCT_THRESHOLD_DB
@@ -413,6 +415,7 @@ def _listening(
     decoder: RecordingSpeechDecoder | None | typing.Literal[False, True] = None,
     sound_classifier: sound_hearing.classification.SoundClassifier | None = None,
     product_threshold_db: float | None = None,
+    affect_classifier: voice.AffectClassifier | None = None,
 ) -> tuple[RecordingListening, RecordingSpeechDecoder | None]:
     speech_decoder: RecordingSpeechDecoder | None
     if decoder is False:
@@ -432,6 +435,7 @@ def _listening(
         sound_classifier=sound_classifier,
         speech_decoder=speech_decoder,
         voice_diarizer=diarizer,
+        affect_classifier=affect_classifier,
         product_threshold_db=(
             listening.interpretation.DEFAULT_PRODUCT_THRESHOLD_DB
             if product_threshold_db is None
@@ -2422,3 +2426,154 @@ def test_overlap_min_voiced_must_be_positive() -> None:
             voice_activity_classifier=FixedVoiceActivityClassifier(_SILENCE_APPLY),
             overlap_min_voiced=datetime.timedelta(0),
         )
+
+
+_CHEERFUL = voice.Affect(label="happy", scores={"happy": 0.7, "neutral": 0.3}, valence=0.6, confidence=0.7)
+
+
+class FixedAffectClassifier(voice.AffectClassifier):
+    calls: list[voice.VoiceSegment]
+
+    def __init__(self) -> None:
+        self.calls = []
+
+    @override
+    async def classify(self, input: voice.VoiceSegment) -> voice.Affect:
+        self.calls.append(input)
+        return _CHEERFUL
+
+
+class FailingAffectClassifier(voice.AffectClassifier):
+    @override
+    async def classify(self, input: voice.VoiceSegment) -> voice.Affect:
+        del input
+        raise RuntimeError("the tone could not be heard")
+
+
+class WrongAffectClassifier(voice.AffectClassifier):
+    @override
+    async def classify(self, input: voice.VoiceSegment) -> voice.Affect:
+        del input
+        return typing.cast(voice.Affect, typing.cast(object, "happy"))
+
+
+def _decoded(handoffs: list[cognition.InputData]) -> listening.SpeechData:
+    data = _stimulus(next(h for h in handoffs if _is_decoded_speech_handoff(h))).data
+    assert isinstance(data, listening.SpeechData)
+    return data
+
+
+def _toned_utterance(
+    affect_classifier: voice.AffectClassifier, *, diarizer: FixedVoiceDiarizer | None = None
+) -> list[cognition.InputData]:
+    async def run() -> list[cognition.InputData]:
+        listening_ability, _ = _listening(diarizer=diarizer, affect_classifier=affect_classifier)
+        await start_ability_tree(None, listening_ability)
+
+        await _apply_utterance(listening_ability, b"voice!", silence=b"silent")
+        await wait_until(lambda: any(_is_decoded_speech_handoff(h) for h in listening_ability.handoffs))
+        return listening_ability.handoffs
+
+    return asyncio.run(run())
+
+
+def test_decoded_speech_carries_the_tone_of_its_utterance() -> None:
+    classifier = FixedAffectClassifier()
+
+    speech_data = _decoded(_toned_utterance(classifier))
+
+    assert speech_data.content == "decoded:voice!silent"
+    assert speech_data.affect == _CHEERFUL
+    # The whole utterance is one voice segment, classified once, at its own format.
+    (segment,) = classifier.calls
+    assert (segment.audio, segment.sample_rate_hz, segment.channels) == (b"voice!silent", 48_000, 1)
+    assert (segment.start_seconds, segment.end_seconds) == (0.0, pytest.approx(6 / 48_000))
+
+
+def test_a_diarized_utterance_is_heard_in_the_tone_of_its_longest_voice() -> None:
+    def clip(start_frame: int, end_frame: int) -> voice.diarization.VoiceDiarizationSegment:
+        return voice.diarization.VoiceDiarizationSegment(
+            audio=b"\x01\x00" * (end_frame - start_frame),
+            media_type="audio/pcm",
+            sample_rate_hz=48_000,
+            channels=1,
+            start_seconds=start_frame / 48_000,
+            end_seconds=end_frame / 48_000,
+        )
+
+    short, long, shorter = clip(0, 4_800), clip(4_800, 24_000), clip(24_000, 26_400)
+    classifier = FixedAffectClassifier()
+
+    speech_data = _decoded(_toned_utterance(classifier, diarizer=FixedVoiceDiarizer(segments=(short, long, shorter))))
+
+    assert speech_data.affect == _CHEERFUL
+    assert classifier.calls == [long]
+
+
+@pytest.mark.parametrize(
+    ("classifier", "kind"),
+    [(FailingAffectClassifier(), "stage_failed"), (WrongAffectClassifier(), "invalid_response")],
+    ids=("failed", "not-an-affect"),
+)
+def test_speech_whose_tone_could_not_be_classified_still_flows_without_one(
+    classifier: voice.AffectClassifier, kind: str, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    failed = {"bot.outcome": "failed", "bot.failure.kind": kind}
+    with metric_reader.recording(tmp_path, monkeypatch) as reader:
+        before = _sum(reader, "bot.listening.affect.count", **failed)
+        speech_data = _decoded(_toned_utterance(classifier))
+        after = _sum(reader, "bot.listening.affect.count", **failed)
+
+    assert speech_data.content == "decoded:voice!silent"
+    assert speech_data.affect is None
+    assert after - before == 1
+
+
+def test_classified_tone_is_counted(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    with metric_reader.recording(tmp_path, monkeypatch) as reader:
+        before = _sum(reader, "bot.listening.affect.count", **{"bot.outcome": "ok"})
+        _ = _toned_utterance(FixedAffectClassifier())
+        after = _sum(reader, "bot.listening.affect.count", **{"bot.outcome": "ok"})
+
+    assert after - before == 1
+
+
+def test_speech_without_an_affect_classifier_has_no_tone() -> None:
+    async def run() -> list[cognition.InputData]:
+        listening_ability, _ = _listening()
+        await start_ability_tree(None, listening_ability)
+        await _apply_utterance(listening_ability, b"voice!", silence=b"silent")
+        await wait_until(lambda: any(_is_decoded_speech_handoff(h) for h in listening_ability.handoffs))
+        return listening_ability.handoffs
+
+    assert _decoded(asyncio.run(run())).affect is None
+
+
+def test_an_affect_classifier_hears_tone_only_on_decoded_speech() -> None:
+    with pytest.raises(ValueError, match="affect_classifier"):
+        _ = listening.Listening(
+            voice_activity_classifier=FixedVoiceActivityClassifier(_SILENCE_APPLY),
+            affect_classifier=FixedAffectClassifier(),
+        )
+
+
+def test_tone_reaches_the_model_as_text_labels() -> None:
+    speech_data = listening.SpeechData(
+        content="that is wonderful",
+        content_type="text/plain",
+        voice_detection=voice.detection.ApplyData(segments=()),
+        sample_rate_hz=16_000,
+        media_type="audio/pcm",
+        affect=_CHEERFUL,
+    )
+
+    (part,) = cognition.event.model_facing_content(
+        listening.SpeechEvent.with_data(speech_data), capacity=media.ImageCapacity()
+    )
+
+    assert isinstance(part, text.TextPart)
+    rendered = part.text
+    assert "that is wonderful" in rendered
+    assert "<hearing:affect" in rendered
+    assert 'label="happy"' in rendered and 'valence="0.6"' in rendered and 'confidence="0.7"' in rendered
+    assert 'key="neutral"' in rendered

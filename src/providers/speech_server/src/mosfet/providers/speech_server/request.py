@@ -1,15 +1,15 @@
 """One request to a speech server: raw s16le PCM posted, a JSON object back, failures in a closed vocabulary.
 
-Shared by the diarization and voice-embedding clients. Failures use existing ``FAILURE_KINDS.md`` strings, the same on
-the error and in telemetry: a 4xx answer is ``invalid_input``; a 5xx answer or an unreachable server is
+Shared by the diarization, voice-embedding and affect clients. Failures use existing ``FAILURE_KINDS.md`` strings,
+the same on the error and in telemetry: a 4xx answer is ``invalid_input``; a 5xx answer or an unreachable server is
 ``unavailable``; a deadline is ``timeout``; any other answer that is not a JSON object of at most
 :data:`MAX_RESPONSE_BYTES` is ``invalid_response``. Raw httpx errors stay chained as the cause; messages name only the
 operation and the status or exception type, never server text, audio or vectors.
 
 Telemetry (cardinality, METRICS > SPANS > Logs; every value comes from code):
 
-* ``bot.provider.speech_server.request.duration`` (histogram, s): ``operation`` {diarize, embed} × ``bot.outcome``
-  {ok, failed}: at most 4 series. Never URLs, models, audio sizes or vectors.
+* ``bot.provider.speech_server.request.duration`` (histogram, s): ``operation`` {diarize, embed, emotion} ×
+  ``bot.outcome`` {ok, failed}: at most 6 series. Never URLs, models, audio sizes or vectors.
 """
 
 from __future__ import annotations
@@ -27,7 +27,7 @@ from mosfet.telemetry import span
 MAX_RESPONSE_BYTES: typing.Final = 1 << 20
 """The largest answer read as JSON; the servers answer a few kilobytes."""
 
-type Operation = typing.Literal["diarize", "embed"]
+type Operation = typing.Literal["diarize", "embed", "emotion"]
 """Which speech-server endpoint a request is for; a metric dimension."""
 
 type FailureKind = typing.Literal["invalid_input", "unavailable", "timeout", "invalid_response"]
@@ -36,7 +36,9 @@ type FailureKind = typing.Literal["invalid_input", "unavailable", "timeout", "in
 _DURATION = metrics.get_meter("mosfet.providers.speech_server").create_histogram(
     "bot.provider.speech_server.request.duration",
     unit="s",
-    description="Duration of each speech-server request, by operation (diarize, embed) and outcome (ok, failed).",
+    description=(
+        "Duration of each speech-server request, by operation (diarize, embed, emotion) and outcome (ok, failed)."
+    ),
 )
 
 

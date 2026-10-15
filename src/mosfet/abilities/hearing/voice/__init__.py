@@ -1,11 +1,12 @@
 """Voice hearing subpackage.
 
 Import ``InputData`` / ``OutputData`` from the defining leaf module
-(``detection``, ``diarization``, ``identification``) — this package does not
+(``affect``, ``detection``, ``diarization``, ``identification``) — this package does not
 re-export colliding type names.
 """
 
-from . import detection, diarization, identification, segment
+from . import affect, detection, diarization, identification, segment
+from .affect import Affect, AffectClassifier
 from .detection import (
     ApplyData,
     EndData,
@@ -30,6 +31,8 @@ from .identification import (
 from .segment import VoiceSegment
 
 __all__ = [
+    "Affect",
+    "AffectClassifier",
     "ApplyData",
     "EndData",
     "EndEvent",
@@ -46,6 +49,7 @@ __all__ = [
     "VoiceIdentification",
     "VoiceEmbedding",
     "VoiceSegment",
+    "affect",
     "detection",
     "diarization",
     "identification",

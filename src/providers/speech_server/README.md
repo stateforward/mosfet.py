@@ -8,11 +8,13 @@ ones, through the same `hearing.voice` ability contracts. The OpenAI-compatible 
 | --- | --- | --- |
 | `speech_server.Diarizer` | `hearing.voice.VoiceDiarizer` | `POST /v1/diarize?sample_rate=16000` (for example Sortformer) |
 | `speech_server.VoiceEmbedder` | the voice-identification `Classifier` (`voice.identification`) | `POST /v1/embed` (for example WeSpeaker) |
+| `speech_server.AffectClassifier` | `hearing.voice.AffectClassifier` | `POST /v1/emotion?sample_rate=…` (for example emotion2vec+) |
 | `speech_server.Transcription` | a streaming session (`hearing.speech.stream`) for `listening.Listening(transcription=)` | WebSocket `/v1/audio/stream` (for example Nemotron with turn detection) |
 
-`Diarizer` and `VoiceEmbedder` are plain collaborators, not state machines: an ability calls them directly. Each request carries raw s16le
-mono 16 kHz; other audio is converted first by `speech_server.resample.to_mono` (channels averaged, linear
-interpolation, standard library only), in a worker thread.
+`Diarizer`, `VoiceEmbedder` and `AffectClassifier` are plain collaborators, not state machines: an ability composes
+them. Each request carries raw s16le mono 16 kHz (the emotion endpoint also takes 24 and 48 kHz as they are); other
+audio is converted first by `speech_server.resample.to_mono` (channels averaged, linear interpolation, standard
+library only), in a worker thread.
 
 - `Diarizer` clips each server segment from the *original* audio, at its own rate and channels, snapped to whole
   frames and clipped to the audio's end; the server's speaker index is dropped. An answer with no usable segment is
@@ -21,6 +23,12 @@ interpolation, standard library only), in a worker thread.
   server's model name, which identification needs to keep one vector space per model. The server refuses audio under
   `MIN_SEGMENT_SECONDS` (0.3 s), so a shorter segment is never sent: it has no voiceprint (`None` in its place) and
   stays unidentified while the rest of the turn is identified (W3-13). An input of only short segments is not an error.
+- `AffectClassifier` posts one voice segment, mono at its own rate when that is 16, 24 or 48 kHz and resampled to
+  16 kHz otherwise, with `sample_rate` naming the rate sent, and returns `voice.Affect(label, scores, valence,
+  confidence)`; the server's other fields (`snr_db`, `model`, timings) are dropped. A segment under
+  `MIN_SEGMENT_SECONDS` is refused as `invalid_input` without a request. Composed as
+  `listening.Listening(affect_classifier=…)`, it gives each text speech product the tone of its longest voice
+  (`SpeechData.affect`).
 
 ```python
 from mosfet.abilities import identification, listening
@@ -87,7 +95,8 @@ Failures raise `speech_server.RequestError` with a `kind` from the existing fail
 `invalid_input`, a 5xx answer or an unreachable server `unavailable`, a deadline `timeout`, and an answer that is not a
 bounded JSON object of the documented shape `invalid_response`. Messages never carry server text, audio or vectors.
 
-`bot.provider.speech_server.request.duration{operation, bot.outcome}` times every request.
+`bot.provider.speech_server.request.duration{operation, bot.outcome}` times every request (`operation` is `diarize`,
+`embed` or `emotion`).
 
 ## Tests
 
@@ -96,5 +105,5 @@ uv run --package mosfet-provider-speech-server --group dev python -m pytest src/
 ```
 
 `tests/test_live.py` checks served endpoints when `BOT_SPEECH_SERVER_URL` (or the per-endpoint
-`BOT_SPEECH_SERVER_EMBED_URL` / `BOT_SPEECH_SERVER_DIARIZE_URL`) is set, and a streaming session when
-`BOT_SPEECH_SERVER_STREAM_URL` is set (`-m live`).
+`BOT_SPEECH_SERVER_EMBED_URL` / `BOT_SPEECH_SERVER_DIARIZE_URL` / `BOT_SPEECH_SERVER_EMOTION_URL`) is set, and a
+streaming session when `BOT_SPEECH_SERVER_STREAM_URL` is set (`-m live`).

@@ -4,6 +4,7 @@ from . import listening
 from . import overlap
 from . import recognition
 from . import sensitivity
+from . import tone
 from . import transcription
 from .enrollment import EnrollData, EnrollEvent
 from .interpretation import (
@@ -39,5 +40,6 @@ __all__ = [
     "overlap",
     "recognition",
     "sensitivity",
+    "tone",
     "transcription",
 ]

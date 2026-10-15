@@ -23,18 +23,21 @@ Who spoke is perceived as on the local path: with a voice classifier and registr
 audio (diarized when a diarizer is composed) is embedded and identified, and the product carries the
 voices and stamps a ``voice:<id>`` participant for each. A segment the classifier could not fingerprint
 (no voiceprint, W3-13) stays unidentified while the turn is still heard and its other voices identified.
-Partial words never reach cognition on their
+With an affect classifier composed, the turn
+also carries the tone of its longest voice (``SpeechData.affect``), heard while its voices are
+identified (:mod:`~mosfet.abilities.listening.tone`). Partial words never reach cognition on their
 own; they ride only on the overlap fact.
 
 Telemetry: ``bot.listening.transcription.gated.count`` (sounds not streamed as predicted own voice),
 ``bot.listening.transcription.dropped.count`` (``bot.listening.transcription.drop.reason``: ``sessions``
 over ``max_sessions``, ``format`` not streamable PCM, ``unavailable`` no session could be made), ``bot.listening.overlap.count``
-(``bot.listening.overlap.path="stream"``), ``bot.listening.voice.own.count``, and the span
-``bot.listening.transcription.turn``.
+(``bot.listening.overlap.path="stream"``), ``bot.listening.voice.own.count``, ``bot.listening.affect.count``,
+and the span ``bot.listening.transcription.turn``.
 """
 
 from __future__ import annotations
 
+import asyncio
 import collections.abc
 import dataclasses
 import datetime
@@ -66,6 +69,7 @@ from . import interpretation
 from . import overlap
 from . import recognition
 from . import sensitivity
+from . import tone
 
 _SCOPE = "bot.abilities.listening"
 _COMPONENT = "listening.transcription"
@@ -106,7 +110,7 @@ DEFAULT_IDLE_CLOSE = datetime.timedelta(seconds=60)
 DEFAULT_MAX_TURN = datetime.timedelta(seconds=30)
 """The most audio of one turn a source keeps for identifying who spoke; older audio is let go."""
 DEFAULT_EMBED_TIMEOUT = datetime.timedelta(seconds=3)
-"""How long a turn waits for its voices to be embedded (and diarized), before the registry's answer."""
+"""How long a turn waits to embed (and diarize) its voices and to hear its tone, before the registry's answer."""
 
 type SessionFactory = collections.abc.Callable[[], hsm.Instance]
 """Makes one unstarted streaming speech-to-text session (``hearing.speech.stream``) for one sound source."""
@@ -127,11 +131,12 @@ class _Turn:
 
 
 class _HeardData(pydantic.BaseModel):
-    """Private completion payload: who was heard in a turn or an overlap, in order."""
+    """Private completion payload: who was heard in a turn or an overlap, in order, and how the turn sounded."""
 
     model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(frozen=True)
 
     voices: tuple[voice.HeardVoice, ...] = ()
+    affect: voice.Affect | None = None
 
 
 class _StartedData(pydantic.BaseModel):
@@ -240,6 +245,7 @@ class Source(Traced):
     _session: hsm.Instance
     _embedder: recognition.Embedder | None
     _diarizer: voice.diarization.VoiceDiarization | None
+    _affect: tone.Classification | None
     _registry: identification.Registry | None
     _idle_close: datetime.timedelta
     _max_turn_seconds: float
@@ -273,6 +279,7 @@ class Source(Traced):
         session: hsm.Instance,
         embedder: recognition.Embedder | None,
         diarizer: voice.diarization.VoiceDiarization | None,
+        affect: tone.Classification | None,
         registry: identification.Registry | None,
         idle_close: datetime.timedelta,
         max_turn: datetime.timedelta,
@@ -285,6 +292,7 @@ class Source(Traced):
         self._session = session
         self._embedder = embedder
         self._diarizer = diarizer
+        self._affect = affect
         self._registry = registry
         self._idle_close = idle_close
         self._max_turn_seconds = max_turn.total_seconds()
@@ -606,7 +614,7 @@ class Source(Traced):
 
     @staticmethod
     async def _run_turn(ctx: hsm.Context, instance: "Source", event: hsm.Event[typing.Any]) -> None:
-        """Identify who spoke in the ended turn, then hand it on."""
+        """Identify who spoke in the ended turn and hear its tone, then hand it on."""
 
         turn = instance._turn
         assert turn is not None
@@ -618,9 +626,19 @@ class Source(Traced):
             context=telemetry.event_context(event),
         ) as active:
             segments = await Source._diarize(instance, event, turn)
-            heard = await Source._identify(instance, event, segments)
+            heard, affect = await asyncio.gather(
+                Source._identify(instance, event, segments),
+                tone.classify(
+                    instance.context(),
+                    instance._affect,
+                    segments,
+                    timeout=instance._embed_timeout,
+                    operation_id=event.id or uuid.uuid4().hex,
+                    metadata=event.metadata,
+                ),
+            )
             active.set_attribute("bot.voice.identified.count", len(heard))
-        _ = hsm.dispatch(ctx, instance, _TurnHeardEvent.with_data(_HeardData(voices=heard)))
+        _ = hsm.dispatch(ctx, instance, _TurnHeardEvent.with_data(_HeardData(voices=heard, affect=affect)))
 
     @staticmethod
     def _hand_on(
@@ -642,7 +660,9 @@ class Source(Traced):
         _ = hsm.dispatch(ctx, instance._owner, telemetry.inject_context(handoff))
 
     @staticmethod
-    def _speak_turn(instance: "Source", ctx: hsm.Context, voices: tuple[voice.HeardVoice, ...]) -> None:
+    def _speak_turn(
+        instance: "Source", ctx: hsm.Context, voices: tuple[voice.HeardVoice, ...], affect: voice.Affect | None
+    ) -> None:
         turn = instance._turn
         instance._turn = None
         if turn is None or not turn.text:
@@ -661,6 +681,7 @@ class Source(Traced):
             voices=voices,
             source_ids=source_ids,
             participants=recognition.merge(turn.participants, heard),
+            affect=affect,
             parent=turn.parent,
         )
         Source._hand_on(ctx, instance, interpretation.SpeechEvent.with_data(speech), speech.participants)
@@ -669,12 +690,12 @@ class Source(Traced):
     def _speak_identified_turn(ctx: hsm.Context, instance: "Source", event: hsm.Event[typing.Any]) -> None:
         data = event.data
         assert isinstance(data, _HeardData)
-        Source._speak_turn(instance, ctx, data.voices)
+        Source._speak_turn(instance, ctx, data.voices, data.affect)
 
     @staticmethod
     def _speak_unidentified_turn(ctx: hsm.Context, instance: "Source", event: hsm.Event[typing.Any]) -> None:
         del event
-        Source._speak_turn(instance, ctx, ())
+        Source._speak_turn(instance, ctx, (), None)
 
     # -- overlap ----------------------------------------------------------------------------------
 
@@ -867,6 +888,7 @@ class Transcription(ability.Ability[sensitivity.OutputData, cognition.InputData]
     _session: SessionFactory
     _embedder: voice.identification.VoiceIdentification | None
     _diarizer: voice.diarization.VoiceDiarization | None
+    _affect: tone.Classification | None
     # The address of the voice registry Listening owns: dispatched to, never started or stopped here.
     _registry: identification.Registry | None
     _recognize_timeout: datetime.timedelta
@@ -892,6 +914,7 @@ class Transcription(ability.Ability[sensitivity.OutputData, cognition.InputData]
         voice_classifier: classifying.Classifier[voice.identification.InputData, voice.identification.OutputData]
         | None = None,
         registry: identification.Registry | None = None,
+        affect_classifier: voice.AffectClassifier | None = None,
         recognize_timeout: datetime.timedelta = interpretation.DEFAULT_RECOGNIZE_TIMEOUT,
         embed_timeout: datetime.timedelta = DEFAULT_EMBED_TIMEOUT,
         product_threshold_db: float = interpretation.DEFAULT_PRODUCT_THRESHOLD_DB,
@@ -903,7 +926,8 @@ class Transcription(ability.Ability[sensitivity.OutputData, cognition.InputData]
 
         ``voice_classifier`` embeds voices and ``registry`` (an unstarted voice registry its owner starts
         and attaches) tells who each is; they come together or not at all. ``voice_diarizer`` splits a
-        turn by speaker before identifying.
+        turn by speaker before identifying. ``affect_classifier`` hears the tone of each turn's longest
+        voice, within ``embed_timeout``.
 
         Raises:
             ValueError: If ``product_threshold_db`` is negative; a timeout, ``idle_close`` or ``max_turn``
@@ -935,6 +959,11 @@ class Transcription(ability.Ability[sensitivity.OutputData, cognition.InputData]
         self._diarizer = (
             voice.diarization.VoiceDiarization(classifier=voice_diarizer) if voice_diarizer is not None else None
         )
+        self._affect = (
+            classifying.Classifying[voice.VoiceSegment, voice.Affect](classifier=affect_classifier)
+            if affect_classifier is not None
+            else None
+        )
         self._registry = registry
         self._recognize_timeout = recognize_timeout
         self._embed_timeout = embed_timeout
@@ -946,7 +975,7 @@ class Transcription(ability.Ability[sensitivity.OutputData, cognition.InputData]
         self._forwarded = {}
         self._closing = {}
         self._closed = []
-        children = tuple(child for child in (self._embedder, self._diarizer) if child is not None)
+        children = tuple(child for child in (self._embedder, self._diarizer, self._affect) if child is not None)
         self._attachment_group: attachment.Group | None = attachment.Group(*children)
 
     @typing.override
@@ -1059,6 +1088,7 @@ class Transcription(ability.Ability[sensitivity.OutputData, cognition.InputData]
                 session=instance._session(),
                 embedder=instance._embedder,
                 diarizer=instance._diarizer,
+                affect=instance._affect,
                 registry=instance._registry,
                 idle_close=instance._idle_close,
                 max_turn=instance._max_turn,
