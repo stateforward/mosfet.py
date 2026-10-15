@@ -1,7 +1,7 @@
 import hsm
 
 from mosfet import abilities
-from mosfet.abilities import embedding, identification
+from mosfet.abilities import embedding, identification, seeing
 
 
 def test_ability_defines_operation_contract() -> None:
@@ -28,3 +28,10 @@ def test_abilities_export_the_identification_package() -> None:
     assert {"Registry", "Identifier", "Matcher", "Store", "InProcessStore", "Print", "decide", "ref"} <= set(
         identification.__all__
     )
+
+
+def test_abilities_export_the_seeing_package() -> None:
+    assert abilities.seeing is seeing
+    assert abilities.Seeing is seeing.Seeing
+    assert {"seeing", "Seeing"} <= set(abilities.__all__)
+    assert "events" not in seeing.__all__

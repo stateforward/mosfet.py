@@ -10,6 +10,7 @@ from mosfet.abilities.listening.interpretation import Interpretation
 from mosfet.abilities.memory.consolidation import Consolidation
 from mosfet.abilities.memory.memory import Memory
 from mosfet.abilities.reading.reading import Reading
+from mosfet.abilities.seeing.seeing import Seeing
 
 
 def _behavior_model(machine_cls: type[hsm.Instance]) -> hsm.Model:
@@ -49,6 +50,8 @@ def test_hsm_init_required_composites_declare_nested_initials() -> None:
         (Memory, "serving", "idle"),
         (Consolidation, "resting", "backfilling"),
         (Cognition, "ready", "idle"),
+        (Seeing, "perceiving", "perceiving/watching"),
+        (Seeing, "interpreting", "interpreting/requested"),
     ]
     for machine_cls, composite_name, expected_target_suffix in cases:
         model = _behavior_model(machine_cls)
