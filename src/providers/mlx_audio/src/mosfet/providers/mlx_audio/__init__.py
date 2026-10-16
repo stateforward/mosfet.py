@@ -1,3 +1,4 @@
+from .catalog import Catalog
 from .speech_decoder import SpeechDecoder, SpeechDecodingError
 from .speech_encoder import SpeechEncoder
 from .voice import VoiceDecoder, VoiceEncoder
@@ -7,6 +8,7 @@ from .voice_diarization import VoiceDiarizationError, VoiceDiarizer
 __version__ = "0.1.0"
 
 __all__ = [
+    "Catalog",
     "SpeechDecoder",
     "SpeechDecodingError",
     "SpeechEncoder",

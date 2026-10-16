@@ -68,6 +68,42 @@ voice = speaking.Speaking(
 )
 ```
 
+### Voices
+
+`Catalog(entries)` is the `vocal.voice.Catalog` an on-device bot is given its voice from at
+inception. Moonshine has no listing to ask, so composition declares the voices it loads as
+canonical `voice.Entry`s of one source, each keyed by Moonshine's own voice name; Speaking's
+encoder factory then builds the encoder with that key as its `voice`. Composition writes what
+each voice is: a Kokoro voice names its language and gender in the two letters after its
+prefix (`kokoro_af_heart` is American English, feminine), so it becomes the entry's
+`languages` and `descriptors.gender`. The filters `voices()` takes are hints; every declared
+voice is listed, in order. A catalog of no voices, of two sources or with a voice twice is
+refused (`ValueError`).
+
+```python
+from mosfet.abilities import speaking, vocal
+from mosfet.devices import audio
+from mosfet.providers import moonshine
+
+voices = moonshine.Catalog(
+    (
+        vocal.voice.Entry(
+            ref=vocal.voice.Ref(source="moonshine", key="kokoro_af_heart"),
+            name="kokoro_af_heart",
+            languages=("en-US",),
+            descriptors=vocal.voice.Descriptors(gender="feminine"),
+        ),
+    )
+)
+mouth = speaking.Speaking(
+    encoder=lambda key, description: moonshine.SpeechEncoder(language="en-us", voice=key),
+    speaker=audio.Speaker(),
+)
+inception = vocal.voice.Inception(
+    traits=traits, languages=("en",), speaking=mouth, processor=inception_model, catalog=voices, memory=bot_memory
+)
+```
+
 ### Defaults
 
 | Adapter | Moonshine API | Default |

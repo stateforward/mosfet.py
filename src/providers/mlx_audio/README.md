@@ -73,3 +73,49 @@ declares its `sample_rate_hz` up front and refuses a model that generates at
 another rate (`invalid_response`). Closing the stream between chunks stops the
 generation; a chunk already being generated finishes first, because MLX native
 work cannot be interrupted.
+
+## Voices
+
+`Catalog(entries)` is the `vocal.voice.Catalog` an on-device bot is given its voice
+from at inception. The model has no listing to ask, so composition declares the
+voices of the checkpoint it loads as canonical `voice.Entry`s of one source, each
+keyed by the model's own voice name; Speaking's encoder factory then builds the
+encoder with that key as its `voice`. Composition writes what each voice is: a
+Kokoro id names its language and gender in its first two letters (`af_heart` is
+American English, feminine), so it becomes the entry's `languages` and
+`descriptors.gender`. The filters `voices()` takes are hints; every declared voice
+is listed, in order. A catalog of no voices, of two sources or with a voice twice
+is refused (`ValueError`).
+
+```python
+from mosfet.abilities import speaking, vocal
+from mosfet.providers import mlx_audio
+
+kokoro = mlx_audio.Catalog(
+    (
+        vocal.voice.Entry(
+            ref=vocal.voice.Ref(source="kokoro", key="af_heart"),
+            name="af_heart",
+            languages=("en-US",),
+            descriptors=vocal.voice.Descriptors(gender="feminine"),
+        ),
+        vocal.voice.Entry(
+            ref=vocal.voice.Ref(source="kokoro", key="bm_george"),
+            name="bm_george",
+            languages=("en-GB",),
+            descriptors=vocal.voice.Descriptors(gender="masculine"),
+        ),
+    )
+)
+mouth = speaking.Speaking(
+    encoder=lambda key, description: mlx_audio.SpeechEncoder(
+        model_id="mlx-community/Kokoro-82M-bf16",
+        voice=key,
+        expressiveness=vocal.speech.Expressiveness(cues=frozenset({"pace"}), pace=vocal.speech.Range(min=0.5, max=2.0)),
+    ),
+    speaker=speaker,
+)
+inception = vocal.voice.Inception(
+    traits=traits, languages=("en",), speaking=mouth, processor=inception_model, catalog=kokoro, memory=bot_memory
+)
+```
