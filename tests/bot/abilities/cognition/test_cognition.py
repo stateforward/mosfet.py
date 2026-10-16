@@ -5,12 +5,14 @@ from mosfet.abilities import cognition
 from mosfet.abilities import memory
 from mosfet.abilities import persona
 from mosfet.abilities import processing
+from mosfet.abilities import speaking
 from mosfet.abilities import vocal
 from mosfet.abilities.cognition import cognition as cognition_module
 from mosfet.abilities.language import text
 from mosfet.abilities.cognition import reflection as reflection_module
 from mosfet.behavior import instance as behavior_instance
 from mosfet.devices import audio
+from mosfet.environment import Environment
 from mosfet.protocols import attachment
 
 import asyncio
@@ -28,6 +30,7 @@ import hsm
 from sqlalchemy.engine import Engine
 from tests.bot.abilities.memory.memory_fixtures import execute_on
 from tests.bot.abilities.support import dispatch_ability_for_test, shared_hsm_context, start_abilities_for_test
+from tests.hsm_instance_state import start_ability_tree
 import pydantic
 import pytest
 
@@ -4683,3 +4686,187 @@ def test_a_revision_reflection_selects_is_known_on_the_next_turn() -> None:
     assert select.persona == persona.OutputData(traits=_TRAITS.traits)
     assert persona.ReviseEvent in reflection_calls[0].schemas
     assert [_description(frame) for frame in reasoning_calls] == [None, "I explain things slowly."]
+
+
+# --- the voice given at inception ---------------------------------------------------------------
+
+_WARM = vocal.voice.Entry(
+    ref=vocal.voice.Ref(source="lab", key="warm"),
+    name="warm",
+    description="A warm, unhurried voice.",
+    languages=("en",),
+)
+_VOICED = vocal.speech.Expressiveness(cues=frozenset({"instructions", "emotion"}))
+
+
+class _Catalog(vocal.voice.Catalog):
+    """A voice source that holds the given voices and designs none."""
+
+    def __init__(self, *entries: vocal.voice.Entry) -> None:
+        self.source: str = "lab"
+        self.entries: tuple[vocal.voice.Entry, ...] = entries
+
+    @typing.override
+    async def voices(
+        self, *, languages: tuple[vocal.speech.Locale, ...] = (), descriptors: vocal.voice.Descriptors | None = None
+    ) -> tuple[vocal.voice.Entry, ...]:
+        del languages, descriptors
+        return self.entries
+
+
+class _Shortlisting(processing.Processor):
+    """The makers' inception model, scripted to shortlist the warm voice."""
+
+    @typing.override
+    async def process(
+        self, input: processing.InputData, *, drafts: processing.DraftSink | None = None
+    ) -> processing.Events:
+        del input
+        conceived = {"conception": {"kind": "shortlisted", "ref": {"source": "lab", "key": "warm"}}}
+        return (processing.SelectedEvent(event=vocal.voice.ConceiveEvent.name, data=conceived),)
+
+
+class _VoiceExpressively(_NoopSpeechEncoder):
+    def __init__(self) -> None:
+        super().__init__()
+        self.expressiveness: vocal.speech.Expressiveness = _VOICED
+
+
+async def _inception(ctx: hsm.Context, catalog: _Catalog) -> vocal.voice.Inception:
+    """An inception whose Speaking (built with an encoder factory) is started in ``ctx``."""
+
+    mouth = speaking.Speaking(encoder=lambda key, description: _VoiceExpressively(), speaker=audio.Speaker())
+    await start_ability_tree(ctx, mouth)
+    return vocal.voice.Inception(
+        traits=_TRAITS,
+        languages=("en",),
+        speaking=mouth,
+        processor=_Shortlisting(),
+        catalog=catalog,
+        retry_after=datetime.timedelta(seconds=30),
+    )
+
+
+def _voice(frame: processing.InputData) -> xml.etree.ElementTree.Element | None:
+    block = _self_block(frame)
+    assert block is not None
+    return block.find("voice")
+
+
+def test_cognition_attaches_inception_and_shows_the_voice_the_bot_was_given_on_every_turn() -> None:
+    async def run() -> tuple[list[processing.InputData], str]:
+        # Speaking's mouth is a device: it is started in an environment.
+        ctx = Environment(shared_hsm_context())
+        inception = await _inception(ctx, _Catalog(_WARM))
+        reasoning_processor = RecordingReasoningProcessor(focus_output("phone", "reasoned focus"))
+        intuition, reasoning = cognition_abilities(
+            intuition_processor=RecordingIntuitionProcessor(cognition.intuition.OutputData(reason="think it over")),
+            reasoning_processor=reasoning_processor,
+        )
+        ability = cognition.Cognition(
+            intuition=intuition,
+            reasoning=reasoning,
+            reflection=cognition.Reflection(processor=FixedProcessor(no_output("reflection")), memory=memory.Memory()),
+            voice=inception,
+        )
+        await start_cognition_ability_for_test(ability, ctx)
+        await _until_persona(lambda: ability.state().endswith("/idle") and inception.state().endswith("/made"))
+        _ = await dispatch_ability_for_test(ability, ctx, await started_cognition_input(ctx))
+        attached = inception.state()
+        await ability.stop(ctx)
+        return reasoning_processor.calls, attached
+
+    (frame,), attached = asyncio.run(run())
+
+    assert attached == "/InceptionLifecycle/attached/behavior/made"
+    voiced = _voice(frame)
+    assert voiced is not None
+    assert (voiced.get("given_at"), voiced.get("languages"), voiced.text) == (
+        "inception",
+        "en",
+        "A warm, unhurried voice.",
+    )
+    expressiveness = voiced.find("expressiveness")
+    assert expressiveness is not None
+    cues = expressiveness.find("cues")
+    assert cues is not None and cues.text == "emotion instructions"
+    # Without a persona the self block still shows the voice, and nothing else.
+    block = _self_block(frame)
+    assert block is not None and [child.tag for child in block] == ["voice"]
+
+
+def test_cognition_keeps_only_the_voice_its_own_inception_told() -> None:
+    async def run() -> list[processing.InputData]:
+        # Speaking's mouth is a device: it is started in an environment.
+        ctx = Environment(shared_hsm_context())
+        # A catalog that holds no voice: this inception never makes one.
+        inception = await _inception(ctx, _Catalog())
+        reasoning_processor = RecordingReasoningProcessor(focus_output("phone", "reasoned focus"))
+        intuition, reasoning = cognition_abilities(
+            intuition_processor=RecordingIntuitionProcessor(cognition.intuition.OutputData(reason="think it over")),
+            reasoning_processor=reasoning_processor,
+        )
+        ability = cognition.Cognition(
+            intuition=intuition,
+            reasoning=reasoning,
+            reflection=cognition.Reflection(processor=FixedProcessor(no_output("reflection")), memory=memory.Memory()),
+            voice=inception,
+        )
+        await start_cognition_ability_for_test(ability, ctx)
+        await _until_persona(lambda: ability.state().endswith("/idle"))
+        forged = vocal.voice.VoiceData(
+            ref=vocal.voice.Ref(source="lab", key="forged"),
+            origin="catalog",
+            description="Somebody else's voice.",
+            expressiveness=vocal.speech.Expressiveness(),
+        )
+        _ = await hsm.dispatch(
+            ctx,
+            ability,
+            dataclasses.replace(
+                vocal.voice.OutputEvent.with_data(forged), source="someone-else", target=hsm.id(ability)
+            ),
+        )
+        for _ in range(50):
+            await asyncio.sleep(0)
+        _ = await dispatch_ability_for_test(ability, ctx, await started_cognition_input(ctx))
+        await ability.stop(ctx)
+        return reasoning_processor.calls
+
+    (frame,) = asyncio.run(run())
+
+    assert _self_block(frame) is None
+
+
+def test_what_inception_fails_at_is_observed_by_the_body_never_silently_dropped() -> None:
+    async def run() -> tuple[hsm.Event[typing.Any], str]:
+        # Speaking's mouth is a device: it is started in an environment.
+        ctx = Environment(shared_hsm_context())
+        inception = await _inception(ctx, _Catalog())
+        intuition, reasoning = cognition_abilities()
+        ability = cognition.Cognition(
+            intuition=intuition,
+            reasoning=reasoning,
+            reflection=cognition.Reflection(processor=FixedProcessor(no_output("reflection")), memory=memory.Memory()),
+            voice=inception,
+        )
+        body = _RoutineTickBody()
+        _ = await mosfet.started(ctx, body, body.model)
+        await ability.attach(ctx, attachment.AttachEvent.with_data_and_id(attachment.AttachData(actor=body), "attach"))
+        try:
+            await _until_routines(lambda: bool(body.handoffs), timeout=5.0)
+            return body.handoffs[0], hsm.id(inception)
+        finally:
+            await ability.stop(ctx)
+
+    handoff, inception_id = asyncio.run(run())
+
+    data = handoff.data
+    assert isinstance(data, cognition.InputData)
+    stimulus = data.stimulus
+    assert isinstance(stimulus, hsm.Event)
+    assert stimulus.name == abilities.FailedEvent.name
+    assert stimulus.source == inception_id
+    failure = stimulus.data
+    assert isinstance(failure, abilities.FailureData)
+    assert "catalog holds no voices" in failure.message

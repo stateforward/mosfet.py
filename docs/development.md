@@ -219,6 +219,26 @@ behavior inventory events, at most one of each per turn, and sends a selected re
 persona as `<reflection operation>:persona` without waiting on it. Whether the bot ever revises
 is its own choice; a request to be different is something it heard, never an instruction.
 
+`vocal.voice.Inception` (owner-given `persona.Traits`, the composed languages, Speaking built with
+an encoder factory, the inception model, a `vocal.voice.Catalog` and optionally a
+`vocal.voice.Designer` of the same source, optional memory peer; compose it as
+`Cognition(voice=...)`) gives the bot its voice: its makers' choice, never the bot's. On the
+first start there is no `self_voice` row for the catalog's source, so the inception model is
+shown the traits, the languages and the source's capacity (`vocal.voice.InceptionInput`) and
+offered only `bot.ability.voice.conceive`; its one conception (a voice described within the
+designer's `max_description`, or one catalog entry shortlisted by ref) is checked mechanically,
+made permanent by the source, written down once as `vocal.voice.Given` (fail-closed), and given
+to Speaking (`speaking.VoiceEvent`), which constructs its encoder once. On every later start the
+row is recalled and the catalog is checked to still hold the voice, with no model call. A voice
+recorded only for another source, or one the source no longer holds, is estranged: a failure,
+and the bot stays unvoiced and is never re-made automatically. Inception tells Cognition the
+voice and what it can do (`vocal.voice.OutputEvent`), which the self block shows as
+`<voice given_at="inception">` with its `<expressiveness>`; what inception fails at reaches the
+body as a `cognition.InputEvent` observing it. Telemetry: `bot.voice.inception.count` {origin,
+outcome}, `bot.voice.inception.duration` {outcome}, `bot.voice.recall.count` {outcome}, and the
+`bot.voice.conceive` / `.create` / `.check` / `.voicing` spans; no ref, key, description or
+trait is ever an attribute.
+
 ## Observability
 
 Every HSM-visible behavior is observed at runtime boundaries that opt in

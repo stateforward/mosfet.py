@@ -10,6 +10,7 @@ import mosfet
 import mosfet.lifecycle
 from mosfet.abilities import persona
 from mosfet.abilities import processing
+from mosfet.abilities import vocal
 from mosfet.abilities.ability import Effort
 from mosfet.abilities.cognition import input as cognition_input
 from mosfet.abilities.cognition import types
@@ -419,6 +420,34 @@ def test_self_data_is_frozen_and_closed() -> None:
         _ = cognition_input.SelfData.model_validate({"persona": None, "mood": "cheerful"})
     assert cognition_input.SelfData.model_config.get("frozen") is True
     assert cognition_input.SelfData().persona is None
+    assert cognition_input.SelfData().voice is None
+
+
+_VOICE = vocal.voice.VoiceData(
+    ref=vocal.voice.Ref(source="lab", key="v-3f2a9c41d07e"),
+    origin="designed",
+    description="A bright, quick <young> voice.",
+    languages=("en",),
+    expressiveness=vocal.speech.Expressiveness(
+        cues=frozenset({"instructions", "emotion", "style", "sound"}),
+        styles=("whisper",),
+        sounds=frozenset({"laugh", "sigh"}),
+    ),
+)
+
+
+def test_self_data_renders_the_voice_given_at_inception_after_the_persona() -> None:
+    """The bot knows its voice and what it can do with an expression before it speaks (P-9)."""
+
+    voice_block = (
+        '<voice given_at="inception" languages="en">A bright, quick &lt;young&gt; voice.'
+        "<expressiveness><cues>emotion instructions sound style</cues><styles>whisper</styles>"
+        "<sounds>laugh sigh</sounds></expressiveness></voice>"
+    )
+    known = cognition_input.SelfData(persona=_KNOWN.persona, voice=_VOICE)
+
+    assert known.__model_repr__() == f"{_KNOWN.__model_repr__().removesuffix('</persona>')}{voice_block}</persona>"
+    assert cognition_input.SelfData(voice=_VOICE).__model_repr__() == f"<persona>{voice_block}</persona>"
 
 
 def test_build_processing_input_shows_what_the_bot_knows_of_itself_after_the_world_block() -> None:

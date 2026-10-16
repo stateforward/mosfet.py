@@ -19,6 +19,7 @@ from __future__ import annotations
 import mosfet
 from .. import ability
 from .. import processing
+from .. import vocal
 
 # SelfData's field is named ``persona``, which would shadow the package in the class body (these
 # annotations are resolved there), so the package goes by its role in this module.
@@ -105,7 +106,8 @@ class SelfData(pydantic.BaseModel):
 
     Cognition builds it from what its own children last told it, by event; nothing here reads a
     peer's state. The traits are its owner's, the description is the bot's own and is shown as it
-    wrote it: marked self-written, never filtered.
+    wrote it: marked self-written, never filtered. The voice was given to it at inception and is
+    shown with what it can do with an expression, so the bot knows its capacity before it speaks.
     """
 
     model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
@@ -113,8 +115,9 @@ class SelfData(pydantic.BaseModel):
         extra="forbid",
         json_schema_extra={
             "description": (
-                "What the bot knows of itself this turn: the traits its owner gave it and the description of "
-                "itself it wrote, or none when it has not written one."
+                "What the bot knows of itself this turn: the traits its owner gave it, the description of "
+                "itself it wrote (or none when it has not written one), and the voice it was given when it was "
+                "made, with what that voice can do."
             ),
         },
     )
@@ -123,12 +126,18 @@ class SelfData(pydantic.BaseModel):
         default=None,
         description="The bot's owner-given traits and its self-written description; None without a persona.",
     )
+    voice: vocal.voice.VoiceData | None = pydantic.Field(
+        default=None,
+        description="The voice the bot was given at inception and what it can do; None until it has one.",
+    )
 
     def __model_repr__(self) -> str:
-        """The self block: ``<persona>`` holding the traits (given by the owner) and the description (by you)."""
+        """The self block: ``<persona>`` holding the traits (given by the owner), the description (by you),
+        and the voice (given at inception)."""
 
         known = "" if self.persona is None else self.persona.__model_repr__()
-        return f"<persona>{known}</persona>"
+        voiced = "" if self.voice is None else self.voice.__model_repr__()
+        return f"<persona>{known}{voiced}</persona>"
 
 
 def stimulus_name(stimulus: mosfet.InputData) -> str | None:

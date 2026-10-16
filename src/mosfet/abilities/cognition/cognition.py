@@ -2,6 +2,7 @@ from .. import ability
 from .. import memory
 from .. import persona
 from .. import processing
+from .. import vocal
 
 import dataclasses
 import datetime
@@ -287,6 +288,12 @@ class Cognition(ability.Ability[InputData, OutputData]):
     block as the self block (``SelfData``), so the bot knows who it is on every turn, and hands it to
     reflection with the turn. Cognition only keeps what it was told; reflection, composed with the
     same persona, is the only place a revision may be selected.
+
+    With ``voice`` composed, Cognition attaches the bot's inception (``vocal.voice.Inception``) and
+    keeps the voice it was told the bot speaks in (``vocal.voice.OutputEvent``), with what that
+    voice can do with an expression; the self block shows it from then on. Inception is the bot's
+    making, never a turn: what it fails at (a voice estranged or lost, a source or model that cannot
+    answer) goes to the body as a ``cognition.InputEvent`` observing it, never silently dropped.
     """
 
     input_data_type: typing.ClassVar[type[object] | tuple[type[object], ...] | None] = InputData
@@ -308,6 +315,10 @@ class Cognition(ability.Ability[InputData, OutputData]):
     _persona: persona.Persona | None
     # What persona last told Cognition, by event: durable self-knowledge, not turn scratch.
     _persona_told: persona.OutputData | None
+    # Quoted: Inception reaches Speaking, whose imports reach this module (vocal.voice exports it lazily).
+    _voice: "vocal.voice.Inception | None"
+    # The voice inception told Cognition the bot speaks in, by event: durable self-knowledge.
+    _voice_told: vocal.voice.VoiceData | None
     _rest_after: datetime.timedelta
     # Injected operation bounds (None = live module default, so tests may still tune
     # the module constants around construction). Never hardcode per-caller durations.
@@ -366,12 +377,13 @@ class Cognition(ability.Ability[InputData, OutputData]):
     ) -> processing.InputData:
         associative = instance._associative
         told = instance._persona_told
+        voiced = instance._voice_told
         frame = input.build_processing_input(
             cognition_input,
             # Deliberate recall: offered to a stage whose effort ceiling admits the associative.
             extra_actors=None if associative is None else {"memory": associative},
             authority=instance,
-            known=None if told is None else input.SelfData(persona=told),
+            known=None if told is None and voiced is None else input.SelfData(persona=told, voice=voiced),
         )
         return frame if recalled is None else frame.model_copy(update={"recalled": recalled})
 
@@ -1537,7 +1549,8 @@ class Cognition(ability.Ability[InputData, OutputData]):
         instance: "Cognition",
         event: hsm.Event[typing.Any],
     ) -> None:
-        """Hand a routine tick or a recall outcome to the body as an observation; the body grants it a turn when free."""
+        """Hand a routine tick, a recall outcome or an inception failure to the body as an observation; the body
+        grants it a turn when free."""
 
         owner = instance._attachments[0]
         stimulus = dataclasses.replace(event, target="", metadata=_public_metadata(dict(event.metadata)))
@@ -1581,6 +1594,52 @@ class Cognition(ability.Ability[InputData, OutputData]):
             # Unreachable: paired with hsm.guard(_is_persona_told), which narrows this payload.
             return
         instance._persona_told = told
+
+    @staticmethod
+    def _is_voice_told(
+        ctx: hsm.Context,
+        instance: "Cognition",
+        event: hsm.Event[typing.Any],
+    ) -> bool:
+        """The voice the bot speaks in, told by its own inception child (by source and payload type)."""
+
+        del ctx
+        return (
+            instance._voice is not None
+            and event.source == hsm.id(instance._voice)
+            and isinstance(event.data, vocal.voice.VoiceData)
+        )
+
+    @staticmethod
+    def _know_voice(
+        ctx: hsm.Context,
+        instance: "Cognition",
+        event: hsm.Event[typing.Any],
+    ) -> None:
+        """Keep the voice inception told: every frame built from now on shows it in the self block."""
+
+        del ctx
+        told = event.data
+        if not isinstance(told, vocal.voice.VoiceData):
+            # Unreachable: paired with hsm.guard(_is_voice_told), which narrows this payload.
+            return
+        instance._voice_told = told
+
+    @staticmethod
+    def _is_inception_failure(
+        ctx: hsm.Context,
+        instance: "Cognition",
+        event: hsm.Event[typing.Any],
+    ) -> bool:
+        """What the bot's inception could not do, from its own inception child, with a body to observe it."""
+
+        del ctx
+        return (
+            instance._voice is not None
+            and event.source == hsm.id(instance._voice)
+            and isinstance(event.data, ability.FailureData)
+            and bool(instance._attachments)
+        )
 
     @staticmethod
     def _has_consolidation(
@@ -1964,6 +2023,18 @@ class Cognition(ability.Ability[InputData, OutputData]):
             hsm.guard(_is_persona_told),
             hsm.effect(_know_persona),
         ),
+        # Inception gives the bot its voice once, usually while Cognition is still attaching its
+        # children, and what it fails at can happen in any phase; neither moves a phase.
+        hsm.transition(
+            hsm.on(vocal.voice.OutputEvent),
+            hsm.guard(_is_voice_told),
+            hsm.effect(_know_voice),
+        ),
+        hsm.transition(
+            hsm.on(ability.FailedEvent),
+            hsm.guard(_is_inception_failure),
+            hsm.effect(_observe),
+        ),
         hsm.state(
             "detaching",
             hsm.defer(input_event, attachment.AttachEvent, attachment.DetachEvent),
@@ -1998,6 +2069,7 @@ class Cognition(ability.Ability[InputData, OutputData]):
         associative: memory.Associative | None = None,
         consolidation: memory.Consolidation | None = None,
         persona: persona.Persona | None = None,
+        voice: "vocal.voice.Inception | None" = None,
         rest_after: datetime.timedelta = _DEFAULT_REST_AFTER,
         child_operation_timeout: datetime.timedelta | None = None,
         cancel_teardown_timeout: datetime.timedelta | None = None,
@@ -2023,6 +2095,8 @@ class Cognition(ability.Ability[InputData, OutputData]):
         self._consolidation = consolidation
         self._persona = persona
         self._persona_told = None
+        self._voice = voice
+        self._voice_told = None
         self._rest_after = rest_after
         self._child_operation_timeout = child_operation_timeout
         self._cancel_teardown_timeout = cancel_teardown_timeout
@@ -2039,6 +2113,8 @@ class Cognition(ability.Ability[InputData, OutputData]):
             children.append(consolidation)
         if persona is not None:
             children.append(persona)
+        if voice is not None:
+            children.append(voice)
         if routines is not None:
             children.append(routines)
         self._attachment_group = attachment.Group(*children)
