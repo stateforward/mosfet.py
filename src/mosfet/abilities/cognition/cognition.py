@@ -284,8 +284,9 @@ class Cognition(ability.Ability[InputData, OutputData]):
     With ``persona`` composed, Cognition attaches it and keeps what it last told: the traits the
     bot's owner gave it and the description it wrote of itself (``persona.OutputEvent``, on waking
     and after every revision written down). Every frame Cognition builds shows it after the world
-    block as the self block (``SelfData``), so the bot knows who it is on every turn. Cognition only
-    keeps what it was told; it never revises the persona.
+    block as the self block (``SelfData``), so the bot knows who it is on every turn, and hands it to
+    reflection with the turn. Cognition only keeps what it was told; reflection, composed with the
+    same persona, is the only place a revision may be selected.
     """
 
     input_data_type: typing.ClassVar[type[object] | tuple[type[object], ...] | None] = InputData
@@ -708,7 +709,10 @@ class Cognition(ability.Ability[InputData, OutputData]):
         ability.Ability._forward_terminal_event(ctx, instance, ability.TerminalOutputEvent.with_data(terminal))
         reflection_ability = instance._reflection
         turn = reflection.InputData(
-            cognition_input=cognition_input, cognition_output=output, associations=data.turn.associations
+            cognition_input=cognition_input,
+            cognition_output=output,
+            associations=data.turn.associations,
+            persona=instance._persona_told,
         )
         reflection_event = dataclasses.replace(
             reflection_ability.input_event.with_data_and_id(

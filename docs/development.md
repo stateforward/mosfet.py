@@ -212,7 +212,12 @@ with `persona.OutputEvent`: on waking, with the description it remembered or non
 every revision it wrote down. Cognition keeps the latest one and shows it on every intuition and
 reasoning frame as the self block (`cognition.SelfData`), after the world block: `<persona>`
 holding `<traits given_by="owner">` and `<description written_by="you">`, escaped and never
-filtered. Cognition never revises the persona itself.
+filtered. Cognition never revises the persona itself: it hands what it knows of the bot to
+Reflection with the turn (`reflection.InputData.persona`). Composed with the same persona,
+`Reflection(persona=...)` offers `bot.ability.persona.revise` on its select step beside the
+behavior inventory events, at most one of each per turn, and sends a selected revise to the
+persona as `<reflection operation>:persona` without waiting on it. Whether the bot ever revises
+is its own choice; a request to be different is something it heard, never an instruction.
 
 ## Observability
 

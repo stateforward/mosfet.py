@@ -3,6 +3,7 @@ from mosfet import behavior
 from mosfet.abilities import ability
 from mosfet.abilities import cognition
 from mosfet.abilities import memory
+from mosfet.abilities import persona
 from mosfet.abilities import processing
 from mosfet.abilities.cognition import inventory
 from mosfet.abilities.cognition import reflection as reflection_module
@@ -22,6 +23,7 @@ import uuid
 import hsm
 import pytest
 from tests.type_helpers import model_view
+from tests.bot.abilities.support import start_abilities_for_test
 from tests.bot.abilities.cognition.metadata_contract import assert_metadata_is_not_coordination
 
 
@@ -1326,3 +1328,164 @@ def test_reflection_selects_with_what_memory_surfaced_and_writes_no_episode() ->
     assert "/ReflectionLifecycle/attached/behavior/loading" in members
     assert "/ReflectionLifecycle/attached/behavior/recalling" not in members
     assert "/ReflectionLifecycle/attached/behavior/storing" not in members
+
+
+_TRAITS = persona.Traits(traits=("curious", "patient with children"))
+_KNOWN = persona.OutputData(traits=_TRAITS.traits)
+
+
+class RecordingPersona(persona.Persona):
+    """Persona that keeps every revision delivered to it, then handles it as usual."""
+
+    revisions: list[hsm.Event[typing.Any]]
+
+    def __init__(self) -> None:
+        super().__init__(traits=_TRAITS)
+        self.revisions = []
+
+    @typing.override
+    def dispatch(self, ctx: hsm.Context, event: hsm.Event[typing.Any]) -> collections.abc.Awaitable[bool]:
+        if isinstance(event.data, persona.ReviseData):
+            self.revisions.append(event)
+        return super().dispatch(ctx, event)
+
+
+class SelectingProcessor(processing.Processor):
+    """Select step that returns fixed selections and keeps every input it was given."""
+
+    inputs: list[processing.InputData]
+    selections: processing.Events
+
+    def __init__(self, *selections: processing.SelectedEvent) -> None:
+        self.inputs = []
+        self.selections = selections
+
+    @typing.override
+    async def process(
+        self, input: processing.InputData, *, drafts: processing.DraftSink | None = None
+    ) -> processing.Events:
+        self.inputs.append(input)
+        return self.selections
+
+
+def _revise(text: str = "I explain things slowly.") -> processing.SelectedEvent:
+    return processing.SelectedEvent(
+        event=persona.ReviseEvent.name,
+        data={"text": text, "reason": "A long talk with a child."},
+        reason="I noticed it.",
+    )
+
+
+def _break(name: str = "Unknown") -> processing.SelectedEvent:
+    return processing.SelectedEvent(
+        event=behavior.BreakEvent.name, data={"name": name, "reason": "stop it"}, reason="stop it"
+    )
+
+
+async def _reflect(
+    processor: processing.Processor, *, with_persona: bool
+) -> tuple[RecordingPersona | None, list[hsm.Event[typing.Any]]]:
+    """Run one reflection (operation ``turn-1:reflection``) and return the persona and the terminals."""
+
+    connection = sqlite3.connect(":memory:", check_same_thread=False)
+    store = memory.Memory(engine=memory.store.open_sqlite_engine(connection=connection))
+    ctx = hsm.Context()
+    self_ = RecordingPersona() if with_persona else None
+    if self_ is not None:
+        await start_abilities_for_test(ctx, self_)
+        await wait_until(lambda: self_.state().endswith("/knowing"))
+    reflection = cognition.Reflection(processor=processor, memory=store, persona=self_)
+    owner = AttachmentOwner()
+    _ = await mosfet.started(ctx, owner, owner.model)
+    await attach_store(ctx, store)
+    _ = await reflection.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)))
+    await wait_until(lambda: reflection.state().endswith("/idle"))
+    owner.lifecycle.clear()
+    turn = reflection_input().model_copy(update={"persona": _KNOWN})
+    _ = await hsm.dispatch(ctx, reflection, reflection.input_event.with_data_and_id(turn, "turn-1:reflection"))
+    await wait_until(lambda: bool(owner.lifecycle))
+    for _ in range(50):
+        await asyncio.sleep(0)
+    lifecycle = list(owner.lifecycle)
+    await reflection.stop(reflection.context())
+    connection.close()
+    return self_, lifecycle
+
+
+def test_reflection_without_persona_offers_only_behavior_events() -> None:
+    processor = CapturingProcessor()
+
+    _, lifecycle = asyncio.run(_reflect(processor, with_persona=False))
+
+    assert [event.name for event in lifecycle] == [cognition.Reflection.output_event.name]
+    (frame,) = processor.inputs
+    assert {event.name for event in frame.schemas} == {
+        behavior.CreateEvent.name,
+        behavior.ChangeEvent.name,
+        behavior.BreakEvent.name,
+    }
+
+
+def test_reflection_with_persona_offers_a_revision_and_shows_what_the_bot_knows() -> None:
+    """Revising is offered, never selected for the bot: an empty selection revises nothing."""
+
+    processor = CapturingProcessor()
+
+    self_, lifecycle = asyncio.run(_reflect(processor, with_persona=True))
+
+    assert [event.name for event in lifecycle] == [cognition.Reflection.output_event.name]
+    (frame,) = processor.inputs
+    assert persona.ReviseEvent in frame.schemas
+    select = frame.input
+    assert isinstance(select, cognition.reflection.SelectInput)
+    assert select.persona == _KNOWN
+    assert self_ is not None and self_.revisions == []
+
+
+def test_a_selected_revision_reaches_persona_under_the_reflection_id_without_waiting() -> None:
+    self_, lifecycle = asyncio.run(_reflect(SelectingProcessor(_revise()), with_persona=True))
+
+    assert [event.name for event in lifecycle] == [cognition.Reflection.output_event.name]
+    assert self_ is not None
+    (revision,) = self_.revisions
+    assert revision.id == "turn-1:reflection:persona"
+    assert revision.data == persona.ReviseData(text="I explain things slowly.", reason="A long talk with a child.")
+
+
+def test_a_revision_and_a_behavior_event_are_each_handled_on_their_own() -> None:
+    """One revise beside one behavior event: the revise is sent even when the behavior work fails."""
+
+    self_, lifecycle = asyncio.run(_reflect(SelectingProcessor(_break("Unknown"), _revise()), with_persona=True))
+
+    assert [event.name for event in lifecycle] == [cognition.Reflection.failed_event.name]
+    assert self_ is not None
+    assert [event.id for event in self_.revisions] == ["turn-1:reflection:persona"]
+
+
+@pytest.mark.parametrize(
+    ("selections", "with_persona"),
+    [
+        ((_revise("first"), _revise("second")), True),
+        ((_break("A"), _break("B"), _revise()), True),
+        ((_revise(),), False),
+        ((_revise(" "),), True),
+    ],
+    ids=["two-revisions", "two-behavior-events", "revise-without-persona", "blank-revision"],
+)
+def test_reflection_refuses_a_selection_beyond_its_bound(
+    selections: tuple[processing.SelectedEvent, ...], with_persona: bool
+) -> None:
+    """At most one behavior event and at most one offered, valid revision; otherwise nothing is sent."""
+
+    self_, lifecycle = asyncio.run(_reflect(SelectingProcessor(*selections), with_persona=with_persona))
+
+    assert [event.name for event in lifecycle] == [cognition.Reflection.failed_event.name]
+    assert self_ is None or self_.revisions == []
+
+
+def test_reflection_select_instructions_name_the_revision_capacity_only() -> None:
+    instructions = reflection_impl.SELECT_INSTRUCTIONS
+
+    assert persona.ReviseEvent.name in instructions
+    assert "at most once" in instructions
+    assert "when bot.ability.persona.revise is offered you may" in instructions

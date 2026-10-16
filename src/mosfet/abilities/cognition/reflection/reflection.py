@@ -2,12 +2,19 @@
 
 HSM phases (children attached; never call child ``_process`` / ``_apply``):
 1. **loading** — ask memory, by message, for the installed behavior inventory
-2. **processing** — dispatch select processor (create | change | break | empty)
+2. **processing** — dispatch select processor (create | change | break | empty, and with a
+   persona composed at most one ``bot.ability.persona.revise`` beside them)
 3. **revising** — delegate create/change authoring and validation to ``Revision``
 4. **break** sets status=BROKEN (does not delete); complete with no host product
 
-What memory surfaced for the turn (``associations``) is select context. Reflection never writes
-episodes: Cognition remembers every turn itself.
+What memory surfaced for the turn (``associations``) and what the bot knew of itself
+(``persona``) are select context. Reflection never writes episodes: Cognition remembers every
+turn itself.
+
+Persona revision is the one other thing reflection may select (P-2, P-9): at most one revise per
+turn, beside at most one behavior event. A selected revise is sent to the persona under the id
+``<reflection operation>:persona`` and never waited on; persona writes it down and tells its
+owner. Whether the bot ever revises is its own choice.
 
 Inventory policy:
 - ``bot.behavior.create`` delegates DRAFT seeding and authoring to ``Revision``.
@@ -25,6 +32,10 @@ from __future__ import annotations
 from ... import ability
 from ... import processing
 from ... import memory
+
+# Two select payloads have a field named ``persona``, which would shadow the package in their class
+# bodies (these annotations are resolved there), so the package goes by its role in this module.
+from ... import persona as self_knowledge
 
 import dataclasses
 import datetime
@@ -72,7 +83,10 @@ SELECT_INSTRUCTIONS = (
     "create delegates a DRAFT behavior revision; change revises an existing behavior; "
     "break sets status=BROKEN (keeps inventory for later change; Autonomy will not run it and a broken "
     "routine stops); change a routine to reschedule or revise it, break it to stop it. "
-    "Select intent may omit source — do not invent source here."
+    "Select intent may omit source — do not invent source here. "
+    "Separately, when bot.ability.persona.revise is offered you may also select it, at most once, with or "
+    "without a behavior event: it rewrites the description of yourself that persona shows beside the traits "
+    "your owner gave you."
 )
 
 CHANGE_INSTRUCTIONS = revision.CHANGE_INSTRUCTIONS
@@ -80,6 +94,7 @@ CHANGE_INSTRUCTIONS = revision.CHANGE_INSTRUCTIONS
 INSTRUCTIONS = SELECT_INSTRUCTIONS
 
 _SELECT_ID_SUFFIX = ":reflection:select"
+_PERSONA_ID_SUFFIX = ":persona"
 _CHILD_OPERATION_TIMEOUT = datetime.timedelta(seconds=30)
 _CANCEL_TEARDOWN_TIMEOUT = datetime.timedelta(seconds=5)
 
@@ -116,6 +131,13 @@ class InputData(pydantic.BaseModel):
         default=None,
         description="What memory surfaced for this turn; None when the bot has no associative memory.",
     )
+    persona: self_knowledge.OutputData | None = pydantic.Field(
+        default=None,
+        description=(
+            "What the bot knew of itself on this turn: the traits its owner gave it and the description it "
+            "wrote. None when it has no persona."
+        ),
+    )
 
 
 class SelectInput(pydantic.BaseModel):
@@ -142,6 +164,13 @@ class SelectInput(pydantic.BaseModel):
     associations: memory.AssociationsData | None = pydantic.Field(
         default=None,
         description="What memory surfaced for this turn (best first), for similar-turn behavior work.",
+    )
+    persona: self_knowledge.OutputData | None = pydantic.Field(
+        default=None,
+        description=(
+            "What you know of yourself: the traits your owner gave you and the description of yourself you "
+            "wrote (none when you have written none). None when you have no persona to revise."
+        ),
     )
     behaviors: tuple[Instance, ...] = pydantic.Field(
         default=(),
@@ -248,6 +277,9 @@ def behavior_events() -> tuple[processing.Event[typing.Any], ...]:
     return (CreateEvent, ChangeEvent, BreakEvent)
 
 
+_BEHAVIOR_EVENT_NAMES = frozenset(event.name for event in behavior_events())
+
+
 def _coerce_output_data(value: object) -> types.OutputData:
     selections = processing.coerce_event_selections(value)
     if selections is None:
@@ -332,6 +364,8 @@ class Reflection(processing.Processing):
     _select_processing: processing.Processing
     _revision: revision.Revision
     _memory: memory.MemoryStore
+    # A peer reached by message (Cognition attaches it), never a child here.
+    _persona: self_knowledge.Persona | None
     _events: tuple[processing.Event[typing.Any], ...]
 
     @staticmethod
@@ -643,11 +677,12 @@ class Reflection(processing.Processing):
                 cognition_input=turn.cognition_input,
                 cognition_output=turn.cognition_output,
                 associations=turn.associations,
+                persona=turn.persona,
                 behaviors=data.behaviors,
                 operation_id=operation_id,
                 generation=data.generation,
             ),
-            schemas=behavior_events(),
+            schemas=instance._events,
             actors={},
         )
         hop_id = Reflection._child_id(instance, _SELECT_ID_SUFFIX)
@@ -796,8 +831,31 @@ class Reflection(processing.Processing):
         )
 
     @staticmethod
+    def _revise_persona(
+        ctx: hsm.Context,
+        instance: "Reflection",
+        event: hsm.Event[typing.Any],
+        data: self_knowledge.ReviseData,
+        operation_id: str,
+    ) -> None:
+        """Send the selected revision to the persona; never waited on (persona tells its owner)."""
+
+        persona_ability = instance._persona
+        assert persona_ability is not None, "a revision is accepted only with a persona composed"
+        _ = hsm.dispatch(
+            ctx,
+            persona_ability,
+            dataclasses.replace(
+                self_knowledge.ReviseEvent.with_data_and_id(data, f"{operation_id}{_PERSONA_ID_SUFFIX}"),
+                source=hsm.id(instance),
+                target=hsm.id(persona_ability),
+                metadata=dict(event.metadata),
+            ),
+        )
+
+    @staticmethod
     def _on_select_output(ctx: hsm.Context, instance: "Reflection", event: hsm.Event[typing.Any]) -> None:
-        """Route select terminal: empty → store; create/change/break → seed/write/break."""
+        """Route select terminal: a revise → persona; empty → store; create/change/break → seed/write/break."""
 
         completion = event.data
         assert isinstance(completion, processing.CompletionData)
@@ -807,10 +865,28 @@ class Reflection(processing.Processing):
             cognition_input=select_input.cognition_input,
             cognition_output=select_input.cognition_output,
             associations=select_input.associations,
+            persona=select_input.persona,
         )
         operation_id = select_input.operation_id
         try:
-            selection = _coerce_output_data(completion.output)
+            selected = _coerce_output_data(completion.output)
+            revisions = tuple(item for item in selected if item.event == self_knowledge.ReviseEvent.name)
+            selection = tuple(item for item in selected if item.event in _BEHAVIOR_EVENT_NAMES)
+            if (
+                len(selection) > 1
+                or len(revisions) > 1
+                or len(selection) + len(revisions) != len(selected)
+                or (revisions and instance._persona is None)
+            ):
+                raise ValueError(
+                    "Reflection select must return at most one behavior event and at most one offered persona revision."
+                )
+            revised = tuple(
+                item.data
+                if isinstance(item.data, self_knowledge.ReviseData)
+                else self_knowledge.ReviseData.model_validate(item.data if item.data is not None else {})
+                for item in revisions
+            )
         except Exception as error:
             _ = hsm.dispatch(
                 ctx,
@@ -823,6 +899,8 @@ class Reflection(processing.Processing):
                 ),
             )
             return
+        for data in revised:
+            Reflection._revise_persona(ctx, instance, event, data, operation_id)
         if not selection:
             _ = hsm.dispatch(
                 ctx,
@@ -837,18 +915,6 @@ class Reflection(processing.Processing):
                         operation_id=operation_id,
                         generation=select_input.generation,
                     ),
-                ),
-            )
-            return
-        if len(selection) != 1:
-            _ = hsm.dispatch(
-                ctx,
-                instance,
-                Reflection._private_event(
-                    instance,
-                    event,
-                    _StageFailedEvent,
-                    ability.FailureData(message="Reflection select must return at most one behavior event."),
                 ),
             )
             return
@@ -1229,6 +1295,7 @@ class Reflection(processing.Processing):
         *,
         processor: processing.Processor | ProcessorFactory,
         memory: memory.MemoryStore,
+        persona: self_knowledge.Persona | None = None,
     ) -> None:
         super(processing.Processing, self).__init__()
         leaf = processor() if not isinstance(processor, processing.Processor) else processor
@@ -1242,12 +1309,13 @@ class Reflection(processing.Processing):
             memory=memory,
         )
         self._memory = memory
-        # Memory is a peer reached by message (Cognition attaches it), never a child here.
+        self._persona = persona
+        # Memory and persona are peers reached by message (Cognition attaches them), never children here.
         self._attachment_group = attachment.Group(
             self._select_processing,
             self._revision,
         )
-        self._events = behavior_events()
+        self._events = behavior_events() if persona is None else (*behavior_events(), self_knowledge.ReviseEvent)
 
 
 InputEvent = Reflection.input_event

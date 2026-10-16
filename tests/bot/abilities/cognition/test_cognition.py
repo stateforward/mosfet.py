@@ -4502,6 +4502,23 @@ def _description(frame: processing.InputData) -> str | None:
     return description.text
 
 
+class _TellingPersona(persona.Persona):
+    """Persona that keeps what it tells its owner, so a test can wait until it was told."""
+
+    told: list[persona.OutputData]
+
+    def __init__(self) -> None:
+        super().__init__(traits=_TRAITS)
+        self.told = []
+
+    @typing.override
+    def dispatch(self, ctx: hsm.Context, event: hsm.Event[typing.Any]) -> collections.abc.Awaitable[bool]:
+        terminal = event.data
+        if isinstance(terminal, hsm.Event) and isinstance(terminal.data, persona.OutputData):
+            self.told.append(terminal.data)
+        return super().dispatch(ctx, event)
+
+
 async def _until_persona(condition: collections.abc.Callable[[], bool]) -> None:
     async with asyncio.timeout(5):
         while not condition():
@@ -4620,3 +4637,49 @@ def test_cognition_keeps_only_what_its_own_persona_told() -> None:
     assert block is not None
     assert [trait.text for trait in block.iter("trait")] == list(_TRAITS.traits)
     assert _description(frame) is None
+
+
+def test_a_revision_reflection_selects_is_known_on_the_next_turn() -> None:
+    """Reflection sees what the bot knows of itself; what it revises comes back by event to every frame.
+
+    The fixed reflection processor stands in for the model's own selection: this pins the path a
+    revision takes, never that a bot revises.
+    """
+
+    revise = (
+        cognition.types.EventData(
+            event=persona.ReviseEvent.name,
+            data={"text": "I explain things slowly.", "reason": "A long talk with a child."},
+            reason="I noticed it.",
+        ),
+    )
+
+    async def run() -> tuple[list[processing.InputData], list[processing.InputData]]:
+        self_ = _TellingPersona()
+        reasoning_processor = RecordingReasoningProcessor(focus_output("phone", "reasoned focus"))
+        reflection_processor = FixedProcessor(revise)
+        intuition, reasoning = cognition_abilities(
+            intuition_processor=RecordingIntuitionProcessor(cognition.intuition.OutputData(reason="think it over")),
+            reasoning_processor=reasoning_processor,
+        )
+        ability = cognition.Cognition(
+            intuition=intuition,
+            reasoning=reasoning,
+            reflection=cognition.Reflection(processor=reflection_processor, memory=memory.Memory(), persona=self_),
+            persona=self_,
+        )
+        ctx = await start_cognition_ability_for_test(ability)
+        await _until_persona(lambda: ability.state().endswith("/idle") and self_.state().endswith("/knowing"))
+        _ = await dispatch_ability_for_test(ability, ctx, await started_cognition_input(ctx))
+        await _until_persona(lambda: len(self_.told) == 2 and ability.state().endswith("/idle"))
+        _ = await dispatch_ability_for_test(ability, ctx, await started_cognition_input(ctx))
+        await ability.stop(ctx)
+        return reasoning_processor.calls, reflection_processor.step.calls
+
+    reasoning_calls, reflection_calls = asyncio.run(run())
+
+    select = reflection_calls[0].input
+    assert isinstance(select, cognition.reflection.SelectInput)
+    assert select.persona == persona.OutputData(traits=_TRAITS.traits)
+    assert persona.ReviseEvent in reflection_calls[0].schemas
+    assert [_description(frame) for frame in reasoning_calls] == [None, "I explain things slowly."]
