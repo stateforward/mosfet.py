@@ -22,7 +22,8 @@ class Store(abc.ABC):
 
     Every call that matches runs ``identification.decide`` inside its own transaction. Every
     ``Match`` and ``Refine`` advances the id's ``seen_at`` (retention counts from last seen); only
-    ``Refine`` and the enroll upsert change its vector and its capped ``seen_count`` weight. Each
+    ``Refine`` and the enroll upsert change its vector and its capped ``seen_count`` weight. An
+    enrollment without an id decides among the own ids of its kind and model alone. Each
     model has one recorded dimension count, and a print of other dimensions is ``INVALID_INPUT``.
     Ids marked ``own``, or linked to a person, are never pruned. Every failure raises
     ``identification.StoreError``, and its message never carries a print or a vector.
@@ -47,7 +48,7 @@ class Store(abc.ABC):
     def enroll(
         self,
         kind: identification.Kind,
-        id: identification.Id,
+        id: identification.Id | None,
         print: identification.Print,
         own: bool,
         policy: identification.MatchPolicy,
@@ -57,10 +58,14 @@ class Store(abc.ABC):
         """Upsert ``id``: insert it, or refine it with ``print`` weighted by at most ``policy.refine_weight_cap``.
 
         ``own`` is sticky; an existing id answers ``recognized=True`` with its similarity to ``print``.
+        With ``id=None`` (only with ``own``) the id is the own id of ``kind`` and ``print.model``
+        that ``identification.decide`` picks among own ids alone (a ``Match`` refines it too), or a
+        new own ``uuid4().hex`` id, answered ``recognized=False`` with the best own similarity.
 
         Raises:
             identification.StoreError: ``INVALID_INPUT`` when ``print.model`` differs from the id's
-                model or its dimensions from the model's, else ``STORE_FAILED``.
+                model, its dimensions from the model's, or ``id`` is ``None`` without ``own``; else
+                ``STORE_FAILED``.
         """
 
     @abc.abstractmethod
@@ -204,13 +209,17 @@ class InProcessStore(Store):
     def enroll(
         self,
         kind: identification.Kind,
-        id: identification.Id,
+        id: identification.Id | None,
         print: identification.Print,
         own: bool,
         policy: identification.MatchPolicy,
         *,
         at: datetime.datetime,
     ) -> identification.Recognition:
+        if id is None and not own:
+            raise identification.StoreError(
+                identification.FailureKind.INVALID_INPUT, "an enrollment without an id must be the bot's own"
+            )
         with self._lock:
             ids = dict(self._ids.get(kind, {}))
             dimensions = dict(self._dimensions)
@@ -220,6 +229,22 @@ class InProcessStore(Store):
                     identification.FailureKind.INVALID_INPUT,
                     f"a print has {len(print.vector)} dimensions; its model's space has {recorded}",
                 )
+            minted_similarity: float | None = None
+            if id is None:
+                decision = identification.decide(
+                    [
+                        identification.Neighbor(
+                            id=stored_id, similarity=Store._similarity(stored.vector, print.vector), own=True
+                        )
+                        for stored_id, stored in ids.items()
+                        if stored.own and stored.model == print.model
+                    ],
+                    policy,
+                )
+                if isinstance(decision, identification.Mint):
+                    id, minted_similarity = uuid.uuid4().hex, decision.similarity
+                else:
+                    id = decision.id
             entry = ids.get(id)
             if entry is None:
                 if len(ids) >= self._max_ids:
@@ -232,7 +257,7 @@ class InProcessStore(Store):
                 ids[id] = _Entry(
                     model=print.model, vector=print.vector, own=own, created_at=at, seen_at=at, seen_count=1
                 )
-                recognition = identification.Recognition(id=id, recognized=False, similarity=None, own=own)
+                recognition = identification.Recognition(id=id, recognized=False, similarity=minted_similarity, own=own)
             else:
                 if entry.model != print.model:
                     raise identification.StoreError(
@@ -301,7 +326,7 @@ class Matcher(identification.Identifier):
 
     @typing.override
     async def enroll(
-        self, kind: identification.Kind, id: identification.Id, print: identification.Print, own: bool
+        self, kind: identification.Kind, id: identification.Id | None, print: identification.Print, own: bool
     ) -> identification.Recognition:
         return await asyncio.to_thread(self._store.enroll, kind, id, print, own, self._policy, at=self._clock())
 

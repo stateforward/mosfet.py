@@ -265,7 +265,7 @@ class SilentIdentifier(identification.Identifier):
 
     @override
     async def enroll(
-        self, kind: identification.Kind, id: str, print: identification.Print, own: bool
+        self, kind: identification.Kind, id: str | None, print: identification.Print, own: bool
     ) -> identification.Recognition:
         del kind, id, print, own
         _ = await asyncio.Event().wait()

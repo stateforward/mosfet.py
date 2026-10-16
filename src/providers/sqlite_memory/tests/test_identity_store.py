@@ -84,7 +84,7 @@ class Fixture:
         return [typing.cast(identification.Recognition, recognition) for recognition in recognitions]
 
     def enroll(
-        self, id: str, print: identification.Print, *, own: bool = False, kind: identification.Kind = "voice"
+        self, id: str | None, print: identification.Print, *, own: bool = False, kind: identification.Kind = "voice"
     ) -> identification.Recognition:
         return asyncio.run(self.matcher.enroll(kind, id, print, own))
 
@@ -304,6 +304,54 @@ def test_contract_enroll_with_another_model_for_an_existing_id_is_invalid_input(
         _ = fixture.enroll("tts:warm", _angle(0, model="other"))
 
     assert raised.value.kind is identification.FailureKind.INVALID_INPUT
+
+
+def test_contract_an_own_print_without_an_id_mints_an_own_id_then_refines_it(store_factory: StoreFactory) -> None:
+    fixture = _fixture(store_factory)
+
+    minted = fixture.enroll(None, _angle(0), own=True)
+    # cos(55°) ≈ 0.574: only a Match under the policy, yet an own enrollment still refines the id.
+    matched = fixture.enroll(None, _angle(55), own=True)
+    (heard,) = fixture.identify(_angle(27.5))
+    fixture.clock.advance(datetime.timedelta(days=365))
+    pruned = fixture.prune(age=datetime.timedelta(days=1), max_ids=0)
+
+    assert (minted.recognized, minted.similarity, minted.own) == (False, None, True)
+    assert len(minted.id) == 32
+    assert (matched.id, matched.recognized, matched.own) == (minted.id, True, True)
+    assert matched.similarity == pytest.approx(math.cos(math.radians(55)), abs=_CLOSE)
+    assert (heard.id, heard.own) == (minted.id, True)
+    assert heard.similarity == pytest.approx(1.0, abs=_CLOSE)
+    assert pruned == 0
+
+
+def test_contract_an_own_print_never_matches_an_id_that_is_not_own(store_factory: StoreFactory) -> None:
+    fixture = _fixture(store_factory)
+    (stranger,) = fixture.identify(_angle(0))
+    _ = fixture.enroll(None, _angle(0), own=True, kind="face")
+
+    own = fixture.enroll(None, _angle(0), own=True)
+    far = fixture.enroll(None, _angle(90), own=True)
+
+    assert own.id != stranger.id
+    # Neither the stranger nor the own face was a candidate.
+    assert (own.recognized, own.similarity, own.own) == (False, None, True)
+    # The best own candidate is reported, as for any mint.
+    assert (far.recognized, far.own) == (False, True)
+    assert far.id != own.id
+    assert far.similarity == pytest.approx(0.0, abs=_CLOSE)
+    assert fixture.forget(stranger.id) is True
+
+
+def test_contract_an_enrollment_without_an_id_that_is_not_own_is_invalid_input(store_factory: StoreFactory) -> None:
+    fixture = _fixture(store_factory)
+
+    with pytest.raises(identification.StoreError) as raised:
+        _ = fixture.enroll(None, _angle(0), own=False)
+    (after,) = fixture.identify(_angle(0))
+
+    assert raised.value.kind is identification.FailureKind.INVALID_INPUT
+    assert after.recognized is False
 
 
 # --- what only the database store has -----------------------------------------------------------

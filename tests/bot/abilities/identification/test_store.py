@@ -60,7 +60,12 @@ def _identify(
 
 
 def _enroll(
-    fixture: Fixture, id: str, print: identification.Print, *, own: bool = False, kind: identification.Kind = "voice"
+    fixture: Fixture,
+    id: str | None,
+    print: identification.Print,
+    *,
+    own: bool = False,
+    kind: identification.Kind = "voice",
 ) -> identification.Recognition:
     return asyncio.run(fixture.matcher.enroll(kind, id, print, own))
 
@@ -257,6 +262,64 @@ def test_enroll_with_another_model_for_an_existing_id_is_invalid_input() -> None
         _ = _enroll(fixture, "tts:warm", _print(1.0, 0.0, model="other"))
 
     assert raised.value.kind is identification.FailureKind.INVALID_INPUT
+
+
+def test_an_own_print_without_an_id_mints_an_own_id_then_refines_it() -> None:
+    fixture = _fixture()
+
+    minted = _enroll(fixture, None, _angle(0), own=True)
+    # cos(55°) ≈ 0.574: only a Match under the policy, yet an own enrollment still refines the id.
+    matched = _enroll(fixture, None, _angle(55), own=True)
+    (heard,) = _identify(fixture, _angle(27.5))
+    fixture.clock.advance(datetime.timedelta(days=365))
+    pruned = _prune(fixture, age=datetime.timedelta(days=1), max_ids=0)
+
+    assert (minted.recognized, minted.similarity, minted.own) == (False, None, True)
+    assert len(minted.id) == 32
+    assert (matched.id, matched.recognized, matched.own) == (minted.id, True, True)
+    assert matched.similarity == pytest.approx(math.cos(math.radians(55)))
+    assert (heard.id, heard.own) == (minted.id, True)
+    assert heard.similarity == pytest.approx(1.0)
+    assert pruned == 0
+
+
+def test_an_own_print_never_matches_an_id_that_is_not_own() -> None:
+    fixture = _fixture()
+    (stranger,) = _identify(fixture, _angle(0))
+    _ = _enroll(fixture, None, _angle(0), own=True, kind="face")
+
+    own = _enroll(fixture, None, _angle(0), own=True)
+    far = _enroll(fixture, None, _angle(90), own=True)
+
+    assert own.id != stranger.id
+    # Neither the stranger nor the own face was a candidate.
+    assert (own.recognized, own.similarity, own.own) == (False, None, True)
+    # The best own candidate is reported, as for any mint.
+    assert (far.recognized, far.own) == (False, True)
+    assert far.id != own.id
+    assert far.similarity == pytest.approx(0.0, abs=1e-9)
+    assert asyncio.run(fixture.matcher.forget("voice", stranger.id)) is True
+
+
+def test_an_enrollment_without_an_id_that_is_not_own_is_invalid_input() -> None:
+    fixture = _fixture()
+
+    with pytest.raises(identification.StoreError) as raised:
+        _ = _enroll(fixture, None, _angle(0), own=False)
+    (after,) = _identify(fixture, _angle(0))
+
+    assert raised.value.kind is identification.FailureKind.INVALID_INPUT
+    assert after.recognized is False
+
+
+def test_minting_an_own_id_at_the_hard_cap_evicts_the_least_recently_seen_non_own_id() -> None:
+    fixture = _fixture(max_ids=1)
+    (stranger,) = _identify(fixture, _angle(90))
+
+    own = _enroll(fixture, None, _angle(0), own=True)
+
+    assert (own.recognized, own.own) == (False, True)
+    assert asyncio.run(fixture.matcher.forget("voice", stranger.id)) is False
 
 
 def test_minting_at_the_hard_cap_evicts_the_least_recently_seen_non_own_id() -> None:

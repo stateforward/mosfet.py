@@ -94,6 +94,7 @@ class FakeIdentifier(identification.Identifier):
     gated: set[str]
     errors: dict[str, BaseException]
     recognitions: tuple[identification.Recognition | None, ...] | None
+    enrolled: identification.Recognition | None
 
     def __init__(self, time: FakeTime) -> None:
         self.time = time
@@ -102,6 +103,7 @@ class FakeIdentifier(identification.Identifier):
         self.gated = set()
         self.errors = {}
         self.recognitions = None
+        self.enrolled = None
 
     async def _call(self, operation: str) -> None:
         call = Call(operation=operation, at=self.time.now)
@@ -129,10 +131,12 @@ class FakeIdentifier(identification.Identifier):
 
     @typing.override
     async def enroll(
-        self, kind: identification.Kind, id: identification.Id, print: identification.Print, own: bool
+        self, kind: identification.Kind, id: identification.Id | None, print: identification.Print, own: bool
     ) -> identification.Recognition:
         await self._call("enroll")
-        return identification.Recognition(id=id, recognized=False, similarity=None, own=own)
+        if self.enrolled is not None:
+            return self.enrolled
+        return identification.Recognition(id=id or "own", recognized=False, similarity=None, own=own)
 
     @typing.override
     async def forget(self, kind: identification.Kind, id: identification.Id) -> bool:
@@ -648,3 +652,49 @@ def test_telemetry_counts_outcomes_with_closed_attributes_and_no_vector(
         if attributes.get("bot.outcome") == "failed":
             assert attributes["bot.failure.kind"] in kinds
     assert {dict(recorded.attributes or {}).get("bot.failure.kind") for recorded in spans} == {None, "store_failed"}
+
+
+def test_enroll_telemetry_names_whether_the_id_was_declared_matched_or_minted(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, finished_spans: InMemorySpanExporter
+) -> None:
+    async def run(
+        reader: metric_reader.Reader,
+    ) -> tuple[dict[tuple[tuple[str, object], ...], float], list[hsm.Event[typing.Any]]]:
+        before = reader.points("bot.identification.count")
+        harness = await _harness()
+        await harness.send(
+            identification.EnrollEvent, "declared", identification.EnrollData(id="3f2a9c", print=_PRINT, own=True)
+        )
+        _ = await harness.reply("declared")
+        await harness.send(
+            identification.EnrollEvent, "minted", identification.EnrollData(id=None, print=_PRINT, own=True)
+        )
+        _ = await harness.reply("minted")
+        harness.identifier.enrolled = identification.Recognition(id="own", recognized=True, similarity=0.8, own=True)
+        await harness.send(
+            identification.EnrollEvent, "matched", identification.EnrollData(id=None, print=_PRINT, own=True)
+        )
+        _ = await harness.reply("matched")
+        return _delta(before, reader.points("bot.identification.count")), harness.owner.replies()
+
+    with metric_reader.recording(tmp_path, monkeypatch) as reader:
+        delta, replies = asyncio.run(run(reader))
+
+    voice = ("bot.identification.kind", "voice")
+    none = ("bot.failure.kind", "none")
+    assert delta == {
+        (none, voice, ("bot.identification.mode", "declared"), ("bot.outcome", "minted")): 1,
+        (none, voice, ("bot.identification.mode", "own_minted"), ("bot.outcome", "minted")): 1,
+        (none, voice, ("bot.identification.mode", "own_matched"), ("bot.outcome", "recognized")): 1,
+    }
+    assert [(event.id, event.data) for event in replies] == [
+        ("declared", identification.Recognition(id="3f2a9c", recognized=False, similarity=None, own=True)),
+        ("minted", identification.Recognition(id="own", recognized=False, similarity=None, own=True)),
+        ("matched", identification.Recognition(id="own", recognized=True, similarity=0.8, own=True)),
+    ]
+    modes = [
+        dict(recorded.attributes or {}).get("bot.identification.mode")
+        for recorded in finished_spans.get_finished_spans()
+        if recorded.name == "bot.identification.enroll"
+    ]
+    assert modes == ["declared", "own_minted", "own_matched"]

@@ -228,27 +228,56 @@ class IdentityStore(identification.Store):
     def enroll(
         self,
         kind: identification.Kind,
-        id: identification.Id,
+        id: identification.Id | None,
         print: identification.Print,
         own: bool,
         policy: identification.MatchPolicy,
         *,
         at: datetime.datetime,
     ) -> identification.Recognition:
+        if id is None and not own:
+            raise identification.StoreError(
+                identification.FailureKind.INVALID_INPUT, "an enrollment without an id must be the bot's own"
+            )
         stamp = memory.graph.utc_text(at)
 
         def work(connection: Connection) -> identification.Recognition:
             table = _space(connection, print)
+            enrolled = id
+            minted_similarity: float | None = None
+            if enrolled is None:
+                # Own ids are few, so each is compared exactly; a k-nearest query could miss them all
+                # behind closer ids that are not own.
+                own_rows = connection.execute(
+                    sqlalchemy.select(_IDENTITIES.c.seq, _IDENTITIES.c.id).where(
+                        _IDENTITIES.c.kind == kind, _IDENTITIES.c.model == print.model, _IDENTITIES.c.own == 1
+                    )
+                ).all()
+                decision = identification.decide(
+                    [
+                        identification.Neighbor(
+                            id=str(own_id),
+                            similarity=self._similarity(_stored(connection, table, int(seq)), print.vector),
+                            own=True,
+                        )
+                        for seq, own_id in own_rows
+                    ],
+                    policy,
+                )
+                if isinstance(decision, identification.Mint):
+                    enrolled, minted_similarity = uuid.uuid4().hex, decision.similarity
+                else:
+                    enrolled = decision.id
             row = connection.execute(
                 sqlalchemy.select(
                     _IDENTITIES.c.seq, _IDENTITIES.c.model, _IDENTITIES.c.own, _IDENTITIES.c.seen_count
-                ).where(_IDENTITIES.c.kind == kind, _IDENTITIES.c.id == id)
+                ).where(_IDENTITIES.c.kind == kind, _IDENTITIES.c.id == enrolled)
             ).first()
             if row is None:
                 result = connection.execute(
                     sqlalchemy.insert(_IDENTITIES).values(
                         kind=kind,
-                        id=id,
+                        id=enrolled,
                         model=print.model,
                         own=int(own),
                         linked=0,
@@ -262,7 +291,7 @@ class IdentityStore(identification.Store):
                     f"INSERT INTO {table} (seq, embedding, kind) VALUES (?, ?, ?)",
                     (seq, memory.index.pack(print.vector), kind),
                 )
-                return identification.Recognition(id=id, recognized=False, similarity=None, own=own)
+                return identification.Recognition(id=enrolled, recognized=False, similarity=minted_similarity, own=own)
             seq, model, stored_own, seen_count = int(row[0]), str(row[1]), bool(row[2]), int(row[3])
             if model != print.model:
                 raise identification.StoreError(
@@ -280,7 +309,7 @@ class IdentityStore(identification.Store):
                 .where(_IDENTITIES.c.seq == seq)
                 .values(own=int(sticky), seen_at=stamp, seen_count=min(seen_count + 1, policy.refine_weight_cap))
             )
-            return identification.Recognition(id=id, recognized=True, similarity=similarity, own=sticky)
+            return identification.Recognition(id=enrolled, recognized=True, similarity=similarity, own=sticky)
 
         return self._transaction(work)
 

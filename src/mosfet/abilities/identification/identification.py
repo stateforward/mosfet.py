@@ -5,6 +5,9 @@ registry is the HSM wrapper around an injected ``Identifier``: it serves ``Ident
 ``EnrollEvent`` and ``ForgetEvent`` one at a time, replies to each request's source under the
 request's id, and prunes ids that were never linked to a person on its own timer. Unknown prints
 are enrolled automatically: identifying a print either matches an existing id or mints a new one.
+An enrollment either names the id it refines (declared) or, for the bot's own print, names none:
+the print then refines the nearest own id of its kind or mints a new own id, and never matches an
+id that is not own.
 
 Prints are biometric (``telemetry.capture.Biometric``): full capture never writes their vectors,
 and no failure message carries a payload. Telemetry (every attribute is a closed set from code;
@@ -14,13 +17,14 @@ ids are never attributes):
   {recognized, minted, failed, skipped} × ``bot.failure.kind`` (``FailureKind`` or ``none``): one
   point per print identified or enrolled, one per failed request, one per print an identifier could
   not identify (``failed`` with ``none``), and, from the ear, one per voice segment its classifier
-  gave no voiceprint (``skipped`` with ``none``, voice only): at most 15 series.
+  gave no voiceprint (``skipped`` with ``none``, voice only). An enrolled print's point also carries
+  ``bot.identification.mode`` {declared, own_matched, own_minted}: at most 23 series.
 * ``bot.identification.pruned`` — ids pruned by retention, by kind: 2 series.
 * ``bot.identification.prune.failed`` — prunes that failed or timed out, by kind ×
   ``bot.failure.kind`` (``FailureKind``): at most 8 series.
 * ``bot.identification.forgotten`` — ids erased by a ``ForgetEvent``, by kind: 2 series.
 * Spans ``bot.identification.{identify,enroll,forget,prune}`` record a failure with the same
-  ``FailureKind`` string the reply carries.
+  ``FailureKind`` string the reply carries; an enrollment's span carries its ``bot.identification.mode``.
 """
 
 import abc
@@ -46,12 +50,15 @@ Kind: typing.TypeAlias = typing.Literal["voice", "face"]
 """The ref namespace an identity belongs to."""
 
 Id: typing.TypeAlias = typing.Annotated[str, pydantic.StringConstraints(pattern=r"^[a-z0-9][a-z0-9:._-]{0,127}$")]
-"""An identity id: minted ids are ``uuid4().hex``; a declared id (the bot's own voice) is like ``tts:warm``."""
+"""An identity id: minted ids (own ones included) are ``uuid4().hex``; a producer may declare any other."""
 
 Ref: typing.TypeAlias = typing.Annotated[
     str, pydantic.StringConstraints(pattern=r"^(voice|face):[a-z0-9][a-z0-9:._-]{0,127}$")
 ]
 """A participant ref for an identity, ``<kind>:<id>``; at most 134 characters."""
+
+_Mode: typing.TypeAlias = typing.Literal["declared", "own_matched", "own_minted"]
+"""How an enrollment found its id: the one it declared, the nearest own id, or an own id minted now."""
 
 _MAX_DIMENSIONS: typing.Final = 4096
 _MAX_PRINTS: typing.Final = 16
@@ -304,15 +311,19 @@ class Identifier(abc.ABC):
         """
 
     @abc.abstractmethod
-    async def enroll(self, kind: Kind, id: Id, print: Print, own: bool) -> Recognition:
+    async def enroll(self, kind: Kind, id: Id | None, print: Print, own: bool) -> Recognition:
         """Upsert ``id`` with ``print``: insert a new id, or refine an existing one.
 
         Refining advances ``seen_at`` and the capped ``seen_count`` weight; ``own`` is sticky. An
-        existing id answers ``recognized=True``.
+        existing id answers ``recognized=True``. With ``id=None`` (only with ``own``), the print is
+        matched among the own ids of ``kind`` alone under the ``MatchPolicy``: a ``Match`` or
+        ``Refine`` refines that id and answers ``recognized=True``; a ``Mint`` inserts a new own id
+        (``uuid4().hex``) and answers ``recognized=False`` with the best own candidate's similarity.
 
         Raises:
-            StoreError: ``INVALID_INPUT`` when ``print.model`` differs from the id's model or its
-                dimensions differ from the model's space; ``STORE_FAILED`` for a failed store.
+            StoreError: ``INVALID_INPUT`` when ``print.model`` differs from the id's model, its
+                dimensions differ from the model's space, or ``id`` is ``None`` without ``own``;
+                ``STORE_FAILED`` for a failed store.
         """
 
     @abc.abstractmethod
@@ -380,29 +391,52 @@ class IdentifiedData(pydantic.BaseModel):
 
 
 class EnrollData(pydantic.BaseModel):
-    """Enroll (or refine) a declared id with a print, for example the bot's own voice."""
+    """Enroll (or refine) an id with a print: a declared id, or, for the bot's own print, no id at all.
+
+    Without an id the print refines the nearest own id of the registry's kind, or mints a new own
+    id; it never matches an id that is not own. The reply names the id either way.
+    """
 
     model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
         frozen=True,
         extra="forbid",
         json_schema_extra={
-            "description": "Enroll or refine a declared id with a print.",
+            "description": (
+                "Enroll or refine an id with a print. A null id enrolls the bot's own print: it refines the "
+                "nearest own id or mints a new own id, and never matches an id that is not own."
+            ),
             "examples": [
                 {
-                    "id": "tts:warm",
+                    "id": None,
                     "print": {"vector": [0.6, 0.8], "model": "pyannote/wespeaker-voxceleb-resnet34-LM"},
                     "own": True,
-                }
+                },
+                {
+                    "id": "3f2a9c",
+                    "print": {"vector": [0.6, 0.8], "model": "pyannote/wespeaker-voxceleb-resnet34-LM"},
+                    "own": False,
+                },
             ],
         },
     )
 
-    id: Id = pydantic.Field(description="The declared id to enroll or refine.", examples=["tts:warm"])
+    id: Id | None = pydantic.Field(
+        description=(
+            "The declared id to enroll or refine; null only with own, to match the nearest own id or mint one."
+        ),
+        examples=[None, "3f2a9c"],
+    )
     print: Print = pydantic.Field(description="The print to enroll the id with.")
     own: bool = pydantic.Field(
-        description="True when the producer declares this id as the bot's own; sticky once set.",
+        description="True when the producer declares the print as the bot's own; sticky once set.",
         examples=[True],
     )
+
+    @pydantic.model_validator(mode="after")
+    def _own_when_undeclared(self) -> typing.Self:
+        if self.id is None and not self.own:
+            raise ValueError("an enrollment without an id must be the bot's own")
+        return self
 
 
 class ForgetData(pydantic.BaseModel):
@@ -457,6 +491,7 @@ class _DoneData(pydantic.BaseModel):
     model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(frozen=True, extra="forbid")
 
     reply: _Reply
+    mode: _Mode | None = None
 
 
 class _PrunedData(pydantic.BaseModel):
@@ -672,6 +707,7 @@ class Registry(ability.Ability[IdentifyData, IdentifiedData]):
                 failure = FailureData(kind=FailureKind.INVALID_INPUT, message=f"the {operation} request is invalid")
             else:
                 try:
+                    mode: _Mode | None = None
                     if isinstance(data, IdentifyData):
                         recognitions = await instance._identifier.identify(kind, data.prints)
                         if len(recognitions) != len(data.prints):
@@ -679,6 +715,11 @@ class Registry(ability.Ability[IdentifyData, IdentifiedData]):
                         reply: _Reply = IdentifiedData(kind=kind, recognitions=recognitions)
                     elif isinstance(data, EnrollData):
                         reply = await instance._identifier.enroll(kind, data.id, data.print, data.own)
+                        if data.id is not None:
+                            mode = "declared"
+                        else:
+                            mode = "own_matched" if reply.recognized else "own_minted"
+                        active.set_attribute("bot.identification.mode", mode)
                     else:
                         assert isinstance(data, ForgetData)
                         forgotten = await instance._identifier.forget(kind, data.id)
@@ -691,7 +732,9 @@ class Registry(ability.Ability[IdentifyData, IdentifiedData]):
                         kind=FailureKind.STORE_FAILED, message=f"the identifier failed: {type(error).__name__}"
                     )
                 else:
-                    _ = instance.dispatch(ctx, _DoneEvent.with_data_and_id(_DoneData(reply=reply), in_flight.id))
+                    _ = instance.dispatch(
+                        ctx, _DoneEvent.with_data_and_id(_DoneData(reply=reply, mode=mode), in_flight.id)
+                    )
                     return
             span.record_failure(active, failure.kind.value)
             _ = instance.dispatch(ctx, _FailedEvent.with_data_and_id(failure, in_flight.id))
@@ -723,7 +766,10 @@ class Registry(ability.Ability[IdentifyData, IdentifiedData]):
                 _FORGOTTEN.add(1, {"bot.identification.kind": kind})
         for recognition in recognitions:
             outcome = "failed" if recognition is None else "recognized" if recognition.recognized else "minted"
-            _COUNT.add(1, {"bot.identification.kind": kind, "bot.outcome": outcome, "bot.failure.kind": "none"})
+            attributes = {"bot.identification.kind": kind, "bot.outcome": outcome, "bot.failure.kind": "none"}
+            if data.mode is not None:
+                attributes["bot.identification.mode"] = data.mode
+            _COUNT.add(1, attributes)
 
     @staticmethod
     def _reply_failed(ctx: hsm.Context, instance: "Registry", event: hsm.Event[typing.Any]) -> None:

@@ -156,6 +156,20 @@ def test_identify_carries_one_to_sixteen_prints() -> None:
         _ = identification.IdentifyData(prints=(print,) * 17)
 
 
+def test_an_enrollment_without_an_id_must_be_the_bots_own() -> None:
+    print = identification.Print(vector=(1.0,), model="m")
+
+    own = identification.EnrollData(id=None, print=print, own=True)
+    declared = identification.EnrollData(id="3f2a9c", print=print, own=False)
+
+    assert own.id is None
+    assert declared.id == "3f2a9c"
+    with pytest.raises(pydantic.ValidationError, match="own"):
+        _ = identification.EnrollData(id=None, print=print, own=False)
+    with pytest.raises(pydantic.ValidationError):
+        _ = identification.EnrollData.model_validate({"print": print, "own": True})
+
+
 def test_events_are_named_in_the_identification_domain_and_never_model_tools() -> None:
     events = [
         (identification.IdentifyEvent, "bot.ability.identification.identify"),

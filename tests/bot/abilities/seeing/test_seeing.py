@@ -196,10 +196,10 @@ class FakeIdentifier(identification.Identifier):
 
     @typing.override
     async def enroll(
-        self, kind: identification.Kind, id: identification.Id, print: identification.Print, own: bool
+        self, kind: identification.Kind, id: identification.Id | None, print: identification.Print, own: bool
     ) -> identification.Recognition:
         del kind, print
-        return identification.Recognition(id=id, recognized=False, similarity=None, own=own)
+        return identification.Recognition(id=id or "own", recognized=False, similarity=None, own=own)
 
     @typing.override
     async def forget(self, kind: identification.Kind, id: identification.Id) -> bool:
