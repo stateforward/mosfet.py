@@ -1643,7 +1643,10 @@ class DraftData(pydantic.BaseModel):
     """Text a model has newly written into one marked string field of an event it is still selecting: a delta.
 
     A model writes a JSON string left to right, so the field only ever grows by appending; each draft carries what
-    was appended and how much was written before it. Nothing here knows any model or language.
+    was appended and how much was written before it. When the marker names an array the field lives ``within``,
+    each element's field is drafted on its own, and ``part`` says which element. The first draft of a field (of a
+    part) also carries the sibling fields the marker lists as ``leading`` that the model finished writing before the
+    field began. Nothing here knows any model or language.
     """
 
     model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
@@ -1653,8 +1656,10 @@ class DraftData(pydantic.BaseModel):
             "description": (
                 "A draft of one string field of an event a model is still writing: the text newly written into the "
                 "field and how many characters were written before it, which event it belongs to, where that event "
-                "sits in the selection, and its order among the drafts of one request. The final selection, under "
-                "the same event id, is authoritative."
+                "sits in the selection, which element of an array the field lives in (when it lives in one), its "
+                "order among the drafts of one request, and (on the first draft of a field only) the listed sibling "
+                "fields already written before the field began. The final selection, under the same event id, is "
+                "authoritative."
             ),
             "examples": [
                 {
@@ -1662,7 +1667,9 @@ class DraftData(pydantic.BaseModel):
                     "offset": 5,
                     "event": "bot.ability.communication.respond",
                     "item": 0,
+                    "part": 1,
                     "seq": 3,
+                    "leading": {},
                 }
             ],
         },
@@ -1675,8 +1682,9 @@ class DraftData(pydantic.BaseModel):
     offset: int = pydantic.Field(
         ge=0,
         description=(
-            "How many characters of the field were written before ``text``: a repeated delta is harmless "
-            "(``offset + len(text)`` within what was written), and one past what was written is a gap."
+            "How many characters of the field were written before ``text``, within this part when the field lives "
+            "in an array: a repeated delta is harmless (``offset + len(text)`` within what was written), and one "
+            "past what was written is a gap."
         ),
         examples=[5],
     )
@@ -1688,8 +1696,27 @@ class DraftData(pydantic.BaseModel):
     item: int = pydantic.Field(
         ge=0, description="Index of the drafted event in the selection's events array.", examples=[0]
     )
+    part: int | None = pydantic.Field(
+        default=None,
+        ge=0,
+        description=(
+            "Index of the element of the marker's ``within`` array whose field this drafts; ``None`` when the "
+            "field is directly in the event's data."
+        ),
+        examples=[1],
+    )
     seq: int = pydantic.Field(
         ge=0, description="Order of this draft among every draft of one processing request.", examples=[3]
+    )
+    leading: dict[str, pydantic.JsonValue] = pydantic.Field(
+        default_factory=dict[str, pydantic.JsonValue],
+        description=(
+            "On the first draft of a field (of a part) only: each sibling field the marker lists as leading, in the "
+            "same object as the field, that the model finished writing before the drafted field began, as decoded "
+            "JSON and not yet validated against the event's schema. A listed field written later, or one that does "
+            "not decode, is absent; every later draft carries none."
+        ),
+        examples=[{"expression": {"emotion": "amused"}}],
     )
 
 
@@ -1698,11 +1725,26 @@ class Draft:
     """Marker on an event payload schema (``__draft__``): ``field`` may reach the target as ``event`` while written.
 
     Read by Processing only, never shown to the model: the selected event's schema and payload are unchanged.
-    The final selection follows the drafts under the same event id, and it is what counts.
+    Without ``within``, ``field`` is in the event's data; with it, the drafted string is ``data.<within>[i].<field>``
+    for each element ``i`` of that array, drafted part by part. ``leading`` names sibling fields in the same object
+    as ``field`` that ride its first draft when the model finishes writing them before ``field`` begins; the schema
+    should declare them before ``field`` so a model tends to write them first. The final selection follows the
+    drafts under the same event id, and it is what counts.
+
+    Raises:
+        ValueError: ``leading`` lists ``field`` itself, or ``within`` is ``field``.
     """
 
     field: str
     event: hsm.Event[DraftData]
+    within: str | None = None
+    leading: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.field in self.leading:
+            raise ValueError(f"Draft field {self.field!r} cannot also be one of its leading fields.")
+        if self.within == self.field:
+            raise ValueError(f"Draft field {self.field!r} cannot also be the array it is drafted within.")
 
 
 class DraftSink(typing.Protocol):
@@ -1724,6 +1766,16 @@ _DRAFTS = _METER.create_counter(
         "or gap (counted by the consumer: a delta whose offset is past what was written)."
     ),
 )
+_LEADING = _METER.create_counter(
+    "bot.processing.draft.leading.count",
+    unit="{field}",
+    description=(
+        "Sibling fields a draft marker lists as leading, by outcome: captured (written before the drafted field "
+        "began; rides its first draft), invalid (did not decode as JSON; left out), or late (written after the "
+        "drafted field began; only the final selection carries it)."
+    ),
+)
+_JSON: pydantic.TypeAdapter[pydantic.JsonValue] = pydantic.TypeAdapter(pydantic.JsonValue)
 
 
 def _draft_marker(event: Event[typing.Any] | None) -> Draft | None:
@@ -1732,17 +1784,31 @@ def _draft_marker(event: Event[typing.Any] | None) -> Draft | None:
     return marker if isinstance(marker, Draft) else None
 
 
+_Role = typing.Literal["root", "events", "item", "data", "within", "element", "other"]
+
+
 @dataclasses.dataclass(kw_only=True)
 class _Frame:
     """One open JSON container in the streamed ``dispatch`` arguments, and what it is to the selection."""
 
     kind: typing.Literal["object", "array"]
-    role: typing.Literal["root", "events", "item", "data", "other"]
+    role: _Role
     key: str | None = None
     count: int = 0
     item: int = 0
+    part: int | None = None
     event: str | None = None
     unresolved: bool = False
+    leading: dict[str, pydantic.JsonValue] = dataclasses.field(default_factory=dict[str, pydantic.JsonValue])
+
+
+@dataclasses.dataclass(kw_only=True)
+class _Capture:
+    """The raw JSON text of one leading field's value being read, and the object (data or element) it is in."""
+
+    data: _Frame
+    key: str
+    text: list[str] = dataclasses.field(default_factory=list[str])
 
 
 _WHITESPACE = frozenset(" \t\r\n")
@@ -1755,16 +1821,23 @@ class DraftParser:
 
     A plain collaborator, built per request with the offered events. ``feed`` takes the next piece of the
     arguments (``{"events": [{"event": …, "target": …, "data": {…}}]}``) and returns the drafts it completes:
-    the unescaped text newly written into ``data.<field>``, at its offset, for each item whose offered event carries a
-    :class:`Draft` marker for that field. An item is drafted only when its ``event`` string ended before that
-    field's string began; otherwise it is counted ``unresolved``. Malformed arguments stop drafting for the
-    request and are counted ``unparsed``; nothing ever raises into the processor.
+    the unescaped text newly written into ``data.<field>`` (or into ``data.<within>[i].<field>``, per element ``i``,
+    when the marker names an array), at its offset, for each item whose offered event carries a :class:`Draft`
+    marker for that field. An item is drafted only when its ``event`` string ended before that field's string (or
+    that array) began; otherwise it is counted ``unresolved``. The marker's ``leading`` sibling fields, in the same
+    object as the field, whose values close before the field's string begins are decoded and ride its first draft.
+    Malformed arguments stop drafting for the request and are counted ``unparsed``; nothing ever raises into the
+    processor.
     """
 
     def __init__(self, schemas: collections.abc.Sequence[Event[typing.Any]]) -> None:
-        self._fields: dict[str, str] = {
-            event.name: marker.field for event in schemas if (marker := _draft_marker(event)) is not None
+        self._markers: dict[str, Draft] = {
+            event.name: marker for event in schemas if (marker := _draft_marker(event)) is not None
         }
+        # Keys in ``data`` that would draft (or open a drafted array) once the item's event is known.
+        self._fields: frozenset[str] = frozenset(
+            marker.field if marker.within is None else marker.within for marker in self._markers.values()
+        )
         self._stack: list[_Frame] = []
         self._mode: typing.Literal["value", "key", "colon", "next", "string", "escape", "unicode", "literal", "end"]
         self._mode = "value"
@@ -1779,6 +1852,8 @@ class DraftParser:
         self._offset: int = 0
         self._hex: str = ""
         self._high: int | None = None
+        # The leading field whose value is being read, if any.
+        self._capture: _Capture | None = None
 
     def feed(self, chunk: str) -> tuple[DraftData, ...]:
         """Read the next piece of the arguments; return the drafts it advanced, in order."""
@@ -1790,6 +1865,7 @@ class DraftParser:
             if not self._step(character, drafts):
                 self._failed = True
                 self._drafting = None
+                self._capture = None
                 _DRAFTS.add(1, {"outcome": "unparsed"})
                 return tuple(drafts)
         self._flush(drafts)
@@ -1800,15 +1876,27 @@ class DraftParser:
         if frame is None or len(self._text) == self._emitted or frame.event is None:
             return
         delta = "".join(self._text[self._emitted :])
-        drafts.append(DraftData(text=delta, offset=self._offset, event=frame.event, item=frame.item, seq=self._seq))
+        leading = frame.leading if self._offset == 0 else {}
+        drafts.append(
+            DraftData(
+                text=delta,
+                offset=self._offset,
+                event=frame.event,
+                item=frame.item,
+                part=frame.part,
+                seq=self._seq,
+                leading=leading,
+            )
+        )
         self._emitted = len(self._text)
         self._offset += len(delta)
         self._seq += 1
 
     def _open(self, kind: typing.Literal["object", "array"]) -> None:
         parent = self._stack[-1] if self._stack else None
-        role: typing.Literal["root", "events", "item", "data", "other"] = "other"
+        role: _Role = "other"
         item = 0
+        part = None
         if parent is None:
             role = "root" if kind == "object" else "other"
         elif parent.role == "root" and parent.key == "events" and kind == "array":
@@ -1817,7 +1905,11 @@ class DraftParser:
             role, item = "item", parent.count
         elif parent.role == "item" and parent.key == "data" and kind == "object":
             role, item = "data", parent.item
-        self._stack.append(_Frame(kind=kind, role=role, item=item))
+        elif parent.role == "data" and kind == "array" and self._within(parent):
+            role, item = "within", parent.item
+        elif parent.role == "within" and kind == "object":
+            role, item, part = "element", parent.item, parent.count
+        self._stack.append(_Frame(kind=kind, role=role, item=item, part=part))
         self._mode = "key" if kind == "object" else "value"
 
     def _close(self, kind: typing.Literal["object", "array"]) -> bool:
@@ -1828,6 +1920,15 @@ class DraftParser:
         return True
 
     def _value_done(self) -> None:
+        capture = self._capture
+        if capture is not None and self._stack and self._stack[-1] is capture.data:
+            self._capture = None
+            try:
+                capture.data.leading[capture.key] = _JSON.validate_json("".join(capture.text))
+            except pydantic.ValidationError:
+                _LEADING.add(1, {"outcome": "invalid"})
+            else:
+                _LEADING.add(1, {"outcome": "captured"})
         if self._stack:
             self._stack[-1].count += 1
             self._mode = "next"
@@ -1842,20 +1943,58 @@ class DraftParser:
         self._high = None
         self._drafting = None
         frame = self._stack[-1] if self._stack else None
-        if self._is_key or frame is None or frame.role != "data":
+        if self._is_key or frame is None or frame.key is None:
             return
-        item = self._item_of(frame)
-        if item is None:
-            return
-        field = None if item.event is None else self._fields.get(item.event)
-        if item.event is None and frame.key is not None and frame.key in self._fields.values():
-            if not item.unresolved:
-                item.unresolved = True
-                _DRAFTS.add(1, {"outcome": "unresolved"})
-            return
-        if field is not None and frame.key == field:
-            frame.event = item.event
+        if frame.role == "data":
+            self._unresolved(frame)
+        held = self._holder(frame)
+        if held is not None and frame.key == held[0].field:
+            frame.event = held[1]
             self._drafting = frame
+
+    def _unresolved(self, data: _Frame) -> bool:
+        """Whether ``data``'s current key would draft but its item's event is not known yet; counted once."""
+
+        item = self._item_of(data)
+        if item is None or item.event is not None or data.key not in self._fields:
+            return False
+        if not item.unresolved:
+            item.unresolved = True
+            _DRAFTS.add(1, {"outcome": "unresolved"})
+        return True
+
+    def _within(self, data: _Frame) -> bool:
+        """Whether the array opening at ``data``'s current key is the one its item's marker drafts within."""
+
+        if self._unresolved(data):
+            return False
+        item = self._item_of(data)
+        marker = None if item is None or item.event is None else self._markers.get(item.event)
+        return marker is not None and marker.within is not None and data.key == marker.within
+
+    def _holder(self, frame: _Frame) -> tuple[Draft, str] | None:
+        """The marker whose field lives directly in ``frame`` (a data object or an element), and its event name."""
+
+        item = self._item_of(frame) if frame.role in ("data", "element") else None
+        if item is None or item.event is None or (marker := self._markers.get(item.event)) is None:
+            return None
+        if (marker.within is None) != (frame.role == "data"):
+            return None
+        return marker, item.event
+
+    def _lead(self) -> None:
+        """After a key's colon: start reading its value when it is a leading field of the item's marker."""
+
+        frame = self._stack[-1]
+        if frame.key is None:
+            return
+        held = self._holder(frame)
+        if held is None or frame.key not in held[0].leading:
+            return
+        if frame.event is not None:
+            _LEADING.add(1, {"outcome": "late"})
+            return
+        self._capture = _Capture(data=frame, key=frame.key)
 
     def _item_of(self, data: _Frame) -> _Frame | None:
         return next(
@@ -1886,6 +2025,11 @@ class DraftParser:
         self._text.append(text)
 
     def _step(self, character: str, drafts: list[DraftData]) -> bool:
+        if self._mode == "literal" and character not in _LITERAL:
+            # A literal ends just before the character that follows it.
+            self._value_done()
+        if self._capture is not None:
+            self._capture.text.append(character)
         mode = self._mode
         if mode == "string":
             if character == '"':
@@ -1930,10 +2074,7 @@ class DraftParser:
                 self._append(chr(code))
             return True
         if mode == "literal":
-            if character in _LITERAL:
-                return True
-            self._value_done()
-            return self._step(character, drafts)
+            return True
         if character in _WHITESPACE:
             return True
         if mode == "value":
@@ -1963,6 +2104,7 @@ class DraftParser:
             if character != ":":
                 return False
             self._mode = "value"
+            self._lead()
             return True
         if mode == "next":
             frame = self._stack[-1]

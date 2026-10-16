@@ -1889,9 +1889,194 @@ def test_draft_parser_stops_at_malformed_arguments_counts_them_and_never_raises(
     assert after - before == collections.Counter({"unparsed": 1})
 
 
+class _ToldData(pydantic.BaseModel):
+    """A marked payload whose ``tone`` and ``level`` ride its first draft when they close before ``text`` begins."""
+
+    __draft__: typing.ClassVar[processing.Draft] = processing.Draft(
+        field="text", event=_SAY_DRAFT_EVENT, leading=("tone", "level")
+    )
+
+    tone: dict[str, object] | None = None
+    level: float | None = None
+    note: str | None = None
+    text: str
+
+
+_TOLD_EVENT = hsm.Event[_ToldData](name="tests.processing.told", kind=processing.EventKind, schema=_ToldData)
+_TONE: pydantic.JsonValue = {"mood": 'dry "wry"', "tags": ["a", {"b": None}], "on": True}
+_TOLD_ARGS = (
+    '{"events": [{"event": "tests.processing.told", "target": "voice", "data": {"tone": '
+    + json.dumps(_TONE)
+    + ', "level": -0.5e1, "note": "not listed", "text": "Hi there, friend"}}]}'
+)
+
+
+def test_draft_parser_carries_listed_fields_that_close_before_the_text_on_the_first_draft_only(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert json.loads(_TOLD_ARGS)["events"][0]["data"]["tone"] == _TONE
+    schemas = (_UNMARKED_EVENT, _TOLD_EVENT)
+    leading: dict[str, pydantic.JsonValue] = {"tone": _TONE, "level": -5.0}
+    with metric_reader.recording(tmp_path, monkeypatch) as reader:
+        before = _leading_counts(reader)
+        whole = _drafted(processing.DraftParser(schemas), (_TOLD_ARGS,))
+        after = _leading_counts(reader)
+
+    assert whole == [
+        processing.DraftData(text="Hi there, friend", offset=0, event=_TOLD_EVENT.name, item=0, seq=0, leading=leading)
+    ]
+    assert after - before == collections.Counter({"captured": 2})
+
+    for cut in range(len(_TOLD_ARGS) + 1):
+        drafts = _drafted(processing.DraftParser(schemas), (_TOLD_ARGS[:cut], _TOLD_ARGS[cut:]))
+        assert _appended(drafts) == "Hi there, friend", cut
+        assert drafts[0].leading == leading, cut
+        assert all(draft.leading == {} for draft in drafts[1:]), cut
+
+    by_character = _drafted(processing.DraftParser(schemas), _TOLD_ARGS)
+    assert by_character[0].leading == leading
+    assert all(draft.leading == {} for draft in by_character[1:])
+
+
+def test_draft_parser_leaves_out_listed_fields_that_are_late_or_do_not_decode(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    arguments = '{"events": [{"event": "tests.processing.told", "data": {"level": tru, "text": "Said", "tone": {"mood": "x"}}}]}'
+    with metric_reader.recording(tmp_path, monkeypatch) as reader:
+        before = _leading_counts(reader)
+        drafts = _drafted(processing.DraftParser((_TOLD_EVENT,)), (arguments,))
+        after = _leading_counts(reader)
+
+    assert drafts == [processing.DraftData(text="Said", offset=0, event=_TOLD_EVENT.name, item=0, seq=0)]
+    assert after - before == collections.Counter({"invalid": 1, "late": 1})
+
+
+def test_a_draft_marker_never_lists_its_own_field_as_leading() -> None:
+    with pytest.raises(ValueError, match="text"):
+        _ = processing.Draft(field="text", event=_SAY_DRAFT_EVENT, leading=("tone", "text"))
+
+
+def test_a_draft_marker_never_drafts_a_field_within_itself() -> None:
+    with pytest.raises(ValueError, match="words"):
+        _ = processing.Draft(field="words", event=_SAY_DRAFT_EVENT, within="words")
+
+
+class _LinePartData(pydantic.BaseModel):
+    """One element of a parted payload: its ``words`` are drafted, and its ``how`` rides its first draft."""
+
+    how: dict[str, object] | None = None
+    words: str
+
+
+class _LinesData(pydantic.BaseModel):
+    """A marked payload whose ``words`` are drafted element by element of ``parts``."""
+
+    __draft__: typing.ClassVar[processing.Draft] = processing.Draft(
+        field="words", event=_SAY_DRAFT_EVENT, within="parts", leading=("how",)
+    )
+
+    words: str | None = None
+    parts: list[_LinePartData]
+
+
+_LINES_EVENT = hsm.Event[_LinesData](name="tests.processing.lines", kind=processing.EventKind, schema=_LinesData)
+_HOW: pydantic.JsonValue = {"mood": "dry", "nested": {"words": "not drafted", "list": [1, {"words": "no"}]}}
+_LINES_ARGS = (
+    '{"events": [{"event": "tests.processing.lines", "target": "voice", "data": {"words": "not a part", "parts": ['
+    + '{"how": '
+    + json.dumps(_HOW)
+    + ', "words": "Oh, "}, {"words": "you \\"got\\" me."}, {"how": {"pace": 1.2}, "words": "Ha"}]}}]}'
+)
+
+
+def _parts_of(drafts: collections.abc.Sequence[processing.DraftData]) -> dict[int, str]:
+    """Each part's words as its deltas wrote them, checking each part's deltas start where its last one ended."""
+
+    written: dict[int, str] = {}
+    for draft in drafts:
+        assert draft.part is not None
+        assert draft.text
+        assert draft.offset == len(written.get(draft.part, ""))
+        written[draft.part] = written.get(draft.part, "") + draft.text
+    return written
+
+
+def test_draft_parser_drafts_each_part_of_a_within_array_with_its_own_leading_however_split(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    parts = json.loads(_LINES_ARGS)["events"][0]["data"]["parts"]
+    assert [part["words"] for part in parts] == ["Oh, ", 'you "got" me.', "Ha"]
+    schemas = (_UNMARKED_EVENT, _LINES_EVENT)
+    with metric_reader.recording(tmp_path, monkeypatch) as reader:
+        before = _leading_counts(reader)
+        whole = _drafted(processing.DraftParser(schemas), (_LINES_ARGS,))
+        after = _leading_counts(reader)
+
+    name = _LINES_EVENT.name
+    assert whole == [
+        processing.DraftData(text="Oh, ", offset=0, event=name, item=0, part=0, seq=0, leading={"how": _HOW}),
+        processing.DraftData(text='you "got" me.', offset=0, event=name, item=0, part=1, seq=1),
+        processing.DraftData(text="Ha", offset=0, event=name, item=0, part=2, seq=2, leading={"how": {"pace": 1.2}}),
+    ]
+    assert after - before == collections.Counter({"captured": 2})
+
+    for cut in range(len(_LINES_ARGS) + 1):
+        drafts = _drafted(processing.DraftParser(schemas), (_LINES_ARGS[:cut], _LINES_ARGS[cut:]))
+        assert _parts_of(drafts) == {0: "Oh, ", 1: 'you "got" me.', 2: "Ha"}, cut
+        assert [draft.seq for draft in drafts] == list(range(len(drafts))), cut
+        openings = [draft for draft in drafts if draft.offset == 0]
+        assert [draft.leading for draft in openings] == [{"how": _HOW}, {}, {"how": {"pace": 1.2}}], cut
+        assert all(draft.leading == {} for draft in drafts if draft.offset), cut
+
+    by_character = _drafted(processing.DraftParser(schemas), _LINES_ARGS)
+    assert _parts_of(by_character) == {0: "Oh, ", 1: 'you "got" me.', 2: "Ha"}
+
+
+def test_draft_parser_leaves_out_a_leading_field_written_after_its_part_began_in_that_part_only(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    arguments = (
+        '{"events": [{"event": "tests.processing.lines", "data": {"parts": [{"how": {"mood": "a"}, "words": "One. "}, '
+        '{"words": "Two.", "how": {"mood": "b"}}]}}]}'
+    )
+    with metric_reader.recording(tmp_path, monkeypatch) as reader:
+        before = _leading_counts(reader)
+        drafts = _drafted(processing.DraftParser((_LINES_EVENT,)), (arguments,))
+        after = _leading_counts(reader)
+
+    name = _LINES_EVENT.name
+    assert drafts == [
+        processing.DraftData(text="One. ", offset=0, event=name, item=0, part=0, seq=0, leading={"how": {"mood": "a"}}),
+        processing.DraftData(text="Two.", offset=0, event=name, item=0, part=1, seq=1),
+    ]
+    assert after - before == collections.Counter({"captured": 1, "late": 1})
+
+
+def test_draft_parser_drafts_no_part_of_a_within_array_written_before_the_event_name(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    arguments = '{"events": [{"data": {"parts": [{"words": "Too early."}, {"words": "Also."}]}, "event": "tests.processing.lines"}]}'
+    with metric_reader.recording(tmp_path, monkeypatch) as reader:
+        before = _draft_counts(reader)
+        drafts = _drafted(processing.DraftParser((_LINES_EVENT,)), (arguments,))
+        after = _draft_counts(reader)
+
+    assert drafts == []
+    assert after - before == collections.Counter({"unresolved": 1})
+
+
 def _draft_counts(reader: metric_reader.Reader) -> collections.Counter[str]:
     return collections.Counter(
         {str(point.attributes["outcome"]): int(point.value) for point in reader.points("bot.processing.draft.count")}
+    )
+
+
+def _leading_counts(reader: metric_reader.Reader) -> collections.Counter[str]:
+    return collections.Counter(
+        {
+            str(point.attributes["outcome"]): int(point.value)
+            for point in reader.points("bot.processing.draft.leading.count")
+        }
     )
 
 
