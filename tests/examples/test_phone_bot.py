@@ -241,7 +241,7 @@ class WordsAsAudio(vocal.speech.SpeechEncoder):
         self.format = vocal.speech.Format(sample_rate_hz=16000, channels=1)
 
     async def encode(self, input):
-        said = "".join([piece async for piece in input])
+        said = "".join([piece.words async for piece in input])
         yield vocal.speech.Audio(pcm=b"spoken:" + said.encode(), text=said)
 
 
@@ -305,7 +305,7 @@ def test_the_words_somebody_types_are_synthesized_on_this_machine() -> None:
             "from phone_bot_example import person",
             "async def said():",
             "    text = vocal.speech.Text()",
-            "    text.write('Call Bob at phone bot bob.')",
+            "    text.write(vocal.speech.Piece(part=0, words='Call Bob at phone bot bob.'))",
             "    text.close()",
             "    return [chunk async for chunk in person.SayEncoder().encode(text)]",
             "chunks = asyncio.run(said())",
@@ -363,7 +363,7 @@ SAID = "Call Bob at 555-0142 and mention the budget"
 real = subprocess.run
 person.subprocess.run = lambda command, **kwargs: real(["false"], **kwargs)
 text = vocal.speech.Text()
-text.write(SAID)
+text.write(vocal.speech.Piece(part=0, words=SAID))
 text.close()
 try:
     asyncio.run(anext(person.SayEncoder().encode(text)))

@@ -37,7 +37,7 @@ def test_served_speech_round_trips_through_encoding_and_transcription() -> None:
 
     async def encode() -> bytes:
         text = speech.Text()
-        text.write("Hello from the bot.")
+        text.write(speech.Piece(part=0, words="Hello from the bot."))
         text.close()
         return b"".join([chunk.pcm async for chunk in encoder.encode(text)])
 

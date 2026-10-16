@@ -47,7 +47,7 @@ class VoiceEncoder(conversation.voice.VoiceEncoder):
     async def encode(self, input: mosfet.abilities.EncodeData) -> str | bytes:
         # A whole string is the text written once and closed.
         text = vocal.speech.Text()
-        text.write(_response_text(input))
+        text.write(vocal.speech.Piece(part=0, words=_response_text(input)))
         text.close()
         return b"".join([chunk.pcm async for chunk in self.speech_encoder.encode(text)])
 

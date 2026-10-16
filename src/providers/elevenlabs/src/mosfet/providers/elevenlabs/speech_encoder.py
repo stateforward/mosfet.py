@@ -1,7 +1,7 @@
 """ElevenLabs stream-input text-to-speech as a ``vocal.speech.SpeechEncoder``.
 
-The text goes to ElevenLabs' stream-input WebSocket (``/v1/text-to-speech/{voice_id}/stream-input``) piece by
-piece as it is written, and the end of the text sends the end-of-input message. ElevenLabs' server decides when it
+The words of every part go to ElevenLabs' stream-input WebSocket (``/v1/text-to-speech/{voice_id}/stream-input``)
+piece by piece as they are written, and the end of the text sends the end-of-input message. ElevenLabs' server decides when it
 has enough text to generate (its ``chunk_length_schedule``), so speech starts as soon as it has enough of a reply
 that is still being written. Nothing here splits, joins or rewrites the text.
 
@@ -88,13 +88,14 @@ async def _connect(url: str, headers: collections.abc.Mapping[str, str]) -> Sock
     return _WebSocket(connection)
 
 
-async def _send(socket: Socket, text: collections.abc.AsyncIterable[str], read: list[str]) -> None:
-    """Send each piece of ``text`` as it arrives, then the end of input; blank text is refused once it ends."""
+async def _send(socket: Socket, text: collections.abc.AsyncIterable[speech.Piece], read: list[str]) -> None:
+    """Send the words of each piece of ``text`` as they arrive, then the end of input; blank words are refused once
+    the text ends."""
 
     async for piece in text:
-        if piece:
-            read.append(piece)
-            await socket.send(json.dumps({"text": piece}))
+        if piece.words:
+            read.append(piece.words)
+            await socket.send(json.dumps({"text": piece.words}))
     if not "".join(read).strip():
         raise encoding.Error("invalid_input", "ElevenLabs speech encoding requires non-blank text.")
     await socket.send(json.dumps({"text": ""}))
@@ -124,8 +125,9 @@ def _mapping(value: object) -> collections.abc.Mapping[str, object]:
 class SpeechEncoder(speech.SpeechEncoder):
     """ElevenLabs text-to-speech over its stream-input WebSocket, streamed as raw mono s16le PCM.
 
-    The text is sent as it is written; audio is yielded as it arrives, re-cut to whole samples, with the
-    characters the server aligned to it. Closing the stream early closes the socket, which cancels the encoding
+    The words of every part are sent in order as they are written, and no expression is applied
+    (``expressiveness`` is the default, so all parts form one run); audio is yielded as it arrives, re-cut to whole
+    samples, with the characters the server aligned to it. Closing the stream early closes the socket, which cancels the encoding
     at ElevenLabs. ``voice_id`` is the ElevenLabs voice the text is spoken in. ``connect`` opens the socket
     (injected in tests; the ``websockets`` client by default).
     """
@@ -148,7 +150,9 @@ class SpeechEncoder(speech.SpeechEncoder):
         self._connect: Connect = connect
 
     @typing.override
-    async def encode(self, input: collections.abc.AsyncIterable[str]) -> collections.abc.AsyncIterator[speech.Audio]:
+    async def encode(
+        self, input: collections.abc.AsyncIterable[speech.Piece]
+    ) -> collections.abc.AsyncIterator[speech.Audio]:
         query = urllib.parse.urlencode(
             {"model_id": self._model_id, "output_format": f"pcm_{self.format.sample_rate_hz}"}
         )

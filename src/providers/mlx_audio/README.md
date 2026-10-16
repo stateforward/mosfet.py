@@ -60,11 +60,15 @@ detection = VoiceDetection(classifier=VoiceActivityClassifier())
 diarization = VoiceDiarization(classifier=VoiceDiarizer())
 ```
 
-`SpeechEncoder` reads the utterance's text to its end (the model's `generate` takes
-the whole text; joining the pieces in order is its only buffering), then streams
-each chunk the model generates as mono s16le PCM. Alignment is emulated over the
-whole text: every chunk carries `""` but the last, which carries the whole text,
-so one generated chunk is held until the next arrives. It
+`SpeechEncoder` generates the reply once per run of consecutive parts with the same
+direction (the model's `generate` takes whole text; a run closes when a part with
+another direction begins, or when the reply ends), then streams each chunk the model
+generates as mono s16le PCM. Composition declares what the checkpoint applies
+(`expressiveness=`): a declared `pace` becomes the run's `speed`, clamped, and the
+declared natural-language cues its `instruct`; sounds and undeclared cues are
+ignored. Alignment is emulated per generation: every chunk carries `""` but the
+last, which carries the run's words, so one generated chunk is held until the next
+arrives. It
 declares its `sample_rate_hz` up front and refuses a model that generates at
 another rate (`invalid_response`). Closing the stream between chunks stops the
 generation; a chunk already being generated finishes first, because MLX native

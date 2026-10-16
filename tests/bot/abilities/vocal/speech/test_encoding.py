@@ -1,4 +1,4 @@
-"""The streaming speech encoding contract: Format, Audio, Text and SpeechEncoder."""
+"""The streaming speech encoding contract: Format, Audio, the Text pipe of pieces, and SpeechEncoder."""
 
 from mosfet.abilities import encoding
 from mosfet.abilities.vocal import speech
@@ -34,16 +34,18 @@ def test_format_measures_whole_frames_of_s16le() -> None:
 
 
 class _Words(speech.SpeechEncoder):
-    """Reads the text to its end, then says it one word per chunk, each chunk aligned to its word."""
+    """Reads the words to their end, then says them one word per chunk, each chunk aligned to its word."""
 
     def __init__(self) -> None:
         self.format: speech.Format = speech.Format(sample_rate_hz=8_000, channels=1)
         self.closed: bool = False
 
     @typing.override
-    async def encode(self, input: collections.abc.AsyncIterable[str]) -> collections.abc.AsyncIterator[speech.Audio]:
+    async def encode(
+        self, input: collections.abc.AsyncIterable[speech.Piece]
+    ) -> collections.abc.AsyncIterator[speech.Audio]:
         try:
-            whole = "".join([piece async for piece in input])
+            whole = "".join([piece.words async for piece in input])
             if not whole.strip():
                 raise encoding.Error("invalid_input", "blank text")
             for word in whole.split(" "):
@@ -52,14 +54,15 @@ class _Words(speech.SpeechEncoder):
             self.closed = True
 
 
-def test_a_speech_encoder_is_a_stream_encoder_of_text_to_aligned_audio() -> None:
+def test_a_speech_encoder_is_a_stream_encoder_of_pieces_to_aligned_audio_that_applies_nothing_by_default() -> None:
     assert issubclass(speech.SpeechEncoder, encoding.StreamEncoder)
     assert speech.SpeechEncoder.__abstractmethods__ == frozenset({"encode"})
+    assert _Words().expressiveness == speech.Expressiveness()
 
     async def run() -> tuple[speech.Audio, bool]:
         encoder = _Words()
         text = speech.Text()
-        text.write("one two three")
+        text.write(speech.Piece(part=0, words="one two three"))
         text.close()
         stream = encoder.encode(text)
         first = await anext(stream)
@@ -74,9 +77,23 @@ def test_a_speech_encoder_is_a_stream_encoder_of_text_to_aligned_audio() -> None
 
 
 def test_the_provider_contract_holds_for_an_aligned_speech_encoder() -> None:
-    chunks = asyncio.run(contract.assert_speech_encoder(_Words(), ["one t", "wo three"]))
+    chunks = asyncio.run(contract.assert_speech_encoder(_Words(), contract.words("one t", "wo three")))
 
     assert [chunk.text for chunk in chunks] == ["one ", "two ", "three"]
+
+
+def test_the_provider_contract_aligns_the_words_of_every_part_whatever_their_expressions() -> None:
+    pieces = [
+        speech.Piece(part=0, words="Oh, ", expression=speech.Expression(sound="laugh")),
+        speech.Piece(
+            part=1, words="you ", expression=speech.Expression(style="whisper", sound="sigh", sound_at="after")
+        ),
+        speech.Piece(part=1, words="got me"),
+    ]
+
+    chunks = asyncio.run(contract.assert_speech_encoder(_Words(), pieces))
+
+    assert "".join(chunk.text for chunk in chunks) == "Oh, you got me"
 
 
 def test_audio_is_whole_frames_with_the_text_it_finishes_saying() -> None:
@@ -89,11 +106,17 @@ def test_audio_is_whole_frames_with_the_text_it_finishes_saying() -> None:
         _ = speech.Audio.model_validate({"pcm": b"\x01\x00", "text": "Hi", "seconds": 1.0})
 
 
-def test_text_is_an_append_only_pipe_that_ends_once_closed() -> None:
-    async def run() -> tuple[list[str], str]:
+def _piece(part: int, words: str = "", expression: speech.Expression | None = None) -> speech.Piece:
+    return speech.Piece(part=part, words=words, expression=expression)
+
+
+def test_text_is_an_append_only_pipe_of_pieces_that_ends_once_closed() -> None:
+    loud = speech.Expression(volume=1.5)
+
+    async def run() -> tuple[list[speech.Piece], str, int]:
         text = speech.Text()
-        text.write("Sure. ")
-        read: list[str] = []
+        text.write(_piece(0, "Sure. "))
+        read: list[speech.Piece] = []
 
         async def reader() -> None:
             async for piece in text:
@@ -101,41 +124,82 @@ def test_text_is_an_append_only_pipe_that_ends_once_closed() -> None:
 
         task = asyncio.ensure_future(reader())
         await asyncio.sleep(0)
-        text.write("")
-        text.write("I can help")
+        text.write(_piece(0))
+        text.write(_piece(0, "I can"))
+        text.write(_piece(1, expression=loud))
+        text.write(_piece(1, " help"))
         await asyncio.sleep(0)
         text.close()
         text.close()
         await task
-        return read, text.written
+        return read, text.written, text.parts
 
-    read, written = asyncio.run(run())
+    read, written, parts = asyncio.run(run())
 
-    assert read == ["Sure. ", "I can help"]
+    # An empty piece that continues a part says nothing and is not kept; an empty opening piece is.
+    assert read == [_piece(0, "Sure. "), _piece(0, "I can"), _piece(1, expression=loud), _piece(1, " help")]
     assert written == "Sure. I can help"
+    assert parts == 2
+
+
+def test_text_refuses_pieces_that_break_the_stream_invariants() -> None:
+    text = speech.Text()
+    with pytest.raises(ValueError, match="part 1"):
+        text.write(_piece(1, "Skipped the first part."))
+    text.write(_piece(0, "One. ", speech.Expression(emphasis=True)))
+    with pytest.raises(ValueError, match="first piece"):
+        text.write(_piece(0, "Late.", speech.Expression(emphasis=True)))
+    with pytest.raises(ValueError, match="part 2"):
+        text.write(_piece(2, "Skipped a part."))
+    text.write(_piece(1, "Two."))
+    with pytest.raises(ValueError, match="part 0"):
+        text.write(_piece(0, "Back."))
+
+    assert text.written == "One. Two."
+    assert text.parts == 2
 
 
 def test_text_has_no_length_bound_and_refuses_writes_after_it_is_final() -> None:
-    """W3-20: a long reply is said in full; the pipe never caps the text."""
+    """W3-20: a long reply is said in full; the pipe never caps the words."""
 
     async def run() -> str:
-        return "".join([piece async for piece in text])
+        return "".join([piece.words async for piece in text])
 
     reply = "x" * 100 * 1024
     text = speech.Text()
-    text.write(reply)
-    text.write("y" * 500)
+    text.write(_piece(0, reply))
+    text.write(_piece(0, "y" * 500))
     assert text.written == reply + "y" * 500
     text.close()
     with pytest.raises(ValueError, match="final"):
-        text.write("z")
+        text.write(_piece(0, "z"))
     assert asyncio.run(run()) == reply + "y" * 500
 
 
-def test_core_has_no_text_segmentation_and_exports_only_the_encoder_contract() -> None:
-    """W3-14: the text goes to the TTS model; core never cuts it. W3-21: the TTS model is a speech encoder."""
+def test_core_has_no_text_segmentation_nor_markup_and_exports_only_the_encoder_and_part_contracts() -> None:
+    """W3-14: the words go to the TTS model; core never cuts them. P-18: nothing parses a message for sounds."""
 
     assert not hasattr(speech, "segment")
     assert not hasattr(speech.encoding, "segment")
-    assert sorted(speech.__all__) == ["Audio", "Format", "SpeechEncoder", "Text", "encoding"]
+    assert not hasattr(speech, "marks")
+    assert not hasattr(speech, "Delivery")
+    assert sorted(speech.__all__) == sorted(
+        [
+            "Audio",
+            "Cue",
+            "Expression",
+            "Expressiveness",
+            "Format",
+            "Locale",
+            "Part",
+            "Piece",
+            "Range",
+            "Sound",
+            "SpeechEncoder",
+            "Text",
+            "encoding",
+            "part",
+            "said",
+        ]
+    )
     assert sorted(speech.encoding.__all__) == ["Audio", "Format", "SpeechEncoder", "Text"]

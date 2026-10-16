@@ -11,7 +11,7 @@ from .client import (
 )
 from .embedder import Embedder
 from .processing import Processor, ProcessingError
-from .speech import SpeechDecoder, SpeechDecodingError, SpeechEncoder
+from .speech import ANGLE_TAGS, Markup, SpeechDecoder, SpeechDecodingError, SpeechEncoder
 from .text_generator import TextGenerationError, TextGenerator
 from .client import ReasoningEffort, ResponsesClient
 from .text_generator import ResponsesTextGenerator, UnsupportedReasoningEffortError
@@ -19,6 +19,7 @@ from .text_generator import ResponsesTextGenerator, UnsupportedReasoningEffortEr
 __version__ = "0.1.0"
 
 __all__ = [
+    "ANGLE_TAGS",
     "AsyncOpenAIClient",
     "ChatCompletionClient",
     "OpenAI",
@@ -26,6 +27,7 @@ __all__ = [
     "Embedder",
     "EmbeddingClient",
     "EmbeddingsClient",
+    "Markup",
     "OpenAIEmbeddingsSDK",
     "Processor",
     "ProcessingError",

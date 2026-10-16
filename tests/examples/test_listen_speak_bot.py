@@ -916,9 +916,9 @@ def test_lab_encoder_streams_through_and_keeps_what_it_said(tmp_path: pathlib.Pa
 
         @typing.override
         async def encode(
-            self, input: collections.abc.AsyncIterable[str]
+            self, input: collections.abc.AsyncIterable[vocal.speech.Piece]
         ) -> collections.abc.AsyncIterator[vocal.speech.Audio]:
-            said = "".join([piece async for piece in input])
+            said = "".join([piece.words async for piece in input])
             if not said.strip():
                 raise encoding.Error("invalid_input", "blank text")
             yield vocal.speech.Audio(pcm=b"\x01\x00", text="")
@@ -926,7 +926,7 @@ def test_lab_encoder_streams_through_and_keeps_what_it_said(tmp_path: pathlib.Pa
 
     async def run() -> tuple[list[bytes], LabEncoder]:
         encoder = LabEncoder(Served(), destination=tmp_path / "reply.wav")
-        chunks = [chunk.pcm for chunk in await contract.assert_speech_encoder(encoder, ["Hel", "lo."])]
+        chunks = [chunk.pcm for chunk in await contract.assert_speech_encoder(encoder, contract.words("Hel", "lo."))]
         return chunks, encoder
 
     chunks, encoder = asyncio.run(run())
@@ -1055,7 +1055,7 @@ def _rendered(*samples: int) -> bytes:
 
 async def _encoded(encoder: vocal.speech.SpeechEncoder, text: str) -> list[bytes]:
     said = vocal.speech.Text()
-    said.write(text)
+    said.write(vocal.speech.Piece(part=0, words=text))
     said.close()
     return [chunk.pcm async for chunk in encoder.encode(said)]
 
@@ -1080,9 +1080,9 @@ def test_say_encoder_streams_the_rendered_pcm_and_renders_in_a_temporary_directo
     assert asyncio.run(_encoded(encoder, " reply ")) == [b"\x01\x00\x02\x00"]
     assert encoder.format == vocal.speech.Format(sample_rate_hz=22_050, channels=1)
     assert encoder.calls == [" reply "]
-    assert [chunk.text for chunk in asyncio.run(contract.assert_speech_encoder(encoder, [" re", "ply "]))] == [
-        " reply "
-    ]
+    assert [
+        chunk.text for chunk in asyncio.run(contract.assert_speech_encoder(encoder, contract.words(" re", "ply ")))
+    ] == [" reply "]
     assert not rendered[0].parent.exists()
 
 

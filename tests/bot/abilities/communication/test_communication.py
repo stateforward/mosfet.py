@@ -52,9 +52,9 @@ class Script(vocal.speech.SpeechEncoder):
 
     @typing.override
     async def encode(
-        self, input: collections.abc.AsyncIterable[str]
+        self, input: collections.abc.AsyncIterable[vocal.speech.Piece]
     ) -> collections.abc.AsyncIterator[vocal.speech.Audio]:
-        said = "".join([piece async for piece in input])
+        said = "".join([piece.words async for piece in input])
         self.calls.append(said)
         if self.stall:
             _ = await asyncio.Event().wait()

@@ -137,23 +137,44 @@ that validates against the provided Pydantic/type schema.
 ## Speech
 
 `SpeechEncoder` is a `vocal.speech.SpeechEncoder` over an OpenAI-compatible `/v1/audio/speech` endpoint (for example
-Breeze TTS). The endpoint takes one whole `input`, so it reads the utterance's text to its end (joining the pieces in
-order is its only buffering; there are no chunking rules) and sends one request; closing it before the text ends sends
+Breeze TTS). The endpoint takes one whole `input`, so the reply is sent as one request per run of consecutive parts
+with the same direction (the provider merge rule): a run closes when a part with another direction begins, or when
+the reply ends, and only then is its request sent, in order; closing the stream before the first run closes sends
 none. It asks for `response_format="pcm"` and streams the raw s16le body through the SDK's `with_streaming_response`,
-yielding whole frames as they arrive with whole-text alignment: every chunk carries `""` but the last, which carries
-the whole text (so a stop before the end records nothing as said). Closing the iterator closes the response, which is
-how such a server cancels. `sample_rate_hz` and `channels` declare what the server sends: an `X-Sample-Rate` or
-`X-Sample-Format` header that disagrees is `encoding.Error("invalid_response")`. `voice` is the provider voice the
-text is spoken in; without one the request names no voice.
+yielding whole frames as they arrive with per-request alignment: every chunk carries `""` but a request's last, which
+carries the run's words (so a stop before it plays records none of the run as said). Closing the iterator closes the
+response, which is how such a server cancels. `sample_rate_hz` and `channels` declare what the server sends: an
+`X-Sample-Rate` or `X-Sample-Format` header that disagrees is `encoding.Error("invalid_response")`. `voice` is the
+provider voice the text is spoken in; without one the request names no voice.
+
+Each request is built from the parts' typed expressions, never from their words. `expressiveness` declares what the
+server applies and `markup` how it writes each declared sound and style inline (`ANGLE_TAGS` is a lab engine's
+`<laugh>`/`<whisper>` convention): the run's style tag comes first, each part's sound tag goes before or after that
+part's words, the run's natural-language cues become one `instructions` written after `voice_description` (a lab
+engine's `instructions` replace the voice's stored description), and a declared pace range becomes `speed`. Words that
+look like tags are sent unchanged. Undeclared cues and sounds change nothing.
 
 `SpeechDecoder` is a `hearing.speech.SpeechDecoder` over `/v1/audio/transcriptions`: raw PCM at `sample_rate_hz` and
 `channels` is wrapped as WAV (a WAV input is sent as is) and uploaded as multipart `file`; the stripped `text` comes
 back as UTF-8 bytes, and blank text raises `SpeechDecodingError("decode_failed")`.
 
 ```python
+from mosfet.abilities import vocal
 from mosfet.providers import openai_compat
 
 encoder = openai_compat.SpeechEncoder(model="tts", base_url=config.tts_base_url, voice="warm")
+lab = openai_compat.SpeechEncoder(
+    model="tts",
+    base_url=config.tts_base_url,
+    voice=voice_key,
+    voice_description=voice_description,
+    expressiveness=vocal.speech.Expressiveness(
+        cues=frozenset({"instructions", "emotion", "intensity", "emphasis", "style", "sound"}),
+        styles=("whisper",),
+        sounds=frozenset({"laugh", "giggle", "chuckle", "gasp", "sigh"}),
+    ),
+    markup=openai_compat.ANGLE_TAGS,
+)
 decoder = openai_compat.SpeechDecoder(model="stt", base_url=config.stt_base_url, language="en")
 ```
 

@@ -1,12 +1,16 @@
 """Speech over OpenAI-compatible audio endpoints: streamed speech encoding and batch transcription.
 
 ``SpeechEncoder`` is a ``vocal.speech.SpeechEncoder`` over ``POST /v1/audio/speech`` with ``response_format="pcm"``,
-streamed through the SDK's ``with_streaming_response``. The endpoint takes one whole ``input``, so the encoder
-reads the utterance's text to its end first (joining its pieces in order is its only buffering; there are no
-chunking rules) and sends one request; closing it before the text ends sends none. The raw s16le body is yielded
-as it arrives, re-cut to whole frames, with alignment emulated over the whole text: every chunk carries ``""`` but
-the last, which carries the whole text, so one chunk is held until the next arrives or the body ends. Closing the
-iterator closes the response, which is how a server such as Breeze cancels an encoding.
+streamed through the SDK's ``with_streaming_response``. The endpoint takes one whole ``input``, so the encoder says
+the reply as one request per run of consecutive parts with the same direction (the provider merge rule): a run
+closes when a part with another direction begins, or when the reply ends, and only then is its request sent, in
+order; closing the stream before the first run closes sends none. Each request is built from typed data only: the
+run's style tag, then each part's words with its sound tag before or after them (:class:`Markup`), one
+``instructions`` rendered from the run's natural-language cues after the voice's description, and ``speed`` from a
+declared pace range. Words are sent exactly as written, and nothing is ever searched for in them. The raw s16le body
+is yielded as it arrives, re-cut to whole frames, with alignment emulated per request: every chunk carries ``""``
+but the last, which carries the run's words (never its tags), so one chunk is held until the next arrives or the
+reply ends. Closing the iterator closes the response, which is how a server such as Breeze cancels an encoding.
 ``SpeechDecoder`` is a ``hearing.speech.SpeechDecoder`` over ``POST /v1/audio/transcriptions``: raw PCM is wrapped
 as a WAV file with the stdlib ``wave`` module and uploaded as multipart ``file``; the answer's ``text`` is returned
 as UTF-8 bytes.
@@ -19,25 +23,29 @@ contract does not allow ``invalid_response``; anything narrower-less is ``encode
 Telemetry (cardinality, METRICS > SPANS > Logs; every value comes from code). Speaking already counts and times each
 encoding stream, so this provider adds spans only:
 
-* ``bot.provider.openai_compat.speech.encode`` (component ``openai_compat.speech``, stage ``encode``), with
-  the bounded counts ``bot.text.chars`` and ``bot.audio.bytes`` and ``bot.http.status_class``. It is not made the
-  current span, because the stream yields to its consumer while it is open.
+* ``bot.provider.openai_compat.speech.encode`` (component ``openai_compat.speech``, stage ``encode``), one per
+  stream, with the bounded counts ``bot.text.chars``, ``bot.audio.bytes`` and ``bot.speech.requests`` (synthesis
+  requests sent) and the last ``bot.http.status_class``. It is not made the current span, because the stream
+  yields to its consumer while it is open.
 * ``bot.provider.openai_compat.speech.decode`` (stage ``decode``), with ``bot.audio.bytes``,
   ``bot.transcript.chars`` and ``bot.http.status_class``.
 
-Never text, audio, transcripts, voices, URLs, model names or credentials.
+Never text, audio, transcripts, voices, descriptions, cue values, URLs, model names or credentials.
 """
 
 from __future__ import annotations
 
 import asyncio
 import collections.abc
+import contextlib
+import dataclasses
 import io
 import typing
 import wave
 
 import openai
 import pydantic
+from opentelemetry import trace
 
 from mosfet.abilities import encoding, hearing, vocal
 from mosfet.telemetry import span
@@ -52,6 +60,52 @@ _STATUS_CLASS_ATTR: typing.Final = "bot.http.status_class"
 _OUTCOME_ATTR: typing.Final = "bot.outcome"
 _SAMPLE_BYTES: typing.Final = 2
 """s16le: two bytes per sample per channel."""
+_APPLICABLE: typing.Final[frozenset[vocal.speech.Cue]] = frozenset(
+    {"instructions", "emotion", "intensity", "emphasis", "style", "sound", "pace"}
+)
+"""The cues this endpoint can carry: natural-language cues in ``instructions``, style and sound as inline markup,
+and pace as ``speed``. Pitch and volume have no field, so declaring them would report them applied untruthfully."""
+
+
+@dataclasses.dataclass(frozen=True, kw_only=True)
+class Markup:
+    """How a server writes each declared sound and style inline in ``input``: the literal text of each tag.
+
+    A tag is concatenated from a part's typed fields, before or after its words, and never searched for in them.
+    """
+
+    sounds: collections.abc.Mapping[vocal.speech.Sound, str] = dataclasses.field(
+        default_factory=dict[vocal.speech.Sound, str]
+    )
+    styles: collections.abc.Mapping[str, str] = dataclasses.field(default_factory=dict[str, str])
+
+
+ANGLE_TAGS: typing.Final = Markup(
+    sounds={"laugh": "<laugh>", "giggle": "<giggle>", "chuckle": "<chuckle>", "gasp": "<gasp>", "sigh": "<sigh>"},
+    styles={"whisper": "<whisper>"},
+)
+"""The angle-tag markup of a lab speech engine that rewrites ``<laugh>`` and ``<whisper>`` style tags itself."""
+
+
+@dataclasses.dataclass(frozen=True, kw_only=True)
+class _Direction:
+    """How a run of parts is said, from the cues this encoder applies: equal directions share one request."""
+
+    instructions: str | None = None
+    emotion: str | None = None
+    style: str | None = None
+    intensity: float | None = None
+    emphasis: bool = False
+    speed: float | None = None
+
+
+@dataclasses.dataclass(kw_only=True)
+class _Said:
+    """One part as read so far: the words written into it, and the expression it opened with."""
+
+    expression: vocal.speech.Expression | None
+    words: list[str] = dataclasses.field(default_factory=list[str])
+
 
 type DecodingFailureKind = typing.Literal[
     "invalid_input", "unavailable", "timeout", "invalid_response", "decode_failed"
@@ -116,10 +170,18 @@ class SpeechEncoder(vocal.speech.SpeechEncoder):
     """Streaming text-to-speech over an OpenAI-compatible ``/v1/audio/speech`` endpoint, as raw s16le PCM.
 
     ``voice`` is the provider voice name the text is spoken in; without one the request names no voice, so the
-    server uses its default. ``sample_rate_hz`` and ``channels`` declare the PCM
-    the server sends (``format``); a server that says otherwise in ``X-Sample-Rate`` or ``X-Sample-Format`` is an
-    ``invalid_response``. ``client`` is an injected ``openai.AsyncOpenAI``; without one, it is built on first use
-    from ``base_url``, ``api_key``, ``timeout_seconds`` and ``default_headers``.
+    server uses its default. ``voice_description`` is the description the voice was made from: a server whose
+    ``instructions`` replace the voice's stored description (as a lab engine's do) keeps it when a part is directed,
+    because it is written before the direction. ``expressiveness`` declares what this server applies, and
+    ``markup`` how it writes each declared sound and style inline; its keys must be exactly the declared sounds and
+    styles. ``sample_rate_hz`` and ``channels`` declare the PCM the server sends (``format``); a server that says
+    otherwise in ``X-Sample-Rate`` or ``X-Sample-Format`` is an ``invalid_response``. ``client`` is an injected
+    ``openai.AsyncOpenAI``; without one, it is built on first use from ``base_url``, ``api_key``,
+    ``timeout_seconds`` and ``default_headers``.
+
+    Raises:
+        ValueError: ``expressiveness`` declares pitch or volume, which the endpoint cannot carry, or ``markup`` does
+            not write exactly the declared sounds and styles.
     """
 
     def __init__(
@@ -128,6 +190,9 @@ class SpeechEncoder(vocal.speech.SpeechEncoder):
         model: str,
         base_url: str,
         voice: str | None = None,
+        voice_description: str | None = None,
+        expressiveness: vocal.speech.Expressiveness = vocal.speech.Expressiveness(),
+        markup: Markup = Markup(),
         api_key: pydantic.SecretStr | None = None,
         sample_rate_hz: int = 24_000,
         channels: int = 1,
@@ -135,9 +200,17 @@ class SpeechEncoder(vocal.speech.SpeechEncoder):
         default_headers: collections.abc.Mapping[str, str] | None = None,
         client: AsyncOpenAIClient | None = None,
     ) -> None:
+        unsupported = sorted(expressiveness.cues - _APPLICABLE)
+        if unsupported:
+            raise ValueError(f"An OpenAI-compatible speech endpoint cannot apply: {', '.join(unsupported)}.")
+        if set(markup.sounds) != expressiveness.sounds or set(markup.styles) != set(expressiveness.styles):
+            raise ValueError("The markup must write exactly the sounds and styles the expressiveness declares.")
         self.format: vocal.speech.Format = vocal.speech.Format(sample_rate_hz=sample_rate_hz, channels=channels)
+        self.expressiveness: vocal.speech.Expressiveness = expressiveness
         self._model: str = model
         self._voice: str | None = voice
+        self._voice_description: str | None = voice_description
+        self._markup: Markup = markup
         self._base_url: str = base_url
         self._api_key: pydantic.SecretStr | None = api_key
         self._timeout_seconds: float = timeout_seconds
@@ -146,65 +219,43 @@ class SpeechEncoder(vocal.speech.SpeechEncoder):
 
     @typing.override
     async def encode(
-        self, input: collections.abc.AsyncIterable[str]
+        self, input: collections.abc.AsyncIterable[vocal.speech.Piece]
     ) -> collections.abc.AsyncIterator[vocal.speech.Audio]:
-        said = "".join([piece async for piece in input])
-        request: dict[str, object] = {
-            "model": self._model,
-            "input": said,
-            "voice": openai.omit if self._voice is None else self._voice,
-            "response_format": "pcm",
-        }
         active = span.tracer(_SCOPE).start_span(
-            _ENCODE_SPAN,
-            attributes={"bot.component.name": _COMPONENT, "bot.stage": "encode", "bot.text.chars": len(said)},
+            _ENCODE_SPAN, attributes={"bot.component.name": _COMPONENT, "bot.stage": "encode"}
         )
-        frame = _SAMPLE_BYTES * self.format.channels
+        chars = 0
+        requests = 0
         yielded = 0
+        # The last chunk, held until the next one arrives or the reply ends: the last one of a request carries the
+        # words that request said, and the reply's last one also carries any trailing words with nothing to say.
+        held: vocal.speech.Audio | None = None
         try:
-            if not said.strip():
-                raise encoding.Error("invalid_input", "OpenAI-compatible speech encoding requires non-blank text.")
-            started = False
-            pending = b""
-            held: bytes | None = None
-            try:
-                self._client = _client(
-                    self._client,
-                    base_url=self._base_url,
-                    api_key=self._api_key,
-                    timeout_seconds=self._timeout_seconds,
-                    default_headers=self._default_headers,
-                )
-                async with self._client.audio.speech.with_streaming_response.create(**request) as response:
-                    active.set_attribute(_STATUS_CLASS_ATTR, "2xx")
-                    self._check_format(response.headers)
-                    started = True
-                    async for chunk in response.iter_bytes():
-                        pending += chunk
-                        whole = len(pending) - len(pending) % frame
-                        if whole:
+            async with contextlib.aclosing(self._runs(input)) as runs:
+                async for run, direction in runs:
+                    words = "".join(word for said in run for word in said.words)
+                    chars += len(words)
+                    if not words.strip():
+                        # Only the reply's last run can have nothing to say; earlier ones join the run after them.
+                        if held is None:
+                            break
+                        held = held.model_copy(update={"text": held.text + words})
+                        continue
+                    requests += 1
+                    last: vocal.speech.Audio | None = None
+                    async with contextlib.aclosing(self._say(run, direction, active)) as said:
+                        async for pcm in said:
                             if held is not None:
-                                yielded += len(held)
-                                yield vocal.speech.Audio(pcm=held, text="")
-                            held, pending = pending[:whole], pending[whole:]
-            except encoding.Error:
-                raise
-            except Exception as error:
-                kind, status_class = _request_failure(error, started=started)
-                if status_class != "none":
-                    active.set_attribute(_STATUS_CLASS_ATTR, status_class)
-                raise encoding.Error(
-                    kind or "encode_failed",
-                    f"OpenAI-compatible speech encoding failed: {type(error).__name__}.",
-                ) from error
-            if pending:
-                raise encoding.Error(
-                    "invalid_response", "OpenAI-compatible speech encoding returned PCM that ends mid-frame."
-                )
+                                yielded += len(held.pcm)
+                                yield held
+                            held = last = vocal.speech.Audio(pcm=pcm, text="")
+                    if last is None:
+                        raise encoding.Error("invalid_response", "OpenAI-compatible speech encoding returned no audio.")
+                    held = last.model_copy(update={"text": words})
             if held is None:
-                raise encoding.Error("invalid_response", "OpenAI-compatible speech encoding returned no audio.")
-            yielded += len(held)
-            yield vocal.speech.Audio(pcm=held, text=said)
+                raise encoding.Error("invalid_input", "OpenAI-compatible speech encoding requires non-blank text.")
+            yielded += len(held.pcm)
+            yield held
         except encoding.Error as error:
             span.record_failure(active, error.kind)
             raise
@@ -214,8 +265,130 @@ class SpeechEncoder(vocal.speech.SpeechEncoder):
         else:
             active.set_attribute(_OUTCOME_ATTR, span.Ok)
         finally:
+            active.set_attribute("bot.text.chars", chars)
+            active.set_attribute("bot.speech.requests", requests)
             active.set_attribute("bot.audio.bytes", yielded)
             active.end()
+
+    async def _runs(
+        self, input: collections.abc.AsyncIterable[vocal.speech.Piece]
+    ) -> collections.abc.AsyncGenerator[tuple[list[_Said], _Direction], None]:
+        """The reply's runs, each once it closes: consecutive parts said with one direction, in order.
+
+        A run closes when a part with another direction begins, or when the reply ends. A run with no words to
+        say yet takes the direction of the part that follows it, so a blank part never sends a request.
+
+        Raises:
+            encoding.Error: ``invalid_input`` when the pieces break the stream's invariants.
+        """
+
+        run: list[_Said] = []
+        direction = _Direction()
+        opened = 0
+        async for piece in input:
+            if piece.part == opened:
+                opened += 1
+                following = self._direction(piece.expression)
+                if _spoken(run) and following != direction:
+                    yield run, direction
+                    run = []
+                if not _spoken(run):
+                    direction = following
+                run.append(_Said(expression=piece.expression))
+            elif piece.part != opened - 1 or piece.expression is not None:
+                raise encoding.Error("invalid_input", "Speech pieces must open each part in order, once.")
+            run[-1].words.append(piece.words)
+        if run:
+            yield run, direction
+
+    def _direction(self, expression: vocal.speech.Expression | None) -> _Direction:
+        """The part's direction from the cues this encoder declares, values clamped to its ranges."""
+
+        if expression is None:
+            return _Direction()
+        declared = self.expressiveness
+        cues = declared.cues
+        emotion = expression.emotion if "emotion" in cues else None
+        if declared.emotions is not None and emotion not in declared.emotions:
+            emotion = None
+        pace = declared.pace if "pace" in cues else None
+        return _Direction(
+            instructions=expression.instructions if "instructions" in cues else None,
+            emotion=emotion,
+            style=expression.style if expression.style in declared.styles else None,
+            intensity=expression.intensity if "intensity" in cues else None,
+            emphasis=expression.emphasis and "emphasis" in cues,
+            speed=None if pace is None or expression.pace is None else min(max(expression.pace, pace.min), pace.max),
+        )
+
+    async def _say(
+        self, run: list[_Said], direction: _Direction, active: trace.Span
+    ) -> collections.abc.AsyncGenerator[bytes, None]:
+        """Send one run's request and yield its PCM as it arrives, in whole frames."""
+
+        text: list[str] = [] if direction.style is None else [self._markup.styles[direction.style]]
+        for said in run:
+            words = "".join(said.words)
+            sound = None if said.expression is None else said.expression.sound
+            tag = self._markup.sounds.get(sound) if sound is not None and words.strip() else None
+            if tag is None:
+                text.append(words)
+            elif typing.cast(vocal.speech.Expression, said.expression).sound_at == "after":
+                text.extend((words, tag))
+            else:
+                text.extend((tag, words))
+        cues = [
+            *([] if direction.instructions is None else [direction.instructions]),
+            *([] if direction.emotion is None else [f"Emotion: {direction.emotion}."]),
+            *([] if direction.intensity is None else [f"Intensity: {direction.intensity:g} out of 1."]),
+            *(["Stress these words."] if direction.emphasis else []),
+        ]
+        instructions = " ".join(cues) if cues else None
+        if instructions is not None and self._voice_description:
+            instructions = f"{self._voice_description} {instructions}"
+        request: dict[str, object] = {
+            "model": self._model,
+            "input": "".join(text),
+            "voice": openai.omit if self._voice is None else self._voice,
+            "response_format": "pcm",
+            "instructions": openai.omit if instructions is None else instructions,
+            "speed": openai.omit if direction.speed is None else direction.speed,
+        }
+        frame = _SAMPLE_BYTES * self.format.channels
+        started = False
+        pending = b""
+        try:
+            self._client = _client(
+                self._client,
+                base_url=self._base_url,
+                api_key=self._api_key,
+                timeout_seconds=self._timeout_seconds,
+                default_headers=self._default_headers,
+            )
+            async with self._client.audio.speech.with_streaming_response.create(**request) as response:
+                active.set_attribute(_STATUS_CLASS_ATTR, "2xx")
+                self._check_format(response.headers)
+                started = True
+                async for chunk in response.iter_bytes():
+                    pending += chunk
+                    whole = len(pending) - len(pending) % frame
+                    if whole:
+                        yield pending[:whole]
+                        pending = pending[whole:]
+        except encoding.Error:
+            raise
+        except Exception as error:
+            kind, status_class = _request_failure(error, started=started)
+            if status_class != "none":
+                active.set_attribute(_STATUS_CLASS_ATTR, status_class)
+            raise encoding.Error(
+                kind or "encode_failed",
+                f"OpenAI-compatible speech encoding failed: {type(error).__name__}.",
+            ) from error
+        if pending:
+            raise encoding.Error(
+                "invalid_response", "OpenAI-compatible speech encoding returned PCM that ends mid-frame."
+            )
 
     def _check_format(self, headers: collections.abc.Mapping[str, str]) -> None:
         rate = headers.get("x-sample-rate")
@@ -226,6 +399,12 @@ class SpeechEncoder(vocal.speech.SpeechEncoder):
         sample_format = headers.get("x-sample-format")
         if sample_format is not None and sample_format.strip().lower() != "s16le":
             raise encoding.Error("invalid_response", "The speech server's X-Sample-Format is not s16le PCM.")
+
+
+def _spoken(run: collections.abc.Iterable[_Said]) -> bool:
+    """Whether any part of ``run`` has words to say."""
+
+    return any("".join(said.words).strip() for said in run)
 
 
 class SpeechDecoder(hearing.speech.SpeechDecoder):
@@ -328,4 +507,4 @@ class SpeechDecoder(hearing.speech.SpeechDecoder):
         return output.getvalue()
 
 
-__all__ = ["DecodingFailureKind", "SpeechDecoder", "SpeechDecodingError", "SpeechEncoder"]
+__all__ = ["ANGLE_TAGS", "DecodingFailureKind", "Markup", "SpeechDecoder", "SpeechDecodingError", "SpeechEncoder"]

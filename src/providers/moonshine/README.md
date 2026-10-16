@@ -44,7 +44,7 @@ from mosfet.providers.moonshine import SpeechEncoder
 
 async def main() -> None:
     text = vocal.speech.Text()
-    text.write("Hello from Moonshine.")
+    text.write(vocal.speech.Piece(part=0, words="Hello from Moonshine."))
     text.close()
     chunks = [chunk async for chunk in SpeechEncoder(language="en-us").encode(text)]
     print("pcm_bytes", sum(len(chunk.pcm) for chunk in chunks))
@@ -74,7 +74,7 @@ voice = speaking.Speaking(
 | Adapter | Moonshine API | Default |
 |---------|---------------|---------|
 | `SpeechDecoder` | `Transcriber.transcribe_without_streaming` | language `en` via `get_model_for_language` |
-| `SpeechEncoder` | `TextToSpeech.synthesize` | language `en-us`, mono s16le PCM at `sample_rate_hz` (24000); reads the text to its end, one chunk aligned to the whole text |
+| `SpeechEncoder` | `TextToSpeech.synthesize` | language `en-us`, mono s16le PCM at `sample_rate_hz` (24000); applies no expression, so reads the words of every part to their end as one run, one chunk aligned to all of them |
 
 Models are downloaded and cached by Moonshine on first use when `download=True` (TTS) /
 `get_model_for_language` (STT).

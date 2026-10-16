@@ -36,9 +36,9 @@ class RecordingSpeechEncoder(vocal.speech.SpeechEncoder):
 
     @typing.override
     async def encode(
-        self, input: collections.abc.AsyncIterable[str]
+        self, input: collections.abc.AsyncIterable[vocal.speech.Piece]
     ) -> collections.abc.AsyncIterator[vocal.speech.Audio]:
-        said = "".join([piece async for piece in input])
+        said = "".join([piece.words async for piece in input])
         self.calls.append(said)
         yield vocal.speech.Audio(pcm=b"\x01\x00", text="")
         yield vocal.speech.Audio(pcm=b"\x02\x00", text=said)

@@ -16,8 +16,10 @@ from ._runtime import MoonshineTextToSpeech, MoonshineTextToSpeechLoader, load_t
 class SpeechEncoder(speech.SpeechEncoder):
     """Moonshine ``TextToSpeech.synthesize`` as mono s16le PCM at ``sample_rate_hz``.
 
-    The model is not incremental and takes the whole text, so the text is read to its end (joining its pieces in
-    order is the only buffering) and said as one chunk once the model has spoken it, aligned to the whole text. Audio at
+    The model is not incremental and takes the whole text, and it applies no expression (``expressiveness`` is the
+    default, so every part has the same direction and all of them form one run): the reply is read to its end
+    (joining the words of its pieces in order is the only buffering) and said as one chunk once the model has
+    spoken it, aligned to all the words. Audio at
     a rate other than the declared ``sample_rate_hz`` is refused as ``invalid_response``, because raw PCM carries
     no header to correct it. ``voice`` selects the voice the model is loaded with; an injected ``tts`` is used as
     is.
@@ -43,8 +45,10 @@ class SpeechEncoder(speech.SpeechEncoder):
         self._load_tts: MoonshineTextToSpeechLoader = load_tts
 
     @typing.override
-    async def encode(self, input: collections.abc.AsyncIterable[str]) -> collections.abc.AsyncIterator[speech.Audio]:
-        said = "".join([piece async for piece in input])
+    async def encode(
+        self, input: collections.abc.AsyncIterable[speech.Piece]
+    ) -> collections.abc.AsyncIterator[speech.Audio]:
+        said = "".join([piece.words async for piece in input])
         if not said.strip():
             raise encoding.Error("invalid_input", "Moonshine speech encoding requires non-blank text.")
         pcm = await asyncio.to_thread(self._generate, said)

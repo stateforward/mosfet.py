@@ -81,7 +81,7 @@ class Script(vocal.speech.SpeechEncoder):
         self.stall_on: str | None = stall_on
         self.whole: bool = whole
         self.reads: list[list[str]] = []
-        self.texts: list[collections.abc.AsyncIterable[str]] = []
+        self.texts: list[collections.abc.AsyncIterable[vocal.speech.Piece]] = []
         self.closed: list[str] = []
         self.pulled: int = 0
 
@@ -95,7 +95,7 @@ class Script(vocal.speech.SpeechEncoder):
 
     @typing.override
     async def encode(
-        self, input: collections.abc.AsyncIterable[str]
+        self, input: collections.abc.AsyncIterable[vocal.speech.Piece]
     ) -> collections.abc.AsyncIterator[vocal.speech.Audio]:
         read: list[str] = []
         self.reads.append(read)
@@ -103,7 +103,7 @@ class Script(vocal.speech.SpeechEncoder):
         try:
             if self.whole:
                 async for piece in input:
-                    read.append(piece)
+                    read.append(piece.words)
                 if not "".join(read).strip():
                     raise encoding.Error("invalid_input", "blank text")
                 said = words("".join(read))
@@ -111,8 +111,8 @@ class Script(vocal.speech.SpeechEncoder):
                     yield await self._say(word, "".join(read) if index == len(said) - 1 else "")
                 return
             async for piece in input:
-                read.append(piece)
-                for word in words(piece):
+                read.append(piece.words)
+                for word in words(piece.words):
                     yield await self._say(word, word)
             if not "".join(read).strip():
                 raise encoding.Error("invalid_input", "blank text")
@@ -388,7 +388,10 @@ def test_speak_input_schema_offers_no_example_utterance() -> None:
 
 def test_the_scripted_encoder_keeps_the_alignment_contract() -> None:
     assert [
-        chunk.text for chunk in asyncio.run(contract.assert_speech_encoder(Script(), ["Of course, I can", " do that."]))
+        chunk.text
+        for chunk in asyncio.run(
+            contract.assert_speech_encoder(Script(), contract.words("Of course, I can", " do that."))
+        )
     ] == [
         "Of ",
         "course, ",
@@ -397,7 +400,7 @@ def test_the_scripted_encoder_keeps_the_alignment_contract() -> None:
         " do ",
         "that.",
     ]
-    whole = asyncio.run(contract.assert_speech_encoder(Script(whole=True), ["Of course,", " I can."]))
+    whole = asyncio.run(contract.assert_speech_encoder(Script(whole=True), contract.words("Of course,", " I can.")))
     assert [chunk.text for chunk in whole] == ["", "", "", "Of course, I can."]
 
 
@@ -572,7 +575,9 @@ class IteratorScript(Script):
         self.aclosed: list[str] = []
 
     @typing.override
-    def encode(self, input: collections.abc.AsyncIterable[str]) -> collections.abc.AsyncIterator[vocal.speech.Audio]:
+    def encode(
+        self, input: collections.abc.AsyncIterable[vocal.speech.Piece]
+    ) -> collections.abc.AsyncIterator[vocal.speech.Audio]:
         inner = typing.cast(collections.abc.AsyncGenerator[vocal.speech.Audio], super().encode(input))
         return Chunks(inner, self.aclosed, self)
 
@@ -686,12 +691,12 @@ def test_blank_text_goes_to_the_encoder_and_the_requester_always_gets_a_terminal
     class Refusing(Script):
         @typing.override
         async def encode(
-            self, input: collections.abc.AsyncIterable[str]
+            self, input: collections.abc.AsyncIterable[vocal.speech.Piece]
         ) -> collections.abc.AsyncIterator[vocal.speech.Audio]:
             read: list[str] = []
             self.reads.append(read)
             async for piece in input:
-                read.append(piece)
+                read.append(piece.words)
             if not "".join(read).strip():
                 raise encoding.Error("invalid_input", "blank text")
             yield vocal.speech.Audio(pcm=pcm(20), text="".join(read))
@@ -718,7 +723,7 @@ def test_a_stream_whose_close_fails_is_still_measured(tmp_path: pathlib.Path, mo
     class BreaksOnClose(IteratorScript):
         @typing.override
         def encode(
-            self, input: collections.abc.AsyncIterable[str]
+            self, input: collections.abc.AsyncIterable[vocal.speech.Piece]
         ) -> collections.abc.AsyncIterator[vocal.speech.Audio]:
             inner = typing.cast(collections.abc.AsyncGenerator[vocal.speech.Audio], Script.encode(self, input))
             return Breaks(inner, self.aclosed, self)
@@ -882,7 +887,7 @@ def test_a_stop_flushes_the_mouth_at_once_even_while_the_provider_takes_its_time
 
         @typing.override
         async def encode(
-            self, input: collections.abc.AsyncIterable[str]
+            self, input: collections.abc.AsyncIterable[vocal.speech.Piece]
         ) -> collections.abc.AsyncIterator[vocal.speech.Audio]:
             try:
                 async for _ in input:
@@ -1112,8 +1117,8 @@ def test_a_stop_while_drafting_closes_the_pipe_the_encoder_reads() -> None:
     assert (outputs[0].outcome, outputs[0].text, outputs[0].spoken) == ("stopped", "Never finished", "")
 
 
-async def _read(text: collections.abc.AsyncIterable[str]) -> list[str]:
-    return [piece async for piece in text]
+async def _read(text: collections.abc.AsyncIterable[vocal.speech.Piece]) -> list[str]:
+    return [piece.words async for piece in text]
 
 
 def test_drafts_and_finals_for_a_finished_utterance_never_reopen_it() -> None:

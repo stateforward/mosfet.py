@@ -84,11 +84,7 @@ def _encoder(server: FakeServer) -> speech_encoder.SpeechEncoder:
 
 
 def _text(*pieces: str) -> speech.Text:
-    text = speech.Text()
-    for piece in pieces:
-        text.write(piece)
-    text.close()
-    return text
+    return contract.text(contract.words(*pieces))
 
 
 async def _all(stream: collections.abc.AsyncIterator[speech.Audio]) -> list[speech.Audio]:
@@ -117,10 +113,24 @@ def test_the_text_is_streamed_to_the_stream_input_socket_and_audio_comes_back_wi
     assert server.closed
 
 
+def test_the_words_of_every_part_are_sent_in_order_and_no_expression_is_applied() -> None:
+    server = FakeServer(replies=[_audio(b"\x01\x00", "Oh, you got me."), _FINAL])
+    pieces = [
+        speech.Piece(part=0, words="Oh, ", expression=speech.Expression(sound="laugh", emotion="amused")),
+        speech.Piece(part=1, words="you got me.", expression=speech.Expression(style="whisper")),
+    ]
+
+    chunks = asyncio.run(contract.assert_speech_encoder(_encoder(server), pieces))
+
+    assert _encoder(server).expressiveness == speech.Expressiveness()
+    assert [chunk.text for chunk in chunks] == ["Oh, you got me."]
+    assert server.texts()[:4] == [" ", "Oh, ", "you got me.", ""]
+
+
 def test_the_shared_speech_encoder_contract_holds_on_the_wire() -> None:
     server = FakeServer(replies=[_audio(b"\x01\x00", "Hello "), _audio(b"\x02\x00\x03\x00", "there."), _FINAL])
 
-    chunks = asyncio.run(contract.assert_speech_encoder(_encoder(server), ["Hel", "lo there."]))
+    chunks = asyncio.run(contract.assert_speech_encoder(_encoder(server), contract.words("Hel", "lo there.")))
 
     assert [chunk.text for chunk in chunks] == ["Hello ", "there."]
     # Closing the last stream after its first chunk closed its socket.
@@ -141,11 +151,11 @@ def test_pieces_are_sent_as_they_are_written_and_audio_starts_before_the_text_en
 
     async def run() -> tuple[speech.Audio, list[str], list[speech.Audio]]:
         text = speech.Text()
-        text.write("Sure. ")
+        text.write(speech.Piece(part=0, words="Sure. "))
         stream = _encoder(server).encode(text)
         first = await anext(stream)
         sent_before_the_end = server.texts()
-        text.write("I can help.")
+        text.write(speech.Piece(part=0, words="I can help."))
         text.close()
         return first, sent_before_the_end, [chunk async for chunk in stream]
 
@@ -170,7 +180,7 @@ def test_text_the_server_never_aligned_rides_the_last_chunk_even_when_it_came_wh
 
     async def run() -> list[speech.Audio]:
         text = speech.Text()
-        text.write("Hello!")
+        text.write(speech.Piece(part=0, words="Hello!"))
         stream = _encoder(server).encode(text)
         first = asyncio.ensure_future(anext(stream))
         while len(server.replies) == 2:
@@ -199,7 +209,7 @@ def test_closing_the_stream_early_closes_the_socket() -> None:
 
     async def run() -> None:
         text = speech.Text()
-        text.write("one ")
+        text.write(speech.Piece(part=0, words="one "))
         stream = _encoder(server).encode(text)
         _ = await anext(stream)
         assert isinstance(stream, collections.abc.AsyncGenerator)

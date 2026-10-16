@@ -4599,9 +4599,9 @@ class UtteranceSpeechEncoder(vocal.speech.SpeechEncoder):
 
     @typing.override
     async def encode(
-        self, input: collections.abc.AsyncIterable[str]
+        self, input: collections.abc.AsyncIterable[vocal.speech.Piece]
     ) -> collections.abc.AsyncIterator[vocal.speech.Audio]:
-        said = "".join([piece async for piece in input])
+        said = "".join([piece.words async for piece in input])
         yield vocal.speech.Audio(pcm=spoken(said), text=said)
 
 
@@ -4719,9 +4719,9 @@ class TimedUtteranceSpeechEncoder(vocal.speech.SpeechEncoder):
 
     @typing.override
     async def encode(
-        self, input: collections.abc.AsyncIterable[str]
+        self, input: collections.abc.AsyncIterable[vocal.speech.Piece]
     ) -> collections.abc.AsyncIterator[vocal.speech.Audio]:
-        said = "".join([piece async for piece in input])
+        said = "".join([piece.words async for piece in input])
         yield vocal.speech.Audio(pcm=spoken(said).ljust(self._bytes, b"\x00"), text=said)
 
 

@@ -812,7 +812,7 @@ class Speaking(ability.Ability[InputData, OutputData]):
             drafted=isinstance(data, DraftData),
             enroll=None if instance._enrolled or not instance._listening else bytearray(),
         )
-        pipe.write(data.text)
+        pipe.write(vocal.speech.Piece(part=0, words=data.text))
         if isinstance(data, InputData):
             utterance.text, utterance.final = data.text, True
             pipe.close()
@@ -831,7 +831,7 @@ class Speaking(ability.Ability[InputData, OutputData]):
         if data.offset > written:
             _DRAFT_GAPS.add(1, {"outcome": "gap"})
             return
-        utterance.pipe.write(data.text[written - data.offset :])
+        utterance.pipe.write(vocal.speech.Piece(part=0, words=data.text[written - data.offset :]))
 
     @staticmethod
     def _finalized(ctx: hsm.Context, instance: "Speaking", event: hsm.Event[typing.Any]) -> None:
@@ -848,7 +848,7 @@ class Speaking(ability.Ability[InputData, OutputData]):
         utterance.text = data.text
         if not utterance.final:
             if used:
-                utterance.pipe.write(data.text[len(written) :])
+                utterance.pipe.write(vocal.speech.Piece(part=0, words=data.text[len(written) :]))
             utterance.pipe.close()
             utterance.final = True
         if utterance.drafted:

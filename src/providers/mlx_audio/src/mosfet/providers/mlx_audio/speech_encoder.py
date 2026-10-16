@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import collections.abc
 import concurrent.futures
+import contextlib
 import logging
 import typing
 
@@ -22,19 +23,34 @@ from ._mlx import (
 from .speech_decoder import BoundedWorker
 
 _LOG = logging.getLogger(__name__)
+_APPLICABLE: typing.Final[frozenset[speech.Cue]] = frozenset(
+    {"instructions", "emotion", "intensity", "emphasis", "pace"}
+)
+"""The cues a generation can carry: natural-language cues as ``instruct`` and pace as ``speed``."""
+
+type _Direction = tuple[str | None, float | None]
+"""How a run is generated: its ``instruct`` and its ``speed``, each ``None`` when the run sets none."""
 
 
 class SpeechEncoder(speech.SpeechEncoder):
     """MLX Audio TTS, streamed: the model's generated chunks are yielded as mono s16le PCM as they are produced.
 
-    ``generate`` takes the whole text, so the text is read to its end first; joining its pieces in order is the
-    only buffering. Alignment is emulated over the whole text: every chunk carries ``""`` but the last, which
-    carries the whole text, so one generated chunk is held back until the next arrives or the generation ends.
+    ``generate`` takes whole text, so the reply is generated once per run of consecutive parts with the same
+    direction (the provider merge rule): a run closes when a part with another direction begins, or when the reply
+    ends, and only then is it generated, in order. ``expressiveness`` declares what the loaded checkpoint applies,
+    as composition knows it: ``pace`` becomes the run's ``speed`` (clamped to the declared range), and the
+    natural-language cues (``instructions``, ``emotion``, ``intensity``, ``emphasis``) become its ``instruct``.
+    Sounds and every undeclared cue are ignored. Alignment is emulated per generation: every chunk carries ``""``
+    but the last, which carries the run's words, so one generated chunk is held back until the next arrives or the
+    reply ends.
     Native work runs one call at a time on a bounded worker: loading the model, starting a generation, and
     pulling each chunk. Closing the stream between chunks stops the generation; a chunk already being generated
     finishes first, because MLX native work cannot be interrupted. The model's sample rate must match the
     declared ``sample_rate_hz``: raw PCM carries no header, so a mismatch is refused as ``invalid_response``
     rather than played at the wrong speed. ``voice`` is the model voice the text is spoken in.
+
+    Raises:
+        ValueError: ``expressiveness`` declares a cue a generation cannot carry (style, pitch, volume or sound).
     """
 
     def __init__(
@@ -42,6 +58,7 @@ class SpeechEncoder(speech.SpeechEncoder):
         *,
         model_id: str = "mlx-community/Qwen3-TTS-12Hz-0.6B-Base-bf16",
         voice: str | None = None,
+        expressiveness: speech.Expressiveness = speech.Expressiveness(),
         speed: float = 1.0,
         lang_code: str = "auto",
         sample_rate_hz: int = 24_000,
@@ -53,7 +70,11 @@ class SpeechEncoder(speech.SpeechEncoder):
         load_model: SpeechEncodingModelLoader = load_speech_encoding_model,
         convert: PcmConverter = pcm16,
     ) -> None:
+        unsupported = sorted(expressiveness.cues - _APPLICABLE)
+        if unsupported:
+            raise ValueError(f"An MLX Audio generation cannot apply: {', '.join(unsupported)}.")
         self.format: speech.Format = speech.Format(sample_rate_hz=sample_rate_hz, channels=1)
+        self.expressiveness: speech.Expressiveness = expressiveness
         self._model_id: str = model_id
         self._voice: str | None = voice
         self._speed: float = speed
@@ -68,29 +89,108 @@ class SpeechEncoder(speech.SpeechEncoder):
         self._worker: BoundedWorker = BoundedWorker(name="mlx-audio-speech-encoder")
 
     @typing.override
-    async def encode(self, input: collections.abc.AsyncIterable[str]) -> collections.abc.AsyncIterator[speech.Audio]:
-        said = "".join([piece async for piece in input])
-        if not said.strip():
-            raise encoding.Error("invalid_input", "MLX Audio speech encoding requires non-blank text.")
-        chunks: collections.abc.Iterator[object] | None = None
+    async def encode(
+        self, input: collections.abc.AsyncIterable[speech.Piece]
+    ) -> collections.abc.AsyncIterator[speech.Audio]:
+        # The last chunk, held until the next one arrives or the reply ends: the last one of a generation carries
+        # the words it said, and the reply's last one also carries any trailing words with nothing to say.
+        held: speech.Audio | None = None
         try:
-            stream = await self._run(lambda: iter(self._resolve_model().generate(text=said, **self._kwargs())))
-            chunks = stream
-            held: bytes | None = None
-            while (result := await self._run(lambda: next(stream, None))) is not None:
-                pcm = self._pcm(result)
-                if not pcm:
-                    continue
-                if held is not None:
-                    yield speech.Audio(pcm=held, text="")
-                held = pcm
+            async with contextlib.aclosing(self._runs(input)) as runs:
+                async for words, direction in runs:
+                    if not words.strip():
+                        # Only the reply's last run can have nothing to say; earlier ones join the run after them.
+                        if held is None:
+                            break
+                        held = held.model_copy(update={"text": held.text + words})
+                        continue
+                    last: speech.Audio | None = None
+                    async with contextlib.aclosing(self._generate(words, direction)) as generated:
+                        async for pcm in generated:
+                            if held is not None:
+                                yield held
+                            held = last = speech.Audio(pcm=pcm, text="")
+                    if last is None:
+                        raise encoding.Error("invalid_response", "MLX Audio generated no audio.")
+                    held = last.model_copy(update={"text": words})
             if held is None:
-                raise encoding.Error("invalid_response", "MLX Audio generated no audio.")
-            yield speech.Audio(pcm=held, text=said)
+                raise encoding.Error("invalid_input", "MLX Audio speech encoding requires non-blank text.")
+            yield held
         except encoding.Error:
             raise
         except Exception as error:
             raise encoding.Error("encode_failed", "MLX Audio speech encoding failed.") from error
+
+    async def _runs(
+        self, input: collections.abc.AsyncIterable[speech.Piece]
+    ) -> collections.abc.AsyncGenerator[tuple[str, _Direction], None]:
+        """The reply's runs, each once it closes: the joined words of consecutive parts with one direction.
+
+        A run with no words to say yet takes the direction of the part that follows it.
+
+        Raises:
+            encoding.Error: ``invalid_input`` when the pieces break the stream's invariants.
+        """
+
+        words: list[str] = []
+        direction: _Direction = (None, None)
+        opened = 0
+        async for piece in input:
+            if piece.part == opened:
+                opened += 1
+                following = self._direction(piece.expression)
+                spoken = bool("".join(words).strip())
+                if spoken and following != direction:
+                    yield "".join(words), direction
+                    words, spoken = [], False
+                if not spoken:
+                    direction = following
+            elif piece.part != opened - 1 or piece.expression is not None:
+                raise encoding.Error("invalid_input", "Speech pieces must open each part in order, once.")
+            words.append(piece.words)
+        if opened:
+            yield "".join(words), direction
+
+    def _direction(self, expression: speech.Expression | None) -> _Direction:
+        """A part's ``instruct`` and ``speed`` from the cues this encoder declares, the pace clamped to its range."""
+
+        if expression is None:
+            return None, None
+        cues = self.expressiveness.cues
+        emotion = expression.emotion if "emotion" in cues else None
+        if self.expressiveness.emotions is not None and emotion not in self.expressiveness.emotions:
+            emotion = None
+        directed = [
+            *([expression.instructions] if expression.instructions is not None and "instructions" in cues else []),
+            *([] if emotion is None else [f"Emotion: {emotion}."]),
+            *(
+                [f"Intensity: {expression.intensity:g} out of 1."]
+                if expression.intensity is not None and "intensity" in cues
+                else []
+            ),
+            *(["Stress these words."] if expression.emphasis and "emphasis" in cues else []),
+        ]
+        pace = self.expressiveness.pace if "pace" in cues else None
+        speed = None if pace is None or expression.pace is None else min(max(expression.pace, pace.min), pace.max)
+        return (" ".join(directed) or None), speed
+
+    async def _generate(self, words: str, direction: _Direction) -> collections.abc.AsyncGenerator[bytes, None]:
+        """Generate one run and yield its PCM as each chunk is produced; closing it stops the generation."""
+
+        instruct, speed = direction
+        kwargs = self._kwargs()
+        if instruct is not None:
+            kwargs["instruct"] = instruct
+        if speed is not None:
+            kwargs["speed"] = speed
+        chunks: collections.abc.Iterator[object] | None = None
+        try:
+            stream = await self._run(lambda: iter(self._resolve_model().generate(text=words, **kwargs)))
+            chunks = stream
+            while (result := await self._run(lambda: next(stream, None))) is not None:
+                pcm = self._pcm(result)
+                if pcm:
+                    yield pcm
         finally:
             if isinstance(chunks, collections.abc.Generator):
                 generator = typing.cast(collections.abc.Generator[object], chunks)

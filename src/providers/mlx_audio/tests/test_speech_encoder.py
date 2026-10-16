@@ -60,18 +60,23 @@ async def _all(stream: collections.abc.AsyncIterator[speech.Audio]) -> list[spee
 
 
 def _text(*pieces: str) -> speech.Text:
-    text = speech.Text()
-    for piece in pieces:
-        text.write(piece)
-    text.close()
-    return text
+    return contract.text(contract.words(*pieces))
+
+
+def _parts(*parts: tuple[str, speech.Expression | None]) -> speech.Text:
+    return contract.text(
+        [
+            speech.Piece(part=index, words=words, expression=expression)
+            for index, (words, expression) in enumerate(parts)
+        ]
+    )
 
 
 def test_encoder_reads_the_text_to_its_end_and_streams_each_generated_chunk_aligned_to_the_whole_text() -> None:
     model = FakeSpeechEncodingModel(results=(chunk(2), chunk(3)))
     encoder = SpeechEncoder(model=model, voice="Chelsie", speed=1.2, lang_code="English", convert=as_pcm)
 
-    chunks = asyncio.run(contract.assert_speech_encoder(encoder, ["hel", "lo"]))
+    chunks = asyncio.run(contract.assert_speech_encoder(encoder, contract.words("hel", "lo")))
 
     assert encoder.format == speech.Format(sample_rate_hz=24_000, channels=1)
     assert chunks == [speech.Audio(pcm=bytes(4), text=""), speech.Audio(pcm=bytes(6), text="hello")]
@@ -152,3 +157,63 @@ def test_blank_text_and_no_audio_are_refused() -> None:
         _ = asyncio.run(_all(SpeechEncoder(model=FakeSpeechEncodingModel(results=())).encode(_text("hi"))))
 
     assert (blank.value.kind, silent.value.kind) == ("invalid_input", "invalid_response")
+
+
+_QWEN = speech.Expressiveness(
+    cues=frozenset({"instructions", "emotion", "intensity", "emphasis", "pace"}), pace=speech.Range(min=0.8, max=1.5)
+)
+"""A checkpoint that takes ``instruct`` and ``speed``, as composition declares it."""
+
+
+def test_a_declared_pace_is_the_runs_speed_clamped_and_natural_language_cues_are_its_instruct() -> None:
+    model = FakeSpeechEncodingModel(results=(chunk(1),))
+    encoder = SpeechEncoder(model=model, expressiveness=_QWEN, speed=1.1, convert=as_pcm)
+    secret = speech.Expression(instructions="Like a secret.", emotion="amused", intensity=0.5, emphasis=True, pace=2.0)
+
+    chunks = asyncio.run(_all(encoder.encode(_parts(("Psst. ", secret), ("Hello.", None)))))
+
+    assert [(call["text"], call["speed"], call.get("instruct")) for call in model.calls] == [
+        ("Psst. ", 1.5, "Like a secret. Emotion: amused. Intensity: 0.5 out of 1. Stress these words."),
+        ("Hello.", 1.1, None),
+    ]
+    assert [item.text for item in chunks] == ["Psst. ", "Hello."]
+
+
+def test_parts_with_one_direction_merge_into_one_generation_and_sounds_are_ignored() -> None:
+    model = FakeSpeechEncodingModel(results=(chunk(1), chunk(2)))
+    encoder = SpeechEncoder(model=model, expressiveness=_QWEN, convert=as_pcm)
+
+    chunks = asyncio.run(
+        _all(
+            encoder.encode(
+                _parts(
+                    ("Oh, ", speech.Expression(sound="laugh", emotion="amused")),
+                    ("you got me.", speech.Expression(emotion="amused", pitch=4.0)),
+                )
+            )
+        )
+    )
+
+    assert [(call["text"], call["instruct"]) for call in model.calls] == [("Oh, you got me.", "Emotion: amused.")]
+    assert chunks == [speech.Audio(pcm=bytes(2), text=""), speech.Audio(pcm=bytes(4), text="Oh, you got me.")]
+
+
+def test_undeclared_cues_never_change_a_generation() -> None:
+    model = FakeSpeechEncodingModel(results=(chunk(1),))
+    encoder = SpeechEncoder(model=model, convert=as_pcm)
+
+    _ = asyncio.run(_all(encoder.encode(_parts(("A ", speech.Expression(pace=1.4, emotion="sad")), ("b.", None)))))
+
+    assert model.calls == [{"text": "A b.", "speed": 1.0, "lang_code": "auto", "verbose": False, "stream": True}]
+
+
+def test_a_cue_a_generation_cannot_carry_is_refused_at_construction() -> None:
+    for cue in ("style", "sound", "pitch", "volume"):
+        declared = speech.Expressiveness.model_validate(
+            {"cues": {cue}}
+            | ({"styles": ("whisper",)} if cue == "style" else {})
+            | ({"sounds": {"laugh"}} if cue == "sound" else {})
+            | ({cue: {"min": 0.5, "max": 1.5}} if cue in ("pitch", "volume") else {})
+        )
+        with pytest.raises(ValueError, match=cue):
+            _ = SpeechEncoder(model=FakeSpeechEncodingModel(results=()), expressiveness=declared)

@@ -84,9 +84,10 @@ class SpeechEncoder(speech.SpeechEncoder):
             generation_config={"speech_config": [{"voice": "Kore"}]},
         )
 
-    The model is not incremental and takes the whole text, so the text is read to its end (joining its pieces
-    in order is the only buffering) and said as one chunk, aligned to the whole text. ``voice_name`` is
-    the Gemini voice the text is spoken in.
+    The model is not incremental and takes the whole text, and this encoder applies no expression
+    (``expressiveness`` is the default, so all parts form one run): the reply is read to its end (joining the words
+    of its pieces in order is the only buffering) and said as one chunk, aligned to all the words. ``voice_name``
+    is the Gemini voice the text is spoken in.
     """
 
     def __init__(
@@ -97,7 +98,6 @@ class SpeechEncoder(speech.SpeechEncoder):
         voice_name: str = _DEFAULT_VOICE,
         language_code: str | None = None,
         sample_rate_hz: int = _DEFAULT_SAMPLE_RATE_HZ,
-        prompt_prefix: str | None = None,
         store: bool = False,
         generation_config: collections.abc.Mapping[str, object] | None = None,
     ) -> None:
@@ -106,20 +106,20 @@ class SpeechEncoder(speech.SpeechEncoder):
         self._model: str = model
         self._voice_name: str = voice_name
         self._language_code: str | None = language_code
-        self._prompt_prefix: str | None = prompt_prefix
         self._store: bool = store
         self._generation_config: dict[str, object] = dict(generation_config or {})
 
     @typing.override
-    async def encode(self, input: collections.abc.AsyncIterable[str]) -> collections.abc.AsyncIterator[speech.Audio]:
-        said = "".join([piece async for piece in input])
+    async def encode(
+        self, input: collections.abc.AsyncIterable[speech.Piece]
+    ) -> collections.abc.AsyncIterator[speech.Audio]:
+        said = "".join([piece.words async for piece in input])
         if not said.strip():
             raise encoding.Error("invalid_input", "Gemini speech encoding requires non-blank text.")
         pcm = await asyncio.to_thread(self._generate, said, self._voice_name)
         yield speech.Audio(pcm=pcm, text=said)
 
     def _generate(self, text: str, voice_name: str) -> bytes:
-        spoken = text if not self._prompt_prefix else f"{self._prompt_prefix.rstrip()}\n{text}"
         speech_entry: dict[str, object] = {"voice": voice_name}
         if self._language_code is not None:
             speech_entry["language_code"] = self._language_code
@@ -127,7 +127,7 @@ class SpeechEncoder(speech.SpeechEncoder):
         try:
             response = self._client.create_interaction(
                 model=self._model,
-                input=spoken,
+                input=text,
                 response_format={"type": "audio"},
                 generation_config=generation_config,
                 store=self._store,

@@ -2196,11 +2196,11 @@ def test_a_drafted_response_is_heard_before_the_processor_has_finished_writing_i
 
         @typing.override
         async def encode(
-            self, input: collections.abc.AsyncIterable[str]
+            self, input: collections.abc.AsyncIterable[vocal.speech.Piece]
         ) -> collections.abc.AsyncIterator[vocal.speech.Audio]:
             # A streaming-input encoder: each piece is said as it arrives, one chunk per word of it.
             async for piece in input:
-                for word in re.findall(r"\s*\S+\s*", piece):
+                for word in re.findall(r"\s*\S+\s*", piece.words):
                     yield vocal.speech.Audio(pcm=b"\x01\x00" * (rate // 50), text=word)
 
     class Mouth(audio.Speaker):

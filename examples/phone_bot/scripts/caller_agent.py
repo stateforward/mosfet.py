@@ -101,7 +101,7 @@ async def _gemini_to_pcm(
     )
     # A whole string is the text written once and closed.
     said = vocal.speech.Text()
-    said.write(text)
+    said.write(vocal.speech.Piece(part=0, words=text))
     said.close()
     pcm = b"".join([chunk.pcm async for chunk in encoder.encode(said)])
     return pcm, encoder.format.sample_rate_hz

@@ -51,9 +51,9 @@ class _NoopSpeechEncoder(vocal.speech.SpeechEncoder):
         self.format = vocal.speech.Format(sample_rate_hz=16_000, channels=1)
 
     async def encode(
-        self, input: collections.abc.AsyncIterable[str]
+        self, input: collections.abc.AsyncIterable[vocal.speech.Piece]
     ) -> collections.abc.AsyncIterator[vocal.speech.Audio]:
-        yield vocal.speech.Audio(pcm=b"\x00\x00", text="".join([piece async for piece in input]))
+        yield vocal.speech.Audio(pcm=b"\x00\x00", text="".join([piece.words async for piece in input]))
 
 
 def test_cognition_never_uses_metadata_for_coordination() -> None:

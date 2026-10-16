@@ -86,9 +86,9 @@ class SayEncoder(vocal.speech.SpeechEncoder):
 
     @typing.override
     async def encode(
-        self, input: collections.abc.AsyncIterable[str]
+        self, input: collections.abc.AsyncIterable[vocal.speech.Piece]
     ) -> collections.abc.AsyncIterator[vocal.speech.Audio]:
-        said = "".join([piece async for piece in input])
+        said = "".join([piece.words async for piece in input])
         if not said.strip():
             raise encoding.Error("invalid_input", "Saying something out loud needs something to say.")
         try:

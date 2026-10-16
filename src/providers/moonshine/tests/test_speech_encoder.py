@@ -49,17 +49,14 @@ async def _all(stream: collections.abc.AsyncIterator[speech.Audio]) -> list[byte
 
 
 def _text(text: str) -> speech.Text:
-    said = speech.Text()
-    said.write(text)
-    said.close()
-    return said
+    return contract.text(contract.words(text))
 
 
 def test_encoder_yields_one_pcm_chunk_at_its_declared_rate() -> None:
     tts = FakeTextToSpeech(samples=[0.0, 0.5, -0.5], sample_rate=24_000)
     encoder = SpeechEncoder(tts=tts, speed=1.1)
 
-    chunks = asyncio.run(contract.assert_speech_encoder(encoder, ["Hello ", "Moonshine"]))
+    chunks = asyncio.run(contract.assert_speech_encoder(encoder, contract.words("Hello ", "Moonshine")))
 
     assert encoder.format == speech.Format(sample_rate_hz=24_000, channels=1)
     assert len(chunks) == 1
@@ -106,3 +103,17 @@ def test_encoder_failures_are_encoding_errors() -> None:
     with pytest.raises(encoding.Error, match="non-blank") as blank:
         _ = asyncio.run(_all(SpeechEncoder(tts=FakeTextToSpeech(samples=[0.0])).encode(_text("   "))))
     assert blank.value.kind == "invalid_input"
+
+
+def test_every_part_is_one_run_said_with_words_only() -> None:
+    tts = FakeTextToSpeech(samples=[0.0], sample_rate=24_000)
+    encoder = SpeechEncoder(tts=tts)
+    pieces = [
+        speech.Piece(part=0, words="Oh, ", expression=speech.Expression(sound="laugh", pace=1.5)),
+        speech.Piece(part=1, words="hi.", expression=speech.Expression(emotion="calm")),
+    ]
+
+    chunks = asyncio.run(contract.assert_speech_encoder(encoder, pieces))
+
+    assert encoder.expressiveness == speech.Expressiveness()
+    assert [chunk.text for chunk in chunks] == ["Oh, hi."]

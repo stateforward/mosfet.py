@@ -116,10 +116,7 @@ async def _all(stream: collections.abc.AsyncIterator[speech.Audio]) -> list[byte
 
 
 def _say(encoder: SpeechEncoder, text: str = "hello") -> list[bytes]:
-    said = speech.Text()
-    said.write(text)
-    said.close()
-    return asyncio.run(_all(encoder.encode(said)))
+    return asyncio.run(_all(encoder.encode(contract.text(contract.words(text)))))
 
 
 def test_encoder_uses_interactions_api_and_yields_one_pcm_chunk() -> None:
@@ -141,11 +138,27 @@ def test_encoder_reads_the_text_to_its_end_and_aligns_its_one_chunk_to_the_whole
     pcm = b"\x00\x01" * 8
     client = FakeContentClient(response=_tts_response(pcm))
 
-    chunks = asyncio.run(contract.assert_speech_encoder(SpeechEncoder(client=client), ["Hello ", "the", "re"]))
+    chunks = asyncio.run(
+        contract.assert_speech_encoder(SpeechEncoder(client=client), contract.words("Hello ", "the", "re"))
+    )
 
     assert chunks == [speech.Audio(pcm=pcm, text="Hello there")]
     # One request per non-blank stream (the whole text, then the one closed after its chunk); blank text sends none.
     assert [call.kwargs["input"] for call in client.calls] == ["Hello there", "Hello there"]
+
+
+def test_every_part_is_one_whole_text_said_as_written_with_no_expression() -> None:
+    client = FakeContentClient(response=_tts_response(b"\x00\x01"))
+    pieces = [
+        speech.Piece(part=0, words="Oh, ", expression=speech.Expression(sound="laugh")),
+        speech.Piece(part=1, words="hi.", expression=speech.Expression(instructions="Softly.")),
+    ]
+
+    chunks = asyncio.run(contract.assert_speech_encoder(SpeechEncoder(client=client), pieces))
+
+    assert chunks == [speech.Audio(pcm=b"\x00\x01", text="Oh, hi.")]
+    assert client.calls[0].kwargs["input"] == "Oh, hi."
+    assert SpeechEncoder(client=client).expressiveness == speech.Expressiveness()
 
 
 def test_the_constructor_voice_names_the_voice() -> None:

@@ -87,7 +87,7 @@ client = ChatClient(api_key="your-gemini-api-key")
 # interactions.create(model=..., input=text, response_format={"type":"audio"},
 #                     generation_config={"speech_config":[{"voice":"Kore"}]})
 text = vocal.speech.Text()
-text.write("Hello.")
+text.write(vocal.speech.Piece(part=0, words="Hello."))
 text.close()
 pcm = b"".join([chunk.pcm async for chunk in SpeechEncoder(client=client, voice_name="Kore").encode(text)])
 
