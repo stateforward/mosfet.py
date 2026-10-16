@@ -10,12 +10,14 @@ fit to a token budget, and brings a memory to mind in full when the bot delibera
 (the model-callable ``RecallEvent``, answered by a ``RecollectedEvent`` observation).
 ``Consolidation`` works through memory while the bot rests: it backfills vectors, then offers a
 model one unit at a time to link, merge, forget, or leave as it is. ``StmMemory`` is the short-term
-register of admitted stimuli.
+register of admitted stimuli. Facts the bot holds about itself share one row shape about
+``SELF_SUBJECT``, built with ``self_fact_select_input`` and ``self_fact_insert_input``.
 """
 
-from . import associative, consolidation, graph, index, memory, payload, schema, stm, store
+from . import associative, consolidation, fact, graph, index, memory, payload, schema, stm, store
 from .associative import AssociateEvent, AssociatedEvent, Associative, RecallEvent, RecollectedEvent
 from .consolidation import Consolidation, RestEvent, UnitOutcomeEvent, WakeEvent
+from .fact import SELF_SUBJECT, self_fact_insert_input, self_fact_select_input
 from .index import ExactIndex, Index, Neighbor
 from .memory import (
     REQUESTS,
@@ -108,6 +110,7 @@ __all__ = [
     "MEMORY_TABLE",
     "OPERATION_TIMEOUT",
     "REQUESTS",
+    "SELF_SUBJECT",
     "STM_MEMORY_TABLE",
     "Act",
     "AssociateEvent",
@@ -193,6 +196,7 @@ __all__ = [
     "compile_statement",
     "compile_statements",
     "consolidation",
+    "fact",
     "graph",
     "index",
     "memory",
@@ -201,6 +205,8 @@ __all__ = [
     "payload",
     "recent_select",
     "schema",
+    "self_fact_insert_input",
+    "self_fact_select_input",
     "stm",
     "stm_memory_table",
     "store",

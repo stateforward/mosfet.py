@@ -11,7 +11,7 @@ A bot starts with no name. Someone in its environment says one, cognition may se
 
 from . import identity, name, recognition, value
 from .identity import AddressedData, AddressedEvent, AdoptData, AdoptEvent, Identity
-from .name import NAME_QUERY, NAME_SUBJECT, Name, adopted_name, name_insert_input, name_select_input, names_from_output
+from .name import NAME_QUERY, Name, adopted_name, name_insert_input, name_select_input, names_from_output
 from .recognition import NameRecognizer, SpeechNameRecognizer, hears_name
 from .value import (
     IdentitySet,
@@ -26,7 +26,6 @@ from .value import (
 
 __all__ = [
     "NAME_QUERY",
-    "NAME_SUBJECT",
     "AddressedData",
     "AddressedEvent",
     "AdoptData",

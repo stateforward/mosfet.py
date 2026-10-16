@@ -1,10 +1,9 @@
 """The name a bot answers to, stored the way every other durable fact is.
 
-A name is a **fact about a subject**, and the subject is the bot itself: ``kind=fact``,
-``subject_ref=self``, ``query_tags=self_name`` on the existing ``bot_memory`` schema — no new
-table, no migration. A name is a fact row, not an episode and not an instruction: it records
-something the bot *is*, never something it was told to *do*. Nothing about a name is ever
-completed, released, or acted on.
+A name is a **self-fact**: a ``memory`` fact row about ``memory.SELF_SUBJECT`` tagged
+``query_tags=self_name``, written and read with the shared self-fact helpers. A name is a fact
+row, not an episode and not an instruction: it records something the bot *is*, never something it
+was told to *do*. Nothing about a name is ever completed, released, or acted on.
 
 Adoption is append-only. A bot that was renamed still remembers having been called something
 else, so the current name is simply the most recently adopted row.
@@ -16,15 +15,11 @@ from .. import memory
 
 import datetime
 import typing
-import uuid
 
 import pydantic
-from sqlalchemy import insert
 
 # Stable query_tags value for adopted names in bot_memory.
 NAME_QUERY = "self_name"
-# Stable subject_ref for a memory that is about the bot itself.
-NAME_SUBJECT = "self"
 
 
 class Name(pydantic.BaseModel):
@@ -76,46 +71,26 @@ def adopted_name(output: memory.OutputData, *, statement_index: int = 0) -> Name
 def name_select_input(*, limit: int = 50) -> memory.InputData:
     """Memory apply input that SELECTs the ``limit`` most recently adopted names, oldest first."""
 
-    table = memory.memory_table
-    clause = memory.recent_select(table.c.query_tags == NAME_QUERY, table.c.subject_ref == NAME_SUBJECT, limit=limit)
-    return memory.InputData(statements=memory.compile_statements(clause))
+    return memory.self_fact_select_input(NAME_QUERY, limit=limit)
 
 
 def name_insert_input(
     name: Name,
     *,
-    scope: str = "long_term",
     memory_id: str | None = None,
     created_at: datetime.datetime | None = None,
 ) -> memory.InputData:
-    """Memory apply input that INSERTs one adopted name.
+    """Memory apply input that INSERTs one adopted name as a self-fact.
 
-    ``created_at`` is written explicitly rather than left to the column default: the default is
-    ``CURRENT_TIMESTAMP``, whose one-second resolution cannot order two adoptions made in the
-    same second, and "which name is current" is exactly that ordering.
+    "Which name is current" is the order of adoption, which the self-fact stamp keeps even for two
+    adoptions made in the same second.
     """
 
-    stamp = created_at if created_at is not None else datetime.datetime.now(datetime.UTC)
-    table = memory.memory_table
-    clause = insert(table).values(
-        memory_id=memory_id or uuid.uuid4().hex,
-        scope=scope,
-        context_ref=None,
-        subject_ref=NAME_SUBJECT,
-        kind=name.kind,
-        sensitivity="standard",
-        retention="retain",
-        content=name.model_dump_json(),
-        content_format="application/json",
-        query_tags=NAME_QUERY,
-        created_at=stamp.isoformat(),
-    )
-    return memory.InputData(statements=memory.compile_statements(clause))
+    return memory.self_fact_insert_input(NAME_QUERY, name, created_at=created_at, memory_id=memory_id)
 
 
 __all__ = [
     "NAME_QUERY",
-    "NAME_SUBJECT",
     "Name",
     "adopted_name",
     "name_insert_input",

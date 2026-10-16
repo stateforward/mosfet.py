@@ -58,7 +58,7 @@ def test_an_adopted_name_is_a_fact_about_the_bot_itself() -> None:
     assert len(rows) == 1
     row = rows[0]
     assert row["query_tags"] == identity.NAME_QUERY
-    assert row["subject_ref"] == identity.NAME_SUBJECT
+    assert row["subject_ref"] == memory.SELF_SUBJECT
     assert row["kind"] == "fact"
     assert row["retention"] == "retain"
     assert row["sensitivity"] == "standard"
