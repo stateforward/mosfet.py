@@ -25,6 +25,7 @@ from mosfet.abilities import ability
 from mosfet.abilities import cognition
 from mosfet.abilities import processing
 from mosfet.abilities import speaking
+from mosfet.abilities import vocal
 from . import conversation
 from mosfet.protocols import attachment
 from mosfet import telemetry
@@ -436,11 +437,11 @@ class Communication(ability.Ability[TurnData, object]):
         target = instance._speaking
         forwarded: hsm.Event[typing.Any]
         if isinstance(data, RespondData):
-            forwarded = speaking.InputEvent.with_data(speaking.InputData(text=data.text))
+            forwarded = speaking.InputEvent.with_data(speaking.InputData(parts=(vocal.speech.Part(words=data.text),)))
         else:
             assert isinstance(data, processing.DraftData)
-            # The delta goes on unchanged: what was newly written, at the offset it was written at.
-            forwarded = speaking.DraftEvent.with_data(speaking.DraftData(text=data.text, offset=data.offset))
+            # The delta goes on unchanged: what was newly written into the one part, at the offset it was written at.
+            forwarded = speaking.DraftEvent.with_data(speaking.DraftData(part=0, words=data.text, offset=data.offset))
         with span.operation(
             "bot.communication.response.dispatch",
             scope="bot.abilities.communication",

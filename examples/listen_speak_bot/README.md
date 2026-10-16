@@ -46,9 +46,9 @@ The PyAnnote adapter loads `pyannote/wespeaker-voxceleb-resnet34-LM` lazily and 
 voice `identification.Registry` (WeSpeaker's 0.50/0.05/0.65 operating point over an in-process store) turns
 each embedding into an opaque voice id, and the speech product carries `voice:<id>` as its source. The
 embedding never leaves Listening, and nothing fabricates human-readable identities. The bot's own voice is
-enrolled from what it says, so its echo is stamped `voice:tts:say` and never admitted as a turn. The example
-therefore has the identity capability needed for Conversation admission, but this source-only run does not
-claim a reply until run-time model access selects `communication.respond`. The CLI exits nonzero for
+enrolled from what it says, and the bot learns the id hearing gives it, so its echo is stamped `voice:<that id>`
+and never admitted as a turn. The example therefore has the identity capability needed for Conversation
+admission, but this source-only run does not claim a reply until run-time model access selects `communication.respond`. The CLI exits nonzero for
 the explicit incomplete status; this is a cognition-selection result, not a claim that PyAnnote
 lacks an identity path.
 
@@ -85,7 +85,7 @@ Lab wiring (each optional): `BOT_SPEECH_SERVER_STREAM_URL` (for example `ws://19
 through a speech server's streaming transcription instead of Silero VAD, the server's end of turn making each text
 speech product; `BOT_SPEECH_SERVER_URL` (for example `http://192.168.2.32:8003`) embeds voices there instead of
 PyAnnote; `BOT_OPENAI_COMPAT_SPEECH_BASE_URL` (for example `http://192.168.2.32:8002/v1`) speaks through that
-OpenAI-compatible `/v1/audio/speech` (voice `warm`, own voice id `tts:warm`) instead of `say`.
+OpenAI-compatible `/v1/audio/speech` (voice `warm`) instead of `say`.
 
 Keys defined in `--env` / default `.env` override the process environment (so a local
 example credential file wins over a stub key in the shell).

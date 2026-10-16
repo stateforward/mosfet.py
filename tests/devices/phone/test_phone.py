@@ -2501,9 +2501,11 @@ def test_a_bot_that_speaks_is_heard_by_its_own_mouthpiece_and_goes_up_the_wire(
         phone, mouth, _ = await _handset_on_a_call(environment)
         assert phone_microphone(phone) is not None
 
-        voice = speaking.Speaking(encoder=_Utterance(), speaker=mouth, voice_id="tts:alice")
+        voice = speaking.Speaking(encoder=_Utterance(), speaker=mouth)
         await start_ability_tree(environment, voice)
-        _ = await voice.apply(speaking.InputData(text="Hello, this is Alice."), ctx=environment)
+        _ = await voice.apply(
+            speaking.InputData(parts=(vocal.speech.Part(words="Hello, this is Alice."),)), ctx=environment
+        )
 
         await wait_until(lambda: uplinks(spans) > 0, timeout=2.0)
         for _ in range(5):

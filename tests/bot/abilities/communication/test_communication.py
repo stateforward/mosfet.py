@@ -83,7 +83,6 @@ def _speaking(
     return speaking.Speaking(
         encoder=encoder or Script(),
         speaker=speaker or audio.Speaker(frame=datetime.timedelta(milliseconds=10), clock=_instant()),
-        voice_id="tts:warm",
         conversation=conversation,
         encode_idle_timeout=encode_idle_timeout,
     )
@@ -155,7 +154,7 @@ async def _owned(ctx: hsm.Context, speaker: speaking.Speaking, comm: communicati
     _ = await mosfet.started(ctx, comm, comm_model)
     await comm.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=collector)))
     await _wait_until(lambda: "/behavior/active" in (comm.state() or ""))
-    await _wait_until(lambda: (speaker.state() or "").endswith("/wired/idle"))
+    await _wait_until(lambda: (speaker.state() or "").endswith("/wired/voiced/idle"))
     return collector
 
 
@@ -292,7 +291,6 @@ def test_communication_respond_without_id_mints_unique_operation_identity(monkey
         speaker = RecordingSpeaking(
             encoder=Script(),
             speaker=audio.Speaker(frame=datetime.timedelta(milliseconds=10), clock=_instant()),
-            voice_id="tts:warm",
         )
         comm = communication.Communication(active_conversation=_conversation(), speaking=speaker)
         collector = await _owned(ctx, speaker, comm)
@@ -322,9 +320,7 @@ def test_communication_rejects_speaking_terminals_for_another_response_or_recipi
         collector = await _owned(ctx, speaker, comm)
         _ = await hsm.dispatch(ctx, comm, _respond("current response", "current-response"))
         await _wait_until(lambda: "/behavior/responding" in (comm.state() or ""))
-        output = speaking.OutputData(
-            text="stale", outcome="completed", voice_id="tts:warm", sample_rate_hz=RATE, channels=1
-        )
+        output = speaking.OutputData(text="stale", outcome="completed", sample_rate_hz=RATE, channels=1)
         for id, target in (("stale-response", hsm.id(comm)), ("current-response", "wrong-recipient")):
             _ = await hsm.dispatch(
                 ctx,
@@ -367,7 +363,6 @@ def test_communication_gives_up_on_a_response_after_its_idle_timeout_of_silence_
         speaker = RecordingSpeaking(
             encoder=Script(stall=True),
             speaker=audio.Speaker(frame=datetime.timedelta(milliseconds=10), clock=_instant()),
-            voice_id="tts:warm",
             encode_idle_timeout=datetime.timedelta(seconds=60),
         )
         comm = communication.Communication(
@@ -380,7 +375,7 @@ def test_communication_gives_up_on_a_response_after_its_idle_timeout_of_silence_
         await _wait_until(lambda: bool(_failures(collector)))
         state = comm.state() or ""
         # The response it gave up on is stopped, so Speaking is free again; its late terminal is ignored.
-        await _wait_until(lambda: (speaker.state() or "").endswith("/wired/idle"))
+        await _wait_until(lambda: (speaker.state() or "").endswith("/wired/voiced/idle"))
         await asyncio.sleep(0.01)
         failed = [
             (event.id, event.data.message)
@@ -394,7 +389,7 @@ def test_communication_gives_up_on_a_response_after_its_idle_timeout_of_silence_
     assert failures == [("response-timeout", "Speaking response timed out.")]
     assert stops == ["response-timeout"]
     assert spoken == []
-    assert speaking_state.endswith("/wired/idle")
+    assert speaking_state.endswith("/wired/voiced/idle")
 
 
 def test_speaking_progress_keeps_a_long_response_alive_past_the_idle_timeout() -> None:
@@ -433,7 +428,6 @@ class ForwardRecordingSpeaking(speaking.Speaking):
         super().__init__(
             encoder=encoder,
             speaker=audio.Speaker(frame=datetime.timedelta(milliseconds=10), clock=_instant()),
-            voice_id="tts:warm",
         )
         self.forwarded: list[hsm.Event[typing.Any]] = []
 
@@ -474,7 +468,14 @@ def test_drafts_open_the_response_and_reach_speaking_under_its_id_until_the_fina
         await _wait_until(lambda: bool(_spoken(collector)))
         await _wait_until(lambda: "/behavior/active" in (comm.state() or ""))
         forwarded = [
-            (event.name, event.id or "", typing.cast(typing.Any, event.data).text, getattr(event.data, "offset", None))
+            (
+                event.name,
+                event.id or "",
+                event.data.words
+                if isinstance(event.data, speaking.DraftData)
+                else vocal.speech.said(typing.cast(speaking.InputData, event.data).parts),
+                getattr(event.data, "offset", None),
+            )
             for event in voice.forwarded
         ]
         return forwarded, _spoken(collector), hsm.id(comm)

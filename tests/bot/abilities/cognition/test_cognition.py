@@ -3502,7 +3502,6 @@ def test_autonomy_native_seed_preserves_acoustic_speech_for_conversation() -> No
             speaking=abilities.Speaking(
                 encoder=_NoopSpeechEncoder(),
                 speaker=audio.Speaker(),
-                voice_id="tts:test",
                 conversation=(conversation_actor,),
             ),
         )

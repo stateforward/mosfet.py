@@ -4621,9 +4621,9 @@ async def somebody_speaks(
 
     mouth = audio.Speaker(placement=space.Placement(position=position), amplitude_db=amplitude_db)
     _ = await mosfet.started(environment, mouth, typing.cast(hsm.Model, mouth.model))
-    voice = speaking.Speaking(encoder=UtteranceSpeechEncoder(), speaker=mouth, voice_id="person:1")
+    voice = speaking.Speaking(encoder=UtteranceSpeechEncoder(), speaker=mouth)
     await start_ability_tree(environment, voice)
-    _ = await voice.apply(speaking.InputData(text=text), ctx=environment)
+    _ = await voice.apply(speaking.InputData(parts=(vocal.speech.Part(words=text),)), ctx=environment)
     return mouth
 
 
@@ -4768,7 +4768,6 @@ async def a_bot_with_a_voice(
     voice = speaking.Speaking(
         encoder=TimedUtteranceSpeechEncoder(seconds=utterance_seconds, sample_rate_hz=sample_rate_hz),
         speaker=mouth,
-        voice_id="tts:alice",
         listening=(listening_ability,),
     )
     active_bot = AbilityAgent(devices={}, cognition=ability, input=(listening_ability,), output=(voice,))
@@ -4840,7 +4839,9 @@ def test_perception_sees_the_copy_of_a_command_before_the_sound_it_predicts() ->
                         seen.append("sound")
                 return seen
 
-            _ = await voice.apply(speaking.InputData(text=f"Utterance {index}."), ctx=environment)
+            _ = await voice.apply(
+                speaking.InputData(parts=(vocal.speech.Part(words=f"Utterance {index}."),)), ctx=environment
+            )
             await wait_until(lambda: {"copy", "sound"} <= set(arrivals()), timeout=5.0)
             orders.append(arrivals())
             # Let the window close so each utterance is scored against its own copy.
@@ -4867,7 +4868,9 @@ def test_a_bot_does_not_deliberate_its_own_utterance() -> None:
     async def run() -> tuple[list[processing.InputData], list[bytes]]:
         active_bot, ability, listening_ability, voice, environment, _ = await a_bot_with_a_voice(utterance_seconds=0.4)
 
-        _ = await voice.apply(speaking.InputData(text="Hello, this is Alice."), ctx=environment)
+        _ = await voice.apply(
+            speaking.InputData(parts=(vocal.speech.Part(words="Hello, this is Alice."),)), ctx=environment
+        )
         # Close streaming VAD so speech decoding can finish on the attenuated own-voice frame.
         await close_hearing_speech(active_bot, environment)
         # Well past playout, and past anything the pipeline could still be chewing on.
@@ -4898,7 +4901,9 @@ def test_a_bot_hears_its_own_voice_coming_back_late() -> None:
             utterance_seconds=0.2
         )
 
-        _ = await voice.apply(speaking.InputData(text="Hello, this is Alice."), ctx=environment)
+        _ = await voice.apply(
+            speaking.InputData(parts=(vocal.speech.Part(words="Hello, this is Alice."),)), ctx=environment
+        )
         await close_hearing_speech(active_bot, environment)
         await asyncio.sleep(1.0)
         during = list(ability.calls)
@@ -4936,7 +4941,9 @@ def test_somebody_cutting_in_while_the_bot_talks_is_still_heard() -> None:
         )
         mouth_id = hsm.id(mouth)
 
-        _ = await voice.apply(speaking.InputData(text="Hello, this is Alice."), ctx=environment)
+        _ = await voice.apply(
+            speaking.InputData(parts=(vocal.speech.Part(words="Hello, this is Alice."),)), ctx=environment
+        )
         # Mid-utterance: the mouth is still committed and the sensitivity window is still open.
         await asyncio.sleep(0.15)
         # End own-voice HearingSpeech (attenuated, no turn) before the interrupt is heard.
@@ -4996,7 +5003,7 @@ def test_a_bot_does_not_answer_itself_because_it_spoke_while_perception_was_busy
         # Perception is now committed to a sentence for longer than the reply will last.
         await wait_until(lambda: bool(decoder.calls), timeout=5.0)
 
-        _ = await voice.apply(speaking.InputData(text="Yes, I am here."), ctx=environment)
+        _ = await voice.apply(speaking.InputData(parts=(vocal.speech.Part(words="Yes, I am here."),)), ctx=environment)
         await close_hearing_speech(active_bot, environment)
 
         # Long enough for the backlog to drain and for anything it produced to become a turn.
@@ -5024,7 +5031,7 @@ def test_speaking_delivers_the_copy_of_its_own_command_to_linked_listening() -> 
         def copies() -> list[hsm.Event[typing.Any]]:
             return [event for event in listening_ability.received if isinstance(event.data, EfferenceData)]
 
-        _ = await voice.apply(speaking.InputData(text="Hello."), ctx=environment)
+        _ = await voice.apply(speaking.InputData(parts=(vocal.speech.Part(words="Hello."),)), ctx=environment)
         await wait_until(lambda: any(duration == 0.0 for duration in durations(copies())), timeout=5.0)
         return copies(), hsm.id(voice), hsm.id(listening_ability)
 

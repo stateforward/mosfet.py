@@ -146,7 +146,6 @@ class Person(hsm.Instance):
         self._voice = speaking.Speaking(
             encoder=encoder,
             speaker=self._mouth,
-            voice_id="person:say",
         )
         self._arrived = None
         self._arriving_id = None
@@ -282,7 +281,7 @@ class Person(hsm.Instance):
         environment's to work out, and what to do about it is the bot's.
         """
 
-        return self._voice.apply(speaking.InputData(text=text), ctx=ctx)
+        return self._voice.apply(speaking.InputData(parts=(vocal.speech.Part(words=text),)), ctx=ctx)
 
 
 __all__ = [

@@ -2249,13 +2249,13 @@ def test_a_drafted_response_is_heard_before_the_processor_has_finished_writing_i
         # The mouth is a device: it is attached to in the environment it is powered in.
         ctx = Environment()
         mouth = Mouth()
-        voice = speaking.Speaking(encoder=Words(), speaker=mouth, voice_id="tts:warm")
+        voice = speaking.Speaking(encoder=Words(), speaker=mouth)
         talk = conversation.Conversation(turn_detector=turn_detector.TurnDetector(decoder=Decoder()))
         comm = communication.Communication(active_conversation=talk, speaking=voice)
         await start_ability_tree(ctx, voice)
         await start_ability_tree(ctx, comm)
         for _ in range(2_000):
-            if "/behavior/active" in (comm.state() or "") and (voice.state() or "").endswith("/wired/idle"):
+            if "/behavior/active" in (comm.state() or "") and (voice.state() or "").endswith("/wired/voiced/idle"):
                 break
             await asyncio.sleep(0.001)
         writer = Writer(mouth)
@@ -2270,7 +2270,7 @@ def test_a_drafted_response_is_heard_before_the_processor_has_finished_writing_i
             ),
         )
         for _ in range(2_000):
-            if (voice.state() or "").endswith("/wired/idle") and len(mouth.frames) >= 4:
+            if (voice.state() or "").endswith("/wired/voiced/idle") and len(mouth.frames) >= 4:
                 break
             await asyncio.sleep(0.001)
         return writer.heard_before_return, [frame.mark or "" for frame in mouth.frames]

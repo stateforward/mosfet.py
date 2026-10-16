@@ -58,7 +58,6 @@ def _speaking(
     return speaking.Speaking(
         encoder=encoder,
         speaker=audio.Speaker(),
-        voice_id="tts:test",
         conversation=conversation,
     )
 

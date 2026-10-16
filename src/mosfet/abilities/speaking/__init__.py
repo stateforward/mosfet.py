@@ -1,4 +1,4 @@
-"""Bot output ability: say text in the bot's own voice through the mouth it is wired to."""
+"""Bot output ability: say a reply, part by part, in the bot's own voice through the mouth it is wired to."""
 
 from .speaking import (
     DraftData,
@@ -10,11 +10,16 @@ from .speaking import (
     Outcome,
     OutputData,
     OutputEvent,
+    PartReport,
     ProgressData,
     ProgressEvent,
     Speaking,
     StopData,
     StopEvent,
+    VoiceData,
+    VoiceEvent,
+    VoicedData,
+    VoicedEvent,
 )
 
 __all__ = [
@@ -27,9 +32,14 @@ __all__ = [
     "Outcome",
     "OutputData",
     "OutputEvent",
+    "PartReport",
     "ProgressData",
     "ProgressEvent",
     "Speaking",
     "StopData",
     "StopEvent",
+    "VoiceData",
+    "VoiceEvent",
+    "VoicedData",
+    "VoicedEvent",
 ]

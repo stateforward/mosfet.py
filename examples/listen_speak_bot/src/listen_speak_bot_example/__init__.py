@@ -1089,7 +1089,6 @@ class ListenSpeakBot(Bot):
         self._speaking = speaking.Speaking(
             encoder=self._encoder,
             speaker=self._speaker,
-            voice_id="tts:say" if lab.speech_base_url is None else f"tts:{DEFAULT_LAB_VOICE}",
             listening=(self._listening,),
             conversation=(self._conversation,),
         )

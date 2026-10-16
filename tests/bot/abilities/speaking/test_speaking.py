@@ -1,4 +1,5 @@
-"""Speaking: text → one streaming encoding → the attached mouth, chunk by chunk, under aligned, played marks."""
+"""Speaking: a reply's parts → one streaming encoding → the attached mouth, chunk by chunk, under aligned, played
+marks; a voice given once, per-part expression reports, and the own voice id learned by hearing."""
 
 from __future__ import annotations
 
@@ -16,6 +17,7 @@ import typing
 
 import hsm
 import mosfet
+import pydantic
 import pytest
 from mosfet import lifecycle
 from opentelemetry.sdk.trace import TracerProvider
@@ -39,7 +41,8 @@ from tests.hsm_instance_state import device_bots, start_ability_tree
 
 RATE = 8_000
 """8 kHz mono s16le: 1 ms is 8 samples, 16 bytes."""
-VOICE_ID = "tts:warm"
+OWN_VOICE = "3f2a9c41d07e4b6a9c2f1e8d5b7a0c63"
+"""The id hearing gives the bot's own voice in these tests."""
 LOOKAHEAD = datetime.timedelta(seconds=1)
 ENCODE_IDLE_TIMEOUT = datetime.timedelta(seconds=5)
 ENROLL = datetime.timedelta(seconds=6)
@@ -73,14 +76,17 @@ class Script(vocal.speech.SpeechEncoder):
         fail_kind: encoding.FailureKind = "unavailable",
         stall_on: str | None = None,
         whole: bool = False,
+        expressiveness: vocal.speech.Expressiveness | None = None,
     ) -> None:
         self.format: vocal.speech.Format = vocal.speech.Format(sample_rate_hz=RATE, channels=1)
+        self.expressiveness: vocal.speech.Expressiveness = expressiveness or vocal.speech.Expressiveness()
         self.chunk_ms: int = chunk_ms
         self.fail_on: str | None = fail_on
         self.fail_kind: encoding.FailureKind = fail_kind
         self.stall_on: str | None = stall_on
         self.whole: bool = whole
         self.reads: list[list[str]] = []
+        self.pieces: list[list[vocal.speech.Piece]] = []
         self.texts: list[collections.abc.AsyncIterable[vocal.speech.Piece]] = []
         self.closed: list[str] = []
         self.pulled: int = 0
@@ -98,12 +104,15 @@ class Script(vocal.speech.SpeechEncoder):
         self, input: collections.abc.AsyncIterable[vocal.speech.Piece]
     ) -> collections.abc.AsyncIterator[vocal.speech.Audio]:
         read: list[str] = []
+        pieces: list[vocal.speech.Piece] = []
         self.reads.append(read)
+        self.pieces.append(pieces)
         self.texts.append(input)
         try:
             if self.whole:
                 async for piece in input:
                     read.append(piece.words)
+                    pieces.append(piece)
                 if not "".join(read).strip():
                     raise encoding.Error("invalid_input", "blank text")
                 said = words("".join(read))
@@ -112,6 +121,7 @@ class Script(vocal.speech.SpeechEncoder):
                 return
             async for piece in input:
                 read.append(piece.words)
+                pieces.append(piece)
                 for word in words(piece.words):
                     yield await self._say(word, word)
             if not "".join(read).strip():
@@ -232,24 +242,37 @@ class Stage:
     ear: Collector
     room: SoundListener
 
-    async def say(self, text: str, *, id: str = "utterance-1") -> None:
+    async def say(self, *words: str | vocal.speech.Part, id: str = "utterance-1") -> None:
+        """Say a reply of these parts: a plain string is a part with no expression."""
+
+        parts = tuple(vocal.speech.Part(words=part) if isinstance(part, str) else part for part in words)
         _ = await hsm.dispatch(
             self.environment,
             self.speaking,
             dataclasses.replace(
-                speaking.InputEvent.with_data(speaking.InputData(text=text)),
+                speaking.InputEvent.with_data(speaking.InputData(parts=parts)),
                 id=id,
                 source=hsm.id(self.requester),
                 target=hsm.id(self.speaking),
             ),
         )
 
-    async def draft(self, text: str, offset: int, *, id: str = "utterance-1") -> None:
+    async def draft(
+        self,
+        words: str,
+        offset: int,
+        *,
+        part: int = 0,
+        expression: vocal.speech.Expression | None = None,
+        id: str = "utterance-1",
+    ) -> None:
         _ = await hsm.dispatch(
             self.environment,
             self.speaking,
             dataclasses.replace(
-                speaking.DraftEvent.with_data(speaking.DraftData(text=text, offset=offset)),
+                speaking.DraftEvent.with_data(
+                    speaking.DraftData(part=part, words=words, offset=offset, expression=expression)
+                ),
                 id=id,
                 source=hsm.id(self.requester),
                 target=hsm.id(self.speaking),
@@ -277,6 +300,20 @@ class Stage:
     def copies(self) -> list[speaking.EfferenceData]:
         return [event.data for event in self.ear.events if isinstance(event.data, speaking.EfferenceData)]
 
+    async def hear_own_voice(self, voice_id: str = OWN_VOICE, *, id: str = "utterance-1") -> None:
+        """Hearing (the ear) tells Speaking which id the bot's own voice has, in reply to its copy ``id``."""
+
+        _ = await hsm.dispatch(
+            self.environment,
+            self.speaking,
+            dataclasses.replace(
+                listening.EnrolledEvent.with_data(listening.EnrolledData(voice_id=voice_id)),
+                id=id,
+                source=hsm.id(self.ear),
+                target=hsm.id(self.speaking),
+            ),
+        )
+
 
 async def stage(
     encoder: Script | None = None,
@@ -288,7 +325,9 @@ async def stage(
     enroll_seconds: datetime.timedelta = ENROLL,
     stop_timeout: datetime.timedelta = STOP_TIMEOUT,
     draft_timeout: datetime.timedelta = DRAFT_TIMEOUT,
+    voicing_timeout: datetime.timedelta = datetime.timedelta(seconds=30),
     mouth: RecordingSpeaker | None = None,
+    factory: collections.abc.Callable[[str, str | None], vocal.speech.SpeechEncoder] | None = None,
 ) -> Stage:
     environment = Environment()
     mouth = mouth or RecordingSpeaker(clock=clock or instant())
@@ -298,9 +337,8 @@ async def stage(
         _ = await mosfet.started(environment, actor, actor.model)
     environment.join(room)
     voice = speaking.Speaking(
-        encoder=script,
+        encoder=script if factory is None else factory,
         speaker=mouth,
-        voice_id=VOICE_ID,
         listening=(ear,),
         conversation=conversation_targets,
         lookahead=lookahead,
@@ -308,9 +346,12 @@ async def stage(
         enroll_seconds=enroll_seconds,
         stop_timeout=stop_timeout,
         draft_timeout=draft_timeout,
+        voicing_timeout=voicing_timeout,
     )
     await start_ability_tree(environment, voice)
-    await wait_until(lambda: (voice.state() or "").endswith("/wired/idle"))
+    await wait_until(
+        lambda: (voice.state() or "").endswith("/wired/voiced/idle" if factory is None else "/unvoiced/holding")
+    )
     return Stage(environment, voice, mouth, script, requester, ear, room)
 
 
@@ -335,19 +376,17 @@ def utterance_failure(exporter: InMemorySpanExporter) -> object:
 def test_speaking_requires_ability_conversation_targets_and_sane_bounds() -> None:
     mouth = audio.Speaker()
     with pytest.raises(TypeError):
-        _ = speaking.Speaking(
-            encoder=Script(), speaker=mouth, voice_id=VOICE_ID, conversation=(typing.cast(typing.Any, hsm.Instance()),)
-        )
+        _ = speaking.Speaking(encoder=Script(), speaker=mouth, conversation=(typing.cast(typing.Any, hsm.Instance()),))
     with pytest.raises(ValueError, match="lookahead"):
-        _ = speaking.Speaking(encoder=Script(), speaker=mouth, voice_id=VOICE_ID, lookahead=datetime.timedelta(0))
+        _ = speaking.Speaking(encoder=Script(), speaker=mouth, lookahead=datetime.timedelta(0))
     with pytest.raises(ValueError, match="enroll_seconds"):
-        _ = speaking.Speaking(
-            encoder=Script(), speaker=mouth, voice_id=VOICE_ID, enroll_seconds=datetime.timedelta(seconds=1)
-        )
+        _ = speaking.Speaking(encoder=Script(), speaker=mouth, enroll_seconds=datetime.timedelta(seconds=1))
     with pytest.raises(ValueError, match="draft_timeout"):
-        _ = speaking.Speaking(encoder=Script(), speaker=mouth, voice_id=VOICE_ID, draft_timeout=datetime.timedelta(0))
+        _ = speaking.Speaking(encoder=Script(), speaker=mouth, draft_timeout=datetime.timedelta(0))
     with pytest.raises(ValueError, match="stop_timeout"):
-        _ = speaking.Speaking(encoder=Script(), speaker=mouth, voice_id=VOICE_ID, stop_timeout=datetime.timedelta(0))
+        _ = speaking.Speaking(encoder=Script(), speaker=mouth, stop_timeout=datetime.timedelta(0))
+    with pytest.raises(ValueError, match="voicing_timeout"):
+        _ = speaking.Speaking(encoder=Script(), speaker=mouth, voicing_timeout=datetime.timedelta(0))
 
 
 def test_speaking_input_is_not_a_cognition_call_event() -> None:
@@ -359,6 +398,10 @@ def test_speaking_input_is_not_a_cognition_call_event() -> None:
     assert speaking.DraftEvent.name == "bot.ability.speaking.draft"
     assert speaking.DraftEvent.kind != processing.EventKind
     assert speaking.EfferenceEvent.kind != processing.EventKind
+    assert speaking.VoiceEvent.name == "bot.ability.speaking.voice"
+    assert speaking.VoiceEvent.kind != processing.EventKind
+    assert speaking.VoicedEvent.name == "bot.ability.speaking.voiced"
+    assert speaking.VoicedEvent.kind == hsm.CompletionEventKind
 
 
 def _examples_in(schema: object, path: str = "") -> list[str]:
@@ -366,9 +409,11 @@ def _examples_in(schema: object, path: str = "") -> list[str]:
 
     found: list[str] = []
     if isinstance(schema, dict):
-        for key, value in typing.cast(dict[str, object], schema).items():
+        fields = typing.cast(dict[str, object], schema)
+        for key, value in fields.items():
             here = f"{path}.{key}" if path else key
-            if key in ("examples", "example", "default"):
+            # A default that is not text, or one of a closed set, offers nothing to say.
+            if key in ("examples", "example") or (key == "default" and isinstance(value, str) and "enum" not in fields):
                 found.append(f"{here} = {value!r}")
             else:
                 found.extend(_examples_in(value, here))
@@ -428,7 +473,6 @@ def test_speaking_attaches_to_its_mouth_and_streams_each_chunk_under_its_mark() 
             spoken="Of course, I can do that. See you soon.",
             unspoken="",
             outcome="completed",
-            voice_id="tts:warm",
             sample_rate_hz=RATE,
             channels=1,
         )
@@ -621,10 +665,11 @@ def test_the_next_chunk_is_pulled_only_once_the_mouth_has_played_down_to_the_loo
 def test_a_long_whole_reply_is_written_whole_and_spoken_in_full(
     tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """W3-20: no whole-reply cap. The encoder reads the whole text, and none of it is an encoding failure."""
+    """W3-20: no whole-reply cap. The encoder reads every part whole, and none of it is an encoding failure."""
 
-    text = " ".join(["word"] * 1_700)
-    assert len(text + ".") == 8_500
+    parts = ["word " * 340] * 4 + ["word " * 339 + "word."]
+    text = "".join(parts)
+    assert len(text) == 8_500
 
     with metric_reader.recording(tmp_path, monkeypatch) as reader:
         before = collections.Counter(
@@ -633,7 +678,7 @@ def test_a_long_whole_reply_is_written_whole_and_spoken_in_full(
 
         async def run() -> tuple[Stage, list[speaking.OutputData]]:
             voice = await stage()
-            await voice.say(text + ".")
+            await voice.say(*parts)
             await wait_until(lambda: bool(voice.outputs()), timeout=20)
             return voice, voice.outputs()
 
@@ -642,8 +687,8 @@ def test_a_long_whole_reply_is_written_whole_and_spoken_in_full(
             {str(point.attributes["outcome"]): point.count for point in reader.points("bot.speaking.encoding.duration")}
         )
 
-    assert voice.encoder.reads == [[text + "."]]
-    assert (outputs[0].outcome, outputs[0].spoken, outputs[0].unspoken) == ("completed", text + ".", "")
+    assert voice.encoder.reads == [parts]
+    assert (outputs[0].outcome, outputs[0].spoken, outputs[0].unspoken) == ("completed", text, "")
     assert after - before == collections.Counter({"completed": 1})
 
 
@@ -685,32 +730,17 @@ def test_audio_the_mouth_drops_never_ends_the_utterance_completed(finished_spans
     assert utterance_failure(finished_spans) == "overloaded"
 
 
-def test_blank_text_goes_to_the_encoder_and_the_requester_always_gets_a_terminal() -> None:
-    """R5-1: blank text is the provider's to refuse once the text ends; Speaking never drops a request silently."""
+def test_a_reply_is_one_to_sixty_four_parts_whose_words_are_not_blank() -> None:
+    """R6-5: blank words never reach the encoder: the request that carries them cannot be made."""
 
-    class Refusing(Script):
-        @typing.override
-        async def encode(
-            self, input: collections.abc.AsyncIterable[vocal.speech.Piece]
-        ) -> collections.abc.AsyncIterator[vocal.speech.Audio]:
-            read: list[str] = []
-            self.reads.append(read)
-            async for piece in input:
-                read.append(piece.words)
-            if not "".join(read).strip():
-                raise encoding.Error("invalid_input", "blank text")
-            yield vocal.speech.Audio(pcm=pcm(20), text="".join(read))
-
-    async def run() -> tuple[Stage, list[speaking.OutputData]]:
-        voice = await stage(Refusing())
-        await voice.say("   ")
-        await wait_until(lambda: bool(voice.outputs()))
-        return voice, voice.outputs()
-
-    voice, outputs = asyncio.run(run())
-
-    assert voice.encoder.reads == [["   "]]
-    assert (outputs[0].text, outputs[0].outcome, outputs[0].spoken) == ("   ", "failed", "")
+    with pytest.raises(pydantic.ValidationError):
+        _ = speaking.InputData(parts=())
+    with pytest.raises(pydantic.ValidationError):
+        _ = speaking.InputData(parts=tuple(vocal.speech.Part(words="a") for _ in range(65)))
+    with pytest.raises(pydantic.ValidationError):
+        _ = speaking.InputData.model_validate({"parts": [{"words": "   "}]})
+    reply = speaking.InputData(parts=(vocal.speech.Part(words="Oh, "), vocal.speech.Part(words="you got me.")))
+    assert vocal.speech.said(reply.parts) == "Oh, you got me."
 
 
 def test_a_stream_whose_close_fails_is_still_measured(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -769,14 +799,16 @@ def test_a_mouth_that_stops_reporting_ends_the_utterance_unspoken(
         environment = Environment()
         requester = Collector()
         _ = await mosfet.started(environment, requester, requester.model)
-        voice = speaking.Speaking(encoder=Script(), speaker=Mute(clock=instant()), voice_id=VOICE_ID)
+        voice = speaking.Speaking(encoder=Script(), speaker=Mute(clock=instant()))
         await start_ability_tree(environment, voice)
-        await wait_until(lambda: (voice.state() or "").endswith("/wired/idle"))
+        await wait_until(lambda: (voice.state() or "").endswith("/wired/voiced/idle"))
         _ = await hsm.dispatch(
             environment,
             voice,
             dataclasses.replace(
-                speaking.InputEvent.with_data(speaking.InputData(text="Nobody hears this.")),
+                speaking.InputEvent.with_data(
+                    speaking.InputData(parts=(vocal.speech.Part(words="Nobody hears this."),))
+                ),
                 id="unheard",
                 source=hsm.id(requester),
             ),
@@ -826,7 +858,6 @@ def test_stop_flushes_the_mouth_and_ends_stopped_with_only_what_was_played() -> 
             spoken="First. ",
             unspoken="Then a few more words. And more.",
             outcome="stopped",
-            voice_id="tts:warm",
             sample_rate_hz=RATE,
             channels=1,
         )
@@ -849,7 +880,7 @@ def test_stop_closes_the_pipe_and_the_stream_in_flight_and_ignores_a_stop_for_an
         still = voice.speaking.state() or ""
         await voice.stop()
         await wait_until(lambda: bool(voice.outputs()))
-        await wait_until(lambda: (voice.speaking.state() or "").endswith("/wired/idle"))
+        await wait_until(lambda: (voice.speaking.state() or "").endswith("/wired/voiced/idle"))
         return still, voice.outputs(), typing.cast(IteratorScript, voice.encoder), voice.speaking.state() or ""
 
     still, outputs, script, state = asyncio.run(run())
@@ -861,7 +892,7 @@ def test_stop_closes_the_pipe_and_the_stream_in_flight_and_ignores_a_stop_for_an
     # The provider saw the stream closed, and it had read the whole pipe to its end.
     assert script.aclosed == ["Said first. Then stuck here."]
     assert script.closed == ["Said first. Then stuck here."]
-    assert state.endswith("/wired/idle")
+    assert state.endswith("/wired/voiced/idle")
 
 
 def test_a_stop_with_whole_text_alignment_says_nothing_was_said() -> None:
@@ -988,7 +1019,6 @@ def test_drafted_text_is_spoken_while_it_is_written_and_the_final_text_is_not_sa
             spoken="Sure. I can help with that.",
             unspoken="",
             outcome="completed",
-            voice_id="tts:warm",
             sample_rate_hz=RATE,
             channels=1,
         )
@@ -999,22 +1029,23 @@ def test_drafted_text_is_spoken_while_it_is_written_and_the_final_text_is_not_sa
 def test_a_long_drafted_reply_is_written_and_spoken_in_full() -> None:
     """W3-20: no whole-reply cap, drafted or not; every delta and the rest of the final reach the encoder."""
 
-    first = " ".join(["word"] * 1_000) + " "
-    rest = " ".join(["more"] * 700) + "."
-    assert len(first + rest) == 8_500
+    parts = ["word " * 400] * 4 + ["more " * 99 + "more."]
+    text = "".join(parts)
+    assert len(text) == 8_500
 
     async def run() -> tuple[Stage, list[speaking.OutputData]]:
         voice = await stage()
-        await voice.draft(first, 0)
-        await voice.draft(rest[:-1], len(first))
-        await voice.say(first + rest)
+        for index, words in enumerate(parts[:-1]):
+            await voice.draft(words, 0, part=index)
+        await voice.draft(parts[-1][:-1], 0, part=len(parts) - 1)
+        await voice.say(*parts)
         await wait_until(lambda: bool(voice.outputs()), timeout=20)
         return voice, voice.outputs()
 
     voice, outputs = asyncio.run(run())
 
-    assert voice.encoder.reads == [[first, rest[:-1], "."]]
-    assert (outputs[0].outcome, outputs[0].spoken, outputs[0].unspoken) == ("completed", first + rest, "")
+    assert voice.encoder.reads == [[*parts[:-1], parts[-1][:-1], "."]]
+    assert (outputs[0].outcome, outputs[0].spoken, outputs[0].unspoken) == ("completed", text, "")
 
 
 def test_a_whole_text_encoder_reads_one_joined_text_and_speaks_only_after_the_final() -> None:
@@ -1126,7 +1157,7 @@ def test_drafts_and_finals_for_a_finished_utterance_never_reopen_it() -> None:
         voice = await stage()
         await voice.say("Done.", id="finished")
         await wait_until(lambda: bool(voice.outputs()))
-        await wait_until(lambda: (voice.speaking.state() or "").endswith("/wired/idle"))
+        await wait_until(lambda: (voice.speaking.state() or "").endswith("/wired/voiced/idle"))
         await voice.draft("Done. And a late", 0, id="finished")
         await voice.say("Done.", id="finished")
         await asyncio.sleep(0.05)
@@ -1136,7 +1167,7 @@ def test_drafts_and_finals_for_a_finished_utterance_never_reopen_it() -> None:
 
     assert len(outputs) == 1
     assert reads == [["Done."]]
-    assert state.endswith("/wired/idle")
+    assert state.endswith("/wired/voiced/idle")
 
 
 def test_the_next_utterance_waits_for_this_one() -> None:
@@ -1172,7 +1203,7 @@ def test_speaking_records_what_the_room_heard_as_one_trusted_outbound_message() 
         target = RecordingConversation()
         voice = await stage(Script(fail_on="broken"), conversation_targets=(target,))
         await start_ability_tree(voice.environment, target)
-        await voice.say("Hello there. broken off.")
+        await voice.say("Hello there. ", "broken off.")
         await wait_until(lambda: bool(target.outputs))
         return target.outputs, hsm.id(voice.speaking), hsm.id(target)
 
@@ -1184,30 +1215,63 @@ def test_speaking_records_what_the_room_heard_as_one_trusted_outbound_message() 
     assert message.provenance.event == conversation.AppendEvent.name
     assert message.provenance.source == speaker_id
     assert message.provenance.target == conversation_id
-    # The producer stamps whose voice said it: the bot's own voice ref, which a heard echo resolves to too.
-    assert message.participants == (mosfet.Participant(ref="voice:tts:warm", role=mosfet.ParticipantRole.SOURCE),)
+    # The bot has not yet heard itself, so it cannot say whose voice it was.
+    assert message.participants == ()
 
 
-def test_own_voice_is_enrolled_once_from_the_first_utterance_long_enough() -> None:
-    async def run() -> list[hsm.Event[typing.Any]]:
-        voice = await stage(Script(chunk_ms=500))
-        await voice.say("Short.", id="short")
-        await wait_until(lambda: len(voice.outputs()) == 1)
-        await voice.say("Long enough to learn from.", id="long")
-        await wait_until(lambda: len(voice.outputs()) == 2)
-        await voice.say("And once is enough here.", id="again")
-        await wait_until(lambda: len(voice.outputs()) == 3)
-        return voice.ear.named(listening.EnrollEvent)
+def test_own_voice_is_enrolled_from_each_utterance_long_enough_until_hearing_tells_its_id(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """P-12: no declared voice id. Speaking hands Listening a copy of its own voice with no id until hearing tells it
+    which id that voice has; from then on the id is stamped on what it says, and no more copies are handed over."""
 
-    enrollments = asyncio.run(run())
+    with metric_reader.recording(tmp_path, monkeypatch) as reader:
+        before = sum(int(point.value) for point in reader.points("bot.speaking.voice.learned.count"))
 
-    assert len(enrollments) == 1
+        async def run() -> tuple[Stage, list[conversation.Messages]]:
+            target = RecordingConversation()
+            voice = await stage(Script(chunk_ms=500), conversation_targets=(target,))
+            await start_ability_tree(voice.environment, target)
+            await voice.say("Short.", id="short")
+            await wait_until(lambda: len(voice.outputs()) == 1)
+            await voice.say("Long enough to learn from.", id="long")
+            await wait_until(lambda: len(voice.outputs()) == 2)
+            await voice.say("Still long enough to learn.", id="again")
+            await wait_until(lambda: len(voice.outputs()) == 3)
+            # A stranger claiming to be hearing teaches nothing; the ear Speaking was wired to does.
+            stranger = Collector()
+            _ = await mosfet.started(voice.environment, stranger, stranger.model)
+            _ = await hsm.dispatch(
+                voice.environment,
+                voice.speaking,
+                dataclasses.replace(
+                    listening.EnrolledEvent.with_data(listening.EnrolledData(voice_id="not-mine")),
+                    id="long",
+                    source=hsm.id(stranger),
+                ),
+            )
+            await voice.hear_own_voice(id="long")
+            await voice.hear_own_voice("a-later-answer", id="again")
+            await voice.say("Long enough, and known now.", id="known")
+            await wait_until(lambda: len(voice.outputs()) == 4)
+            await wait_until(lambda: len(target.outputs) == 4)
+            return voice, target.outputs
+
+        voice, histories = asyncio.run(run())
+        learned = sum(int(point.value) for point in reader.points("bot.speaking.voice.learned.count")) - before
+
+    enrollments = voice.ear.named(listening.EnrollEvent)
+    assert [event.id for event in enrollments] == ["long", "again"]
     copy = enrollments[0].data
     assert isinstance(copy, listening.EnrollData)
-    assert copy.voice_id == "tts:warm"
-    assert enrollments[0].id == "long"
+    assert copy.voice_id is None
     assert (copy.segment.sample_rate_hz, copy.segment.channels, copy.segment.media_type) == (RATE, 1, "audio/pcm")
     assert math.isclose(copy.segment.duration_seconds, 2.5, abs_tol=1e-9)
+    assert [output.voice_id for output in voice.outputs()] == [None, None, None, OWN_VOICE]
+    assert histories[-1].messages[-1].participants == (
+        mosfet.Participant(ref=f"voice:{OWN_VOICE}", role=mosfet.ParticipantRole.SOURCE),
+    )
+    assert learned == 1
 
 
 def test_own_voice_enrollment_is_bounded_by_enroll_seconds() -> None:
@@ -1275,7 +1339,7 @@ def test_a_mouth_that_refuses_the_attach_fails_speakings_attach_and_its_owner_is
         for actor in (owner, requester):
             _ = await mosfet.started(environment, actor, actor.model)
         mouth = await foreign_mouth() if refusing == "refuses" else Deaf()
-        voice = speaking.Speaking(encoder=Script(), speaker=mouth, voice_id=VOICE_ID)
+        voice = speaking.Speaking(encoder=Script(), speaker=mouth)
         _ = await voice.attach(
             environment,
             attachment.AttachEvent.with_data_and_id(
@@ -1287,12 +1351,21 @@ def test_a_mouth_that_refuses_the_attach_fails_speakings_attach_and_its_owner_is
             environment,
             voice,
             dataclasses.replace(
-                speaking.InputEvent.with_data(speaking.InputData(text="Anyone?")),
+                speaking.InputEvent.with_data(speaking.InputData(parts=(vocal.speech.Part(words="Anyone?"),))),
                 id="refused",
                 source=hsm.id(requester),
             ),
         )
-        await wait_until(lambda: bool(requester.named(speaking.Speaking.failed_event)))
+        _ = await hsm.dispatch(
+            environment,
+            voice,
+            dataclasses.replace(
+                speaking.VoiceEvent.with_data(speaking.VoiceData(voice="v-3f2a9c41d07e")),
+                id="voice",
+                source=hsm.id(requester),
+            ),
+        )
+        await wait_until(lambda: len(requester.named(speaking.Speaking.failed_event)) == 2)
         return (
             owner.named(attachment.AttachFailedEvent),
             owner.named(attachment.AttachCompleteEvent),
@@ -1303,10 +1376,8 @@ def test_a_mouth_that_refuses_the_attach_fails_speakings_attach_and_its_owner_is
 
     assert completed == []
     assert [event.id for event in refused] == ["attach-speaking"]
-    assert [event.id for event in failures] == ["refused"]
-    failure = failures[0].data
-    assert isinstance(failure, ability.FailureData)
-    assert failure.message == "Speaking is not attached."
+    assert [event.id for event in failures] == ["refused", "voice"]
+    assert {typing.cast(ability.FailureData, event.data).message for event in failures} == {"Speaking is not attached."}
 
 
 def test_speaking_powers_an_unstarted_mouth_and_stops_only_the_mouth_it_started() -> None:
@@ -1314,8 +1385,8 @@ def test_speaking_powers_an_unstarted_mouth_and_stops_only_the_mouth_it_started(
         environment = Environment()
         owned, shared = audio.Speaker(), audio.Speaker()
         _ = await mosfet.started(environment, shared, typing.cast(hsm.Model, shared.model))
-        powering = speaking.Speaking(encoder=Script(), speaker=owned, voice_id=VOICE_ID)
-        borrowing = speaking.Speaking(encoder=Script(), speaker=shared, voice_id=VOICE_ID)
+        powering = speaking.Speaking(encoder=Script(), speaker=owned)
+        borrowing = speaking.Speaking(encoder=Script(), speaker=shared)
         await start_ability_tree(environment, powering)
         await start_ability_tree(environment, borrowing)
         powered = lifecycle.is_started(owned)
@@ -1355,7 +1426,7 @@ def test_cognition_does_not_directly_select_speaking_output() -> None:
 
     async def run() -> tuple[list[list[str]], list[processing.InputData]]:
         script = Script()
-        speaking_ability = speaking.Speaking(encoder=script, speaker=audio.Speaker(), voice_id=VOICE_ID)
+        speaking_ability = speaking.Speaking(encoder=script, speaker=audio.Speaker())
         processor = SpeakProcessor()
 
         class Probe(Bot):
@@ -1370,7 +1441,7 @@ def test_cognition_does_not_directly_select_speaking_output() -> None:
         environment = Environment()
         _ = await probe.attach(environment)
         await wait_until(lambda: (probe.state() or "").endswith("/unfocused"))
-        await wait_until(lambda: (speaking_ability.state() or "").endswith("/wired/idle"))
+        await wait_until(lambda: (speaking_ability.state() or "").endswith("/wired/voiced/idle"))
         _ = await probe.dispatch(
             environment,
             mosfet.InputEvent.with_data(mosfet.InputEventData(target_device="phone", priority=0)),
@@ -1382,3 +1453,388 @@ def test_cognition_does_not_directly_select_speaking_output() -> None:
     assert calls == []
     assert "bot.ability.speaking.input" not in {event.name for event in inputs[0].schemas}
     assert "speaking" not in inputs[0].actors
+
+
+# ----- parts --------------------------------------------------------------------------------------------------------
+
+LAUGH = vocal.speech.Expression(sound="laugh")
+WHISPER = vocal.speech.Expression(style="whisper", emotion="sly")
+
+
+def test_a_reply_of_parts_goes_to_the_encoder_part_by_part_each_opening_with_its_expression() -> None:
+    async def run() -> tuple[Stage, list[speaking.OutputData]]:
+        voice = await stage()
+        await voice.say(vocal.speech.Part(words="Oh, ", expression=LAUGH), "you got me.")
+        await wait_until(lambda: bool(voice.outputs()))
+        return voice, voice.outputs()
+
+    voice, outputs = asyncio.run(run())
+
+    assert voice.encoder.pieces == [
+        [
+            vocal.speech.Piece(part=0, words="Oh, ", expression=LAUGH),
+            vocal.speech.Piece(part=1, words="you got me."),
+        ]
+    ]
+    # The text of record is the words joined verbatim; the sound was never words.
+    assert (outputs[0].text, outputs[0].spoken, outputs[0].unspoken) == ("Oh, you got me.", "Oh, you got me.", "")
+
+
+def test_drafts_write_each_part_as_it_is_written_and_a_draft_for_the_next_part_opens_it() -> None:
+    async def run() -> tuple[Stage, list[vocal.speech.Piece], list[speaking.OutputData]]:
+        voice = await stage()
+        await voice.draft("Oh", 0, expression=LAUGH)
+        await voice.draft(", ", 2)
+        await voice.draft("you", 0, part=1, expression=WHISPER)
+        await wait_until(lambda: len(voice.encoder.pieces[0]) == 3)
+        drafted = list(voice.encoder.pieces[0])
+        await voice.say(
+            vocal.speech.Part(words="Oh, ", expression=LAUGH),
+            vocal.speech.Part(words="you got me.", expression=WHISPER),
+            vocal.speech.Part(words=" Again.", expression=LAUGH),
+        )
+        await wait_until(lambda: bool(voice.outputs()))
+        return voice, drafted, voice.outputs()
+
+    voice, drafted, outputs = asyncio.run(run())
+
+    assert drafted == [
+        vocal.speech.Piece(part=0, words="Oh", expression=LAUGH),
+        vocal.speech.Piece(part=0, words=", "),
+        vocal.speech.Piece(part=1, words="you", expression=WHISPER),
+    ]
+    # The final writes the rest of the part being drafted, then every part not drafted, whole and with its expression.
+    assert voice.encoder.pieces[0][3:] == [
+        vocal.speech.Piece(part=1, words=" got me."),
+        vocal.speech.Piece(part=2, words=" Again.", expression=LAUGH),
+    ]
+    assert (outputs[0].text, outputs[0].spoken, outputs[0].outcome) == (
+        "Oh, you got me. Again.",
+        "Oh, you got me. Again.",
+        "completed",
+    )
+
+
+def test_a_final_that_diverges_in_a_later_part_keeps_what_was_said(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with metric_reader.recording(tmp_path, monkeypatch) as reader:
+        before = _counts(reader, "bot.speaking.drafted.count")
+
+        async def run() -> tuple[Stage, list[speaking.OutputData]]:
+            voice = await stage()
+            await voice.draft("Oh, ", 0)
+            await voice.draft("you got", 0, part=1)
+            await wait_until(lambda: len(voice.encoder.pieces[0]) == 2)
+            await voice.say("Oh, ", "they got me.", "Again.")
+            await wait_until(lambda: bool(voice.outputs()))
+            return voice, voice.outputs()
+
+        voice, outputs = asyncio.run(run())
+        after = _counts(reader, "bot.speaking.drafted.count")
+
+    assert voice.encoder.reads == [["Oh, ", "you got"]]
+    assert outputs[0].text == "Oh, they got me.Again."
+    assert (outputs[0].spoken, outputs[0].unspoken) == ("Oh, you got", "")
+    assert after - before == collections.Counter({"diverged": 1})
+
+
+def test_a_draft_that_skips_a_part_or_adds_to_a_finished_one_is_a_gap(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with metric_reader.recording(tmp_path, monkeypatch) as reader:
+        before = _counts(reader, "bot.processing.draft.count")
+
+        async def run() -> Stage:
+            voice = await stage()
+            await voice.draft("One. ", 0)
+            await voice.draft("Two", 0, part=1)
+            await voice.draft("One. ", 0)  # a repeat of a finished part is harmless
+            await voice.draft("And more. ", 5)  # but more of a finished part is a gap
+            await voice.draft("Four.", 0, part=3)  # and so is a part that skips one
+            await voice.draft(" more", 3, part=1, expression=LAUGH)  # an expression mid-part is not an opening
+            await voice.say("One. ", "Two more. ", "Three. ", "Four.")
+            await wait_until(lambda: bool(voice.outputs()))
+            return voice
+
+        voice = asyncio.run(run())
+        after = _counts(reader, "bot.processing.draft.count")
+
+    assert voice.encoder.pieces[0] == [
+        vocal.speech.Piece(part=0, words="One. "),
+        vocal.speech.Piece(part=1, words="Two"),
+        vocal.speech.Piece(part=1, words=" more"),
+        vocal.speech.Piece(part=1, words=". "),
+        vocal.speech.Piece(part=2, words="Three. "),
+        vocal.speech.Piece(part=3, words="Four."),
+    ]
+    assert voice.outputs()[0].spoken == "One. Two more. Three. Four."
+    assert after - before == collections.Counter({"gap": 2})
+
+
+EXPRESSIVE = vocal.speech.Expressiveness(
+    cues=frozenset({"emotion", "pace", "sound", "style"}),
+    emotions=("amused", "calm"),
+    styles=("whisper",),
+    pace=vocal.speech.Range(min=0.8, max=1.2),
+    sounds=frozenset({"laugh"}),
+)
+
+
+def test_each_part_reports_what_its_voice_applied_clamped_and_could_not_carry(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with metric_reader.recording(tmp_path, monkeypatch) as reader:
+
+        def expression_counts() -> collections.Counter[tuple[str, str]]:
+            return collections.Counter(
+                {
+                    (str(point.attributes["cue"]), str(point.attributes["outcome"])): int(point.value)
+                    for point in reader.points("bot.speaking.expression.count")
+                }
+            )
+
+        before = expression_counts()
+
+        async def run() -> list[speaking.OutputData]:
+            voice = await stage(Script(expressiveness=EXPRESSIVE))
+            await voice.say(
+                vocal.speech.Part(words="Ha, ", expression=vocal.speech.Expression(sound="laugh", emotion="amused")),
+                "plain words, ",
+                vocal.speech.Part(
+                    words="got you.",
+                    expression=vocal.speech.Expression(pace=1.5, pitch=2.0, style="shout", emotion="smug"),
+                ),
+                vocal.speech.Part(words=" Phew.", expression=vocal.speech.Expression(sound="sigh", pace=1.0)),
+                id="expressive",
+            )
+            await wait_until(lambda: len(voice.outputs()) == 1)
+            await voice.say("Nothing to direct.", id="plain")
+            await wait_until(lambda: len(voice.outputs()) == 2)
+            return voice.outputs()
+
+        outputs = asyncio.run(run())
+        after = expression_counts()
+
+    assert outputs[0].expression == (
+        speaking.PartReport(applied=("emotion", "sound")),
+        speaking.PartReport(),
+        speaking.PartReport(applied=("pace",), clamped=("pace",), unsupported=("emotion", "pitch", "style")),
+        speaking.PartReport(applied=("pace",), unsupported=("sound",)),
+    )
+    assert outputs[1].expression is None
+    assert after - before == collections.Counter(
+        {
+            ("emotion", "applied"): 1,
+            ("sound", "applied"): 1,
+            ("pace", "applied"): 2,
+            ("pace", "clamped"): 1,
+            ("emotion", "unsupported"): 1,
+            ("pitch", "unsupported"): 1,
+            ("style", "unsupported"): 1,
+            ("sound", "unsupported"): 1,
+        }
+    )
+
+
+def test_a_cue_set_or_changed_only_on_the_final_is_late_for_a_part_already_begun() -> None:
+    async def run() -> list[speaking.OutputData]:
+        voice = await stage(Script(expressiveness=EXPRESSIVE))
+        await voice.draft("Well, ", 0)
+        await voice.draft("then", 0, part=1, expression=vocal.speech.Expression(emotion="calm"))
+        await wait_until(lambda: len(voice.encoder.pieces[0]) == 2)
+        await voice.say(
+            vocal.speech.Part(words="Well, ", expression=vocal.speech.Expression(emotion="amused")),
+            vocal.speech.Part(words="then.", expression=vocal.speech.Expression(emotion="amused", sound="laugh")),
+            vocal.speech.Part(words=" Bye.", expression=WHISPER),
+        )
+        await wait_until(lambda: bool(voice.outputs()))
+        return voice.outputs()
+
+    outputs = asyncio.run(run())
+
+    assert outputs[0].expression == (
+        speaking.PartReport(late=("emotion",)),
+        speaking.PartReport(applied=("emotion",), late=("emotion", "sound")),
+        # Not drafted, so it opened with the final's expression: nothing about it is late.
+        speaking.PartReport(applied=("style",), unsupported=("emotion",)),
+    )
+
+
+def test_with_whole_text_alignment_no_part_of_a_reply_is_said_until_its_last_chunk_plays() -> None:
+    """R6-6a: an encoder that says a run of parts in one request aligns the run's words to its last chunk, so a stop
+    before that chunk plays leaves every part of the run unspoken, and once it plays every part is said."""
+
+    async def run() -> tuple[list[speaking.OutputData], list[speaking.OutputData]]:
+        stopped = await stage(Script(chunk_ms=200, whole=True), mouth=RecordingSpeaker(clock=time.monotonic))
+        await stopped.say(vocal.speech.Part(words="Oh, ", expression=LAUGH), "you got me. ", "Again.")
+        await wait_until(lambda: any(item.spoken_seconds > 0.0 for item in stopped.progress()))
+        await stopped.stop()
+        await wait_until(lambda: bool(stopped.outputs()))
+        said = await stage(Script(whole=True))
+        await said.say(vocal.speech.Part(words="Oh, ", expression=LAUGH), "you got me.")
+        await wait_until(lambda: bool(said.outputs()))
+        return stopped.outputs(), said.outputs()
+
+    stopped, said = asyncio.run(run())
+
+    assert (stopped[0].outcome, stopped[0].spoken, stopped[0].unspoken) == ("stopped", "", "Oh, you got me. Again.")
+    assert (said[0].outcome, said[0].spoken, said[0].unspoken) == ("completed", "Oh, you got me.", "")
+    assert said[0].expression == (speaking.PartReport(unsupported=("sound",)), speaking.PartReport())
+
+
+# ----- the voice ----------------------------------------------------------------------------------------------------
+
+
+class Factory:
+    """Constructs a ``Script`` voice from the key and description it is given, and remembers every call."""
+
+    def __init__(self, *, refuse: bool = False) -> None:
+        self.calls: list[tuple[str, str | None]] = []
+        self.made: list[Script] = []
+        self.refuse: bool = refuse
+
+    def __call__(self, key: str, description: str | None) -> vocal.speech.SpeechEncoder:
+        self.calls.append((key, description))
+        if self.refuse:
+            raise ValueError(f"no voice {key!r} here")
+        script = Script(expressiveness=EXPRESSIVE)
+        self.made.append(script)
+        return script
+
+
+async def give_voice(voice: Stage, key: str, description: str | None = None, *, id: str = "voice-1") -> None:
+    _ = await hsm.dispatch(
+        voice.environment,
+        voice.speaking,
+        dataclasses.replace(
+            speaking.VoiceEvent.with_data(speaking.VoiceData(voice=key, description=description)),
+            id=id,
+            source=hsm.id(voice.requester),
+            target=hsm.id(voice.speaking),
+        ),
+    )
+
+
+def _voicings(reader: metric_reader.Reader) -> collections.Counter[str]:
+    return _counts(reader, "bot.speaking.voicing.count")
+
+
+def test_built_with_a_factory_speaking_holds_speech_until_it_is_given_its_voice_and_makes_it_once(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with metric_reader.recording(tmp_path, monkeypatch) as reader:
+        before = _voicings(reader)
+
+        async def run() -> tuple[Stage, Factory, str, list[speaking.OutputData]]:
+            factory = Factory()
+            voice = await stage(factory=factory)
+            await voice.draft("Hello ", 0)
+            await voice.say("Hello there.")
+            await asyncio.sleep(0.05)
+            held = voice.speaking.state() or ""
+            assert voice.outputs() == []
+            await give_voice(voice, "v-3f2a9c41d07e", "A warm, unhurried voice.")
+            await wait_until(lambda: bool(voice.outputs()))
+            await give_voice(voice, "v-another", id="voice-2")
+            await asyncio.sleep(0.02)
+            return voice, factory, held, voice.outputs()
+
+        voice, factory, held, outputs = asyncio.run(run())
+        after = _voicings(reader)
+
+    assert held.endswith("/wired/unvoiced/holding")
+    # Exactly one encoder, constructed from the voice the bot was given; a second voice changes nothing.
+    assert factory.calls == [("v-3f2a9c41d07e", "A warm, unhurried voice.")]
+    assert factory.made[0].reads == [["Hello ", "there."]]
+    assert (outputs[0].outcome, outputs[0].spoken) == ("completed", "Hello there.")
+    (voiced,) = voice.requester.named(speaking.VoicedEvent)
+    assert (voiced.id, voiced.source) == ("voice-1", hsm.id(voice.speaking))
+    assert voiced.data == speaking.VoicedData(voice="v-3f2a9c41d07e", expressiveness=EXPRESSIVE)
+    assert (voice.speaking.state() or "").endswith("/wired/voiced/idle")
+    assert after - before == collections.Counter({"voiced": 1, "dropped": 1})
+
+
+def test_speech_held_past_voicing_timeout_fails_unavailable_until_a_voice_comes(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, finished_spans: InMemorySpanExporter
+) -> None:
+    with metric_reader.recording(tmp_path, monkeypatch) as reader:
+        before = _voicings(reader)
+
+        async def run() -> tuple[Stage, list[hsm.Event[typing.Any]], list[speaking.OutputData]]:
+            voice = await stage(factory=Factory(), voicing_timeout=datetime.timedelta(milliseconds=50))
+            await voice.draft("Too ", 0, id="early")
+            await voice.draft("soon", 4, id="early")
+            await voice.say("Too soon.", id="early")
+            await wait_until(lambda: len(voice.requester.named(speaking.Speaking.failed_event)) == 2)
+            await voice.say("Still nothing.", id="later")
+            await wait_until(lambda: len(voice.requester.named(speaking.Speaking.failed_event)) == 3)
+            await give_voice(voice, "v-3f2a9c41d07e")
+            await wait_until(lambda: bool(voice.requester.named(speaking.VoicedEvent)))
+            await voice.say("Now I can.", id="voiced")
+            await wait_until(lambda: bool(voice.outputs()))
+            return voice, voice.requester.named(speaking.Speaking.failed_event), voice.outputs()
+
+        voice, failures, outputs = asyncio.run(run())
+        after = _voicings(reader)
+
+    # The held opening draft and the final each get their terminal; a continuing draft is not a request of its own.
+    assert [event.id for event in failures] == ["early", "early", "later"]
+    assert {typing.cast(ability.FailureData, event.data).message for event in failures} == {
+        "Speaking has no voice yet."
+    }
+    kinds = {
+        dict(recorded.attributes or {}).get("bot.failure.kind")
+        for recorded in finished_spans.get_finished_spans()
+        if recorded.name == "bot.speaking.terminal"
+    }
+    assert kinds == {"unavailable"}
+    assert [(output.text, output.outcome) for output in outputs] == [("Now I can.", "completed")]
+    assert after - before == collections.Counter({"timed_out": 1, "voiced": 1})
+    assert voice.speaking.state() is not None
+
+
+def test_a_voice_the_factory_cannot_construct_fails_and_leaves_speaking_unvoiced(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with metric_reader.recording(tmp_path, monkeypatch) as reader:
+        before = _voicings(reader)
+
+        async def run() -> tuple[Stage, Factory, list[hsm.Event[typing.Any]], str]:
+            factory = Factory(refuse=True)
+            voice = await stage(factory=factory)
+            await give_voice(voice, "v-gone")
+            await wait_until(lambda: bool(voice.requester.named(speaking.Speaking.failed_event)))
+            await asyncio.sleep(0.02)
+            return voice, factory, voice.requester.named(speaking.Speaking.failed_event), voice.speaking.state() or ""
+
+        voice, factory, failures, state = asyncio.run(run())
+        after = _voicings(reader)
+
+    assert factory.calls == [("v-gone", None)]
+    assert [event.id for event in failures] == ["voice-1"]
+    assert "no voice 'v-gone' here" in typing.cast(ability.FailureData, failures[0].data).message
+    assert voice.requester.named(speaking.VoicedEvent) == []
+    assert state.endswith("/wired/unvoiced/holding")
+    assert after - before == collections.Counter({"failed": 1})
+
+
+def test_speaking_built_with_its_encoder_is_voiced_and_drops_a_voice_it_is_given(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with metric_reader.recording(tmp_path, monkeypatch) as reader:
+        before = _voicings(reader)
+
+        async def run() -> Stage:
+            voice = await stage()
+            await give_voice(voice, "v-3f2a9c41d07e")
+            await voice.say("Same voice.")
+            await wait_until(lambda: bool(voice.outputs()))
+            return voice
+
+        voice = asyncio.run(run())
+        after = _voicings(reader)
+
+    assert voice.requester.named(speaking.VoicedEvent) == []
+    assert voice.outputs()[0].outcome == "completed"
+    assert after - before == collections.Counter({"dropped": 1})

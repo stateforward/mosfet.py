@@ -65,7 +65,6 @@ listening_speech = SpeechDecoding(decoder=SpeechDecoder(language="en"))
 voice = speaking.Speaking(
     encoder=SpeechEncoder(language="en-us", voice="kokoro_af_heart", sample_rate_hz=24000),
     speaker=audio.Speaker(),
-    voice_id="tts:kokoro-af-heart",
 )
 ```
 

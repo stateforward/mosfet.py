@@ -386,9 +386,9 @@ async def _voice(environment: Environment) -> speaking.Speaking:
 
     mouth = audio.Speaker()
     _ = await mosfet.started(environment, mouth, typing.cast(hsm.Model, audio.Speaker.model))
-    voice = speaking.Speaking(encoder=_Utterance(), speaker=mouth, voice_id="tts:test")
+    voice = speaking.Speaking(encoder=_Utterance(), speaker=mouth)
     await start_ability_tree(environment, voice)
-    await wait_until(lambda: (voice.state() or "").endswith("/wired/idle"))
+    await wait_until(lambda: (voice.state() or "").endswith("/wired/voiced/idle"))
     return voice
 
 
@@ -403,14 +403,14 @@ def test_a_bot_that_speaks_is_heard_on_the_remote_speaker_only_while_linked() ->
         await wait_until(lambda: all(port.state().endswith("/attached") for port in ports))
         voice = await _voice(environment)
 
-        _ = await voice.apply(speaking.InputData(text="Hello."), ctx=environment)
+        _ = await voice.apply(speaking.InputData(parts=(vocal.speech.Part(words="Hello."),)), ctx=environment)
         await settle(50)
 
         _ = await fake.dispatch(hsm.Context(), connected(fake))
         streams = await open_streams(environment, fake)
         await wait_until(lambda: firmware_state(device) == "/Computer/linked")
         await settle()
-        _ = await voice.apply(speaking.InputData(text="Hello again."), ctx=environment)
+        _ = await voice.apply(speaking.InputData(parts=(vocal.speech.Part(words="Hello again."),)), ctx=environment)
         await wait_until(lambda: bool(streams["speaker"].sent), timeout=5.0)
         await settle(50)
         return streams["speaker"].sent

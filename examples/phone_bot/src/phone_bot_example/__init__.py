@@ -784,7 +784,6 @@ def _speaking(
     return speaking.Speaking(
         encoder=_gemini_speech_encoder(config),
         speaker=speaker,
-        voice_id=f"tts:{config.voice_name.lower()}",
         listening=listening,
         conversation=conversation,
     )

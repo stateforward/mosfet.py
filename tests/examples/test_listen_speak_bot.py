@@ -220,9 +220,7 @@ class _HandoffProbeBot(ListenSpeakBot):
 
 
 def _spoken(text: str) -> speaking.OutputData:
-    return speaking.OutputData(
-        text=text, spoken=text, outcome="completed", voice_id="tts:say", sample_rate_hz=22_050, channels=1
-    )
+    return speaking.OutputData(text=text, spoken=text, outcome="completed", sample_rate_hz=22_050, channels=1)
 
 
 class _FakeRunEncoder:
