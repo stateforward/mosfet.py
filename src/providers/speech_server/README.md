@@ -1,7 +1,7 @@
 # mosfet-provider-speech-server
 
 Clients for a speech server's own wire protocols, so a bot can hear through served speech models next to its local
-ones, through the same `hearing.voice` ability contracts. The OpenAI-compatible speech endpoints
+ones, through the same `hearing.voice` ability contracts, and be given a voice the server holds or designs. The OpenAI-compatible speech endpoints
 (`/v1/audio/speech`, `/v1/audio/transcriptions`) are served by `mosfet-provider-openai-compat`.
 
 | Client | Serves | Endpoint |
@@ -9,6 +9,8 @@ ones, through the same `hearing.voice` ability contracts. The OpenAI-compatible 
 | `speech_server.Diarizer` | `hearing.voice.VoiceDiarizer` | `POST /v1/diarize?sample_rate=16000` (for example Sortformer) |
 | `speech_server.VoiceEmbedder` | the voice-identification `Classifier` (`voice.identification`) | `POST /v1/embed` (for example WeSpeaker) |
 | `speech_server.AffectClassifier` | `hearing.voice.AffectClassifier` | `POST /v1/emotion?sample_rate=…` (for example emotion2vec+) |
+| `speech_server.Catalog` | `vocal.voice.Catalog` | `GET /v1/voices` (for example anygame's lab TTS engine) |
+| `speech_server.Designer` | `vocal.voice.Designer` | `POST /v1/voices` (for example anygame's lab TTS engine) |
 | `speech_server.Transcription` | a streaming session (`hearing.speech.stream`) for `listening.Listening(transcription=)` | WebSocket `/v1/audio/stream` (for example Nemotron with turn detection) |
 
 `Diarizer`, `VoiceEmbedder` and `AffectClassifier` are plain collaborators, not state machines: an ability composes
@@ -53,6 +55,44 @@ ears = listening.Listening(
 The embedder's vectors stay inside Listening: the registry turns each into a voice id, and heard speech carries
 `voice:<id>` refs. With a file memory database, `sqlite_memory.IdentityStore(engine=...)` replaces the in-process
 store and shares the memory engine.
+
+## Voices
+
+`speech_server.Catalog` and `speech_server.Designer` are the voice source `vocal.voice.Inception` gives a bot its
+voice from, on the lab TTS engine's `/v1/voices` protocol. Both are plain collaborators. `source` is the name
+composition gives this server; every ref they answer carries it, and the two must share it.
+
+```python
+from mosfet.abilities import vocal
+from mosfet.providers import speech_server
+
+inception = vocal.voice.Inception(
+    traits=traits,
+    languages=("en",),
+    speaking=mouth,
+    processor=inception_model,
+    catalog=speech_server.Catalog(config.tts_url, source="lab", languages=("en",)),
+    designer=speech_server.Designer(config.tts_url, source="lab"),
+    memory=bot_memory,
+)
+```
+
+- `Catalog.voices()` lists every voice the server holds (the filters are hints the server has no query for). Each
+  becomes a `voice.Entry` named by its id, with the server's description and the `languages` composition declared
+  for the engine (the server describes no languages or descriptors). A designed voice is labelled
+  `{"custom": "true"}` and carries its preview URL, `/v1/voices/{id}/preview`.
+- `Designer.create()` asks for exactly one voice (`{description, count: 1}`); the server keeps its reference clip,
+  so the voice is permanent from the answer, which becomes `voice.Designed` with the request's description and the
+  preview URL. `max_description` is the server's 300 characters; a longer description is refused as
+  `invalid_input` without a request. The request's descriptors, languages and sample text are not part of this
+  protocol.
+
+Failures raise `vocal.voice.Error`: 404 `unsupported_input` (an engine that holds or designs no voices), 422
+`invalid_input`, 503 or an unreachable server `unavailable`, 507 (voice storage full) `overloaded`, a deadline
+`timeout`, an answer that is not the documented shape `invalid_response`; any other listing refusal is
+`invalid_input` (4xx) or `unavailable` (5xx), and any other design refusal `design_failed`. `timeout_seconds` is 3 s
+for a listing and 60 s for a design, which renders the voice. `bot.provider.speech_server.voices.duration{operation,
+bot.outcome}` times every request (`operation` is `list` or `design`).
 
 ## Streaming transcription
 
