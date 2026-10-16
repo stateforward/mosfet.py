@@ -2234,7 +2234,9 @@ def test_a_drafted_response_is_heard_before_the_processor_has_finished_writing_i
             del input
             assert drafts is not None
             drafts(
-                processing.DraftData(text="Sure. I can", offset=0, event=communication.RespondEvent.name, item=0, seq=0)
+                processing.DraftData(
+                    text="Sure. I can", offset=0, event=communication.RespondEvent.name, item=0, part=0, seq=0
+                )
             )
             for _ in range(2_000):
                 if self.mouth.frames:
@@ -2242,7 +2244,9 @@ def test_a_drafted_response_is_heard_before_the_processor_has_finished_writing_i
                 await asyncio.sleep(0.001)
             self.heard_before_return = bool(self.mouth.frames)
             return (
-                processing.SelectedEvent(event=communication.RespondEvent.name, data={"text": "Sure. I can help."}),
+                processing.SelectedEvent(
+                    event=communication.RespondEvent.name, data={"parts": [{"words": "Sure. I can help."}]}
+                ),
             )
 
     async def run() -> tuple[bool, list[str]]:

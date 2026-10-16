@@ -49,6 +49,14 @@ _LATE = _METER.create_counter(
     unit="{event}",
     description="Responses or drafts that arrived for a response id Communication had already finished; ignored.",
 )
+_INVALID_EXPRESSION = _METER.create_counter(
+    "bot.communication.expression.invalid.count",
+    unit="{expression}",
+    description=(
+        "Expressions a drafted part opened with that are not a valid vocal.speech.Expression; the part's words are "
+        "forwarded without one, and the final respond still carries what the model chose."
+    ),
+)
 
 
 class ActivateData(pydantic.BaseModel):
@@ -88,50 +96,55 @@ DraftEvent = hsm.Event[processing.DraftData](
     kind=hsm.EventKind,
     schema=processing.DraftData,
 )
-"""Text newly written into a ``respond`` the model is still writing (an append-only delta), under the selection's id.
-Not model-callable: Processing dispatches it while the selection streams, and the final ``respond`` under the same id
-follows."""
+"""Words newly written into one part of a ``respond`` the model is still writing (an append-only delta), with the part's
+expression on its opening draft when the model wrote it first, under the selection's id. Not model-callable: Processing
+dispatches it while the selection streams, and the final ``respond`` under the same id follows."""
 
 
 class RespondData(pydantic.BaseModel):
-    """Semantic response selected by cognition for the current communication.
+    """Semantic response selected by cognition for the current communication: a reply as one or more parts.
 
-    Communication currently delivers this action through its injected Speaking ability. The
-    selected payload is deliberately text-only: cognition chooses to respond, while Speaking
-    owns speech encoding and playout. ``text`` is marked for drafting: while a model is still writing
-    it, Processing hands it here as :data:`DraftEvent`, so speech can start before the response
-    is complete. The marker is not part of the schema the model sees.
+    Communication delivers this action through its injected Speaking ability: cognition chooses to respond and how
+    each part is said, while Speaking owns speech encoding and playout. Each part's ``words`` is marked for drafting
+    within ``parts``: while a model is still writing them, Processing hands them here part by part as
+    :data:`DraftEvent`, a part's ``expression`` riding its first draft when the model wrote it first, so speech can
+    start before the response is complete. The marker is not part of the schema the model sees.
+
+    No example reply anywhere on this model, deliberately: an example of a reply is a complete, valid answer, and a
+    bot that is unsure what to say says it out loud. The descriptions carry the whole contract instead.
     """
 
-    __draft__: typing.ClassVar[processing.Draft] = processing.Draft(field="text", event=DraftEvent)
+    __draft__: typing.ClassVar[processing.Draft] = processing.Draft(
+        field="words", event=DraftEvent, within="parts", leading=("expression",)
+    )
 
     model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
         frozen=True,
         extra="forbid",
         json_schema_extra={
             "description": (
-                "A response to communicate aloud. Communication routes the text through its injected "
-                "Speaking ability; cognition does not select Speaking directly."
+                "A response to say aloud, as one or more parts. Most replies are one part with no expression. "
+                "Communication routes it through its injected Speaking ability; cognition does not select Speaking "
+                "directly."
             ),
-            "examples": [{"text": "I am doing well, thank you."}],
         },
     )
 
-    text: str = pydantic.Field(
+    parts: tuple[vocal.speech.Part, ...] = pydantic.Field(
         min_length=1,
+        max_length=64,
         description=(
-            "The complete non-blank text to communicate. It is spoken verbatim by the configured "
-            "Speaking ability after this action is selected."
+            "The reply, as one or more parts said in order in your own voice. Their words, joined exactly as "
+            "written, are the reply, and are read aloud literally; how a part is said belongs in its expression, "
+            "never in its words."
         ),
-        examples=["I am doing well, thank you."],
     )
 
-    @pydantic.field_validator("text")
-    @classmethod
-    def require_nonblank(cls, text: str) -> str:
-        if not text.strip():
-            raise ValueError("Communication response text must be non-blank.")
-        return text
+    @pydantic.model_validator(mode="after")
+    def _spoken(self) -> typing.Self:
+        if not vocal.speech.said(self.parts).strip():
+            raise ValueError("A reply's words must not be blank.")
+        return self
 
 
 RespondEvent = hsm.Event[RespondData](
@@ -249,12 +262,14 @@ class Communication(ability.Ability[TurnData, object]):
     - ``inactive``: attaching the active Conversation composite (or after End).
     - ``active``: route :data:`InputEvent` to ``_active_conversation`` and accept
       :data:`RespondEvent` for the configured Speaking route; forward terminals.
-    - ``responding``: the response's text has gone to the injected Speaking ability as
-      ``speaking.input`` (or, while the model is still writing it, ``speaking.draft``, each
-      append-only delta forwarded unchanged) under the response id; drafts and the final ``respond``
-      for that id keep being forwarded, and Communication forwards Speaking's terminal for that id to
-      its owner. The ``respond`` for another response is held (bounded) until this one ends, then
-      handled in order; its drafts are not held, because the ``respond`` carries all of their text. ``waiting`` re-enters on every ``speaking.progress`` for the response, so a long
+    - ``responding``: the response's parts have gone to the injected Speaking ability as
+      ``speaking.input`` (or, while the model is still writing them, ``speaking.draft``, each
+      append-only delta of one part's words forwarded unchanged at its part and offset, a part's
+      valid drafted expression on its opening draft) under the response id; drafts and the final
+      ``respond`` for that id keep being forwarded, and Communication forwards Speaking's terminal for
+      that id to its owner. The ``respond`` for another response is held (bounded) until this one ends,
+      then handled in order; its drafts are not held, because the ``respond`` carries all of their
+      words. ``waiting`` re-enters on every ``speaking.progress`` for the response, so a long
       spoken reply is never cut off; ``response_idle_timeout`` of silence from Speaking ends it as
       failed and stops it (``speaking.stop`` for the response id), so Speaking does not go on saying a
       response whose failure was already reported. :data:`StopEvent` is enabled only here, so it is offered only while a response is being
@@ -391,12 +406,18 @@ class Communication(ability.Ability[TurnData, object]):
 
     @staticmethod
     def _is_response_text(event: hsm.Event[typing.Any]) -> bool:
-        """A respond, or a draft of one with some newly written text: the two ways a response's text arrives."""
+        """A respond, or a draft of one with words newly written into one of its parts: the two ways a response's
+        words arrive."""
 
         data = event.data
         if isinstance(data, RespondData):
             return True
-        return isinstance(data, processing.DraftData) and data.event == RespondEvent.name and bool(data.text)
+        return (
+            isinstance(data, processing.DraftData)
+            and data.event == RespondEvent.name
+            and data.part is not None
+            and bool(data.text)
+        )
 
     @staticmethod
     def _is_new_response(ctx: hsm.Context, instance: "Communication", event: hsm.Event[typing.Any]) -> bool:
@@ -428,20 +449,29 @@ class Communication(ability.Ability[TurnData, object]):
         _LATE.add(1)
 
     @staticmethod
-    def _forward_text(
+    def _forward_parts(
         ctx: hsm.Context, instance: "Communication", event: hsm.Event[typing.Any], response_id: str
     ) -> None:
-        """Hand the response's text to Speaking under the response id: a draft as a draft, the final as the input."""
+        """Hand the response's parts to Speaking under the response id: a draft as a draft, the final as the input."""
 
         data = event.data
         target = instance._speaking
         forwarded: hsm.Event[typing.Any]
         if isinstance(data, RespondData):
-            forwarded = speaking.InputEvent.with_data(speaking.InputData(parts=(vocal.speech.Part(words=data.text),)))
+            forwarded = speaking.InputEvent.with_data(speaking.InputData(parts=data.parts))
         else:
-            assert isinstance(data, processing.DraftData)
-            # The delta goes on unchanged: what was newly written into the one part, at the offset it was written at.
-            forwarded = speaking.DraftEvent.with_data(speaking.DraftData(part=0, words=data.text, offset=data.offset))
+            assert isinstance(data, processing.DraftData) and data.part is not None
+            # The delta goes on unchanged: what was newly written into its part, at the offset it was written at,
+            # with the part's expression when the model wrote one before the words and it is a valid one.
+            expression: vocal.speech.Expression | None = None
+            if "expression" in data.leading:
+                try:
+                    expression = vocal.speech.Expression.model_validate(data.leading["expression"])
+                except pydantic.ValidationError:
+                    _INVALID_EXPRESSION.add(1)
+            forwarded = speaking.DraftEvent.with_data(
+                speaking.DraftData(part=data.part, words=data.text, offset=data.offset, expression=expression)
+            )
         with span.operation(
             "bot.communication.response.dispatch",
             scope="bot.abilities.communication",
@@ -463,23 +493,23 @@ class Communication(ability.Ability[TurnData, object]):
 
     @staticmethod
     def _open_response(ctx: hsm.Context, instance: "Communication", event: hsm.Event[typing.Any]) -> None:
-        """Hold the response's id for as long as it is being spoken, and hand the text written so far to Speaking."""
+        """Hold the response's id for as long as it is being spoken, and hand the words written so far to Speaking."""
 
         response_id = event.id or uuid.uuid4().hex
         instance._response_id = response_id
         _ = instance._held_responses.pop(response_id, None)
-        Communication._forward_text(ctx, instance, event, response_id)
+        Communication._forward_parts(ctx, instance, event, response_id)
 
     @staticmethod
     def _continue_response(ctx: hsm.Context, instance: "Communication", event: hsm.Event[typing.Any]) -> None:
-        """More of the response being spoken, or its final text: on to Speaking under the same id."""
+        """More of the response being spoken, or its final parts: on to Speaking under the same id."""
 
-        Communication._forward_text(ctx, instance, event, instance._response_id)
+        Communication._forward_parts(ctx, instance, event, instance._response_id)
 
     @staticmethod
     def _hold_response(ctx: hsm.Context, instance: "Communication", event: hsm.Event[typing.Any]) -> None:
         """Another response waits its turn: its respond is kept. Its drafts are not: the respond carries all of their
-        text, and nothing of that response can be said before its turn."""
+        words, and nothing of that response can be said before its turn."""
 
         if not isinstance(event.data, RespondData):
             return

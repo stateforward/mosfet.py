@@ -16,6 +16,7 @@ import typing
 import hsm
 import mosfet
 import hsm.muid as muid
+import pydantic
 import pytest
 
 from mosfet.abilities import communication
@@ -159,7 +160,11 @@ async def _owned(ctx: hsm.Context, speaker: speaking.Speaking, comm: communicati
 
 
 def _respond(text: str, response_id: str) -> hsm.Event[communication.RespondData]:
-    return communication.RespondEvent.with_data_and_id(communication.RespondData(text=text), response_id)
+    return _reply((vocal.speech.Part(words=text),), response_id)
+
+
+def _reply(parts: tuple[vocal.speech.Part, ...], response_id: str) -> hsm.Event[communication.RespondData]:
+    return communication.RespondEvent.with_data_and_id(communication.RespondData(parts=parts), response_id)
 
 
 def _failures(collector: TerminalCollector) -> list[ability.FailureData]:
@@ -298,7 +303,12 @@ def test_communication_respond_without_id_mints_unique_operation_identity(monkey
         _ = await hsm.dispatch(
             ctx,
             comm,
-            dataclasses.replace(communication.RespondEvent.with_data(communication.RespondData(text="no id")), id=""),
+            dataclasses.replace(
+                communication.RespondEvent.with_data(
+                    communication.RespondData(parts=(vocal.speech.Part(words="no id"),))
+                ),
+                id="",
+            ),
         )
         await _wait_until(lambda: bool(observed))
         await _wait_until(lambda: bool(_spoken(collector)))
@@ -413,10 +423,25 @@ def test_speaking_progress_keeps_a_long_response_alive_past_the_idle_timeout() -
 
 
 def _draft(
-    text: str, response_id: str, *, offset: int = 0, item: int = 0, seq: int = 0
+    text: str,
+    response_id: str,
+    *,
+    offset: int = 0,
+    item: int = 0,
+    seq: int = 0,
+    part: int = 0,
+    leading: dict[str, pydantic.JsonValue] | None = None,
 ) -> hsm.Event[processing.DraftData]:
     return communication.DraftEvent.with_data_and_id(
-        processing.DraftData(text=text, offset=offset, event=communication.RespondEvent.name, item=item, seq=seq),
+        processing.DraftData(
+            text=text,
+            offset=offset,
+            event=communication.RespondEvent.name,
+            item=item,
+            part=part,
+            seq=seq,
+            leading=leading or {},
+        ),
         response_id,
     )
 
@@ -440,22 +465,34 @@ class ForwardRecordingSpeaking(speaking.Speaking):
 
 def test_respond_is_marked_for_drafting_through_communication_draft() -> None:
     marker = communication.RespondData.__draft__
-    assert marker == processing.Draft(field="text", event=communication.DraftEvent)
+    assert marker == processing.Draft(
+        field="words", event=communication.DraftEvent, within="parts", leading=("expression",)
+    )
     assert communication.DraftEvent.name == "bot.ability.communication.draft"
     assert communication.DraftEvent.kind != processing.EventKind
     assert "__draft__" not in json.dumps(communication.RespondData.model_json_schema())
 
 
-def test_drafts_open_the_response_and_reach_speaking_under_its_id_until_the_final_text() -> None:
-    async def run() -> tuple[list[tuple[str, str, str, int | None]], list[hsm.Event[typing.Any]], str]:
+def _forwarded(voice: ForwardRecordingSpeaking) -> list[tuple[str, str, object]]:
+    """What Communication handed Speaking, in order: each event's name, id and payload."""
+
+    return [(event.name, event.id or "", event.data) for event in voice.forwarded]
+
+
+def test_drafts_open_the_response_and_reach_speaking_part_by_part_under_its_id_until_the_final_parts() -> None:
+    amused = vocal.speech.Expression(emotion="amused", sound="laugh")
+    final = (vocal.speech.Part(words="Oh, ", expression=amused), vocal.speech.Part(words="you got me."))
+
+    async def run() -> tuple[list[tuple[str, str, object]], list[hsm.Event[typing.Any]]]:
         ctx = Environment()
         voice = ForwardRecordingSpeaking(Script())
         comm = communication.Communication(active_conversation=_conversation(), speaking=voice)
         collector = await _owned(ctx, voice, comm)
-        _ = await hsm.dispatch(ctx, comm, _draft("Sure. I can", "op-1", seq=0))
+        leading: dict[str, pydantic.JsonValue] = {"expression": {"emotion": "amused", "sound": "laugh"}}
+        _ = await hsm.dispatch(ctx, comm, _draft("Oh", "op-1", seq=0, leading=leading))
         await _wait_until(lambda: "/behavior/responding" in (comm.state() or ""))
-        _ = await hsm.dispatch(ctx, comm, _draft(" help.", "op-1", offset=11, seq=1))
-        # A draft of some other selection is not this response's text.
+        _ = await hsm.dispatch(ctx, comm, _draft(", ", "op-1", offset=2, seq=1))
+        # A draft of some other selection is not this response's words, and neither is one that names no part.
         _ = await hsm.dispatch(
             ctx,
             comm,
@@ -464,34 +501,103 @@ def test_drafts_open_the_response_and_reach_speaking_under_its_id_until_the_fina
                 "op-1",
             ),
         )
-        _ = await hsm.dispatch(ctx, comm, _respond("Sure. I can help.", "op-1"))
+        _ = await hsm.dispatch(
+            ctx,
+            comm,
+            communication.DraftEvent.with_data_and_id(
+                processing.DraftData(text="no part", offset=0, event=communication.RespondEvent.name, item=0, seq=3),
+                "op-1",
+            ),
+        )
+        _ = await hsm.dispatch(ctx, comm, _draft("you got me.", "op-1", part=1, seq=4))
+        _ = await hsm.dispatch(ctx, comm, _reply(final, "op-1"))
         await _wait_until(lambda: bool(_spoken(collector)))
         await _wait_until(lambda: "/behavior/active" in (comm.state() or ""))
-        forwarded = [
-            (
-                event.name,
-                event.id or "",
-                event.data.words
-                if isinstance(event.data, speaking.DraftData)
-                else vocal.speech.said(typing.cast(speaking.InputData, event.data).parts),
-                getattr(event.data, "offset", None),
-            )
-            for event in voice.forwarded
-        ]
-        return forwarded, _spoken(collector), hsm.id(comm)
+        return _forwarded(voice), _spoken(collector)
 
-    forwarded, spoken, comm_id = asyncio.run(run())
+    forwarded, spoken = asyncio.run(run())
     assert forwarded == [
-        # Each delta goes on unchanged, at its offset; then the final text.
-        (speaking.DraftEvent.name, "op-1", "Sure. I can", 0),
-        (speaking.DraftEvent.name, "op-1", " help.", 11),
-        (speaking.InputEvent.name, "op-1", "Sure. I can help.", None),
+        # Each delta goes on at its part and offset, the part's expression on its opening draft; then the final parts.
+        (speaking.DraftEvent.name, "op-1", speaking.DraftData(part=0, words="Oh", offset=0, expression=amused)),
+        (speaking.DraftEvent.name, "op-1", speaking.DraftData(part=0, words=", ", offset=2)),
+        (speaking.DraftEvent.name, "op-1", speaking.DraftData(part=1, words="you got me.", offset=0)),
+        (speaking.InputEvent.name, "op-1", speaking.InputData(parts=final)),
     ]
     assert [item.id for item in spoken] == ["op-1"]
     output = spoken[0].data
     assert isinstance(output, speaking.OutputData)
-    assert (output.text, output.spoken, output.outcome) == ("Sure. I can help.", "Sure. I can help.", "completed")
-    del comm_id
+    assert (output.text, output.spoken, output.outcome) == ("Oh, you got me.", "Oh, you got me.", "completed")
+
+
+def test_an_invalid_drafted_expression_is_forwarded_without_it_and_counted(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with metric_reader.recording(tmp_path, monkeypatch) as metrics:
+        before = sum(point.value for point in metrics.points("bot.communication.expression.invalid.count"))
+
+        async def run() -> list[tuple[str, str, object]]:
+            ctx = Environment()
+            voice = ForwardRecordingSpeaking(Script())
+            comm = communication.Communication(active_conversation=_conversation(), speaking=voice)
+            collector = await _owned(ctx, voice, comm)
+            # Decoded JSON the model wrote, not yet checked: an empty expression and an unknown cue are not valid.
+            _ = await hsm.dispatch(ctx, comm, _draft("Well", "op-1", leading={"expression": {}}))
+            _ = await hsm.dispatch(
+                ctx, comm, _draft(" then.", "op-1", part=1, seq=1, leading={"expression": {"tone": "dry"}})
+            )
+            _ = await hsm.dispatch(
+                ctx, comm, _reply((vocal.speech.Part(words="Well"), vocal.speech.Part(words=" then.")), "op-1")
+            )
+            await _wait_until(lambda: bool(_spoken(collector)))
+            return _forwarded(voice)
+
+        forwarded = asyncio.run(run())
+        invalid = sum(point.value for point in metrics.points("bot.communication.expression.invalid.count")) - before
+
+    assert [data for _, _, data in forwarded[:2]] == [
+        speaking.DraftData(part=0, words="Well", offset=0),
+        speaking.DraftData(part=1, words=" then.", offset=0),
+    ]
+    assert invalid == 2
+
+
+def test_a_reply_is_one_to_sixty_four_parts_whose_words_are_the_text_of_record() -> None:
+    with pytest.raises(pydantic.ValidationError):
+        _ = communication.RespondData(parts=())
+    with pytest.raises(pydantic.ValidationError):
+        _ = communication.RespondData(parts=tuple(vocal.speech.Part(words="a") for _ in range(65)))
+    with pytest.raises(pydantic.ValidationError):
+        _ = communication.RespondData.model_validate({"parts": [{"words": "   "}]})
+    with pytest.raises(pydantic.ValidationError):
+        _ = communication.RespondData.model_validate({"text": "Hello."})
+    reply = communication.RespondData.model_validate(
+        {"parts": [{"expression": {"emotion": "amused"}, "words": "Oh, "}, {"words": "you got me."}]}
+    )
+    assert vocal.speech.said(reply.parts) == "Oh, you got me."
+    schema = communication.RespondData.model_json_schema()
+    assert list(schema["properties"]) == ["parts"]
+    # An example of a reply becomes the reply: the schema carries none.
+    assert "examples" not in json.dumps(schema)
+
+
+def test_a_reply_in_parts_is_recorded_as_its_words_joined_verbatim() -> None:
+    async def run() -> list[conversation.Messages]:
+        ctx = Environment()
+        conv = RecordingConversation()
+        speaker = _speaking(Script(), conversation=(conv,))
+        comm = communication.Communication(active_conversation=conv, speaking=speaker)
+        collector = await _owned(ctx, speaker, comm)
+        parts = (
+            vocal.speech.Part(words="Oh, ", expression=vocal.speech.Expression(sound="laugh")),
+            vocal.speech.Part(words="you got me."),
+        )
+        _ = await hsm.dispatch(ctx, comm, _reply(parts, "response-1"))
+        await _wait_until(lambda: bool(_spoken(collector)))
+        await _wait_until(lambda: len(conv.outputs) == 1)
+        return conv.outputs
+
+    outputs = asyncio.run(run())
+    assert outputs[0].messages[0].content == "Oh, you got me."
 
 
 def test_another_response_waits_for_the_one_being_spoken_even_while_this_one_is_still_drafted() -> None:

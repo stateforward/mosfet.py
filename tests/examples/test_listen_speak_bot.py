@@ -402,7 +402,7 @@ def test_listen_speak_run_progress_waits_for_correlated_speaking_terminal(tmp_pa
                             cognition.EventData(
                                 event=communication.RespondEvent.name,
                                 target="communication",
-                                data=communication.RespondData(text="I am well."),
+                                data=communication.RespondData(parts=(vocal.speech.Part(words="I am well."),)),
                             ),
                         ),
                         focus_candidates=(),
@@ -468,12 +468,12 @@ def test_listen_speak_run_progress_requires_one_terminal_per_response_selection(
                             cognition.EventData(
                                 event=communication.RespondEvent.name,
                                 target="communication",
-                                data=communication.RespondData(text="Reply A."),
+                                data=communication.RespondData(parts=(vocal.speech.Part(words="Reply A."),)),
                             ),
                             cognition.EventData(
                                 event=communication.RespondEvent.name,
                                 target="communication",
-                                data=communication.RespondData(text="Reply B."),
+                                data=communication.RespondData(parts=(vocal.speech.Part(words="Reply B."),)),
                             ),
                         ),
                         focus_candidates=(),
@@ -553,7 +553,7 @@ def test_listen_speak_run_progress_waits_for_earlier_response_before_later_no_re
                             cognition.EventData(
                                 event=communication.RespondEvent.name,
                                 target="communication",
-                                data=communication.RespondData(text="Reply A."),
+                                data=communication.RespondData(parts=(vocal.speech.Part(words="Reply A."),)),
                             ),
                         ),
                         focus_candidates=(),
@@ -746,7 +746,7 @@ def test_listen_speak_communication_drives_body_conversation_and_speaking(tmp_pa
                             cognition.EventData(
                                 event=communication.RespondEvent.name,
                                 target="communication",
-                                data=communication.RespondData(text="Hello."),
+                                data=communication.RespondData(parts=(vocal.speech.Part(words="Hello."),)),
                             ),
                         ),
                         focus_candidates=(),
@@ -1192,7 +1192,7 @@ def test_listen_speak_progress_rejects_stale_and_duplicate_speaking_terminals(tm
                             cognition.EventData(
                                 event=communication.RespondEvent.name,
                                 target="communication",
-                                data=communication.RespondData(text="Reply."),
+                                data=communication.RespondData(parts=(vocal.speech.Part(words="Reply."),)),
                             ),
                         ),
                         focus_candidates=(),
@@ -1263,7 +1263,7 @@ def test_listen_speak_progress_correlates_speaking_failure_to_selected_operation
                             cognition.EventData(
                                 event=communication.RespondEvent.name,
                                 target="communication",
-                                data=communication.RespondData(text="Reply."),
+                                data=communication.RespondData(parts=(vocal.speech.Part(words="Reply."),)),
                             ),
                         ),
                         focus_candidates=(),

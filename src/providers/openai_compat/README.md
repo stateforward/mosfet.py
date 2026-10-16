@@ -50,7 +50,8 @@ Both generators record token usage (including reasoning tokens) through `mosfet.
 each `text.Delta` as it arrives: new content, or new arguments of one tool call. The returned output is assembled from
 the whole stream and is the same, authoritative result as without `deltas`. `Processor.process(input, drafts=...)` uses
 this to read the streamed `dispatch` arguments with `processing.DraftParser`, so a marked field (for example
-`communication.respond`'s `text`) reaches its target as a draft while the model is still writing it.
+the `words` of each of `communication.respond`'s `parts`) reaches its target as a draft while the model is still
+writing it.
 `ResponsesTextGenerator` does not stream; it ignores `deltas`.
 
 A user message may carry ordered content parts: `text.TextPart` and `text.ImagePart` (a typed `mosfet.media.Image`).
