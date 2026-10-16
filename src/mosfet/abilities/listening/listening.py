@@ -382,6 +382,27 @@ class Listening(ability.Ability[SoundData, cognition.InputData]):
         )
 
     @staticmethod
+    def _has_learned_own_voice(ctx: hsm.Context, instance: "Listening", event: hsm.Event[typing.Any]) -> bool:
+        """The reply comes from this ability's own hearing stage, the one it handed the copy to."""
+
+        del ctx
+        return isinstance(event.data, enrollment.EnrolledData) and event.source == hsm.id(instance._hearing)
+
+    @staticmethod
+    def _tell_enroller(ctx: hsm.Context, instance: "Listening", event: hsm.Event[typing.Any]) -> None:
+        """Which id the bot's own voice has, from the stage that learned it, to whoever sent the copy.
+
+        The stage is this ability's own and is not addressable from the enroller's scope, so its reply
+        leaves through this ability's terminal, directed at the enroller it names.
+        """
+
+        _ = hsm.dispatch(
+            ctx,
+            instance,
+            ability.TerminalOutputEvent.with_data(dataclasses.replace(event, metadata=dict(event.metadata))),
+        )
+
+    @staticmethod
     def _emit_hearing_failure(
         ctx: hsm.Context,
         instance: "Listening",
@@ -435,6 +456,12 @@ class Listening(ability.Ability[SoundData, cognition.InputData]):
                 hsm.on(interpretation.ListeningFailedEvent),
                 hsm.guard(_has_hearing_failure),
                 hsm.effect(_emit_hearing_failure),
+            ),
+            # Which id the bot's own voice has, on its way to the enroller that sent the copy.
+            hsm.transition(
+                hsm.on(enrollment.EnrolledEvent),
+                hsm.guard(_has_learned_own_voice),
+                hsm.effect(_tell_enroller),
             ),
             hsm.state(
                 "Listening",

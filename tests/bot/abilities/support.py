@@ -54,6 +54,30 @@ async def start_abilities_for_test(
         remember_ability_terminal_owner(ability, recorder)
 
 
+class EventRecorder(hsm.Instance):
+    """A peer that records every event delivered to it, such as a reply addressed to it as a requester."""
+
+    events: list[hsm.Event[typing.Any]]
+
+    @staticmethod
+    def _record(ctx: hsm.Context, instance: "EventRecorder", event: hsm.Event[typing.Any]) -> None:
+        del ctx
+        instance.events.append(event)
+
+    model: typing.ClassVar[hsm.Model] = mosfet.define(
+        "AbilityTestEventRecorder",
+        hsm.initial(hsm.target("recording")),
+        hsm.state("recording", hsm.transition(hsm.on(hsm.AnyEvent), hsm.effect(_record))),
+    )
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.events = []
+
+    def named(self, event: hsm.Event[typing.Any]) -> list[hsm.Event[typing.Any]]:
+        return [recorded for recorded in self.events if recorded.name == event.name]
+
+
 class _AbilityTerminalRecorder(hsm.Instance):
     model: typing.ClassVar[hsm.Model | None] = None
     output_event: hsm.Event[typing.Any]

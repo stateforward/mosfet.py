@@ -6,7 +6,7 @@ from . import recognition
 from . import sensitivity
 from . import tone
 from . import transcription
-from .enrollment import EnrollData, EnrollEvent
+from .enrollment import EnrollData, EnrollEvent, EnrolledData, EnrolledEvent
 from .interpretation import (
     Interpretation,
     ListeningFailedEvent,
@@ -23,6 +23,8 @@ from .transcription import Transcription
 __all__ = [
     "EnrollData",
     "EnrollEvent",
+    "EnrolledData",
+    "EnrolledEvent",
     "ListeningFailedEvent",
     "Interpretation",
     "Listening",

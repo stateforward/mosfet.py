@@ -198,10 +198,12 @@ async def enroll(
     timeout: datetime.timedelta,
     operation_id: str,
     metadata: collections.abc.Mapping[str, typing.Any],
-) -> identification.FailureKind | None:
-    """Embed the mouth's copy of the bot's own voice and enroll it, as its own, under the voice id it speaks as.
+) -> identification.Recognition | identification.FailureKind:
+    """Embed the mouth's copy of the bot's own voice and enroll it as its own.
 
-    Returns the failure kind, or ``None`` once the registry enrolled it.
+    The copy's ``voice_id``, once learned, is the id it refines; without one, identification matches
+    the nearest own voice or mints one. Returns the registry's recognition, whose ``id`` is the bot's
+    own voice id, or the failure kind.
     """
 
     try:
@@ -236,9 +238,11 @@ async def enroll(
     except TimeoutError:
         return identification.FailureKind.TIMEOUT
     reply = enrolled.data
+    if isinstance(reply, identification.Recognition):
+        return reply
     if isinstance(reply, identification.FailureData):
         return reply.kind
-    return None
+    return identification.FailureKind.STORE_FAILED
 
 
 __all__ = ["MAX_PARTICIPANTS", "Embedder", "embed", "enroll", "identify", "merge", "stamps", "unidentified"]

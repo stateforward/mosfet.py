@@ -29,6 +29,7 @@ from mosfet.environment import SoundData, SoundEvent
 from mosfet.protocols import attachment
 from mosfet.telemetry.hsm import Traced
 from tests import metric_reader
+from tests.bot.abilities.support import EventRecorder, shared_hsm_context
 from tests.hsm_instance_state import ability_terminal_owner, start_ability_tree
 
 MOUTH = "the-mouth-that-is-producing"
@@ -265,6 +266,7 @@ async def _ear(
     registry: identification.Registry | None = None,
     voice_diarizer: voice.diarization.VoiceDiarizer | None = None,
     affect_classifier: voice.AffectClassifier | None = None,
+    ctx: hsm.Context | None = None,
 ) -> StreamingListening:
     ear = StreamingListening(
         sessions,
@@ -273,7 +275,7 @@ async def _ear(
         voice_diarizer=voice_diarizer,
         affect_classifier=affect_classifier,
     )
-    await start_ability_tree(None, ear)
+    await start_ability_tree(ctx, ear)
     return ear
 
 
@@ -418,13 +420,15 @@ def test_a_turns_voice_is_identified_and_stamped() -> None:
     assert classifier.calls[0].segments[0].audio == _TENTH * 5
 
 
-def test_the_bots_own_voice_enrolled_on_the_stream_path_is_never_a_source() -> None:
-    async def run() -> StreamingListening:
+def test_the_bots_own_voice_enrolled_on_the_stream_path_is_never_a_source_and_its_id_is_told() -> None:
+    async def run() -> tuple[StreamingListening, list[hsm.Event[typing.Any]]]:
         sessions = Sessions()
         classifier = FixedVoiceClassifier(voice.identification.VoiceEmbedding(embedding=(0.6, 0.8), model="m"))
-        ear = await _ear(sessions, voice_classifier=classifier, registry=_registry())
+        ctx = shared_hsm_context()
+        enroller = EventRecorder()
+        _ = await mosfet.started(ctx, enroller, enroller.model)
+        ear = await _ear(sessions, voice_classifier=classifier, registry=_registry(), ctx=ctx)
         copy = listening.EnrollData(
-            voice_id="tts:warm",
             segment=voice.VoiceSegment(
                 audio=b"\x02\x00" * 24_000,
                 media_type="audio/pcm",
@@ -434,20 +438,30 @@ def test_the_bots_own_voice_enrolled_on_the_stream_path_is_never_a_source() -> N
                 end_seconds=1.5,
             ),
         )
-        _ = await hsm.dispatch(hsm.Context(), ear, listening.EnrollEvent.with_data_and_id(copy, "enroll"))
-        await _wait(lambda: len(classifier.calls) == 1)
+        _ = await hsm.dispatch(
+            ctx,
+            ear,
+            dataclasses.replace(
+                listening.EnrollEvent.with_data_and_id(copy, "enroll"), source=hsm.id(enroller), target=hsm.id(ear)
+            ),
+        )
+        await _wait(lambda: bool(enroller.named(listening.EnrolledEvent)))
         await arrives(ear, heard(5))
         await _wait(lambda: len(sessions.made) == 1 and bool(sessions.made[0].controllers))
         await sessions.made[0].say(stream.TurnEndedEvent.with_data(stream.TurnEndedData(at_seconds=0.5, text="echo")))
         await _wait(lambda: bool(ear.handoffs))
-        return ear
+        return ear, enroller.named(listening.EnrolledEvent)
 
-    ear = asyncio.run(run())
+    ear, enrolled = asyncio.run(run())
+    (told,) = enrolled
+    assert told.id == "enroll"
+    assert isinstance(told.data, listening.EnrolledData)
+    own_id = told.data.voice_id
     (speech,) = _speech(ear)
     (own,) = speech.voices
-    assert own.recognition.id == "tts:warm" and own.recognition.own
+    assert own.recognition.id == own_id and own.recognition.own
     assert speech.source_ids == frozenset()
-    assert speech.participants == (identification.participant("voice", "tts:warm"),)
+    assert speech.participants == (identification.participant("voice", own_id),)
 
 
 def test_an_overlap_while_producing_is_a_fact_carrying_the_words_so_far(

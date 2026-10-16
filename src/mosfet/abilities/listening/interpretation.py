@@ -23,7 +23,8 @@ composed, each voice heard is embedded and identified, and the product carries t
 included. Only voices that are not the bot's own become ``source_ids``. A segment the classifier
 could not fingerprint (no voiceprint, W3-13) stays unidentified; its content is still heard and the
 other segments are still identified. The embedding itself never
-leaves this step. The bot's own voice is enrolled from what its mouth said (``listening.EnrollEvent``).
+leaves this step. The bot's own voice is enrolled from what its mouth said (``listening.EnrollEvent``),
+and the enroller is told which id it has (``listening.EnrolledEvent``, through Listening's terminal).
 
 Another voice heard while the bot's own mouth is producing is a fact of its own
 (``listening.OverlapEvent``), stated once per utterance once that voice has been going for
@@ -2193,8 +2194,8 @@ class Interpretation(ability.Ability[sensitivity.OutputData, cognition.InputData
     @staticmethod
     async def _enroll(
         instance: "Interpretation", event: hsm.Event[typing.Any], copy: enrollment.EnrollData
-    ) -> identification.FailureKind | None:
-        """Embed the copy of the bot's own voice and enroll it, as its own, under the voice id it speaks as."""
+    ) -> identification.Recognition | identification.FailureKind:
+        """Embed the copy of the bot's own voice and enroll it as its own; the recognition names its id."""
 
         registry = instance._registry
         embedder = instance._voice_identification
@@ -2211,10 +2212,14 @@ class Interpretation(ability.Ability[sensitivity.OutputData, cognition.InputData
 
     @staticmethod
     async def _run_enrollment(ctx: hsm.Context, instance: "Interpretation", event: hsm.Event[typing.Any]) -> None:
-        """Learn the bot's own voice from the copy its mouth sent, then go back to interpreting."""
+        """Learn the bot's own voice from the copy its mouth sent and tell the enroller its id.
+
+        Then go back to interpreting; a failed enrollment tells nobody.
+        """
 
         copy = event.data
         assert isinstance(copy, enrollment.EnrollData)
+        failure: identification.FailureKind | None = None
         with span.operation(
             "bot.listening.enroll_voice",
             scope=_SCOPE,
@@ -2222,10 +2227,27 @@ class Interpretation(ability.Ability[sensitivity.OutputData, cognition.InputData
             stage="voice_enrollment",
             context=telemetry.event_context(event),
         ) as active:
-            failure = await Interpretation._enroll(instance, event, copy)
-            if failure is not None:
+            enrolled = await Interpretation._enroll(instance, event, copy)
+            if isinstance(enrolled, identification.FailureKind):
+                failure = enrolled
                 span.record_failure(active, failure.value)
                 _LOGGER.warning("Own-voice enrollment failed (%s); the bot's own voice stays unknown.", failure.value)
+            elif instance._attachments and event.source not in ("", hsm.id(instance._attachments[0])):
+                # This stage is not addressable from the enroller's scope: the reply leaves through
+                # the owner's terminal, which directs it to the enroller. A copy the owner sent
+                # itself has no enroller to tell.
+                owner = instance._attachments[0]
+                _ = hsm.dispatch(
+                    ctx,
+                    owner,
+                    dataclasses.replace(
+                        enrollment.EnrolledEvent.with_data(enrollment.EnrolledData(voice_id=enrolled.id)),
+                        id=event.id,
+                        source=hsm.id(instance),
+                        target=event.source,
+                        metadata=dict(event.metadata),
+                    ),
+                )
         _ = hsm.dispatch(
             ctx,
             instance,

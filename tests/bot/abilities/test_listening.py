@@ -22,7 +22,7 @@ from typing import override
 
 import hsm
 import mosfet
-from tests.bot.abilities.support import dispatch_ability_for_test
+from tests.bot.abilities.support import EventRecorder, dispatch_ability_for_test, shared_hsm_context
 import pydantic
 import pytest
 
@@ -847,12 +847,18 @@ def test_listening_takes_a_voice_classifier_and_a_registry_together_or_neither()
 def _identified_utterance(
     *embeddings: voice.identification.VoiceEmbedding,
     registry: identification.Registry | None = None,
-    enroll_as: str | None = None,
+    enroll: bool = False,
+    voice_id: str | None = None,
     recognize_timeout: datetime.timedelta = datetime.timedelta(seconds=2),
-) -> tuple[list[cognition.InputData], list[voice.identification.InputData]]:
-    """Hear one direct-identified utterance; first, when asked, enroll the same voice as the bot's own."""
+) -> tuple[list[cognition.InputData], list[voice.identification.InputData], list[hsm.Event[typing.Any]]]:
+    """Hear one direct-identified utterance; first, when asked, enroll the same voice as the bot's own.
 
-    async def run() -> tuple[list[cognition.InputData], list[voice.identification.InputData]]:
+    Returns the handoffs, the voice classifier's calls, and what the enroller was told.
+    """
+
+    async def run() -> tuple[
+        list[cognition.InputData], list[voice.identification.InputData], list[hsm.Event[typing.Any]]
+    ]:
         identifier = FixedVoiceClassifier(*embeddings)
         listening_ability = RecordingListening(
             voice_activity_classifier=SequenceVoiceActivityClassifier(_VOICE_APPLY, _SILENCE_APPLY),
@@ -860,11 +866,13 @@ def _identified_utterance(
             registry=registry if registry is not None else voice_registry(),
             recognize_timeout=recognize_timeout,
         )
-        ctx = hsm.Context()
+        ctx = shared_hsm_context()
+        enroller = EventRecorder()
+        _ = await mosfet.started(ctx, enroller, enroller.model)
         await start_ability_tree(ctx, listening_ability)
-        if enroll_as is not None:
+        if enroll:
             copy = listening.EnrollData(
-                voice_id=enroll_as,
+                voice_id=voice_id,
                 segment=voice.VoiceSegment(
                     audio=b"\x02\x00" * 24_000,
                     media_type="audio/pcm",
@@ -879,20 +887,20 @@ def _identified_utterance(
                 listening_ability,
                 dataclasses.replace(
                     listening.EnrollEvent.with_data_and_id(copy, "enroll-own-voice"),
-                    source="speaking",
+                    source=hsm.id(enroller),
                     target=hsm.id(listening_ability),
                 ),
             )
-            await wait_until(lambda: len(identifier.calls) == 1)
+            await wait_until(lambda: bool(enroller.named(listening.EnrolledEvent)))
         await _apply_utterance(listening_ability, b"\x01\x00" * 240, silence=b"\x00\x00" * 240)
         await wait_until(lambda: len(listening_ability.handoffs) == 1)
-        return listening_ability.handoffs, identifier.calls
+        return listening_ability.handoffs, identifier.calls, enroller.named(listening.EnrolledEvent)
 
     return asyncio.run(run())
 
 
 def test_a_heard_voice_is_a_voice_ref_source_and_participant_after_the_device_stamped_ones() -> None:
-    handoffs, _ = _identified_utterance(voice.identification.VoiceEmbedding(embedding=(0.6, 0.8), model="fixture"))
+    handoffs, _, _ = _identified_utterance(voice.identification.VoiceEmbedding(embedding=(0.6, 0.8), model="fixture"))
 
     speech_data = _stimulus(handoffs[0]).data
     assert isinstance(speech_data, listening.SpeechData)
@@ -906,24 +914,71 @@ def test_a_heard_voice_is_a_voice_ref_source_and_participant_after_the_device_st
 
 
 def test_the_bots_own_voice_is_stamped_as_itself_but_is_never_a_source() -> None:
-    handoffs, calls = _identified_utterance(
-        voice.identification.VoiceEmbedding(embedding=(0.6, 0.8), model="fixture"),
-        enroll_as="tts:warm",
+    handoffs, calls, enrolled = _identified_utterance(
+        voice.identification.VoiceEmbedding(embedding=(0.6, 0.8), model="fixture"), enroll=True
     )
 
     # One embedding for the enrollment copy, one for the heard utterance.
     assert len(calls) == 2
     assert calls[0].segments[0].audio == b"\x02\x00" * 24_000
+    (told,) = enrolled
+    assert isinstance(told.data, listening.EnrolledData)
+    own_id = told.data.voice_id
     speech_data = _stimulus(handoffs[0]).data
     assert isinstance(speech_data, listening.SpeechData)
     (heard,) = speech_data.voices
-    assert heard.recognition.id == "tts:warm"
+    assert heard.recognition.id == own_id
     assert heard.recognition.own is True
     assert heard.recognition.recognized is True
     # Hearing itself resolves to itself, and an echo is never a source the seed would admit as a turn.
-    assert speech_data.participants == (identification.participant("voice", "tts:warm"),)
+    assert speech_data.participants == (identification.participant("voice", own_id),)
     assert speech_data.source_ids == frozenset()
-    assert handoffs[0].participants == (identification.participant("voice", "tts:warm"),)
+    assert handoffs[0].participants == (identification.participant("voice", own_id),)
+
+
+def test_an_enrollment_copy_needs_no_voice_id_and_its_reply_names_one() -> None:
+    segment = voice.VoiceSegment(
+        audio=b"\x02\x00" * 24_000,
+        media_type="audio/pcm",
+        sample_rate_hz=16_000,
+        channels=1,
+        start_seconds=0.0,
+        end_seconds=1.5,
+    )
+
+    assert listening.EnrollData(segment=segment).voice_id is None
+    assert listening.EnrolledEvent.name == "bot.ability.listening.enrolled"
+    assert listening.EnrolledEvent.kind is hsm.CompletionEventKind
+    assert listening.EnrolledData(voice_id="3f2a9c").voice_id == "3f2a9c"
+    with pytest.raises(pydantic.ValidationError):
+        _ = listening.EnrolledData.model_validate({})
+    with pytest.raises(pydantic.ValidationError):
+        _ = listening.EnrolledData(voice_id="Not An Id")
+
+
+@pytest.mark.parametrize("voice_id", [None, "3f2a9c"], ids=["learned", "declared"])
+def test_the_enroller_is_told_which_id_its_own_voice_has(voice_id: str | None) -> None:
+    _, _, enrolled = _identified_utterance(
+        voice.identification.VoiceEmbedding(embedding=(0.6, 0.8), model="fixture"), enroll=True, voice_id=voice_id
+    )
+
+    (told,) = enrolled
+    assert told.id == "enroll-own-voice"
+    assert told.kind is hsm.CompletionEventKind
+    assert isinstance(told.data, listening.EnrolledData)
+    if voice_id is None:
+        # Minted by identification for a print matching no own voice yet.
+        assert len(told.data.voice_id) == 32
+    else:
+        assert told.data.voice_id == voice_id
+
+
+def test_a_failed_enrollment_tells_the_enroller_nothing() -> None:
+    # An embedding without its model gives no print, so the copy cannot be enrolled.
+    _, calls, enrolled = _identified_utterance(voice.identification.VoiceEmbedding(embedding=(0.6, 0.8)), enroll=True)
+
+    assert len(calls) == 2
+    assert enrolled == []
 
 
 def test_enrollment_is_ignored_by_an_ear_that_does_not_identify_voices() -> None:
@@ -934,7 +989,6 @@ def test_enrollment_is_ignored_by_an_ear_that_does_not_identify_voices() -> None
         ctx = hsm.Context()
         await start_ability_tree(ctx, listening_ability)
         copy = listening.EnrollData(
-            voice_id="tts:warm",
             segment=voice.VoiceSegment(
                 audio=b"\x02\x00" * 24_000,
                 media_type="audio/pcm",
@@ -956,7 +1010,7 @@ def test_enrollment_is_ignored_by_an_ear_that_does_not_identify_voices() -> None
 
 
 def test_an_unanswered_identification_leaves_the_product_without_voices() -> None:
-    handoffs, _ = _identified_utterance(
+    handoffs, _, _ = _identified_utterance(
         voice.identification.VoiceEmbedding(embedding=(0.6, 0.8), model="fixture"),
         registry=voice_registry(SilentIdentifier()),
         recognize_timeout=datetime.timedelta(milliseconds=20),
@@ -1012,7 +1066,7 @@ def test_a_voice_classifier_that_never_answers_leaves_the_utterance_without_voic
 
 
 def test_an_embedding_without_its_model_is_not_identified() -> None:
-    handoffs, calls = _identified_utterance(voice.identification.VoiceEmbedding(embedding=(0.6, 0.8)))
+    handoffs, calls, _ = _identified_utterance(voice.identification.VoiceEmbedding(embedding=(0.6, 0.8)))
 
     assert len(calls) == 1
     speech_data = _stimulus(handoffs[0]).data
@@ -1039,7 +1093,7 @@ def test_the_ear_counts_its_own_voice_and_the_voices_it_could_not_identify(
         invalid = _sum(reader, "bot.identification.count", **failed, **{"bot.failure.kind": "invalid_input"})
         late = _sum(reader, "bot.identification.count", **failed, **{"bot.failure.kind": "timeout"})
 
-        _ = _identified_utterance(printed, enroll_as="tts:warm")
+        _ = _identified_utterance(printed, enroll=True)
         _ = _identified_utterance(voice.identification.VoiceEmbedding(embedding=(0.6, 0.8)))
         _ = _identified_utterance(
             printed,
@@ -1055,7 +1109,7 @@ def test_the_ear_counts_its_own_voice_and_the_voices_it_could_not_identify(
 
 
 def test_no_voiceprint_rides_on_a_heard_product_or_reaches_the_model() -> None:
-    handoffs, _ = _identified_utterance(voice.identification.VoiceEmbedding(embedding=(0.28, 0.96), model="fixture"))
+    handoffs, _, _ = _identified_utterance(voice.identification.VoiceEmbedding(embedding=(0.28, 0.96), model="fixture"))
 
     speech_data = _stimulus(handoffs[0]).data
     assert isinstance(speech_data, listening.SpeechData)
@@ -2232,7 +2286,7 @@ def _overlapping_utterance(
     source: str = "somebody-elses-mouth",
     voice_classifier: FixedVoiceClassifier | None = None,
     diarizer: FixedVoiceDiarizer | None = None,
-    enroll_as: str | None = None,
+    enroll: bool = False,
 ) -> list[cognition.InputData]:
     """Hear one utterance of voiced chunks then silence, optionally while the body is producing."""
 
@@ -2246,10 +2300,9 @@ def _overlapping_utterance(
         )
         ctx = hsm.Context()
         await start_ability_tree(ctx, listening_ability)
-        if enroll_as is not None:
+        if enroll:
             assert voice_classifier is not None
             copy = listening.EnrollData(
-                voice_id=enroll_as,
                 segment=voice.VoiceSegment(
                     audio=b"\x02\x00" * 24_000,
                     media_type="audio/pcm",
@@ -2341,7 +2394,7 @@ def test_a_recognized_own_voice_makes_no_overlap_fact() -> None:
         somebody_speaking(3),
         somebody_speaking(3),
         voice_classifier=FixedVoiceClassifier(voice.identification.VoiceEmbedding(embedding=(0.6, 0.8), model="m")),
-        enroll_as="tts:warm",
+        enroll=True,
     )
 
     assert _overlaps(handoffs) == []
