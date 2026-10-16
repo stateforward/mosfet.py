@@ -48,7 +48,7 @@ docstring-code-format = true
 pythonpath = ["src", "../../src"]
 
 [tool.basedpyright]
-include = ["src"]
+include = ["src", "scripts"]
 extraPaths = [
   "src",
   "../../src",

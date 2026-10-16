@@ -3,41 +3,50 @@ from mosfet.abilities import cognition
 from mosfet.abilities import encoding
 from mosfet.abilities import identification
 from mosfet.abilities import listening
+from mosfet.abilities import memory
+from mosfet.abilities import persona
+from mosfet.abilities import processing
 from mosfet.abilities import speaking
 from mosfet.abilities import vocal
 from mosfet.abilities.hearing import voice
 from mosfet.devices import audio
 from mosfet.environment import Environment, SoundData, SoundEvent
 from mosfet.protocols import attachment
+from mosfet.providers import openai_compat
 from mosfet.providers import pyannote
 
 import asyncio
 import collections.abc
 import dataclasses
 import datetime
+import importlib.util
 import io
 import json
 import pathlib
 import shutil
 import subprocess
 import threading
+import types
 import typing
 import wave
 from typing import ClassVar, Protocol, TypeVar, override
 
 import hsm
+import httpx
+import openai
 import pytest
 
 from tests.bot.abilities.vocal.speech import contract
 from tests.bot.lifecycle_replies import started_replies
 
 if typing.TYPE_CHECKING:
-    from listen_speak_bot_example import ListenSpeakBot
+    import listen_speak_bot_example as example
 else:
-    ListenSpeakBot = pytest.importorskip(
+    example = pytest.importorskip(
         "listen_speak_bot_example",
         reason="listen_speak_bot example package not installed (run via the examples/listen_speak_bot project env)",
-    ).ListenSpeakBot
+    )
+ListenSpeakBot = example.ListenSpeakBot
 
 
 def _voice_registry() -> identification.Registry:
@@ -164,19 +173,11 @@ async def _assert_ready(body: _WaitableBot) -> None:
     await asyncio.wait_for(body.wait_for_conversation_processing(), timeout=0.1)
 
 
-def _empty_cognition() -> cognition.Cognition:
-    from mosfet.abilities import memory, processing
+def _empty_cognition(mouth: speaking.Speaking) -> cognition.Cognition:
+    """A cognition that never answers and gives no voice: the mouth keeps the voice it was built with."""
 
-    class _EmptyProcessor(processing.Processor):
-        @override
-        async def process(
-            self, input: processing.InputData, *, drafts: processing.DraftSink | None = None
-        ) -> processing.Events:
-            del input
-            await asyncio.Event().wait()
-            raise AssertionError("cancelled test processor resumed")
-
-    processor = _EmptyProcessor()
+    del mouth
+    processor = _Hanging()
     return cognition.Cognition(
         intuition=cognition.Intuition(processor=processor),
         reasoning=cognition.Reasoning(processor=processor),
@@ -189,10 +190,10 @@ def _test_bot(
     *,
     inference: pyannote.SpeakerEmbeddingInference | None = None,
     load_inference: pyannote.SpeakerEmbeddingInferenceLoader | None = None,
-) -> ListenSpeakBot:
+) -> example.ListenSpeakBot:
     return ListenSpeakBot(
         reply_wav=tmp_path / "reply.wav",
-        cognition=_empty_cognition(),
+        cognition=_empty_cognition,
         voice_activity_classifier=_FixedVoiceActivityClassifier(),
         voice_identification_inference=inference,
         voice_identification_loader=load_inference,
@@ -323,7 +324,7 @@ def _run_with_public_seams(
 def test_listen_speak_bot_owns_speaker(tmp_path: pathlib.Path) -> None:
     body = ListenSpeakBot(
         reply_wav=tmp_path / "reply.wav",
-        cognition=_empty_cognition(),
+        cognition=_empty_cognition,
         voice_activity_classifier=_FixedVoiceActivityClassifier(),
         voice_identity_model_id="local/test-speaker-model",
         voice_identification_inference=_RecordingInference(),
@@ -336,7 +337,7 @@ def test_environment_sound_reaches_listening_after_attach(tmp_path: pathlib.Path
     async def run() -> None:
         body = _HandoffProbeBot(
             reply_wav=tmp_path / "reply.wav",
-            cognition=_empty_cognition(),
+            cognition=_empty_cognition,
             voice_activity_classifier=_FixedVoiceActivityClassifier(),
             voice_identification_inference=_RecordingInference(),
         )
@@ -868,62 +869,75 @@ def test_listen_speak_reads_pyannote_model_override_without_credentials(tmp_path
 
 
 def test_listen_speak_reads_the_lab_speech_wiring_from_the_environment(tmp_path: pathlib.Path) -> None:
-    from listen_speak_bot_example import AppConfig, LabConfig
-
     env_file = tmp_path / ".env"
     _ = env_file.write_text(
         "BOT_SPEECH_SERVER_STREAM_URL=ws://lab.test:8001\n"
         "BOT_SPEECH_SERVER_URL=http://lab.test:8003\n"
-        "BOT_OPENAI_COMPAT_SPEECH_BASE_URL=http://lab.test:8002/v1\n",
+        "BOT_SPEECH_SERVER_TTS_URL=http://lab.test:8002\n",
         encoding="utf-8",
     )
 
-    config = AppConfig.from_env_file(env_file)
+    config = example.AppConfig.from_env_file(env_file)
 
-    assert config.lab == LabConfig(
+    assert config.lab == example.LabConfig(
         stream_url="ws://lab.test:8001",
         speech_server_url="http://lab.test:8003",
-        speech_base_url="http://lab.test:8002/v1",
+        tts_url="http://lab.test:8002",
     )
 
 
-def test_listen_speak_composes_served_speech_from_the_lab_wiring(tmp_path: pathlib.Path) -> None:
-    from listen_speak_bot_example import LabConfig, LabEncoder
+def test_listen_speak_takes_the_traits_its_maker_gives_it_on_the_command_line(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    given: list[persona.Traits] = []
 
+    async def run(**kwargs: typing.Any) -> dict[str, object]:
+        given.append(kwargs["config"].traits)
+        return {"status": "ok"}
+
+    monkeypatch.setattr(example, "run", run)
+
+    assert example.main(["--trait", "curious", "--trait", "patient with children", "--json"]) == 0
+    assert example.main(["--json"]) == 0
+    assert given == [persona.Traits(traits=("curious", "patient with children")), example.DEFAULT_TRAITS]
+
+
+def test_listen_speak_is_unvoiced_on_the_lab_until_inception_gives_it_a_voice(tmp_path: pathlib.Path) -> None:
     body = ListenSpeakBot(
         reply_wav=tmp_path / "reply.wav",
-        cognition=_empty_cognition(),
-        lab=LabConfig(
+        cognition=_empty_cognition,
+        lab=example.LabConfig(
             stream_url="ws://lab.test:8001",
             speech_server_url="http://lab.test:8003",
-            speech_base_url="http://lab.test:8002/v1",
+            tts_url="http://lab.test:8002",
         ),
     )
 
-    # Nothing local is loaded for hearing, and speech goes through the served encoder.
-    assert isinstance(body.encoder(), LabEncoder)
-    assert body.encoder().format == vocal.speech.Format(sample_rate_hz=24_000, channels=1)
+    # The lab voice is the one inception gives the bot, so nothing speaks before it is given.
+    assert body.encoder() is None
+
+
+class _Served(vocal.speech.SpeechEncoder):
+    """A served encoder: two chunks per utterance, aligned to the whole of what it read."""
+
+    def __init__(self, expressiveness: vocal.speech.Expressiveness = vocal.speech.Expressiveness()) -> None:
+        self.format: vocal.speech.Format = vocal.speech.Format(sample_rate_hz=24_000, channels=1)
+        self.expressiveness: vocal.speech.Expressiveness = expressiveness
+
+    @typing.override
+    async def encode(
+        self, input: collections.abc.AsyncIterable[vocal.speech.Piece]
+    ) -> collections.abc.AsyncIterator[vocal.speech.Audio]:
+        said = "".join([piece.words async for piece in input])
+        if not said.strip():
+            raise encoding.Error("invalid_input", "blank text")
+        yield vocal.speech.Audio(pcm=b"\x01\x00", text="")
+        yield vocal.speech.Audio(pcm=b"\x02\x00", text=said)
 
 
 def test_lab_encoder_streams_through_and_keeps_what_it_said(tmp_path: pathlib.Path) -> None:
-    from listen_speak_bot_example import LabEncoder
-
-    class Served(vocal.speech.SpeechEncoder):
-        def __init__(self) -> None:
-            self.format: vocal.speech.Format = vocal.speech.Format(sample_rate_hz=24_000, channels=1)
-
-        @typing.override
-        async def encode(
-            self, input: collections.abc.AsyncIterable[vocal.speech.Piece]
-        ) -> collections.abc.AsyncIterator[vocal.speech.Audio]:
-            said = "".join([piece.words async for piece in input])
-            if not said.strip():
-                raise encoding.Error("invalid_input", "blank text")
-            yield vocal.speech.Audio(pcm=b"\x01\x00", text="")
-            yield vocal.speech.Audio(pcm=b"\x02\x00", text=said)
-
-    async def run() -> tuple[list[bytes], LabEncoder]:
-        encoder = LabEncoder(Served(), destination=tmp_path / "reply.wav")
+    async def run() -> tuple[list[bytes], example.LabEncoder]:
+        encoder = example.LabEncoder(_Served(), destination=tmp_path / "reply.wav")
         chunks = [chunk.pcm for chunk in await contract.assert_speech_encoder(encoder, contract.words("Hel", "lo."))]
         return chunks, encoder
 
@@ -932,6 +946,202 @@ def test_lab_encoder_streams_through_and_keeps_what_it_said(tmp_path: pathlib.Pa
     assert encoder.calls == ["Hello."]
     assert encoder.audio == b"\x01\x00\x02\x00"
     assert (tmp_path / "reply.wav").read_bytes().startswith(b"RIFF")
+
+
+def test_lab_encoder_can_do_what_the_served_encoder_can_with_an_expression() -> None:
+    encoder = example.LabEncoder(_Served(example.LAB_EXPRESSIVENESS))
+
+    # Speaking reports each part's cues against this, and the self block shows it.
+    assert encoder.expressiveness == example.LAB_EXPRESSIVENESS
+
+
+_LAB_PCM_HEADERS = {"x-sample-rate": "24000", "x-sample-format": "s16le", "content-type": "application/octet-stream"}
+
+
+def _lab_speech_client(requests: list[httpx.Request]) -> openai_compat.AsyncOpenAIClient:
+    def handle(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, headers=_LAB_PCM_HEADERS, content=b"\x01\x00\x02\x00")
+
+    sdk = openai.AsyncOpenAI(
+        api_key="test-key",
+        base_url="http://lab.test:8002/v1",
+        max_retries=0,
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(handle)),
+    )
+    # The SDK's create takes its own keywords; the protocol is the narrow shape the provider calls.
+    return typing.cast(openai_compat.AsyncOpenAIClient, typing.cast(object, sdk))
+
+
+def test_lab_voice_speaks_in_the_voice_it_is_given_and_keeps_its_description(tmp_path: pathlib.Path) -> None:
+    requests: list[httpx.Request] = []
+    lab = example.LabVoice(
+        "http://lab.test:8002", destination=tmp_path / "reply.wav", client=_lab_speech_client(requests)
+    )
+
+    encoder = lab("v-0123456789ab", "A bright, quick young voice.")
+    parts = (
+        vocal.speech.Piece(part=0, words="Oh, ", expression=vocal.speech.Expression(sound="laugh")),
+        vocal.speech.Piece(part=1, words="you got me. "),
+        vocal.speech.Piece(part=2, words="Shh.", expression=vocal.speech.Expression(emotion="secretive")),
+    )
+    chunks = asyncio.run(contract.assert_speech_encoder(encoder, parts))
+
+    assert lab.encoder is encoder
+    assert encoder.format == vocal.speech.Format(sample_rate_hz=24_000, channels=1)
+    assert encoder.expressiveness == example.LAB_EXPRESSIVENESS
+    sent = [typing.cast(dict[str, object], json.loads(request.content)) for request in requests]
+    # One request per run of parts said the same way; the voice and its description come from inception.
+    assert sent[:2] == [
+        {"model": "tts", "input": "<laugh>Oh, you got me. ", "voice": "v-0123456789ab", "response_format": "pcm"},
+        {
+            "model": "tts",
+            "input": "Shh.",
+            "voice": "v-0123456789ab",
+            "instructions": sent[1]["instructions"],
+            "response_format": "pcm",
+        },
+    ]
+    assert str(sent[1]["instructions"]).startswith("A bright, quick young voice. ")
+    assert "".join(chunk.text for chunk in chunks) == "Oh, you got me. Shh."
+
+
+_DESCRIBED = "A bright, quick young voice with a smile in it, never hurried."
+
+
+class _Maker(processing.Processor):
+    """The makers' inception model, scripted: it conceives one described voice, and counts what it was asked."""
+
+    def __init__(self) -> None:
+        self.inputs: list[processing.InputData] = []
+
+    @override
+    async def process(
+        self, input: processing.InputData, *, drafts: processing.DraftSink | None = None
+    ) -> processing.Events:
+        self.inputs.append(input)
+        return (
+            processing.SelectedEvent(
+                event=vocal.voice.ConceiveEvent.name,
+                data={"conception": {"kind": "described", "description": _DESCRIBED}},
+            ),
+        )
+
+
+class _Hanging(processing.Processor):
+    """The bot's own models, never answering: this test is about the voice it was given, not its turns."""
+
+    @override
+    async def process(
+        self, input: processing.InputData, *, drafts: processing.DraftSink | None = None
+    ) -> processing.Events:
+        del input
+        await asyncio.Event().wait()
+        raise AssertionError("cancelled test processor resumed")
+
+
+class _LabVoices:
+    """The lab TTS engine's /v1/voices protocol: its built-in voice, and each voice it designs, kept for good."""
+
+    def __init__(self) -> None:
+        self.held: list[dict[str, object]] = [{"id": "warm", "description": "A warm voice."}]
+        self.designed: list[object] = []
+
+    def handle(self, request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/v1/voices"
+        if request.method == "POST":
+            self.designed.append(json.loads(request.content))
+            made: dict[str, object] = {"id": f"v-{len(self.designed):012x}", "description": _DESCRIBED, "custom": True}
+            self.held.append(made)
+            return httpx.Response(201, json={"voices": [made]})
+        return httpx.Response(200, json={"default": "warm", "voices": self.held, "emotive_tags": ["laugh"]})
+
+
+def test_listen_speak_is_given_its_voice_at_inception_on_the_lab_and_keeps_it_for_life(tmp_path: pathlib.Path) -> None:
+    lab = _LabVoices()
+    database = tmp_path / "memory.sqlite3"
+
+    async def start(maker: _Maker) -> example.LabEncoder | None:
+        voices = httpx.AsyncClient(transport=httpx.MockTransport(lab.handle))
+
+        def compose(mouth: speaking.Speaking) -> cognition.Cognition:
+            return example.compose_cognition(
+                mouth,
+                intuition=_Hanging(),
+                deliberate=_Hanging(),
+                maker=maker,
+                traits=example.DEFAULT_TRAITS,
+                store=memory.Memory(database=str(database)),
+                voice_source=example.lab_voice_source("http://lab.test:8002", client=voices),
+            )
+
+        body = ListenSpeakBot(
+            reply_wav=tmp_path / "reply.wav",
+            cognition=compose,
+            voice_activity_classifier=_FixedVoiceActivityClassifier(),
+            voice_identification_inference=_RecordingInference(),
+            lab=example.LabConfig(tts_url="http://lab.test:8002"),
+        )
+        environment = Environment()
+        _ = await body.attach(environment)
+        try:
+            async with asyncio.timeout(10):
+                while body.encoder() is None:
+                    await asyncio.sleep(0.01)
+            return body.encoder()
+        finally:
+            _ = await body.detach(environment)
+            await voices.aclose()
+
+    first, again = _Maker(), _Maker()
+    made = asyncio.run(start(first))
+    kept = asyncio.run(start(again))
+
+    # Made once, from its traits: one conception, one voice designed for it, which it speaks in.
+    assert isinstance(made, example.LabEncoder)
+    assert len(first.inputs) == 1
+    assert lab.designed == [{"description": _DESCRIBED, "count": 1}]
+    # Started again, it recalls that voice, finds the lab still holds it, and is not made again.
+    assert isinstance(kept, example.LabEncoder)
+    assert again.inputs == []
+    assert len(lab.designed) == 1
+
+
+def _listen_check() -> types.ModuleType:
+    path = _repo_root() / "examples" / "listen_speak_bot" / "scripts" / "listen_check.py"
+    spec = importlib.util.spec_from_file_location("listen_check", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_listen_check_renders_each_declared_sound_before_and_after_its_words_and_each_style() -> None:
+    lines = typing.cast(dict[str, tuple[vocal.speech.Part, ...]], _listen_check().replies())
+
+    sounds = sorted(example.LAB_EXPRESSIVENESS.sounds)
+    assert sorted(lines) == sorted(
+        [f"{sound}_{at}" for sound in sounds for at in ("before", "after")] + list(example.LAB_EXPRESSIVENESS.styles)
+    )
+    for name, parts in lines.items():
+        # One two-part reply each: the first part carries the sound or the style, the second is said naturally.
+        assert len(parts) == 2, name
+        opening, closing = parts
+        assert opening.expression is not None and closing.expression is None, name
+    assert lines["laugh_after"][0].expression == vocal.speech.Expression(sound="laugh", sound_at="after")
+    assert lines["whisper"][0].expression == vocal.speech.Expression(style="whisper")
+
+
+def test_listen_check_writes_one_wav_per_line(tmp_path: pathlib.Path) -> None:
+    listen_check = _listen_check()
+
+    def encoder(destination: pathlib.Path) -> vocal.speech.SpeechEncoder:
+        return example.LabEncoder(_Served(), destination=destination)
+
+    written = typing.cast(list[pathlib.Path], asyncio.run(listen_check.render(encoder, tmp_path)))
+
+    assert sorted(path.name for path in written) == sorted(f"{name}.wav" for name in listen_check.replies())
+    assert all(path.read_bytes().startswith(b"RIFF") for path in written)
 
 
 def test_listen_speak_injects_pyannote_classifier_and_emits_the_heard_voice_ref() -> None:
@@ -1351,7 +1561,7 @@ def test_listen_speak_closes_owned_decoder_and_vad_on_detach(
     monkeypatch.setattr(example, "SileroVoiceActivityClassifier", _CloseTrackingVoiceActivityClassifier)
 
     async def run() -> None:
-        body = ListenSpeakBot(reply_wav=tmp_path / "reply.wav", cognition=_empty_cognition())
+        body = ListenSpeakBot(reply_wav=tmp_path / "reply.wav", cognition=_empty_cognition)
         environment = Environment()
         _ = await body.attach(environment)
         _ = await body.detach(environment)
@@ -1387,7 +1597,7 @@ def test_listen_speak_closes_owned_decoder_and_vad_when_attach_fails(
     monkeypatch.setattr(example.Bot, "attach", fail_attach)
 
     async def run() -> None:
-        body = ListenSpeakBot(reply_wav=tmp_path / "reply.wav", cognition=_empty_cognition())
+        body = ListenSpeakBot(reply_wav=tmp_path / "reply.wav", cognition=_empty_cognition)
         with pytest.raises(RuntimeError, match="attach failed"):
             _ = await body.attach(Environment())
 

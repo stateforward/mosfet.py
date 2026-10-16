@@ -8,15 +8,18 @@ Flow:
    with the speech product to cognition.
 4. Communication is acquired and its seeded behavior can admit the identity-bearing speech into
    Conversation; Conversation retains the existing MLX Audio Whisper STT path.
-5. Mercury 2 intuition (OpenAI-compatible) / Gemini reasoning produce cognition output.
+5. Mercury 2 intuition (OpenAI-compatible) / Gemini reasoning produce cognition output, knowing every
+   turn the traits its maker gave it and the persona it writes of itself on top of them.
 6. Cognition may select Communication's semantic response, which routes through the internal
    Speaking port and writes the reply WAV.
 
 Lab wiring (optional, from the environment): ``BOT_SPEECH_SERVER_STREAM_URL`` (``ws://host:8001``) hears
 through a speech server's streaming transcription instead of local VAD, its end of turn making each
 text speech product; ``BOT_SPEECH_SERVER_URL`` (``http://host:8003``) embeds voices there instead of
-PyAnnote; ``BOT_OPENAI_COMPAT_SPEECH_BASE_URL`` (``http://host:8002/v1``) speaks through an
-OpenAI-compatible ``/v1/audio/speech`` instead of ``say``.
+PyAnnote; ``BOT_SPEECH_SERVER_TTS_URL`` (``http://host:8002``) speaks through the lab TTS engine instead
+of ``say``, in the voice the bot is given there at inception: the first time it starts, its maker's model
+conceives one voice from its traits and the engine designs it; every start after, the bot recalls that voice
+from its memory and checks the engine still holds it.
 """
 
 from __future__ import annotations
@@ -41,6 +44,7 @@ import wave
 from typing import override
 
 import hsm
+import pydantic
 from pydantic import BaseModel
 from pydantic import ConfigDict
 from pydantic import Field
@@ -54,6 +58,8 @@ from mosfet.abilities import encoding
 from mosfet.abilities import identification
 from mosfet.abilities import listening
 from mosfet.abilities import memory
+from mosfet.abilities import persona
+from mosfet.abilities import processing
 from mosfet.abilities import speaking
 from mosfet.abilities import vocal
 from mosfet.abilities.communication import conversation
@@ -67,6 +73,7 @@ from mosfet.providers.mlx_audio import VoiceActivityClassifier as SileroVoiceAct
 from mosfet.providers.openai_compat import ChatClient as OpenAIChatClient
 from mosfet.providers.openai_compat import Processor as OpenAIProcessor
 from mosfet.providers.openai_compat import SpeechEncoder as OpenAISpeechEncoder
+from mosfet.providers import openai_compat
 from mosfet.providers import speech_server
 from mosfet.providers.pyannote import Classifier as PyannoteVoiceClassifier
 from mosfet.providers.pyannote import SpeakerEmbeddingInference
@@ -76,8 +83,8 @@ from mosfet.environment import Environment, SoundData, SoundEvent, space
 from mosfet.abilities import classifying
 from mosfet.abilities.communication.conversation import turn_detector
 
-# Capture before any local named ``cognition`` shadows the package (constructor param).
-_Cognition = cognition.Cognition
+if typing.TYPE_CHECKING:
+    import httpx
 
 _LOG = logging.getLogger("listen_speak_bot_example")
 
@@ -96,7 +103,21 @@ DEFAULT_SILERO_VAD_MODEL = "mlx-community/silero-vad"
 DEFAULT_PYANNOTE_VOICE_IDENTITY_MODEL = "pyannote/wespeaker-voxceleb-resnet34-LM"
 DEFAULT_LAB_SPEECH_MODEL = "tts"
 """The model name sent to the lab's OpenAI-compatible speech endpoint (the reference server ignores it)."""
-DEFAULT_LAB_VOICE = "warm"
+DEFAULT_TRAITS = persona.Traits(traits=("curious", "warm", "playful"))
+"""The traits this example's maker gives the bot; ``--trait`` gives it others."""
+LANGUAGES: tuple[vocal.speech.Locale, ...] = ("en",)
+"""The languages the bot speaks, and the lab engine renders."""
+LAB_SOURCE = "lab"
+"""The name this composition gives the lab TTS engine as a voice source; every voice it gives carries it."""
+LAB_EXPRESSIVENESS = vocal.speech.Expressiveness(
+    cues=frozenset[vocal.speech.Cue]({"instructions", "emotion", "intensity", "emphasis", "style", "sound"}),
+    styles=("whisper",),
+    sounds=frozenset[vocal.speech.Sound]({"laugh", "giggle", "chuckle", "gasp", "sigh"}),
+)
+"""What the lab engine does with an expression: natural-language cues as its ``instructions``, the whisper style,
+and the five sounds it renders live, written in its angle tags (``openai_compat.ANGLE_TAGS``)."""
+_VOICING_TIMEOUT = datetime.timedelta(seconds=120)
+"""How long speech waits for the bot's voice: on its first start the lab designs it, within the run's own budget."""
 _MAX_VOICE_IDS = 1000
 """Most voice ids this example remembers."""
 _VOICE_RETENTION = datetime.timedelta(days=30)
@@ -272,14 +293,14 @@ class LabConfig:
 
     stream_url: str | None = None
     speech_server_url: str | None = None
-    speech_base_url: str | None = None
+    tts_url: str | None = None
 
     @classmethod
     def from_env(cls, env: collections.abc.Mapping[str, str]) -> typing.Self:
         return cls(
             stream_url=_env_first(env, "BOT_SPEECH_SERVER_STREAM_URL"),
             speech_server_url=_env_first(env, "BOT_SPEECH_SERVER_URL"),
-            speech_base_url=_env_first(env, "BOT_OPENAI_COMPAT_SPEECH_BASE_URL"),
+            tts_url=_env_first(env, "BOT_SPEECH_SERVER_TTS_URL"),
         )
 
 
@@ -291,6 +312,7 @@ class AppConfig:
     stt_model_id: str | None = None
     voice_identity_model_id: str = DEFAULT_PYANNOTE_VOICE_IDENTITY_MODEL
     lab: LabConfig = dataclasses.field(default_factory=LabConfig)
+    traits: persona.Traits = DEFAULT_TRAITS
 
     @classmethod
     def from_env_file(cls, path: pathlib.Path | None = None) -> typing.Self:
@@ -471,11 +493,13 @@ class SayEncoder(vocal.speech.SpeechEncoder):
 class LabEncoder(vocal.speech.SpeechEncoder):
     """A served encoder that also keeps what it said, as ``SayEncoder`` does, for the run summary.
 
-    What it said is the aligned text of the chunks it streamed through, which joins to exactly the text read.
+    What it said is the aligned text of the chunks it streamed through, which joins to exactly the text read. It can do
+    with an expression exactly what the served encoder can.
     """
 
     def __init__(self, inner: vocal.speech.SpeechEncoder, *, destination: pathlib.Path | None = None) -> None:
         self.format: vocal.speech.Format = inner.format
+        self.expressiveness: vocal.speech.Expressiveness = inner.expressiveness
         self.inner: vocal.speech.SpeechEncoder = inner
         self.destination: pathlib.Path | None = destination
         self.calls: list[str] = []
@@ -497,6 +521,60 @@ class LabEncoder(vocal.speech.SpeechEncoder):
             _ = self.destination.write_bytes(
                 _pcm_wav(self.audio, sample_rate_hz=self.format.sample_rate_hz, channels=self.format.channels)
             )
+
+
+class LabVoice:
+    """Speaking's encoder factory on the lab TTS engine: the voice inception gives the bot, built once.
+
+    Called with the given voice's key and description, it builds the served encoder in that voice. The encoder says
+    each part with the lab's expressiveness in its angle tags, and writes the voice's description before any
+    direction, because the lab's ``instructions`` replace the description it keeps for the voice while the voice's
+    reference clip keeps the speaker. The encoder is kept as ``encoder`` so the run can report what it said. ``url``
+    is the engine's root (its OpenAI-compatible speech endpoint is under ``/v1``); ``client`` is an injected
+    OpenAI-compatible client, and without one the encoder opens its own.
+    """
+
+    def __init__(
+        self,
+        url: str,
+        *,
+        destination: pathlib.Path | None = None,
+        client: openai_compat.AsyncOpenAIClient | None = None,
+    ) -> None:
+        self._url: str = url
+        self._destination: pathlib.Path | None = destination
+        self._client: openai_compat.AsyncOpenAIClient | None = client
+        self.encoder: LabEncoder | None = None
+
+    def __call__(self, key: str, description: str | None) -> LabEncoder:
+        self.encoder = LabEncoder(
+            OpenAISpeechEncoder(
+                model=DEFAULT_LAB_SPEECH_MODEL,
+                base_url=f"{self._url.rstrip('/')}/v1",
+                voice=key,
+                voice_description=description,
+                expressiveness=LAB_EXPRESSIVENESS,
+                markup=openai_compat.ANGLE_TAGS,
+                client=self._client,
+            ),
+            destination=self._destination,
+        )
+        return self.encoder
+
+
+def lab_voice_source(
+    url: str, *, client: httpx.AsyncClient | None = None
+) -> tuple[speech_server.Catalog, speech_server.Designer]:
+    """The lab TTS engine as the source of the bot's voice: the voices it holds, and its designer of new ones.
+
+    Both name the engine ``LAB_SOURCE``, so a voice recorded for another source is never mistaken for one of these.
+    ``client`` is an injected ``httpx.AsyncClient``; without one, each request opens its own.
+    """
+
+    return (
+        speech_server.Catalog(url, source=LAB_SOURCE, languages=LANGUAGES, client=client),
+        speech_server.Designer(url, source=LAB_SOURCE, client=client),
+    )
 
 
 def _gemini_client(config: CognitionConfig, *, model: str | None = None) -> GeminiChatClient:
@@ -560,45 +638,90 @@ def _conversation(*, speech_decoder: SpeechDecoder) -> conversation.Conversation
     )
 
 
-def _listen_speak_cognition(config: CognitionConfig) -> cognition.Cognition:
-    """Run seeded Communication behaviors before Mercury intuition and Gemini reasoning."""
+def compose_cognition(
+    mouth: speaking.Speaking,
+    *,
+    intuition: processing.Processor,
+    deliberate: processing.Processor,
+    maker: processing.Processor,
+    traits: persona.Traits,
+    store: memory.Memory,
+    voice_source: tuple[vocal.voice.Catalog, vocal.voice.Designer | None] | None = None,
+) -> cognition.Cognition:
+    """The bot's mind: seeded Communication behaviors before intuition and deliberate reasoning, and its self.
 
-    store = memory.Memory()
+    Its maker gives it ``traits``; the persona it writes of itself on top of them is kept in ``store``, and only its
+    reflection may revise it. Both are shown to it every turn. With a ``voice_source``, the bot is given its voice
+    there at inception: the first time it starts, the ``maker``'s model conceives one voice from the traits alone and
+    the source makes it; ``store`` keeps it, and every start after recalls it, so the voice is the bot's for life.
+    ``mouth`` speaks only once that voice is given.
+    """
 
-    intuition_ability = cognition.Intuition(
-        processor=OpenAIProcessor(
-            client=_mercury_intuition_client(config),
-            provider="mercury2_intuition",
-        ),
-    )
-    deliberate_processor = GeminiProcessor(
-        client=_gemini_client(config),
-        provider="gemini_slow_reasoning",
-    )
-    reasoning_ability = cognition.Reasoning(processor=deliberate_processor)
-    _LOG.info(
-        "cognition wired intuition_model=%s intuition_base_url=%s reasoning_model=%s",
-        config.intuition_model,
-        config.intuition_base_url,
-        config.model,
+    self_knowledge = persona.Persona(traits=traits, memory=store)
+    inception = (
+        None
+        if voice_source is None
+        else vocal.voice.Inception(
+            traits=traits,
+            languages=LANGUAGES,
+            speaking=mouth,
+            processor=maker,
+            catalog=voice_source[0],
+            designer=voice_source[1],
+            memory=store,
+        )
     )
     return cognition.Cognition(
         autonomy=cognition.Autonomy(
             memory=store,
             seeded_behaviors=(communication.speech_heard_seed(),),
         ),
-        intuition=intuition_ability,
-        reasoning=reasoning_ability,
-        reflection=cognition.Reflection(
-            processor=deliberate_processor,
-            memory=store,
-        ),
+        intuition=cognition.Intuition(processor=intuition),
+        reasoning=cognition.Reasoning(processor=deliberate),
+        reflection=cognition.Reflection(processor=deliberate, memory=store, persona=self_knowledge),
         # Persistent routines the bot authors keep running here; their schedules read UTC wall time.
         routines=cognition.Routines(memory=store, clock=functools.partial(datetime.datetime.now, datetime.UTC)),
         memory=store,
         associative=memory.Associative(memory=store),
         # While the bot rests, its deliberate model consolidates what it remembers.
-        consolidation=memory.Consolidation(memory=store, processor=deliberate_processor),
+        consolidation=memory.Consolidation(memory=store, processor=deliberate),
+        persona=self_knowledge,
+        voice=inception,
+    )
+
+
+def _listen_speak_cognition(
+    config: CognitionConfig,
+    mouth: speaking.Speaking,
+    *,
+    traits: persona.Traits,
+    store: memory.Memory,
+    lab: LabConfig,
+) -> cognition.Cognition:
+    """Mercury intuition and Gemini reasoning; on the lab, Gemini is also the maker's model that conceives the voice."""
+
+    intuition = OpenAIProcessor(
+        client=_mercury_intuition_client(config),
+        provider="mercury2_intuition",
+    )
+    deliberate = GeminiProcessor(
+        client=_gemini_client(config),
+        provider="gemini_slow_reasoning",
+    )
+    _LOG.info(
+        "cognition wired intuition_model=%s intuition_base_url=%s reasoning_model=%s",
+        config.intuition_model,
+        config.intuition_base_url,
+        config.model,
+    )
+    return compose_cognition(
+        mouth,
+        intuition=intuition,
+        deliberate=deliberate,
+        maker=deliberate,
+        traits=traits,
+        store=store,
+        voice_source=None if lab.tts_url is None else lab_voice_source(lab.tts_url),
     )
 
 
@@ -1003,7 +1126,7 @@ class ListenSpeakBot(Bot):
     _speaker: audio.Speaker
     _decoder: SpeechDecoder
     _owned_voice_activity_classifier: SileroVoiceActivityClassifier | None
-    _encoder: SayEncoder | LabEncoder
+    _voice: SayEncoder | LabVoice
     _cognition_config: CognitionConfig
     _conversation: conversation.Conversation
     _communication: _TrackedCommunication
@@ -1016,7 +1139,9 @@ class ListenSpeakBot(Bot):
         self,
         *,
         reply_wav: pathlib.Path,
-        cognition: CognitionConfig | cognition.Cognition | None = None,
+        cognition: CognitionConfig | collections.abc.Callable[[speaking.Speaking], cognition.Cognition] | None = None,
+        traits: persona.Traits = DEFAULT_TRAITS,
+        memory_path: pathlib.Path | None = None,
         sample_rate_hz: int = _DEFAULT_SAMPLE_RATE_HZ,
         vad_model_id: str = DEFAULT_SILERO_VAD_MODEL,
         stt_model_id: str | None = None,
@@ -1031,19 +1156,23 @@ class ListenSpeakBot(Bot):
         voice_identification_loader: SpeakerEmbeddingInferenceLoader | None = None,
         lab: LabConfig | None = None,
     ) -> None:
+        """Compose the bot.
+
+        ``cognition`` is the configuration its models are built from, or a factory given the bot's mouth (Speaking)
+        that composes its whole mind. From a configuration, the bot's maker gives it ``traits``, and its memory is kept
+        at ``memory_path`` (in process when ``None``), where its persona and the voice it is given are kept across
+        starts; a factory composes its own. With ``lab.tts_url``, the bot speaks on the lab TTS engine only once its
+        voice is given (see ``compose_cognition``); otherwise it speaks with macOS ``say``.
+        """
+
         lab = lab if lab is not None else LabConfig()
         self._run_record = _RunRecord()
         self._run_progress = _RunProgress(self._run_record)
         self._decoder = SpeechDecoder() if stt_model_id is None else SpeechDecoder(model_id=stt_model_id)
-        self._encoder = (
+        self._voice = (
             SayEncoder(destination=reply_wav, sample_rate_hz=sample_rate_hz)
-            if lab.speech_base_url is None
-            else LabEncoder(
-                OpenAISpeechEncoder(
-                    model=DEFAULT_LAB_SPEECH_MODEL, base_url=lab.speech_base_url, voice=DEFAULT_LAB_VOICE
-                ),
-                destination=reply_wav,
-            )
+            if lab.tts_url is None
+            else LabVoice(lab.tts_url, destination=reply_wav)
         )
         classifier = (
             voice_classifier
@@ -1087,22 +1216,29 @@ class ListenSpeakBot(Bot):
         # The bot's mouth: Speaking powers it, attaches to it, and streams the encoded PCM through it.
         self._speaker = audio.Speaker()
         self._speaking = speaking.Speaking(
-            encoder=self._encoder,
+            encoder=self._voice,
             speaker=self._speaker,
             listening=(self._listening,),
             conversation=(self._conversation,),
+            voicing_timeout=_VOICING_TIMEOUT,
         )
         self._communication = _TrackedCommunication(
             active_conversation=self._conversation,
             speaking=self._speaking,
             run_progress=self._run_progress,
         )
-        if isinstance(cognition, _Cognition):
-            cognition_instance = cognition
-            self._cognition_config = CognitionConfig()
-        else:
+        if cognition is None or isinstance(cognition, CognitionConfig):
             self._cognition_config = cognition if cognition is not None else CognitionConfig()
-            cognition_instance = _listen_speak_cognition(self._cognition_config)
+            cognition_instance = _listen_speak_cognition(
+                self._cognition_config,
+                self._speaking,
+                traits=traits,
+                store=memory.Memory() if memory_path is None else memory.Memory(database=str(memory_path)),
+                lab=lab,
+            )
+        else:
+            self._cognition_config = CognitionConfig()
+            cognition_instance = cognition(self._speaking)
         super().__init__(
             devices={},
             cognition=cognition_instance,
@@ -1432,8 +1568,10 @@ class ListenSpeakBot(Bot):
     def decoder(self) -> SpeechDecoder:
         return self._decoder
 
-    def encoder(self) -> SayEncoder | LabEncoder:
-        return self._encoder
+    def encoder(self) -> SayEncoder | LabEncoder | None:
+        """The encoder the bot speaks with: ``say``, or on the lab the one built once its voice was given."""
+
+        return self._voice if isinstance(self._voice, SayEncoder) else self._voice.encoder
 
     def cognition_config(self) -> CognitionConfig:
         return self._cognition_config
@@ -1507,6 +1645,9 @@ async def run(
     body = ListenSpeakBot(
         reply_wav=reply_wav,
         cognition=app_config.cognition,
+        traits=app_config.traits,
+        # The bot's memory outlives the run: its persona and the voice it is given are its own on every start.
+        memory_path=assets / "memory.sqlite3",
         vad_model_id=app_config.vad_model_id,
         stt_model_id=app_config.stt_model_id,
         voice_identity_model_id=app_config.voice_identity_model_id,
@@ -1567,8 +1708,9 @@ async def run(
     finally:
         await body.detach(environment)
 
-    reply_audio = body.encoder().audio or b""
-    has_speaking_output = bool(body.encoder().calls)
+    encoder = body.encoder()
+    reply_audio = (encoder.audio if encoder is not None else None) or b""
+    has_speaking_output = encoder is not None and bool(encoder.calls)
     summary_counts["reply_audio_bytes"] = len(reply_audio)
     summary = _build_operator_summary(
         status="ok" if has_speaking_output else "incomplete",
@@ -1578,7 +1720,7 @@ async def run(
 
     if play:
         for label, path in (("heard", heard_wav), ("reply", reply_wav)):
-            if path.exists() and (label == "heard" or body.encoder().calls):
+            if path.exists() and (label == "heard" or has_speaking_output):
                 print(f"Playing {label}: {path}", file=sys.stderr)
                 _ = subprocess.run(["afplay", str(path)], check=False)
 
@@ -1611,10 +1753,16 @@ def main(argv: list[str] | None = None) -> int:
         help=f"Override Gemini cognition model (default: {DEFAULT_GEMINI_MODEL}).",
     )
     _ = parser.add_argument(
+        "--trait",
+        action="append",
+        default=None,
+        help="A trait the bot's maker gives it; repeat for each (default: " + ", ".join(DEFAULT_TRAITS.traits) + ").",
+    )
+    _ = parser.add_argument(
         "--assets-dir",
         type=pathlib.Path,
         default=None,
-        help=f"Directory for hey_gabe.wav and reply.wav (default: {_ASSETS_DIR}).",
+        help=f"Directory for hey_gabe.wav, reply.wav and the bot's memory.sqlite3 (default: {_ASSETS_DIR}).",
     )
     _ = parser.add_argument(
         "-v",
@@ -1628,6 +1776,11 @@ def main(argv: list[str] | None = None) -> int:
     if env_path is None and _DEFAULT_ENV_PATH.exists():
         env_path = _DEFAULT_ENV_PATH
     config = AppConfig.from_env_file(env_path).with_cognition_overrides(model=args.gemini_model)
+    if args.trait:
+        try:
+            config = dataclasses.replace(config, traits=persona.Traits(traits=tuple(args.trait)))
+        except pydantic.ValidationError:
+            parser.error("--trait: give 1 to 24 traits, each 1 to 200 characters.")
     try:
         summary = asyncio.run(run(play=bool(args.play), assets_dir=args.assets_dir, config=config))
     except Exception as error:
@@ -1649,10 +1802,17 @@ __all__ = [
     "DEFAULT_GEMINI_MODEL",
     "DEFAULT_PYANNOTE_VOICE_IDENTITY_MODEL",
     "DEFAULT_SILERO_VAD_MODEL",
+    "DEFAULT_TRAITS",
+    "LAB_EXPRESSIVENESS",
+    "LAB_SOURCE",
+    "LANGUAGES",
     "LabConfig",
     "LabEncoder",
+    "LabVoice",
     "ListenSpeakBot",
     "SayEncoder",
+    "compose_cognition",
+    "lab_voice_source",
     "load_env",
     "main",
     "run",

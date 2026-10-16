@@ -29,6 +29,8 @@ intuition (OpenAI-compatible) / Gemini **reasoning** (`gemini-3.5-flash`) and re
 The real Listening product carries a provider-neutral source identity into Communication, whose
 native seeded behavior admits the typed speech into Conversation. Cognition can select
 `communication.respond`, which routes through the injected Speaking port and produces a reply WAV.
+The bot knows the traits the example gives it and the persona it writes of itself, and on the lab TTS engine
+(`BOT_SPEECH_SERVER_TTS_URL`) it speaks in the voice it is given there at inception.
 The run remains `status: incomplete` when cognition does not select a response. Cognition requires
 `BOT_MERCURY_API_KEY`
 (intuition) and `BOT_GEMINI_API_KEY` / `GEMINI_API_KEY` (reasoning). No LiveKit or
