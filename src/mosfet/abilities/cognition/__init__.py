@@ -25,7 +25,7 @@ if typing.TYPE_CHECKING:
         OutputData,
         OutputEvent,
     )
-    from .input import is_input, stimulus_name
+    from .input import SelfData, is_input, stimulus_name
     from .intuition import Intuition
     from .reasoning import Reasoning
     from .reflection import Reflection
@@ -42,6 +42,7 @@ _LAZY_EXPORT_MODULES = {
     "Cognition": ".cognition",
     "InputData": ".cognition",
     "OutputData": ".cognition",
+    "SelfData": ".input",
     "is_input": ".input",
     "stimulus_name": ".input",
     "Autonomy": ".autonomy",
@@ -66,6 +67,7 @@ __all__ = [
     "Cognition",
     "InputData",
     "OutputData",
+    "SelfData",
     "is_input",
     "stimulus_name",
     "Autonomy",

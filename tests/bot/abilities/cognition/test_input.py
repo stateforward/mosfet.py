@@ -8,6 +8,7 @@ import xml.etree.ElementTree
 
 import mosfet
 import mosfet.lifecycle
+from mosfet.abilities import persona
 from mosfet.abilities import processing
 from mosfet.abilities.ability import Effort
 from mosfet.abilities.cognition import input as cognition_input
@@ -383,6 +384,82 @@ def test_build_processing_input_without_devices_leaves_instructions_unset() -> N
 
     built = cognition_input.build_processing_input(
         cognition_input.InputData(stimulus=mosfet.InputEventData(target_device="phone", priority=0))
+    )
+    assert built.instructions is None
+
+
+_KNOWN = cognition_input.SelfData(
+    persona=persona.OutputData(
+        traits=("curious", "patient with <children>"),
+        description=persona.Description(
+            text="I like explaining things slowly & simply.",
+            reason="A long talk with a child.",
+            traits=("curious", "patient with <children>"),
+        ),
+    )
+)
+
+
+def test_self_data_renders_the_persona_marked_by_who_wrote_each_part() -> None:
+    """The self block: owner traits first, then the description the bot wrote, escaped, never filtered."""
+
+    assert _KNOWN.__model_repr__() == (
+        '<persona><traits given_by="owner"><trait>curious</trait><trait>patient with &lt;children&gt;</trait>'
+        '</traits><description written_by="you">I like explaining things slowly &amp; simply.</description>'
+        "</persona>"
+    )
+    unwritten = cognition_input.SelfData(persona=persona.OutputData(traits=("curious",)))
+    assert unwritten.__model_repr__() == (
+        '<persona><traits given_by="owner"><trait>curious</trait></traits><description written_by="you"/></persona>'
+    )
+
+
+def test_self_data_is_frozen_and_closed() -> None:
+    with pytest.raises(pydantic.ValidationError):
+        _ = cognition_input.SelfData.model_validate({"persona": None, "mood": "cheerful"})
+    assert cognition_input.SelfData.model_config.get("frozen") is True
+    assert cognition_input.SelfData().persona is None
+
+
+def test_build_processing_input_shows_what_the_bot_knows_of_itself_after_the_world_block() -> None:
+    async def run() -> tuple[processing.InputData, processing.InputData]:
+        environment = Environment()
+        owner = _OwnerBotActor({})
+        _ = await mosfet.started(environment, owner, typing.cast(hsm.Model, owner.model))
+        turn = cognition_input.InputData(
+            stimulus=mosfet.InputEventData(target_device="phone", priority=0),
+            actors={"bot": owner},
+        )
+        return (
+            cognition_input.build_processing_input(turn, known=_KNOWN),
+            cognition_input.build_processing_input(turn),
+        )
+
+    known, unknown = asyncio.run(run())
+
+    instructions = known.instructions
+    assert instructions is not None
+    world = unknown.instructions
+    assert world is not None and xml.etree.ElementTree.fromstring(world).tag == "environment"
+    # The world block comes first, unchanged; the self block follows it.
+    assert instructions.startswith(f"{world}\n")
+    self_block = instructions.removeprefix(f"{world}\n")
+    persona_element = xml.etree.ElementTree.fromstring(self_block)
+    assert persona_element.tag == "persona"
+    traits = persona_element.find("traits")
+    assert traits is not None and traits.get("given_by") == "owner"
+    assert [trait.text for trait in traits.findall("trait")] == ["curious", "patient with <children>"]
+    description = persona_element.find("description")
+    assert description is not None and description.get("written_by") == "you"
+    assert description.text == "I like explaining things slowly & simply."
+
+
+def test_build_processing_input_without_a_bot_actor_shows_no_self_block() -> None:
+    """The self block is the bot's perspective, like the world block: no bot actor, no instructions."""
+
+    built = cognition_input.build_processing_input(
+        cognition_input.InputData(stimulus=mosfet.InputEventData(target_device="phone", priority=0)),
+        known=_KNOWN,
     )
     assert built.instructions is None
 

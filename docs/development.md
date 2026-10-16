@@ -206,6 +206,14 @@ fake timer clock. Telemetry: `bot.behavior.routine.tick.count` {trigger, outcome
 `bot.behavior.routine.active`, and `bot.behavior.routine.reconcile` / `.start` / `.stop`
 spans; routine names are never attributes.
 
+`persona.Persona` (owner-given `persona.Traits`, optional memory peer; compose it as
+`Cognition(persona=...)`) is attached by Cognition and tells it what the bot knows of itself
+with `persona.OutputEvent`: on waking, with the description it remembered or none, and after
+every revision it wrote down. Cognition keeps the latest one and shows it on every intuition and
+reasoning frame as the self block (`cognition.SelfData`), after the world block: `<persona>`
+holding `<traits given_by="owner">` and `<description written_by="you">`, escaped and never
+filtered. Cognition never revises the persona itself.
+
 ## Observability
 
 Every HSM-visible behavior is observed at runtime boundaries that opt in

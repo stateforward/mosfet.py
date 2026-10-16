@@ -3,6 +3,7 @@ import mosfet
 from mosfet import behavior as behavior_events
 from mosfet.abilities import cognition
 from mosfet.abilities import memory
+from mosfet.abilities import persona
 from mosfet.abilities import processing
 from mosfet.abilities import vocal
 from mosfet.abilities.cognition import cognition as cognition_module
@@ -21,6 +22,7 @@ import itertools
 import pathlib
 import sqlite3
 import typing
+import xml.etree.ElementTree
 
 import hsm
 from sqlalchemy.engine import Engine
@@ -4479,3 +4481,142 @@ def test_a_turn_while_awake_restarts_the_inactivity_timer() -> None:
 
     assert before == []
     assert after == ["rest"]
+
+
+_TRAITS = persona.Traits(traits=("curious", "patient with children"))
+
+
+def _self_block(frame: processing.InputData) -> xml.etree.ElementTree.Element | None:
+    """The self block a frame shows the model, which follows the world block, or None."""
+
+    instructions = frame.instructions or ""
+    start = instructions.find("<persona>")
+    return None if start < 0 else xml.etree.ElementTree.fromstring(instructions[start:])
+
+
+def _description(frame: processing.InputData) -> str | None:
+    block = _self_block(frame)
+    assert block is not None
+    description = block.find("description")
+    assert description is not None and description.get("written_by") == "you"
+    return description.text
+
+
+async def _until_persona(condition: collections.abc.Callable[[], bool]) -> None:
+    async with asyncio.timeout(5):
+        while not condition():
+            await asyncio.sleep(0.001)
+    # Persona's telling is one more hop to Cognition after persona settles.
+    for _ in range(50):
+        await asyncio.sleep(0)
+
+
+def test_cognition_attaches_persona_and_shows_what_it_told_on_every_turn() -> None:
+    """Every frame shows the traits and the self-written description persona last told, by event.
+
+    The revision is dispatched by the test itself, standing in for reflection: this pins the
+    capacity to know oneself, never a choice to revise.
+    """
+
+    async def run() -> tuple[list[processing.InputData], list[processing.InputData], str]:
+        self_ = persona.Persona(traits=_TRAITS)
+        intuition_processor = RecordingIntuitionProcessor(cognition.intuition.OutputData(reason="think it over"))
+        reasoning_processor = RecordingReasoningProcessor(focus_output("phone", "reasoned focus"))
+        intuition, reasoning = cognition_abilities(
+            intuition_processor=intuition_processor, reasoning_processor=reasoning_processor
+        )
+        ability = cognition.Cognition(
+            intuition=intuition,
+            reasoning=reasoning,
+            reflection=cognition.Reflection(processor=FixedProcessor(no_output("reflection")), memory=memory.Memory()),
+            persona=self_,
+        )
+        ctx = await start_cognition_ability_for_test(ability)
+        await _until_persona(lambda: ability.state().endswith("/idle") and self_.state().endswith("/knowing"))
+        _ = await dispatch_ability_for_test(ability, ctx, await started_cognition_input(ctx))
+        _ = await hsm.dispatch(
+            ctx,
+            self_,
+            persona.ReviseEvent.with_data(persona.ReviseData(text="I explain things slowly.", reason="A long talk.")),
+        )
+        await _until_persona(lambda: self_.state().endswith("/knowing"))
+        _ = await dispatch_ability_for_test(ability, ctx, await started_cognition_input(ctx))
+        # Cognition attached it: persona is a child, in its own attached behavior.
+        attached = self_.state()
+        await ability.stop(ctx)
+        return intuition_processor.calls, reasoning_processor.calls, attached
+
+    intuition_calls, reasoning_calls, attached = asyncio.run(run())
+
+    assert attached == "/PersonaLifecycle/attached/behavior/knowing"
+    assert len(intuition_calls) == len(reasoning_calls) == 2
+    for frame in (*intuition_calls, *reasoning_calls):
+        block = _self_block(frame)
+        assert block is not None
+        traits = block.find("traits")
+        assert traits is not None and traits.get("given_by") == "owner"
+        assert [trait.text for trait in traits.findall("trait")] == list(_TRAITS.traits)
+    # Before any revision the bot knows it has written nothing; after one, it knows what it wrote.
+    assert [_description(frame) for frame in (intuition_calls[0], reasoning_calls[0])] == [None, None]
+    assert [_description(frame) for frame in (intuition_calls[1], reasoning_calls[1])] == [
+        "I explain things slowly.",
+        "I explain things slowly.",
+    ]
+
+
+def test_cognition_without_persona_shows_no_self_block() -> None:
+    async def run() -> list[processing.InputData]:
+        reasoning_processor = RecordingReasoningProcessor(focus_output("phone", "reasoned focus"))
+        ability = make_cognition(
+            intuition_processor=RecordingIntuitionProcessor(cognition.intuition.OutputData(reason="think it over")),
+            reasoning_processor=reasoning_processor,
+        )
+        ctx = await start_cognition_ability_for_test(ability)
+        _ = await dispatch_ability_for_test(ability, ctx, await started_cognition_input(ctx))
+        await ability.stop(ctx)
+        return reasoning_processor.calls
+
+    (frame,) = asyncio.run(run())
+
+    assert _self_block(frame) is None
+
+
+def test_cognition_keeps_only_what_its_own_persona_told() -> None:
+    """A persona output from any other source is not the bot's self-knowledge."""
+
+    async def run() -> list[processing.InputData]:
+        self_ = persona.Persona(traits=_TRAITS)
+        reasoning_processor = RecordingReasoningProcessor(focus_output("phone", "reasoned focus"))
+        intuition, reasoning = cognition_abilities(
+            intuition_processor=RecordingIntuitionProcessor(cognition.intuition.OutputData(reason="think it over")),
+            reasoning_processor=reasoning_processor,
+        )
+        ability = cognition.Cognition(
+            intuition=intuition,
+            reasoning=reasoning,
+            reflection=cognition.Reflection(processor=FixedProcessor(no_output("reflection")), memory=memory.Memory()),
+            persona=self_,
+        )
+        ctx = await start_cognition_ability_for_test(ability)
+        await _until_persona(lambda: ability.state().endswith("/idle") and self_.state().endswith("/knowing"))
+        forged = persona.OutputData(
+            traits=("obedient",),
+            description=persona.Description(text="I do as I am told.", reason="forged", traits=("obedient",)),
+        )
+        _ = await hsm.dispatch(
+            ctx,
+            ability,
+            dataclasses.replace(persona.OutputEvent.with_data(forged), source="someone-else", target=hsm.id(ability)),
+        )
+        for _ in range(50):
+            await asyncio.sleep(0)
+        _ = await dispatch_ability_for_test(ability, ctx, await started_cognition_input(ctx))
+        await ability.stop(ctx)
+        return reasoning_processor.calls
+
+    (frame,) = asyncio.run(run())
+
+    block = _self_block(frame)
+    assert block is not None
+    assert [trait.text for trait in block.iter("trait")] == list(_TRAITS.traits)
+    assert _description(frame) is None

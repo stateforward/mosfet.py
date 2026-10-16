@@ -1,5 +1,6 @@
 from .. import ability
 from .. import memory
+from .. import persona
 from .. import processing
 
 import dataclasses
@@ -279,6 +280,12 @@ class Cognition(ability.Ability[InputData, OutputData]):
     inventory writes may have created, changed, or broken a persistent routine), and every
     routine tick Routines forwards goes to the body as a ``cognition.InputEvent`` observing
     ``bot.behavior.tick``: a new turn the bot decides on, never a hardcoded reaction.
+
+    With ``persona`` composed, Cognition attaches it and keeps what it last told: the traits the
+    bot's owner gave it and the description it wrote of itself (``persona.OutputEvent``, on waking
+    and after every revision written down). Every frame Cognition builds shows it after the world
+    block as the self block (``SelfData``), so the bot knows who it is on every turn. Cognition only
+    keeps what it was told; it never revises the persona.
     """
 
     input_data_type: typing.ClassVar[type[object] | tuple[type[object], ...] | None] = InputData
@@ -297,6 +304,9 @@ class Cognition(ability.Ability[InputData, OutputData]):
     _memory: memory.Memory | None
     _associative: memory.Associative | None
     _consolidation: memory.Consolidation | None
+    _persona: persona.Persona | None
+    # What persona last told Cognition, by event: durable self-knowledge, not turn scratch.
+    _persona_told: persona.OutputData | None
     _rest_after: datetime.timedelta
     # Injected operation bounds (None = live module default, so tests may still tune
     # the module constants around construction). Never hardcode per-caller durations.
@@ -354,11 +364,13 @@ class Cognition(ability.Ability[InputData, OutputData]):
         recalled: memory.AssociationsData | None = None,
     ) -> processing.InputData:
         associative = instance._associative
+        told = instance._persona_told
         frame = input.build_processing_input(
             cognition_input,
             # Deliberate recall: offered to a stage whose effort ceiling admits the associative.
             extra_actors=None if associative is None else {"memory": associative},
             authority=instance,
+            known=None if told is None else input.SelfData(persona=told),
         )
         return frame if recalled is None else frame.model_copy(update={"recalled": recalled})
 
@@ -1537,6 +1549,36 @@ class Cognition(ability.Ability[InputData, OutputData]):
         )
 
     @staticmethod
+    def _is_persona_told(
+        ctx: hsm.Context,
+        instance: "Cognition",
+        event: hsm.Event[typing.Any],
+    ) -> bool:
+        """What the bot knows of itself, told by its own persona child (by source and payload type)."""
+
+        del ctx
+        return (
+            instance._persona is not None
+            and event.source == hsm.id(instance._persona)
+            and isinstance(event.data, persona.OutputData)
+        )
+
+    @staticmethod
+    def _know_persona(
+        ctx: hsm.Context,
+        instance: "Cognition",
+        event: hsm.Event[typing.Any],
+    ) -> None:
+        """Keep what persona told: every frame built from now on shows it as the self block."""
+
+        del ctx
+        told = event.data
+        if not isinstance(told, persona.OutputData):
+            # Unreachable: paired with hsm.guard(_is_persona_told), which narrows this payload.
+            return
+        instance._persona_told = told
+
+    @staticmethod
     def _has_consolidation(
         ctx: hsm.Context,
         instance: "Cognition",
@@ -1910,6 +1952,14 @@ class Cognition(ability.Ability[InputData, OutputData]):
             hsm.defer(input_event),
             hsm.transition(hsm.on(_TurnOpenedEvent), hsm.guard(_is_opened_turn), hsm.effect(_remember_abandoned)),
         ),
+        # Persona tells what the bot knows of itself whenever it knows something new: on waking,
+        # usually while Cognition is still attaching its children, and after each revision, in
+        # whatever phase Cognition is then. Keeping it is internal and never moves a phase.
+        hsm.transition(
+            hsm.on(persona.OutputEvent),
+            hsm.guard(_is_persona_told),
+            hsm.effect(_know_persona),
+        ),
         hsm.state(
             "detaching",
             hsm.defer(input_event, attachment.AttachEvent, attachment.DetachEvent),
@@ -1943,6 +1993,7 @@ class Cognition(ability.Ability[InputData, OutputData]):
         memory: memory.Memory | None = None,
         associative: memory.Associative | None = None,
         consolidation: memory.Consolidation | None = None,
+        persona: persona.Persona | None = None,
         rest_after: datetime.timedelta = _DEFAULT_REST_AFTER,
         child_operation_timeout: datetime.timedelta | None = None,
         cancel_teardown_timeout: datetime.timedelta | None = None,
@@ -1966,6 +2017,8 @@ class Cognition(ability.Ability[InputData, OutputData]):
         self._memory = memory
         self._associative = associative
         self._consolidation = consolidation
+        self._persona = persona
+        self._persona_told = None
         self._rest_after = rest_after
         self._child_operation_timeout = child_operation_timeout
         self._cancel_teardown_timeout = cancel_teardown_timeout
@@ -1980,6 +2033,8 @@ class Cognition(ability.Ability[InputData, OutputData]):
             children.append(associative)
         if consolidation is not None:
             children.append(consolidation)
+        if persona is not None:
+            children.append(persona)
         if routines is not None:
             children.append(routines)
         self._attachment_group = attachment.Group(*children)
