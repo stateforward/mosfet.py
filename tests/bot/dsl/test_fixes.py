@@ -16,10 +16,23 @@ from mosfet import bot
 from mosfet.bot import diagnostics
 from tests.bot.dsl import support
 
-FIXABLE = ["B0001", "B0003", "B0004", "B0006", "B0007", "B0017", "mixed", "unnamed"]
+FIXABLE = ["B0001", "B0003", "B0004", "B0006", "B0007", "B0017", "B0018", "empty_timeouts", "mixed", "unnamed"]
 """The wrong files whose every diagnostic carries a machine-applicable rewrite."""
 
-ALL = [*FIXABLE, "B0002", "B0008", "B0009", "B0010", "B0011", "B0015", "B0016"]
+ALL = [
+    *FIXABLE,
+    "B0002",
+    "B0008",
+    "B0009",
+    "B0010",
+    "B0011",
+    "B0015",
+    "B0016",
+    "ability_without_tools",
+    "instruction_like_traits",
+    "no_devices",
+    "unused_register",
+]
 
 
 @pytest.fixture
@@ -28,10 +41,23 @@ def here(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> pathlib.Pat
     return tmp_path
 
 
-def _machine_applicable(error: bot.DefinitionError) -> list[diagnostics.Suggestion]:
+def _diagnose(path: pathlib.Path) -> tuple[list[diagnostics.Diagnostic], str]:
+    """What running the bot file at ``path`` says: its errors, else its lint warnings, and their text."""
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            _ = support.run(path)
+        except bot.DefinitionError as error:
+            return list(error.diagnostics), str(error)
+    warned = [record.message for record in caught if isinstance(record.message, bot.LintWarning)]
+    return [warning.diagnostic for warning in warned], "\n\n".join(str(warning) for warning in warned)
+
+
+def _machine_applicable(found: list[diagnostics.Diagnostic]) -> list[diagnostics.Suggestion]:
     return [
         diagnostic.help.suggestion
-        for diagnostic in error.diagnostics
+        for diagnostic in found
         if diagnostic.help is not None
         and diagnostic.help.suggestion is not None
         and diagnostic.help.suggestion.applicability == "machine-applicable"
@@ -41,10 +67,10 @@ def _machine_applicable(error: bot.DefinitionError) -> list[diagnostics.Suggesti
 @pytest.mark.parametrize("name", FIXABLE)
 def test_a_wrong_bot_file_defines_clean_with_only_its_diagnostics_applied(name: str, here: pathlib.Path) -> None:
     path = support.copy(name, here)
-    error = support.failure(path)
-    text = str(error)
-    suggestions = _machine_applicable(error)
-    assert len(suggestions) == len(error.diagnostics)
+    found, text = _diagnose(path)
+    suggestions = _machine_applicable(found)
+    assert found
+    assert len(suggestions) == len(found)
     for suggestion in suggestions:
         assert suggestion.replacement in text
 
@@ -61,20 +87,15 @@ def test_a_wrong_bot_file_defines_clean_with_only_its_diagnostics_applied(name: 
 @pytest.mark.parametrize("name", ALL)
 def test_a_machine_applicable_suggestion_always_clears_its_diagnostic(name: str, here: pathlib.Path) -> None:
     path = support.copy(name, here)
-    error = support.failure(path)
-    suggestions = _machine_applicable(error)
-    fixed = {
-        id(diagnostic)
-        for diagnostic in error.diagnostics
-        if diagnostic.help and diagnostic.help.suggestion in suggestions
-    }
-    expected = collections.Counter(diagnostic.code for diagnostic in error.diagnostics if id(diagnostic) not in fixed)
+    found, _ = _diagnose(path)
+    suggestions = _machine_applicable(found)
+    expected = collections.Counter(
+        diagnostic.code
+        for diagnostic in found
+        if diagnostic.help is None or diagnostic.help.suggestion not in suggestions
+    )
 
     _ = path.write_text(support.apply(path.read_text(encoding="utf-8"), suggestions), encoding="utf-8")
-    try:
-        _ = support.run(path)
-        remaining: collections.Counter[str] = collections.Counter()
-    except bot.DefinitionError as again:
-        remaining = collections.Counter(diagnostic.code for diagnostic in again.diagnostics)
+    again, _ = _diagnose(path)
 
-    assert remaining == expected
+    assert collections.Counter(diagnostic.code for diagnostic in again) == expected

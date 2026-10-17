@@ -1,0 +1,7 @@
+"""B0018: bot.allow names a lint that does not exist."""
+
+from mosfet import bot
+
+from tests.bot.dsl import support
+
+model = bot.define("greeter", bot.cognition(support.Silent()), bot.allow("no_device"))

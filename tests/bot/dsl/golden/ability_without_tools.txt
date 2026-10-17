@@ -1,0 +1,10 @@
+warning[ability_without_tools]: ability `stm_memory` offers cognition nothing to select
+  --> greeter.py:13:5
+   |
+13 |     bot.attach(memory.StmMemory()),
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `StmMemory` has no tool events
+   |
+   = note: an acquired ability is used through the events it offers cognition; this one offers none
+   = note: allow it with `bot.allow("ability_without_tools")` if this is deliberate
+help: a sensory register is the body's: `bot.register(memory.StmMemory())`
+   = explain: bot.explain("ability_without_tools")

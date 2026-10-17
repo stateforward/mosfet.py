@@ -11,12 +11,14 @@ definition DSL (``from mosfet import bot``), so it re-exports nothing from the b
     )
 
 A bot file's mistakes come back as rustc-style :class:`Diagnostic`\\ s (``mosfet.bot.diagnostics``),
-all of them in one :class:`DefinitionError`, and :func:`explain` says what any code means.
+all of them in one :class:`DefinitionError`; clippy-style lints are :class:`LintWarning`\\ s that
+:func:`allow` allows per bot and :func:`check` returns; and :func:`explain` says what any code means.
 """
 
 from .define import DefinitionError, Error, Finalizer, RedefinableBot, Validator, define, redefine
 from .diagnostics import Diagnostic, Help, Location, Span, Suggestion, explain
-from .elements import Element, Model, attach, cognition, input, output, register, timeouts, traits
+from .elements import Element, Model, allow, attach, cognition, input, output, register, timeouts, traits
+from .lints import LintWarning, check
 
 __all__ = [
     "DefinitionError",
@@ -25,13 +27,16 @@ __all__ = [
     "Error",
     "Finalizer",
     "Help",
+    "LintWarning",
     "Location",
     "Model",
     "RedefinableBot",
     "Span",
     "Suggestion",
     "Validator",
+    "allow",
     "attach",
+    "check",
     "cognition",
     "define",
     "explain",

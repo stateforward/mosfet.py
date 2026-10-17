@@ -1,0 +1,13 @@
+"""unused_register: a sensory register on a bot with nothing to perceive."""
+
+from mosfet import bot
+from mosfet.abilities import memory
+
+from tests.bot.dsl import support
+
+model = bot.define(
+    "greeter",
+    bot.cognition(support.Silent()),
+    bot.register(memory.StmMemory()),
+    bot.allow("no_devices"),
+)

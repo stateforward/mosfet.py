@@ -358,7 +358,9 @@ EXPLANATIONS: tuple[Explanation, ...] = (
         code="B0009",
         level="error",
         title="an element a bot has once is given twice",
-        meaning="A bot has at most one `bot.traits`, `bot.cognition`, `bot.timeouts` and `bot.register`.",
+        meaning=(
+            "A bot has at most one `bot.traits`, `bot.cognition`, `bot.timeouts`, `bot.register` and `bot.allow`."
+        ),
         why="Each is one thing about the bot. Merge the two into one, for example one `bot.traits` with every trait.",
         wrong=(
             'model = bot.define(\n    "greeter",\n    bot.traits("curious"),\n    bot.traits("patient"),\n'
@@ -445,12 +447,104 @@ EXPLANATIONS: tuple[Explanation, ...] = (
         wrong='model = bot.define("greeter", bot.cognition(processor), phone.Phone())',
         right='model = bot.define("greeter", bot.cognition(processor), bot.attach(phone.Phone()))',
     ),
+    Explanation(
+        code="B0018",
+        level="error",
+        title="`bot.allow` names a lint that does not exist",
+        meaning="Each name given to `bot.allow` is a lint's. The help names the nearest one.",
+        why="Allowing a lint that does not exist allows nothing, so the warning it was meant for still shows.",
+        wrong='model = bot.define("greeter", bot.cognition(processor), bot.allow("no_device"))',
+        right='model = bot.define("greeter", bot.cognition(processor), bot.allow("no_devices"))',
+    ),
+    Explanation(
+        code="ability_without_tools",
+        level="warning",
+        title="an acquired ability offers cognition nothing to select",
+        meaning=(
+            "An ability given to `bot.attach` is acquired: cognition uses it through the events it offers. One "
+            "that offers none can never be used. A sense is given to `bot.input`, an effector to `bot.output`, "
+            "and the sensory register to `bot.register`."
+        ),
+        why="An acquired ability with no tools is almost always a sense or an effector given to the wrong element.",
+        wrong=(
+            'model = bot.define(\n    "greeter",\n    bot.cognition(processor),\n    bot.attach(phone.Phone()),\n'
+            "    bot.attach(memory.StmMemory()),\n)"
+        ),
+        right=(
+            'model = bot.define(\n    "greeter",\n    bot.cognition(processor),\n    bot.attach(phone.Phone()),\n'
+            "    bot.register(memory.StmMemory()),\n)"
+        ),
+    ),
+    Explanation(
+        code="empty_timeouts",
+        level="warning",
+        title="`bot.timeouts()` sets no timeout",
+        meaning="With no values, `bot.timeouts()` keeps every default, so it changes nothing.",
+        why="An element that changes nothing reads as if it did something. Remove it, or set the timeout meant.",
+        wrong=('model = bot.define("greeter", bot.cognition(processor), bot.attach(phone.Phone()), bot.timeouts())'),
+        right='model = bot.define("greeter", bot.cognition(processor), bot.attach(phone.Phone()))',
+    ),
+    Explanation(
+        code="instruction_like_traits",
+        level="warning",
+        title="a trait reads as an instruction",
+        meaning=(
+            "A trait opens like an instruction (`always`, `never`, `you must`, `reply`, `respond`, `do not`), "
+            "speaks to the bot as `you`, or runs past 12 words."
+        ),
+        why=(
+            "Traits are who the bot is: the owner's fixed seed of its nature. How it acts is the bot's own to "
+            "develop; an instruction in a trait would script a choice that is the bot's to make."
+        ),
+        wrong=(
+            'model = bot.define(\n    "greeter",\n    bot.traits("always reply in French"),\n'
+            "    bot.cognition(processor),\n    bot.attach(phone.Phone()),\n)"
+        ),
+        right=(
+            'model = bot.define(\n    "greeter",\n    bot.traits("curious", "speaks French"),\n'
+            "    bot.cognition(processor),\n    bot.attach(phone.Phone()),\n)"
+        ),
+    ),
+    Explanation(
+        code="no_devices",
+        level="warning",
+        title="the bot can perceive nothing",
+        meaning=(
+            "The bot has a cognition but no device and no input ability, so no stimulus ever reaches it and "
+            "nothing can wake it."
+        ),
+        why=(
+            "A bot that perceives nothing is allowed, and doing nothing is a choice it may make; but with nothing "
+            "to perceive it was never given the choice. Attach what it should perceive, or allow the lint."
+        ),
+        wrong='model = bot.define("greeter", bot.cognition(processor))',
+        right='model = bot.define("greeter", bot.cognition(processor), bot.attach(phone.Phone()))',
+    ),
+    Explanation(
+        code="unused_register",
+        level="warning",
+        title="a sensory register on a bot that perceives nothing",
+        meaning=(
+            "`bot.register` records every stimulus the body admits, and only devices and input abilities bring "
+            "stimuli. With neither, it records nothing."
+        ),
+        why="The register is perception machinery; without a sense it is machinery for nothing.",
+        wrong=(
+            'model = bot.define(\n    "greeter",\n    bot.cognition(processor),\n    bot.register(memory.StmMemory()),\n'
+            '    bot.allow("no_devices"),\n)'
+        ),
+        right=(
+            'model = bot.define(\n    "greeter",\n    bot.cognition(processor),\n    bot.attach(phone.Phone()),\n'
+            "    bot.register(memory.StmMemory()),\n)"
+        ),
+    ),
 )
 """Every code and lint, in code order. A retired code keeps its entry and is never reused.
 
-The examples assume ``from mosfet import bot``, ``from mosfet.devices import phone``, ``import hsm``,
-``import mosfet``, ``import datetime``, a ``processor`` (a ``processing.Processor``) and an
-``environment`` (an ``Environment``); a test runs every one of them.
+The examples assume ``from mosfet import bot``, ``from mosfet.devices import phone``,
+``from mosfet.abilities import memory``, ``import hsm``, ``import mosfet``, ``import datetime``, a
+``processor`` (a ``processing.Processor``) and an ``environment`` (an ``Environment``); a test runs
+every one of them.
 """
 
 
@@ -499,8 +593,9 @@ def document() -> str:
         "`bot.define`, `B01xx` from `bot.start` and `bot.run`) stop the bot; lints (snake_case names) are",
         'warnings. `bot.explain("<code>")` prints any entry below.',
         "",
-        "The examples assume `from mosfet import bot`, `from mosfet.devices import phone`, `import hsm`,",
-        "`import mosfet`, `import datetime`, a `processor` (a `processing.Processor`) and an `environment`.",
+        "The examples assume `from mosfet import bot`, `from mosfet.devices import phone`,",
+        "`from mosfet.abilities import memory`, `import hsm`, `import mosfet`, `import datetime`, a `processor`",
+        "(a `processing.Processor`) and an `environment`.",
         "",
     ]
     lines.extend(
@@ -622,6 +717,66 @@ def argument(span: Span, key: int | str) -> tuple[Span, ast.expr] | None:
         if expression is None:
             return None
     return node_span(span, expression), expression
+
+
+def head(span: Span, label: str) -> Span:
+    """The callee of the call under ``span`` (``bot.define``), labelled ``label``; the call when it does not parse."""
+
+    node = call(span)
+    if node is None:
+        return span.model_copy(update={"label": label})
+    return node_span(span, node.func, label)
+
+
+def append(span: Span, element: str) -> Suggestion | None:
+    """A ``maybe-incorrect`` insertion of ``element`` after the last positional argument of the call under ``span``."""
+
+    node = call(span)
+    if node is None or not node.args:
+        return None
+    end = node_span(span, node.args[-1])
+    return Suggestion(
+        span=end.model_copy(update={"lineno": end.end_lineno, "col": end.end_col}),
+        replacement=f", {element}",
+        applicability="maybe-incorrect",
+    )
+
+
+def removal(span: Span, argument: Span) -> Span | None:
+    """The source to delete to remove ``argument`` from the call under ``span``, with its comma.
+
+    An argument alone on its line takes the whole line; otherwise it takes the comma and space after
+    it, or before it when it is the last. ``None`` when ``argument`` is not one of the call's arguments.
+    """
+
+    node = call(span)
+    if node is None:
+        return None
+    arguments = [node_span(span, item) for item in [*node.args, *node.keywords]]
+    arguments.sort(key=lambda item: (item.lineno, item.col))
+    index = next(
+        (
+            position
+            for position, item in enumerate(arguments)
+            if (item.lineno, item.col, item.end_lineno, item.end_col)
+            == (argument.lineno, argument.col, argument.end_lineno, argument.end_col)
+        ),
+        None,
+    )
+    if index is None:
+        return None
+    lines = _source(span.filename)
+    line = lines[argument.lineno - 1].rstrip("\r\n")
+    after = line[argument.end_col :].strip()
+    if argument.lineno == argument.end_lineno and not line[: argument.col].strip() and after in ("", ","):
+        return argument.model_copy(update={"col": 0, "end_lineno": argument.lineno + 1, "end_col": 0})
+    if index + 1 < len(arguments):
+        following = arguments[index + 1]
+        return argument.model_copy(update={"end_lineno": following.lineno, "end_col": following.col})
+    if index > 0:
+        previous = arguments[index - 1]
+        return argument.model_copy(update={"lineno": previous.end_lineno, "col": previous.end_col})
+    return argument
 
 
 def text(span: Span) -> str:
@@ -788,7 +943,22 @@ def _suggested(suggestion: Suggestion, primary: Span, width: int) -> list[str]:
 
     span = suggestion.span
     lines = _source(span.filename)
-    if span.end_lineno != span.lineno or "\n" in suggestion.replacement or not 0 < span.lineno <= len(lines):
+    if not 0 < span.lineno <= len(lines):
+        return []
+    gutter = " " * width
+    if not suggestion.replacement:
+        # A deletion shows the line as written, with ``-`` under what goes (as rustc does).
+        line = lines[span.lineno - 1].rstrip("\r\n")
+        whole = span.end_lineno > span.lineno and span.col == 0
+        start = len(line) - len(line.lstrip()) if whole else span.col
+        end = span.end_col if span.end_lineno == span.lineno else len(line)
+        masked, column = _mask(line, span.lineno, _literals(span.filename), [(start, end)])
+        return [
+            f"{gutter} |",
+            f"{span.lineno:>{width}} | {masked}".rstrip(),
+            f"{gutter} | {' ' * column(start)}{'-' * max(column(end) - column(start), 1)}",
+        ]
+    if span.end_lineno != span.lineno or "\n" in suggestion.replacement:
         return []
     line = lines[span.lineno - 1].rstrip("\r\n")
     start, end = span.col, max(span.end_col, span.col)
@@ -813,13 +983,21 @@ def _suggested(suggestion: Suggestion, primary: Span, width: int) -> list[str]:
         low, high = _extent(primary, line)
         revealed.append((moved(low), high + delta if high >= end else moved(high)))
     masked, column = _mask(edited, span.lineno, literals, revealed)
-    gutter = " " * width
     marker_start, marker_end = column(start), column(start + len(suggestion.replacement))
     return [
         f"{gutter} |",
         f"{span.lineno:>{width}} | {masked}".rstrip(),
         f"{gutter} | {' ' * marker_start}{'~' * (marker_end - marker_start)}".rstrip(),
     ]
+
+
+def ordered(found: collections.abc.Iterable[Diagnostic], home: str) -> list[Diagnostic]:
+    """``found`` in source order, the order rustc reports in: ``home``'s file first, then by file, line, column."""
+
+    return sorted(
+        found,
+        key=lambda item: (item.primary.filename != home, item.primary.filename, item.primary.lineno, item.primary.col),
+    )
 
 
 def summary(diagnostics: collections.abc.Iterable[Diagnostic], *, action: str, name: str) -> str:
@@ -860,12 +1038,16 @@ __all__ = [
     "Location",
     "Span",
     "Suggestion",
+    "append",
     "argument",
     "call",
     "cause",
     "document",
     "explain",
+    "head",
     "node_span",
+    "ordered",
+    "removal",
     "render",
     "report",
     "summary",

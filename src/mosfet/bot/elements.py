@@ -44,6 +44,7 @@ TraitsKind = hsm.kind.Make(MemberKind)
 CognitionKind = hsm.kind.Make(MemberKind, hsm.NamespaceKind)
 TimeoutsKind = hsm.kind.Make(MemberKind)
 RegisterKind = hsm.kind.Make(MemberKind)
+AllowKind = hsm.kind.Make(MemberKind)
 
 RESERVED_IDS: frozenset[str] = frozenset({"bot", "cognition", "firmware"})
 """Actor keys the body keeps for itself: the body, its cognition, and its firmware."""
@@ -120,6 +121,14 @@ class RegisterElement(Member, kind=RegisterKind):
 
     function: typing.ClassVar[str] = "bot.register"
     store: memory.StmMemory
+
+
+@dataclasses.dataclass(kw_only=True)
+class AllowElement(Member, kind=AllowKind):
+    """The lints this bot allows, by name, as written (checked by :class:`~mosfet.bot.define.Validator`)."""
+
+    function: typing.ClassVar[str] = "bot.allow"
+    lints: tuple[object, ...] = ()
 
 
 @dataclasses.dataclass(kw_only=True)
@@ -651,7 +660,7 @@ class Stray(Element[Member]):
                 primary=primary.model_copy(update={"label": "not a bot element"}),
                 notes=(
                     "a bot is defined from `bot.attach`, `bot.input`, `bot.output`, `bot.register`, `bot.traits`, "
-                    + "`bot.cognition` and `bot.timeouts`",
+                    + "`bot.cognition`, `bot.timeouts` and `bot.allow`",
                 ),
                 help=diagnostics.Help(
                     message=f"did you mean `bot.{nearest[0]}(...)`?"
@@ -751,6 +760,29 @@ def timeouts(
     )
 
 
+@dataclasses.dataclass(kw_only=True)
+class RedefinableAllow(_Single[AllowElement]):
+    """``bot.allow``: the lints this bot allows."""
+
+    function: typing.ClassVar[str] = "bot.allow"
+    lints: tuple[object, ...] = ()
+
+    @typing.override
+    def _redefine(self, model: Model, stack: list[hsm.Element]) -> AllowElement | None:
+        key = posixpath.join(model.qualified_name, ".allow")
+        return self._register(model, AllowElement(qualified_name=key, lints=self.lints, location=self.location))
+
+
+def allow(*lints: str) -> RedefinableAllow:
+    """Allow these lints for this bot (``bot.allow("no_devices")``), when what they warn about is deliberate.
+
+    A lint is a warning, never an error: allowing one says the bot file means it. Each name is a lint's
+    (``bot.explain("<lint>")`` says what it warns about).
+    """
+
+    return RedefinableAllow(lints=tuple(lints), location=diagnostics.Location.capture())
+
+
 _ELEMENT_FUNCTIONS: tuple[tuple[object, str], ...] = (
     (attach, "attach"),
     (input, "input"),
@@ -759,17 +791,20 @@ _ELEMENT_FUNCTIONS: tuple[tuple[object, str], ...] = (
     (traits, "traits"),
     (cognition, "cognition"),
     (timeouts, "timeouts"),
+    (allow, "allow"),
 )
 """Every element function, with the name it is written by after ``bot.``."""
 
 
 __all__ = [
     "RESERVED_IDS",
+    "AllowElement",
     "AttachmentElement",
     "CognitionElement",
     "Element",
     "Member",
     "Model",
+    "RedefinableAllow",
     "RedefinableAttachment",
     "RedefinableCognition",
     "RedefinableRegister",
@@ -780,6 +815,7 @@ __all__ = [
     "Stray",
     "TimeoutsElement",
     "TraitsElement",
+    "allow",
     "attach",
     "cognition",
     "free_id",

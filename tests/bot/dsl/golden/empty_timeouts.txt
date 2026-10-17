@@ -1,0 +1,13 @@
+warning[empty_timeouts]: `bot.timeouts()` sets no timeout
+  --> greeter.py:11:5
+   |
+11 |     bot.timeouts(),
+   |     ^^^^^^^^^^^^^^ changes nothing
+   |
+   = note: with no values, the body keeps every default timeout
+   = note: allow it with `bot.allow("empty_timeouts")` if this is deliberate
+help: remove it, or set a timeout
+   |
+11 |     bot.timeouts(),
+   |     ---------------
+   = explain: bot.explain("empty_timeouts")

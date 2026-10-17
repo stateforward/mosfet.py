@@ -1,0 +1,13 @@
+warning[unused_register]: the sensory register records nothing on a bot that perceives nothing
+  --> greeter.py:11:5
+   |
+11 |     bot.register(memory.StmMemory()),
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ records nothing
+   |
+   = note: the register records stimuli the body admits, and only devices and input abilities bring them
+   = note: allow it with `bot.allow("unused_register")` if this is deliberate
+help: remove it, or attach a sense
+   |
+11 |     bot.register(memory.StmMemory()),
+   |     ---------------------------------
+   = explain: bot.explain("unused_register")

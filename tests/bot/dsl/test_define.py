@@ -6,12 +6,14 @@ import datetime
 import pathlib
 import types
 import typing
+import warnings
 
 import hsm
 import pytest
 
 import mosfet
 from mosfet import bot
+from mosfet.abilities import memory
 from mosfet.bot import diagnostics, elements
 from mosfet.devices import audio, phone
 from mosfet.environment import Environment
@@ -184,7 +186,7 @@ def test_no_value_from_the_bot_file_is_rendered(here: pathlib.Path) -> None:
     assert "SENTINEL" not in "".join(diagnostic.model_dump_json() for diagnostic in error.diagnostics)
 
 
-_NAMESPACE_MODULES = {"bot": bot, "phone": phone, "hsm": hsm, "mosfet": mosfet, "datetime": datetime}
+_NAMESPACE_MODULES = {"bot": bot, "phone": phone, "memory": memory, "hsm": hsm, "mosfet": mosfet, "datetime": datetime}
 
 
 async def _execute(source: str) -> None:
@@ -208,11 +210,19 @@ async def _execute(source: str) -> None:
     "explanation", diagnostics.EXPLANATIONS, ids=[explanation.code for explanation in diagnostics.EXPLANATIONS]
 )
 def test_each_explanation_shows_its_mistake_and_the_fix(explanation: diagnostics.Explanation) -> None:
-    with pytest.raises(bot.DefinitionError) as caught:
-        asyncio.run(_execute(explanation.wrong))
-    assert explanation.code in [diagnostic.code for diagnostic in caught.value.diagnostics]
+    if explanation.level == "error":
+        with pytest.raises(bot.DefinitionError) as caught:
+            asyncio.run(_execute(explanation.wrong))
+        found = [diagnostic.code for diagnostic in caught.value.diagnostics]
+    else:
+        with pytest.warns(bot.LintWarning) as warned:
+            asyncio.run(_execute(explanation.wrong))
+        found = [record.message.diagnostic.code for record in warned if isinstance(record.message, bot.LintWarning)]
+    assert explanation.code in found
 
-    asyncio.run(_execute(explanation.right))
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        asyncio.run(_execute(explanation.right))
 
 
 @pytest.mark.parametrize(
@@ -232,6 +242,7 @@ def test_each_explanation_shows_its_mistake_and_the_fix(explanation: diagnostics
         "B0015",
         "B0016",
         "B0017",
+        "B0018",
     ],
 )
 def test_every_define_code_has_an_explanation(code: str) -> None:

@@ -22,8 +22,10 @@ the instances the bot file constructed.
 import collections.abc
 import dataclasses
 import datetime
+import difflib
 import posixpath
 import typing
+import warnings
 
 import hsm
 import pydantic
@@ -34,7 +36,7 @@ from mosfet import lifecycle, runtime
 from mosfet.abilities import memory, persona, processing
 from mosfet.abilities.communication.conversation.conversation import snake_case
 
-from . import diagnostics, elements
+from . import diagnostics, elements, lints
 
 _NAME: pydantic.TypeAdapter[str] = pydantic.TypeAdapter(runtime.BotName)
 
@@ -49,8 +51,8 @@ class Error(hsm.ErrorValidatingModel):
 class DefinitionError(Error):
     """``bot.define`` found errors in a bot file.
 
-    ``diagnostics`` holds every error and warning it found, in source order. ``str()`` is hsm's
-    ``file:line:`` for the first error, then every diagnostic rendered and the summary line.
+    ``diagnostics`` holds every error it found, in source order. ``str()`` is hsm's ``file:line:``
+    for the first one, then every diagnostic rendered and the summary line.
     """
 
     def __init__(self, name: str, found: collections.abc.Sequence[diagnostics.Diagnostic]) -> None:
@@ -90,7 +92,7 @@ class Validator(hsm.ModelValidator):
                     code="B0001",
                     level="error",
                     message="`bot.define` takes the bot's name first",
-                    primary=_head(call, "no name"),
+                    primary=diagnostics.head(call, "no name"),
                     notes=("a bot's name is lower snake case, at most 64 characters",),
                     help=diagnostics.Help(message="name the bot", suggestion=insertion),
                 )
@@ -106,7 +108,7 @@ class Validator(hsm.ModelValidator):
                         code="B0001",
                         level="error",
                         message=f"bot name `{name}` is not lower snake case of at most 64 characters",
-                        primary=(_head(call, "") if found is None else found[0]).model_copy(
+                        primary=(diagnostics.head(call, "") if found is None else found[0]).model_copy(
                             update={"label": "the bot's name"}
                         ),
                         notes=("a bot's name is a telemetry attribute and a topology name, so it is bounded",),
@@ -126,11 +128,39 @@ class Validator(hsm.ModelValidator):
                     code="B0002",
                     level="error",
                     message=f"bot `{name or 'bot'}` has no `bot.cognition`",
-                    primary=_head(call, "no cognition"),
+                    primary=diagnostics.head(call, "no cognition"),
                     notes=("cognition is what perceives and decides; a bot without one is a body with no mind",),
                     help=diagnostics.Help(
                         message="give it a cognition that thinks with a `processing.Processor`",
-                        suggestion=_append(call, "bot.cognition(processor)"),
+                        suggestion=diagnostics.append(call, "bot.cognition(processor)"),
+                    ),
+                )
+            )
+
+    def _validate_allow(self, model: elements.Model, member: elements.AllowElement) -> None:
+        call = diagnostics.Span.of(member.location)
+        for index, name in enumerate(member.lints):
+            if isinstance(name, str) and name in lints.LINTS:
+                continue
+            found = diagnostics.argument(call, index)
+            primary = call if found is None else found[0]
+            nearest = difflib.get_close_matches(name, list(lints.LINTS), n=1) if isinstance(name, str) else []
+            model.findings.append(
+                diagnostics.Diagnostic(
+                    code="B0018",
+                    level="error",
+                    message=f"`bot.allow` names no lint `{name}`"
+                    if isinstance(name, str)
+                    else "`bot.allow` takes lint names",
+                    primary=primary.model_copy(update={"label": "not a lint"}),
+                    notes=(f"the lints are {', '.join(f'`{known}`' for known in lints.LINTS)}",),
+                    help=diagnostics.Help(
+                        message=f"did you mean `{nearest[0]}`?" if nearest else "name a lint, or remove it",
+                        suggestion=None
+                        if not nearest or found is None
+                        else diagnostics.Suggestion(
+                            span=primary, replacement=f'"{nearest[0]}"', applicability="machine-applicable"
+                        ),
                     ),
                 )
             )
@@ -241,29 +271,6 @@ class Validator(hsm.ModelValidator):
             )
 
 
-def _head(call: diagnostics.Span, label: str) -> diagnostics.Span:
-    """The callee of the call under ``call`` (``bot.define``), labelled ``label``; the call when it does not parse."""
-
-    node = diagnostics.call(call)
-    if node is None:
-        return call.model_copy(update={"label": label})
-    return diagnostics.node_span(call, node.func, label)
-
-
-def _append(call: diagnostics.Span, element: str) -> diagnostics.Suggestion | None:
-    """Insert ``element`` after the last positional argument of the call under ``call``."""
-
-    node = diagnostics.call(call)
-    if node is None or not node.args:
-        return None
-    end = diagnostics.node_span(call, node.args[-1])
-    return diagnostics.Suggestion(
-        span=end.model_copy(update={"lineno": end.end_lineno, "col": end.end_col}),
-        replacement=f", {element}",
-        applicability="maybe-incorrect",
-    )
-
-
 def _snake(name: str) -> str:
     """``name`` in lower snake case, starting with a letter and at most 64 characters: a valid bot name."""
 
@@ -275,20 +282,12 @@ def _snake(name: str) -> str:
 
 
 class Finalizer:
-    """Puts what the walk and the validator found in source order, the order rustc reports in."""
+    """Puts what the walk, the validator and the lints found in source order, the order rustc reports in."""
 
     def finalize(self, model: elements.Model) -> elements.Model:
         """``model``, its findings sorted by file (the ``bot.define`` call's first), line and column."""
 
-        home = model.location.filename
-        model.findings.sort(
-            key=lambda found: (
-                found.primary.filename != home,
-                found.primary.filename,
-                found.primary.lineno,
-                found.primary.col,
-            )
-        )
+        model.findings[:] = diagnostics.ordered(model.findings, model.location.filename)
         return model
 
 
@@ -300,10 +299,14 @@ class RedefinableBot(hsm.RedefinableElement[elements.Model]):
     def redefine(
         self, model: hsm.Model | elements.Model, stack: list[hsm.Element], element: elements.Model | None = None
     ) -> elements.Model:
-        """Walk every element into a new model, validate and finalize it.
+        """Walk every element into a new model, validate and lint it, and put what was found in order.
+
+        One pass finds every error and every warning, as rustc's does. A model with no error emits
+        each lint it does not allow as a :class:`~mosfet.bot.lints.LintWarning` at its own
+        ``file:line`` and keeps it in ``findings``.
 
         Raises:
-            DefinitionError: If any error was found, with every diagnostic found.
+            DefinitionError: If any error was found, with every error and warning found.
         """
 
         del model, element
@@ -312,10 +315,18 @@ class RedefinableBot(hsm.RedefinableElement[elements.Model]):
         )
         for owned in self.owned_elements:
             _ = typing.cast(elements.Element[hsm.Element], owned).redefine(result, [*stack, result])
+        # A part the walk refused is missing from the model, so a lint about what the bot lacks would
+        # only be noise until it defines.
+        missing = any(found.level == "error" for found in result.findings)
         Validator().validate(result)
+        result.findings.extend(lints.lint(result, partial=missing))
         _ = Finalizer().finalize(result)
         if any(found.level == "error" for found in result.findings):
             raise DefinitionError(result.qualified_name[1:] or "bot", result.findings)
+        for found in result.findings:
+            warnings.warn_explicit(
+                lints.LintWarning(found), lints.LintWarning, found.primary.filename, found.primary.lineno
+            )
         return result
 
 

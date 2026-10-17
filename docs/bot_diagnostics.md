@@ -8,8 +8,9 @@ code, the source span, notes on why, and a `help:` that shows the rewrite. Error
 `bot.define`, `B01xx` from `bot.start` and `bot.run`) stop the bot; lints (snake_case names) are
 warnings. `bot.explain("<code>")` prints any entry below.
 
-The examples assume `from mosfet import bot`, `from mosfet.devices import phone`, `import hsm`,
-`import mosfet`, `import datetime`, a `processor` (a `processing.Processor`) and an `environment`.
+The examples assume `from mosfet import bot`, `from mosfet.devices import phone`,
+`from mosfet.abilities import memory`, `import hsm`, `import mosfet`, `import datetime`, a `processor`
+(a `processing.Processor`) and an `environment`.
 
 - [`B0001`](#b0001) (error): the bot's name is missing or not lower snake case
 - [`B0002`](#b0002) (error): the bot has no `bot.cognition`
@@ -25,6 +26,12 @@ The examples assume `from mosfet import bot`, `from mosfet.devices import phone`
 - [`B0015`](#b0015) (error): an observer is given to `bot.define`
 - [`B0016`](#b0016) (error): a held device has no id
 - [`B0017`](#b0017) (error): `bot.define` is given something that is not a bot element
+- [`B0018`](#b0018) (error): `bot.allow` names a lint that does not exist
+- [`ability_without_tools`](#ability_without_tools) (warning): an acquired ability offers cognition nothing to select
+- [`empty_timeouts`](#empty_timeouts) (warning): `bot.timeouts()` sets no timeout
+- [`instruction_like_traits`](#instruction_like_traits) (warning): a trait reads as an instruction
+- [`no_devices`](#no_devices) (warning): the bot can perceive nothing
+- [`unused_register`](#unused_register) (warning): a sensory register on a bot that perceives nothing
 
 ## B0001
 
@@ -201,7 +208,7 @@ model = bot.define("greeter", bot.cognition(processor), bot.attach(phone.Phone()
 
 **error:** an element a bot has once is given twice
 
-A bot has at most one `bot.traits`, `bot.cognition`, `bot.timeouts` and `bot.register`.
+A bot has at most one `bot.traits`, `bot.cognition`, `bot.timeouts`, `bot.register` and `bot.allow`.
 
 Why: Each is one thing about the bot. Merge the two into one, for example one `bot.traits` with every trait.
 
@@ -350,4 +357,154 @@ Right:
 
 ```python
 model = bot.define("greeter", bot.cognition(processor), bot.attach(phone.Phone()))
+```
+
+## B0018
+
+**error:** `bot.allow` names a lint that does not exist
+
+Each name given to `bot.allow` is a lint's. The help names the nearest one.
+
+Why: Allowing a lint that does not exist allows nothing, so the warning it was meant for still shows.
+
+Wrong:
+
+```python
+model = bot.define("greeter", bot.cognition(processor), bot.allow("no_device"))
+```
+
+Right:
+
+```python
+model = bot.define("greeter", bot.cognition(processor), bot.allow("no_devices"))
+```
+
+## ability_without_tools
+
+**warning:** an acquired ability offers cognition nothing to select
+
+An ability given to `bot.attach` is acquired: cognition uses it through the events it offers. One that offers none can never be used. A sense is given to `bot.input`, an effector to `bot.output`, and the sensory register to `bot.register`.
+
+Why: An acquired ability with no tools is almost always a sense or an effector given to the wrong element.
+
+Wrong:
+
+```python
+model = bot.define(
+    "greeter",
+    bot.cognition(processor),
+    bot.attach(phone.Phone()),
+    bot.attach(memory.StmMemory()),
+)
+```
+
+Right:
+
+```python
+model = bot.define(
+    "greeter",
+    bot.cognition(processor),
+    bot.attach(phone.Phone()),
+    bot.register(memory.StmMemory()),
+)
+```
+
+## empty_timeouts
+
+**warning:** `bot.timeouts()` sets no timeout
+
+With no values, `bot.timeouts()` keeps every default, so it changes nothing.
+
+Why: An element that changes nothing reads as if it did something. Remove it, or set the timeout meant.
+
+Wrong:
+
+```python
+model = bot.define("greeter", bot.cognition(processor), bot.attach(phone.Phone()), bot.timeouts())
+```
+
+Right:
+
+```python
+model = bot.define("greeter", bot.cognition(processor), bot.attach(phone.Phone()))
+```
+
+## instruction_like_traits
+
+**warning:** a trait reads as an instruction
+
+A trait opens like an instruction (`always`, `never`, `you must`, `reply`, `respond`, `do not`), speaks to the bot as `you`, or runs past 12 words.
+
+Why: Traits are who the bot is: the owner's fixed seed of its nature. How it acts is the bot's own to develop; an instruction in a trait would script a choice that is the bot's to make.
+
+Wrong:
+
+```python
+model = bot.define(
+    "greeter",
+    bot.traits("always reply in French"),
+    bot.cognition(processor),
+    bot.attach(phone.Phone()),
+)
+```
+
+Right:
+
+```python
+model = bot.define(
+    "greeter",
+    bot.traits("curious", "speaks French"),
+    bot.cognition(processor),
+    bot.attach(phone.Phone()),
+)
+```
+
+## no_devices
+
+**warning:** the bot can perceive nothing
+
+The bot has a cognition but no device and no input ability, so no stimulus ever reaches it and nothing can wake it.
+
+Why: A bot that perceives nothing is allowed, and doing nothing is a choice it may make; but with nothing to perceive it was never given the choice. Attach what it should perceive, or allow the lint.
+
+Wrong:
+
+```python
+model = bot.define("greeter", bot.cognition(processor))
+```
+
+Right:
+
+```python
+model = bot.define("greeter", bot.cognition(processor), bot.attach(phone.Phone()))
+```
+
+## unused_register
+
+**warning:** a sensory register on a bot that perceives nothing
+
+`bot.register` records every stimulus the body admits, and only devices and input abilities bring stimuli. With neither, it records nothing.
+
+Why: The register is perception machinery; without a sense it is machinery for nothing.
+
+Wrong:
+
+```python
+model = bot.define(
+    "greeter",
+    bot.cognition(processor),
+    bot.register(memory.StmMemory()),
+    bot.allow("no_devices"),
+)
+```
+
+Right:
+
+```python
+model = bot.define(
+    "greeter",
+    bot.cognition(processor),
+    bot.attach(phone.Phone()),
+    bot.register(memory.StmMemory()),
+)
 ```

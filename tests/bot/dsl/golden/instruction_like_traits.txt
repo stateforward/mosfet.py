@@ -1,0 +1,21 @@
+warning[instruction_like_traits]: trait 2 reads as an instruction: it opens like an instruction
+  --> greeter.py:10:27
+   |
+10 |     bot.traits("…", "always reply in French", "…"),
+   |                     ^^^^^^^^^^^^^^^^^^^^^^^^ an instruction, not a trait
+   |
+   = note: traits are who the bot is; how it acts is the bot's own to develop, never scripted
+   = note: allow it with `bot.allow("instruction_like_traits")` if this is deliberate
+help: give a trait in a word or a short phrase: "patient", "curious"
+   = explain: bot.explain("instruction_like_traits")
+
+warning[instruction_like_traits]: trait 3 reads as an instruction: it speaks to the bot as `you`
+  --> greeter.py:10:53
+   |
+10 |     bot.traits("…", "…", "you are friendly"),
+   |                          ^^^^^^^^^^^^^^^^^^ an instruction, not a trait
+   |
+   = note: traits are who the bot is; how it acts is the bot's own to develop, never scripted
+   = note: allow it with `bot.allow("instruction_like_traits")` if this is deliberate
+help: give a trait in a word or a short phrase: "patient", "curious"
+   = explain: bot.explain("instruction_like_traits")

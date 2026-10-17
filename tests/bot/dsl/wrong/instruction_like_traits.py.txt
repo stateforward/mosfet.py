@@ -1,0 +1,13 @@
+"""instruction_like_traits: traits that script what the bot does."""
+
+from mosfet import bot
+from mosfet.devices import phone
+
+from tests.bot.dsl import support
+
+model = bot.define(
+    "greeter",
+    bot.traits("curious", "always reply in French", "you are friendly"),
+    bot.cognition(support.Silent()),
+    bot.attach(phone.Phone()),
+)

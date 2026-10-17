@@ -1,0 +1,14 @@
+"""ability_without_tools: the sensory register acquired as an ability."""
+
+from mosfet import bot
+from mosfet.abilities import memory
+from mosfet.devices import phone
+
+from tests.bot.dsl import support
+
+model = bot.define(
+    "greeter",
+    bot.cognition(support.Silent()),
+    bot.attach(phone.Phone()),
+    bot.attach(memory.StmMemory()),
+)

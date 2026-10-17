@@ -1,0 +1,7 @@
+"""no_devices: a bot that can perceive nothing."""
+
+from mosfet import bot
+
+from tests.bot.dsl import support
+
+model = bot.define("greeter", bot.traits("curious"), bot.cognition(support.Silent()))
