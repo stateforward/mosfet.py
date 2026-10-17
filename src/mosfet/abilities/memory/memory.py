@@ -386,6 +386,7 @@ class Memory(store.MemoryStore):
     def __init__(
         self,
         *,
+        id: ability.AbilityId | None = None,
         engine: Engine | None = None,
         database: str = ":memory:",
         embedder: embedding.Embedder | None = None,
@@ -396,7 +397,7 @@ class Memory(store.MemoryStore):
     ) -> None:
         if embed_timeout <= datetime.timedelta(0) or operation_timeout <= datetime.timedelta(0):
             raise ValueError("Memory timeouts must be positive.")
-        super().__init__(engine=engine, database=database)
+        super().__init__(id=id, engine=engine, database=database)
         self._embedding = None if embedder is None else embedding.Embedding(embedder=embedder, timeout=embed_timeout)
         self._capacity = None if embedder is None else embedder.capacity
         self._attachment_group = attachment.Group() if self._embedding is None else attachment.Group(self._embedding)

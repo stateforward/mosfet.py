@@ -611,6 +611,7 @@ class Seeing(ability.Ability[VisualData, cognition.InputData]):
     def __init__(
         self,
         *,
+        id: ability.AbilityId | None = None,
         change: vision.change.ChangeMeasure,
         object_detector: vision.detection.ObjectDetector | None = None,
         face_detector: vision.faces.FaceDetector | None = None,
@@ -658,7 +659,7 @@ class Seeing(ability.Ability[VisualData, cognition.InputData]):
             raise ValueError("Seeing measure_every cannot be longer than settle_after.")
         if faces is not None and face_detector is None:
             raise ValueError("Seeing faces needs a face_detector: a registry identifies the prints it detects.")
-        super().__init__()
+        super().__init__(id=id)
         self._change = change
         self._change_threshold = change_threshold
         self._measure_every = measure_every

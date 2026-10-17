@@ -1603,3 +1603,37 @@ def test_an_ability_without_detached_declarations_keeps_its_lifecycle_model() ->
     assert _model_shape(rebuilt) == _model_shape(plain)
     assert len(detached_transitions(plain, "TerminalOperationAbility")) == 3
     assert len(detached_transitions(DetachedReplyingAbility.model, "DetachedReplyingAbility")) == 3 + 3
+
+
+def test_ability_id_defaults_to_its_kind() -> None:
+    """DSL-32: an ability built without an id is known by its kind, its class name in snake case."""
+
+    assert DetachedReplyingAbility().identity() == "detached_replying_ability"
+    assert TerminalOperationAbility().identity() == "terminal_operation_ability"
+
+
+def test_ability_id_is_the_one_it_was_built_with() -> None:
+    """DSL-32: the id is fixed at construction and is not the runtime id the ability gets on start."""
+
+    async def run() -> tuple[str, str]:
+        ability = DetachedReplyingAbility(id="bench")
+        model = DetachedReplyingAbility.model
+        assert model is not None
+        _ = await mosfet.started(environment.Environment(), ability, model)
+        runtime_id = hsm.id(ability)
+        await hsm.stop(ability)
+        return ability.identity(), runtime_id
+
+    identity, runtime_id = asyncio.run(run())
+
+    assert identity == "bench"
+    assert runtime_id != "bench"
+
+
+@pytest.mark.parametrize("bad", ["", "Bench", "1bench", "work bench", "b" * 64])
+def test_ability_id_must_be_an_ability_id(bad: str) -> None:
+    ability_ids: pydantic.TypeAdapter[str] = pydantic.TypeAdapter(abilities.AbilityId)
+    with pytest.raises(pydantic.ValidationError):
+        _ = DetachedReplyingAbility(id=bad)
+    with pytest.raises(pydantic.ValidationError):
+        _ = ability_ids.validate_python(bad)

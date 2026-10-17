@@ -1021,6 +1021,7 @@ class Intuition(processing.Processing):
     def __init__(
         self,
         *,
+        id: ability.AbilityId | None = None,
         processor: IntuitionProcessor,
         instructions: str | None = None,
         confidence_floor: int = _DEFAULT_CONFIDENCE_FLOOR,
@@ -1036,7 +1037,7 @@ class Intuition(processing.Processing):
         if instructions is not None and not instructions.strip():
             raise ValueError("instructions must not be blank when provided.")
         # Empty default is intentional: system channel is only the per-turn world XML when present.
-        super(processing.Processing, self).__init__()
+        super(processing.Processing, self).__init__(id=id)
         self._instructions = resolved.strip() if resolved else ""
         self._processor = processor
         self._confidence_tuner = confidence_tuner or ConfidenceTuner(floor=confidence_floor)

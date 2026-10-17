@@ -772,12 +772,13 @@ class Reading(ability.Ability[InputData, OutputData]):
     def __init__(
         self,
         *,
+        id: ability.AbilityId | None = None,
         visual_classifier: vision.classification.VisualClassifier,
         text_decoder: decoding.Decoder[str, str],
         image_decoder: decoding.Decoder[mosfet.media.Image, str],
         output_encoder: encoding.Encoder[OutputData, OutputData],
     ) -> None:
-        super().__init__()
+        super().__init__(id=id)
         self._visual_classifier = vision.classification.VisualClassification(classifier=visual_classifier)
         self._text_decoder = decoding.Decoding(decoder=text_decoder)
         self._image_decoder = decoding.Decoding(decoder=image_decoder)

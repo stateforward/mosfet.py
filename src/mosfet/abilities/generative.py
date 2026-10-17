@@ -155,9 +155,10 @@ class Generative(ability.Ability[ability.TInput, ability.TOutput]):
     def __init__(
         self,
         *,
+        id: ability.AbilityId | None = None,
         generator: Generator[ability.TInput, ability.TOutput],
     ) -> None:
-        super().__init__()
+        super().__init__(id=id)
         self.generator = generator
 
     def _apply(self, ctx: hsm.Context, input: ability.TInput) -> collections.abc.Awaitable[ability.TOutput]:

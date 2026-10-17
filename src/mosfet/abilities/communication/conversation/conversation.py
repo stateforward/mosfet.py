@@ -699,9 +699,9 @@ def _operation_id(event: hsm.Event[typing.Any]) -> str:
 
 
 def snake_case(name: str) -> str:
-    """Convert a PascalCase model or ability name to snake_case.
+    """Convert a PascalCase model, ability or device name to snake_case.
 
-    Shared naming helper for cognition-visible actor keys and dotted event prefixes.
+    Shared naming helper for the kinds that default ability and device ids, and dotted event prefixes.
     """
 
     chars: list[str] = []
@@ -714,25 +714,6 @@ def snake_case(name: str) -> str:
             chars.append("_")
         chars.append(char.lower())
     return "".join(chars)
-
-
-def ability_actor_key(
-    candidate: ability.Ability[typing.Any, typing.Any],
-    actors: dict[str, hsm.Instance],
-) -> str:
-    """Stable cognition-visible actor name for one ability instance.
-
-    Uses :func:`snake_case` on the ability class name and appends a numeric suffix on
-    collision.
-    """
-
-    key = snake_case(type(candidate).__name__) or "actor"
-    if key in actors:
-        suffix = 2
-        while f"{key}_{suffix}" in actors:
-            suffix += 1
-        key = f"{key}_{suffix}"
-    return key
 
 
 def _with_operation(
@@ -959,6 +940,7 @@ class Conversation(ability.Ability[TurnData, Messages]):
     def __init__(
         self,
         *,
+        id: ability.AbilityId | None = None,
         turn_detector: turn_detector.TurnDetector | None = None,
         turn_detector_factory: TurnDetectorFactory | None = None,
         typing: language.TextGeneration | None = None,
@@ -981,7 +963,7 @@ class Conversation(ability.Ability[TurnData, Messages]):
             self._turn_detector_factory = _default_turn_detector
         self._encoding = encoding_module.Encoding(encoder=encoder) if encoder is not None else encoding
         self._typing = typing
-        super().__init__()
+        super().__init__(id=id)
         self._detectors = {}
         self._relationships = []
         self._history = []
@@ -1924,7 +1906,6 @@ __all__ = [
     "InputEvent",
     "OutputEvent",
     "ParticipatedTurn",
-    "ability_actor_key",
     "participated_turn_from_messages",
     "Messages",
     "Message",

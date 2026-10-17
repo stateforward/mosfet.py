@@ -589,8 +589,10 @@ class Behavior(abilities.Ability[object, object]):
         delay.__name__ = "_behavior_at_delay"
         return delay
 
-    def __init__(self, *, spec: source.Source, clock: schedule.WallClock | None = None) -> None:
-        super().__init__()
+    def __init__(
+        self, *, id: ability.AbilityId | None = None, spec: source.Source, clock: schedule.WallClock | None = None
+    ) -> None:
+        super().__init__(id=id)
         callback_runtime = runtime.CallbackRuntime(
             source=spec.source,
             declared_events=spec.declared_event_specs(failed_event=typing.cast(hsm.Event[object], self.failed_event)),

@@ -2291,6 +2291,44 @@ def test_bot_maps_an_ability_composed_as_acquired_and_input_once() -> None:
     assert calls[0].actor_events[_GlanceEvent.name] == ("glancing",)
 
 
+def test_bot_keys_abilities_by_their_ids() -> None:
+    """DSL-32: an ability's actor key is the id it was built with; two of one kind are named apart."""
+
+    async def run() -> list[processing.InputData]:
+        ability = IgnoreAbility()
+        left = Glancing(id="left_eye")
+        right = Glancing(id="right_eye")
+        active_bot = AbilityAgent(devices=configured_devices("phone"), cognition=ability, input=(left, right))
+        _ = await start_bot_with_devices(active_bot)
+        _ = await active_bot.dispatch(
+            active_bot.context(),
+            mosfet.InputEvent.with_data(mosfet.InputEventData(target_device="phone", priority=3)),
+        )
+        await wait_until(lambda: len(ability.calls) == 1)
+        return ability.calls
+
+    calls = asyncio.run(run())
+
+    assert {key for key, actor in calls[0].actors.items() if isinstance(actor, Glancing)} == {"left_eye", "right_eye"}
+    assert set(calls[0].actor_events[_GlanceEvent.name]) == {"left_eye", "right_eye"}
+
+
+@pytest.mark.parametrize("clash", ["two abilities of one kind", "an ability named like a device", "the body's key"])
+def test_bot_refuses_two_actors_with_one_key(clash: str) -> None:
+    """DSL-32: every actor cognition may address has its own key; the body never suffixes one."""
+
+    devices: tuple[Device, ...] = ()
+    if clash == "two abilities of one kind":
+        given: tuple[abilities.Ability[typing.Any, typing.Any], ...] = (Glancing(), Glancing())
+    elif clash == "an ability named like a device":
+        devices, given = (Device(id="glancing"),), (Glancing(),)
+    else:
+        given = (Glancing(id="bot"),)
+
+    with pytest.raises(ValueError, match="'(glancing|bot)'"):
+        _ = AbilityAgent(devices=devices, cognition=IgnoreAbility(), input=given)
+
+
 class RestRecordingConsolidation(memory.Consolidation):
     """Consolidation that records the rest and wake notices Cognition sends it (test-only observation)."""
 

@@ -434,6 +434,7 @@ class StmMemory(store.MemoryStore):
     def __init__(
         self,
         *,
+        id: ability.AbilityId | None = None,
         engine: typing.Any | None = None,
         connection: typing.Any | None = None,
         database: str = ":memory:",
@@ -441,7 +442,7 @@ class StmMemory(store.MemoryStore):
         recency_window: datetime.timedelta | None = None,
         clock: collections.abc.Callable[[], datetime.datetime] | None = None,
     ) -> None:
-        super().__init__(engine=engine, connection=connection, database=database)
+        super().__init__(id=id, engine=engine, connection=connection, database=database)
         if capacity <= 0:
             raise ValueError("capacity must be positive.")
         if recency_window is not None and recency_window <= datetime.timedelta():

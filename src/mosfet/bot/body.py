@@ -1,7 +1,6 @@
 from mosfet.abilities import cognition
 from mosfet.abilities import memory
 from mosfet.abilities import processing
-from mosfet.abilities.communication.conversation import conversation
 
 import asyncio
 import collections.abc
@@ -370,8 +369,9 @@ class Bot(Traced):
         """Build an unstarted body holding ``devices``, each known by its ``Device.identity()``.
 
         Raises:
-            ValueError: If two devices share one id (one device given twice included), or a timeout
-                is not positive.
+            ValueError: If two devices share one id (one device given twice included), an innate,
+                acquired or input ability's id is already the body's (``"bot"``), a device's or another
+                ability's, or a timeout is not positive.
         """
 
         super().__init__()
@@ -406,6 +406,17 @@ class Bot(Traced):
         self._input = tuple(input)
         self._output = tuple(output)
         self._acquired_abilities = tuple(acquired_abilities)
+        # Every actor cognition may address has its own key: the body is "bot", a device its id, an
+        # ability its id. A clash is the composer's to resolve by naming one; the body never suffixes.
+        keys = {"bot", *held}
+        for ability in Bot._addressable_abilities(self):
+            identity = ability.identity()
+            if identity in keys:
+                raise ValueError(
+                    f"Bot actors must have distinct keys; ability {identity!r} is already one. Name the "
+                    + f"ability with its own id: {type(ability).__name__}(id=...)."
+                )
+            keys.add(identity)
         self._stm_memory: memory.StmMemory | None = stm_memory
         self._attachments = attachment.Group(*Bot._lifecycle_attachment_members(self))
         self._lifecycle = None
@@ -906,17 +917,20 @@ class Bot(Traced):
         """
 
         actors: dict[str, hsm.Instance] = {"bot": instance, **instance._devices}
-        for ability in (
-            *instance._innate_ability_instances,
-            *instance._acquired_abilities,
-            *instance._input,
-        ):
-            # One actor, one key: an ability composed both as acquired and as input is offered once.
-            if any(actor is ability for actor in actors.values()):
-                continue
-            key = conversation.ability_actor_key(ability, actors)
-            actors[key] = ability
+        for ability in Bot._addressable_abilities(instance):
+            actors[ability.identity()] = ability
         return actors
+
+    @staticmethod
+    def _addressable_abilities(instance: "Bot") -> tuple[abilities.Ability[typing.Any, typing.Any], ...]:
+        """Innate, acquired and input abilities, each once: the abilities cognition may address by id."""
+
+        addressable: list[abilities.Ability[typing.Any, typing.Any]] = []
+        for ability in (*instance._innate_ability_instances, *instance._acquired_abilities, *instance._input):
+            # One actor, one key: an ability composed both as acquired and as input is offered once.
+            if not any(known is ability for known in addressable):
+                addressable.append(ability)
+        return tuple(addressable)
 
     @staticmethod
     async def _dispatch_bot_processing(ctx: hsm.Context, instance: "Bot", event: hsm.Event) -> None:

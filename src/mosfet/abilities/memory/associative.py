@@ -298,6 +298,7 @@ class Associative(ability.Ability[payload.CueData, payload.AssociationsData]):
     def __init__(
         self,
         *,
+        id: ability.AbilityId | None = None,
         memory: memory.Memory,
         budget_tokens: int = 1024,
         count_tokens: collections.abc.Callable[[str], int] = payload.approximate_tokens,
@@ -310,7 +311,7 @@ class Associative(ability.Ability[payload.CueData, payload.AssociationsData]):
             raise ValueError("Associative budget_tokens must be positive.")
         if timeout <= datetime.timedelta(0):
             raise ValueError("Associative timeout must be positive.")
-        super().__init__()
+        super().__init__(id=id)
         self._attachment_group = attachment.Group()
         self._memory = memory
         self._budget_tokens = budget_tokens

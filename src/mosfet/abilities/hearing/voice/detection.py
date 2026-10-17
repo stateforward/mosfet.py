@@ -259,8 +259,8 @@ class VoiceDetection(classifying.Classifying[bytes, ApplyData]):
     _open_voice_end_seconds: float | None
     _open_voice_confidence: float | None
 
-    def __init__(self, *, classifier: VoiceActivityClassifier) -> None:
-        super().__init__(classifier=classifier)
+    def __init__(self, *, id: ability.AbilityId | None = None, classifier: VoiceActivityClassifier) -> None:
+        super().__init__(id=id, classifier=classifier)
         self._open_voice_end_seconds = None
         self._open_voice_confidence = None
 

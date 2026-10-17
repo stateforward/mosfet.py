@@ -1407,8 +1407,14 @@ class Revision(processing.Processing):
         hsm.state("rebooting", hsm.defer(input_event)),
     )
 
-    def __init__(self, *, processor: processing.Processor | ProcessorFactory, memory: memory.MemoryStore) -> None:
-        super(processing.Processing, self).__init__()
+    def __init__(
+        self,
+        *,
+        id: ability.AbilityId | None = None,
+        processor: processing.Processor | ProcessorFactory,
+        memory: memory.MemoryStore,
+    ) -> None:
+        super(processing.Processing, self).__init__(id=id)
         leaf = processor() if not isinstance(processor, processing.Processor) else processor
         self._change_processing = processing.Processing(processor=leaf, instructions=type(self).instructions)
         self._memory = memory

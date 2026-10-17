@@ -1672,12 +1672,13 @@ class Learning(ability.Ability[InputData, OutputData]):
     def __init__(
         self,
         *,
+        id: ability.AbilityId | None = None,
         decoder: decoding.Decoder[InputData, DecodedData],
         processor: processing.Processor | revision.ProcessorFactory,
         memory: memory.Memory,
         stm_memory: stm.StmMemory | None = None,
     ) -> None:
-        super().__init__()
+        super().__init__(id=id)
         leaf = processor() if not isinstance(processor, processing.Processor) else processor
         self._decoder = decoder
         self._select_processing = processing.Processing(

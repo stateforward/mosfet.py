@@ -856,6 +856,7 @@ class Speaking(ability.Ability[InputData, OutputData]):
     def __init__(
         self,
         *,
+        id: ability.AbilityId | None = None,
         encoder: vocal.speech.SpeechEncoder | collections.abc.Callable[[str, str | None], vocal.speech.SpeechEncoder],
         speaker: audio.Speaker,
         listening: collections.abc.Sequence[hsm.Instance] = (),
@@ -893,7 +894,7 @@ class Speaking(ability.Ability[InputData, OutputData]):
             ValueError: A duration is not positive, or ``enroll_seconds`` is under 1.5 seconds.
         """
 
-        super().__init__()
+        super().__init__(id=id)
         if lookahead <= datetime.timedelta(0):
             raise ValueError(f"Speaking lookahead must be positive, got {lookahead}.")
         if encode_idle_timeout <= datetime.timedelta(0):

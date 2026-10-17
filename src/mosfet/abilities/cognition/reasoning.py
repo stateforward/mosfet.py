@@ -655,6 +655,7 @@ class Reasoning(processing.Processing):
     def __init__(
         self,
         *,
+        id: ability.AbilityId | None = None,
         processor: ReasoningProcessor,
         instructions: str | None = None,
         max_effort: Effort | None = None,
@@ -664,7 +665,7 @@ class Reasoning(processing.Processing):
             raise ValueError("instructions must not be blank when provided.")
         # Empty default is intentional: system channel is only the per-turn world XML when present.
         # Composition host: leaf Processor is transport; any static policy is ability instructions.
-        super(processing.Processing, self).__init__()
+        super(processing.Processing, self).__init__(id=id)
         self._instructions = resolved.strip() if resolved else ""
         self._processor = processor
         self._max_effort = max_effort

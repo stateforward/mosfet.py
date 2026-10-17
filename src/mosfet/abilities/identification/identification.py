@@ -579,6 +579,7 @@ class Registry(ability.Ability[IdentifyData, IdentifiedData]):
     def __init__(
         self,
         *,
+        id: ability.AbilityId | None = None,
         identifier: Identifier,
         kind: Kind,
         max_unlinked_age: datetime.timedelta,
@@ -599,7 +600,7 @@ class Registry(ability.Ability[IdentifyData, IdentifiedData]):
             raise ValueError("Registry durations must be positive.")
         if max_ids < 0:
             raise ValueError("Registry max_ids cannot be negative.")
-        super().__init__()
+        super().__init__(id=id)
         self._identifier = identifier
         self._kind = kind
         self._max_unlinked_age = max_unlinked_age

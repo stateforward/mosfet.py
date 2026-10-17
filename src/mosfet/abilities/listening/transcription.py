@@ -909,6 +909,7 @@ class Transcription(ability.Ability[sensitivity.OutputData, cognition.InputData]
     def __init__(
         self,
         *,
+        id: ability.AbilityId | None = None,
         session: SessionFactory,
         voice_diarizer: voice.diarization.VoiceDiarizer | None = None,
         voice_classifier: classifying.Classifier[voice.identification.InputData, voice.identification.OutputData]
@@ -935,7 +936,7 @@ class Transcription(ability.Ability[sensitivity.OutputData, cognition.InputData]
                 ``registry`` is given.
         """
 
-        super().__init__()
+        super().__init__(id=id)
         if product_threshold_db < 0.0:
             raise ValueError("product_threshold_db must not be negative.")
         for name, value in (

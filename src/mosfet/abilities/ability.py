@@ -31,6 +31,32 @@ TInput = typing.TypeVar("TInput")
 TOutput = typing.TypeVar("TOutput")
 _DataType = type[object] | tuple[type[object], ...] | None
 
+AbilityId = typing.Annotated[
+    str,
+    pydantic.Field(
+        pattern=r"^[a-z][a-z0-9_-]{0,62}$",
+        description=(
+            "The id the bot an ability belongs to knows it by: its key on the bot's tool menu and the "
+            "address the bot's own machinery sends to. Set when the ability is built and never changed, "
+            "so it survives restarts, and local to that bot; it is not the runtime id an actor gets when "
+            "it starts. 1 to 63 lower-case letters, digits, underscores or hyphens, starting with a "
+            "letter. An ability built without one is known by its kind."
+        ),
+        examples=["bench", "speaking", "conversation"],
+    ),
+]
+_ABILITY_ID: pydantic.TypeAdapter[str] = pydantic.TypeAdapter(AbilityId)
+
+
+def _kind(candidate: "Ability[typing.Any, typing.Any]") -> str:
+    """An ability's kind: its class name in snake case (``TextGeneration`` is ``text_generation``)."""
+
+    # Shared helper lives on conversation; a top-level import would cycle
+    # ability -> communication -> ability through the package inits.
+    from mosfet.abilities.communication.conversation.conversation import snake_case
+
+    return snake_case(type(candidate).__name__.lstrip("_"))
+
 
 class Effort(enum.StrEnum):
     """Cognitive effort rating of one ability, as t-shirt sizes.
@@ -240,6 +266,8 @@ class Ability(Traced, attachment.Attachment, typing.Generic[TInput, TOutput]):
     _attachment_group: attachment.Group | None = None
     _attachment_timeout: datetime.timedelta
     _attachment_request_id: str
+    # Construction-time and never rewritten: the body-local id the owning bot knows this ability by.
+    _identity: str
     _composite_attachment_lifecycle: typing.ClassVar[bool] = False
     # Cognitive effort rating: stages declare ceilings; the frame builder drops abilities
     # beyond them (see Effort). Default XS: every cognition tier offers the ability.
@@ -983,11 +1011,29 @@ class Ability(Traced, attachment.Attachment, typing.Generic[TInput, TOutput]):
             detached_notifications=cls.detached_notifications,
         )
 
-    def __init__(self) -> None:
+    def __init__(self, *, id: AbilityId | None = None) -> None:
+        """Build an unstarted ability, known to the bot it belongs to as ``id`` (its kind when omitted).
+
+        Raises:
+            ValueError: If ``id`` (or the kind it defaults to) is not a valid :data:`AbilityId`
+                (``pydantic.ValidationError`` is a ``ValueError``).
+        """
+
         super().__init__()
+        self._identity = _ABILITY_ID.validate_python(_kind(self) if id is None else id)
         self._attachments = []
         self._attachment_timeout = datetime.timedelta(seconds=30)
         self._attachment_request_id = ""
+
+    def identity(self) -> AbilityId:
+        """The id the bot this ability belongs to knows it by, fixed when the ability was built.
+
+        It is the one construction-time fact a peer may ask an ability for, the way an hsm element
+        has an ``id``: the body keys the ability by it on cognition's tool menu. It is not
+        :func:`hsm.id`, the runtime id the ability gets each time it starts.
+        """
+
+        return self._identity
 
     @typing.override
     def attach(

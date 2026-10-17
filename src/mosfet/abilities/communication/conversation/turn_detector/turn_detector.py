@@ -353,6 +353,7 @@ class TurnDetector(ability.Ability[object, TurnCompleteData]):
     def __init__(
         self,
         *,
+        id: ability.AbilityId | None = None,
         participant_ref: value.IdentityValue = "bot",
         conversation_ref: str = "conversation",
         end_of_turn_silence_seconds: float = 0.5,
@@ -369,7 +370,7 @@ class TurnDetector(ability.Ability[object, TurnCompleteData]):
             raise ValueError("end_of_turn_silence_seconds must not be negative.")
         if decoder is not None and decoding is not None:
             raise ValueError("TurnDetector accepts decoder or decoding, not both.")
-        super().__init__()
+        super().__init__(id=id)
         self.participant_ref = participant_ref
         self.conversation_ref = conversation_ref
         self.end_of_turn_silence_seconds = end_of_turn_silence_seconds

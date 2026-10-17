@@ -529,10 +529,12 @@ class ExampleConversation(abilities.Conversation):
     def __init__(
         self,
         *,
+        id: ability.AbilityId | None = None,
         turn_detector: turn_detector.TurnDetector,
         encoder: abilities.VoiceEncoder | None = None,
     ) -> None:
         super().__init__(
+            id=id,
             turn_detector=turn_detector,
             encoder=encoder if encoder is not None else HostOwnedVoiceEncoder(),
         )

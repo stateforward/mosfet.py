@@ -343,6 +343,7 @@ class Routines(ability.Ability[ReconcileData, behavior.TickData]):
     def __init__(
         self,
         *,
+        id: ability.AbilityId | None = None,
         memory: memory.MemoryStore,
         clock: schedule.WallClock,
         timers: hsm.Clock | None = None,
@@ -354,7 +355,7 @@ class Routines(ability.Ability[ReconcileData, behavior.TickData]):
         uses the HSM default, real time).
         """
 
-        super().__init__()
+        super().__init__(id=id)
         self._memory = memory
         self._clock = clock
         self._timers = timers

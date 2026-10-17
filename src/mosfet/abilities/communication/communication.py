@@ -309,6 +309,7 @@ class Communication(ability.Ability[TurnData, object]):
     def __init__(
         self,
         *,
+        id: ability.AbilityId | None = None,
         active_conversation: Conversation | None = None,
         conversations: collections.abc.Sequence[Conversation] | None = None,
         speaking: speaking.Speaking,
@@ -329,7 +330,7 @@ class Communication(ability.Ability[TurnData, object]):
             ValueError: No conversation is given, or ``response_idle_timeout`` is not positive.
         """
 
-        super().__init__()
+        super().__init__(id=id)
         if not _is_speaking_ability(speaking):
             raise TypeError("Communication speaking must be a Speaking ability.")
         if response_idle_timeout <= datetime.timedelta(0):
