@@ -153,6 +153,31 @@ def test_chat_client_does_not_send_openai_key_to_custom_base_url(monkeypatch: py
     assert api_key() == ""
 
 
+def test_chat_client_defaults_to_the_loopback_endpoint_and_sends_it_no_openai_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """DSL-28e: local first; llama.cpp's server listens on 127.0.0.1:8080 by default."""
+
+    completions = FakeChatCompletions(response={"choices": [{"message": {"content": "done"}}]})
+    constructed: list[dict[str, object]] = []
+
+    def fake_openai(**kwargs: object) -> FakeOpenAIClient:
+        constructed.append(dict(kwargs))
+        return FakeOpenAIClient(chat=FakeChat(completions=completions))
+
+    monkeypatch.setenv("OPENAI_API_KEY", "real-openai-key")
+    monkeypatch.setattr(chat_client, "OpenAI", fake_openai)
+    client = ChatClient(model="local-model")
+
+    _ = client.create_chat_completion(messages=[{"role": "user", "content": "hello"}])
+
+    assert client.base_url == "http://127.0.0.1:8080/v1"
+    assert constructed[0]["base_url"] == "http://127.0.0.1:8080/v1"
+    api_key = constructed[0]["api_key"]
+    assert callable(api_key)
+    assert api_key() == ""
+
+
 def test_chat_client_rejects_non_object_responses() -> None:
     completions = FakeChatCompletions(response=["not", "an", "object"])
     client = ChatClient(

@@ -14,9 +14,11 @@ uv run --package mosfet-provider-openai-compat --group dev \
 
 Cases: ring WAV + `kind=phone.ringing`, kind-only compact WAV, parseable offered events, ambient negative control.
 
-The package owns the OpenAI SDK dependency for providers that expose the Chat Completions API shape. Pass a `base_url`,
-`model`, and optional `api_key` to `ChatClient`, then use that client through `TextGenerator` or
-`Processing`.
+The package owns the OpenAI SDK dependency for providers that expose the Chat Completions API shape. Pass a `model`,
+and a `base_url` and optional `api_key` for any endpoint but the local one, to `ChatClient`, then use that client
+through `TextGenerator` or `Processing`. `base_url` defaults to the loopback endpoint `http://127.0.0.1:8080/v1`, where
+a local llama.cpp server listens, so `ChatClient(model="local-model")` reaches it; a cloud endpoint, OpenAI's
+included, is always named.
 
 ```python
 from bot.abilities.language.text import InputData, TextMessage, TextRole

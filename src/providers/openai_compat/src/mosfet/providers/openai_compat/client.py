@@ -17,6 +17,8 @@ import mosfet.media as media
 from mosfet.abilities import embedding
 
 _DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
+# Local first: a llama.cpp server listens on 127.0.0.1:8080 by default.
+_DEFAULT_CHAT_BASE_URL = "http://127.0.0.1:8080/v1"
 _STATUS_CLASS_ATTR = "bot.http.status_class"
 
 
@@ -335,12 +337,14 @@ def sdk(
 class ChatClient(ChatCompletionClient, ResponsesClient):
     """OpenAI SDK-backed client for the Chat Completions API shape and, where served, the Responses API.
 
+    ``base_url`` defaults to the loopback endpoint ``http://127.0.0.1:8080/v1``, where a local llama.cpp server
+    listens; a cloud endpoint is always named. ``model`` has no default: it is the endpoint's own name for a model.
     Streamed chat completions go through ``async_client`` (an ``openai.AsyncOpenAI``, built lazily with the same
     endpoint, key and headers when not injected), so chunks arrive on the event loop as the server sends them.
     """
 
     model: str
-    base_url: str = _DEFAULT_OPENAI_BASE_URL
+    base_url: str = _DEFAULT_CHAT_BASE_URL
     api_key: str | None = None
     timeout_seconds: float = 240.0
     default_headers: collections.abc.Mapping[str, str] = dataclasses.field(default_factory=_empty_headers)
