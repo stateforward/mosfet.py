@@ -1,0 +1,50 @@
+[project]
+name = "mosfet-provider-docker"
+dynamic = ["version"]
+description = "Docker Engine API sandbox host for stateforward.mosfet: an HSM over a rootless Docker or Podman socket."
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+  "httpx>=0.28,<1",
+  "stateforward.mosfet",
+]
+
+[dependency-groups]
+dev = [
+  "pytest>=9.0.3,<10.0.0",
+  "ruff~=0.11.13",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mosfet"]
+exclude = ["src/mosfet/__init__.pyi"]
+
+[tool.hatch.version]
+path = "src/mosfet/providers/docker/__init__.py"
+
+[tool.uv.sources]
+stateforward-mosfet = { workspace = true }
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# The tests import the shared root `tests` package (the metric reader), so the repo root has to be
+# importable from this rootdir.
+pythonpath = ["../../.."]
+
+[tool.ruff]
+line-length = 120
+target-version = "py313"
+
+[tool.ruff.format]
+docstring-code-format = true
+
+[tool.basedpyright]
+include = ["src", "tests", "scripts"]
+extraPaths = ["src", "../../../src", "../../.."]
+pythonVersion = "3.13"
+reportImportCycles = false
+reportPrivateUsage = "error"

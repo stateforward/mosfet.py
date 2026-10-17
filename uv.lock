@@ -12,6 +12,7 @@ resolution-markers = [
 
 [manifest]
 members = [
+    "mosfet-provider-docker",
     "mosfet-provider-elevenlabs",
     "mosfet-provider-gemini",
     "mosfet-provider-livekit",
@@ -1546,6 +1547,32 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/e1/1a/f32fe9d27851a6c88bdea75891c1d5f0bac11ee5ab72517b9c42657c0262/moonshine_voice-0.0.73-py3-none-manylinux_2_34_aarch64.whl", hash = "sha256:c56de7614b18bbc65d8f4f2cb7432d8a258311aef38a49e9e16c8d06df8085f0", size = 55105425, upload-time = "2026-07-24T01:54:17.609Z" },
     { url = "https://files.pythonhosted.org/packages/b6/7a/245402af9a56879cf24f36ba86087240ef8d5f807064fdd510c58de88947/moonshine_voice-0.0.73-py3-none-manylinux_2_34_x86_64.whl", hash = "sha256:6461c8097ed78d054c46b4c821143008a07b5fa1f4169674493ccfa06c1407db", size = 56320672, upload-time = "2026-07-24T01:50:09.7Z" },
     { url = "https://files.pythonhosted.org/packages/42/14/51f5813cd4cb1a172885e5b6e7f8a50ca2462cb418b67773d8bf8ab1dcf5/moonshine_voice-0.0.73-py3-none-win_amd64.whl", hash = "sha256:fd9895bec46f929ac3747fb83bede3826f7a32c3d0c9559b4b2840fa5e6d2bcd", size = 50504986, upload-time = "2026-07-24T06:10:12.213Z" },
+]
+
+[[package]]
+name = "mosfet-provider-docker"
+source = { editable = "src/providers/docker" }
+dependencies = [
+    { name = "httpx" },
+    { name = "stateforward-mosfet" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "pytest" },
+    { name = "ruff" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "httpx", specifier = ">=0.28,<1" },
+    { name = "stateforward-mosfet", editable = "." },
+]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "pytest", specifier = ">=9.0.3,<10.0.0" },
+    { name = "ruff", specifier = "~=0.11.13" },
 ]
 
 [[package]]
