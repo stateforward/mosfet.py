@@ -88,6 +88,8 @@ The Engine archive API cannot reach a tmpfs on a read-only root, so files move b
   `mapping.MAX_READ_BYTES` (8 MiB) is `too_large`.
 
 The image must provide `sh`, `timeout`, `mkdir`, `cat` and `base64`.
+The repository's bench image for the builder bot, `docker/bench/Dockerfile`, provides them with `python`, `git` and
+`pytest`; `docker/bench/smoke.sh --socket <rootless socket>` builds it and runs the live check below on it.
 
 ## Telemetry
 
