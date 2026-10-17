@@ -1,0 +1,8 @@
+"""B0001: a bot name that is not lower snake case."""
+
+from mosfet import bot
+from mosfet.devices import phone
+
+from tests.bot.dsl import support
+
+model = bot.define("Greeter Bot", bot.cognition(support.Silent()), bot.attach(phone.Phone()))

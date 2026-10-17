@@ -1,0 +1,14 @@
+error[B0007]: id `firmware` is reserved
+ --> greeter.py:8:64
+  |
+8 | model = bot.define("…", bot.cognition(support.Silent()), bot.attach(phone.Phone(id="firmware")))
+  |                                                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `firmware` is the body's own
+  |
+  = note: the body keeps `bot`, `cognition` and `firmware` for itself, the way cognition addresses them
+help: give it another id
+  |
+8 | model = bot.define("…", bot.cognition(support.Silent()), bot.attach(phone.Phone(id="phone")))
+  |                                                                                    ~~~~~~~
+  = explain: bot.explain("B0007")
+
+error: could not define bot `greeter`: 1 error

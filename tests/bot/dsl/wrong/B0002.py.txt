@@ -1,0 +1,6 @@
+"""B0002: a bot with no cognition."""
+
+from mosfet import bot
+from mosfet.devices import phone
+
+model = bot.define("greeter", bot.attach(phone.Phone()))

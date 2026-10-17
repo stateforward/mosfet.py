@@ -1,0 +1,8 @@
+"""B0004: a class where an instance belongs."""
+
+from mosfet import bot
+from mosfet.devices import phone
+
+from tests.bot.dsl import support
+
+model = bot.define("greeter", bot.cognition(support.Silent()), bot.attach(phone.Phone))

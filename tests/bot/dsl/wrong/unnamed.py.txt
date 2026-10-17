@@ -1,0 +1,14 @@
+"""Two speakers of one kind, neither named, and a reserved id: the rewrites name them."""
+
+from mosfet import bot
+from mosfet.devices import audio
+
+from tests.bot.dsl import support
+
+model = bot.define(
+    "greeter",
+    bot.cognition(support.Silent()),
+    bot.attach(audio.Speaker()),
+    bot.attach(audio.Speaker()),
+    bot.attach(audio.Microphone(id="cognition")),
+)

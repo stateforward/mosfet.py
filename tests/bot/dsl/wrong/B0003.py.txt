@@ -1,0 +1,13 @@
+"""B0003: two devices with one id."""
+
+from mosfet import bot
+from mosfet.devices import audio, phone
+
+from tests.bot.dsl import support
+
+model = bot.define(
+    "greeter",
+    bot.cognition(support.Silent()),
+    bot.attach(phone.Phone(id="desk")),
+    bot.attach(audio.Speaker(id="desk")),
+)

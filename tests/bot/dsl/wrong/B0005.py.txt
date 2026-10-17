@@ -1,0 +1,10 @@
+"""B0005: an instance that is already started (the test starts it and calls greeter)."""
+
+from mosfet import bot
+from mosfet.devices import phone
+
+from tests.bot.dsl import support
+
+
+def greeter(handset: phone.Phone) -> bot.Model:
+    return bot.define("greeter", bot.cognition(support.Silent()), bot.attach(handset))

@@ -1,0 +1,8 @@
+"""B0010: no traits at all."""
+
+from mosfet import bot
+from mosfet.devices import phone
+
+from tests.bot.dsl import support
+
+model = bot.define("greeter", bot.traits(), bot.cognition(support.Silent()), bot.attach(phone.Phone()))

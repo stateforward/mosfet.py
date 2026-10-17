@@ -1,0 +1,14 @@
+error[B0011]: the processing timeout is not a positive `datetime.timedelta`
+  --> greeter.py:14:29
+   |
+14 |     bot.timeouts(processing=datetime.timedelta(0)),
+   |                             ^^^^^^^^^^^^^^^^^^^^^ not positive
+   |
+   = note: a timeout bounds how long the body waits; zero or less would never wait
+help: give a positive duration
+   |
+14 |     bot.timeouts(processing=datetime.timedelta(seconds=30)),
+   |                             ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+   = explain: bot.explain("B0011")
+
+error: could not define bot `greeter`: 1 error

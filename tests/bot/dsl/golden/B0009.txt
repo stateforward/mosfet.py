@@ -1,0 +1,14 @@
+error[B0009]: `bot.traits` is given twice
+  --> greeter.py:13:5
+   |
+10 |     bot.traits("curious"),
+   |     --------------------- first given here
+...
+13 |     bot.traits("patient"),
+   |     ^^^^^^^^^^^^^^^^^^^^^ given again here
+   |
+   = note: a bot has one `bot.traits`
+help: merge them into one `bot.traits(...)`
+   = explain: bot.explain("B0009")
+
+error: could not define bot `greeter`: 1 error

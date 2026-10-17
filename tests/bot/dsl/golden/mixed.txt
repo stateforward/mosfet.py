@@ -1,0 +1,68 @@
+error[B0001]: bot name `Greeter Bot` is not lower snake case of at most 64 characters
+  --> greeter.py:11:5
+   |
+11 |     "Greeter Bot",
+   |     ^^^^^^^^^^^^^ the bot's name
+   |
+   = note: a bot's name is a telemetry attribute and a topology name, so it is bounded
+help: name it in lower snake case
+   |
+11 |     "greeter_bot",
+   |     ~~~~~~~~~~~~~
+   = explain: bot.explain("B0001")
+
+error[B0003]: device id `desk` is used twice
+  --> greeter.py:14:5
+   |
+13 |     bot.attach(phone.Phone(id="desk")),
+   |     ---------------------------------- first used here
+14 |     bot.attach(audio.Speaker(id="desk")),
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ used again here
+   |
+   = note: a bot keys its devices and abilities by `id`; the bot addresses `desk` by it
+help: give the second device its own id
+   |
+14 |     bot.attach(audio.Speaker(id="speaker")),
+   |                                 ~~~~~~~~~
+   = explain: bot.explain("B0003")
+
+error[B0004]: `bot.attach` takes a constructed device or ability, not a class
+  --> greeter.py:15:16
+   |
+15 |     bot.attach(audio.Microphone),
+   |                ^^^^^^^^^^^^^^^^ this is the class `audio.Microphone`
+   |
+   = note: the bot file builds its parts; the bot holds the very instances it is given
+help: construct it
+   |
+15 |     bot.attach(audio.Microphone(id="microphone")),
+   |                ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+   = explain: bot.explain("B0004")
+
+error[B0006]: `bot.input` does not take a device
+  --> greeter.py:16:5
+   |
+16 |     bot.input(phone.Phone(id="handset")),
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ this is a device
+   |
+   = note: `bot.input` takes an ability
+help: a device is given to `bot.attach`
+   |
+16 |     bot.attach(phone.Phone(id="handset")),
+   |     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+   = explain: bot.explain("B0006")
+
+error[B0017]: `bot.define` does not take a device
+  --> greeter.py:17:5
+   |
+17 |     audio.Speaker(id="voice"), bot.traits("…"),
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^ this is a device
+   |
+   = note: `bot.define` takes bot elements
+help: a device is given to `bot.attach`
+   |
+17 |     bot.attach(audio.Speaker(id="voice")), bot.traits("…"),
+   |     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+   = explain: bot.explain("B0017")
+
+error: could not define bot `Greeter Bot`: 5 errors

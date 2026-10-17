@@ -1,0 +1,15 @@
+"""B0015: an observer given to bot.define."""
+
+import hsm
+
+from mosfet import bot
+from mosfet.devices import phone
+
+from tests.bot.dsl import support
+
+
+def log(ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event) -> None:
+    del ctx, instance, event
+
+
+model = bot.define("greeter", bot.cognition(support.Silent()), bot.attach(phone.Phone()), hsm.observe(log))

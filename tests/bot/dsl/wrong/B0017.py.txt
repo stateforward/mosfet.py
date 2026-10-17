@@ -1,0 +1,8 @@
+"""B0017: a device given to bot.define directly."""
+
+from mosfet import bot
+from mosfet.devices import phone
+
+from tests.bot.dsl import support
+
+model = bot.define("greeter", bot.cognition(support.Silent()), phone.Phone())

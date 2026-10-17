@@ -1,0 +1,11 @@
+error[B0015]: an observer is not part of a bot's definition
+  --> greeter.py:15:91
+   |
+15 | model = bot.define("…", bot.cognition(support.Silent()), bot.attach(phone.Phone()), hsm.observe(log))
+   |                                                                                     ^^^^^^^^^^^^^^^^ this observes a running bot
+   |
+   = note: an observer watches a bot while it runs, and is given where the bot is started
+help: remove it from `bot.define`, and give it to `bot.start(..., observe=(...))`
+   = explain: bot.explain("B0015")
+
+error: could not define bot `greeter`: 1 error

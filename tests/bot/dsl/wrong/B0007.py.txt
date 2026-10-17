@@ -1,0 +1,8 @@
+"""B0007: a reserved id."""
+
+from mosfet import bot
+from mosfet.devices import phone
+
+from tests.bot.dsl import support
+
+model = bot.define("greeter", bot.cognition(support.Silent()), bot.attach(phone.Phone(id="firmware")))

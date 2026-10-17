@@ -44,6 +44,7 @@ import io
 import linecache
 import os
 import pathlib
+import textwrap
 import tokenize
 import typing
 
@@ -235,8 +236,222 @@ class Explanation(pydantic.BaseModel):
     right: str = pydantic.Field(description="The same code, corrected.")
 
 
-EXPLANATIONS: tuple[Explanation, ...] = ()
-"""Every code and lint, in code order. A retired code keeps its entry and is never reused."""
+EXPLANATIONS: tuple[Explanation, ...] = (
+    Explanation(
+        code="B0001",
+        level="error",
+        title="the bot's name is missing or not lower snake case",
+        meaning=(
+            "`bot.define` takes the bot's name first: lower snake case (a letter, then letters, digits and "
+            "underscores), at most 64 characters."
+        ),
+        why=(
+            "The name is the bot's topology name and a telemetry attribute, so it is bounded and spelled one "
+            "way. The suggestion is the name in snake case."
+        ),
+        wrong='model = bot.define("Greeter Bot", bot.cognition(processor), bot.attach(phone.Phone()))',
+        right='model = bot.define("greeter_bot", bot.cognition(processor), bot.attach(phone.Phone()))',
+    ),
+    Explanation(
+        code="B0002",
+        level="error",
+        title="the bot has no `bot.cognition`",
+        meaning="Every bot has exactly one `bot.cognition`, the mind that perceives and decides.",
+        why=(
+            "A body with no cognition can hold devices but can never choose anything to do with them. "
+            "`bot.cognition(processor)` thinks with a `processing.Processor`."
+        ),
+        wrong='model = bot.define("greeter", bot.attach(phone.Phone()))',
+        right='model = bot.define("greeter", bot.cognition(processor), bot.attach(phone.Phone()))',
+    ),
+    Explanation(
+        code="B0003",
+        level="error",
+        title="a device or ability id is used twice",
+        meaning=(
+            "A bot keys its devices and the abilities it can address by `id`, so no two of them share one. A "
+            "device or ability built without an `id` is known by its kind (`phone.Phone()` is `phone`), so "
+            "two of one kind need ids of their own. The same instance given twice is also this error."
+        ),
+        why=(
+            "The id is how the bot addresses a part: on its tool menu, as its focus, and in what it owns. Two "
+            "parts with one id would be one name for two things."
+        ),
+        wrong=(
+            'model = bot.define(\n    "greeter",\n    bot.cognition(processor),\n    bot.attach(phone.Phone()),\n'
+            "    bot.attach(phone.Phone()),\n)"
+        ),
+        right=(
+            'model = bot.define(\n    "greeter",\n    bot.cognition(processor),\n    bot.attach(phone.Phone()),\n'
+            '    bot.attach(phone.Phone(id="handset")),\n)'
+        ),
+    ),
+    Explanation(
+        code="B0004",
+        level="error",
+        title="an element is given a class instead of an instance",
+        meaning=(
+            "`bot.attach`, `bot.input`, `bot.output` and `bot.register` take a constructed instance: "
+            '`bot.attach(phone.Phone(id="phone"))`, not `bot.attach(phone.Phone)`.'
+        ),
+        why=(
+            "The bot file builds its parts and passes in what they need; the bot holds the very instances it "
+            "is given, so one may also be handed to another part's constructor. Constructing a part does "
+            "nothing until the bot starts."
+        ),
+        wrong='model = bot.define("greeter", bot.cognition(processor), bot.attach(phone.Phone))',
+        right='model = bot.define("greeter", bot.cognition(processor), bot.attach(phone.Phone(id="phone")))',
+    ),
+    Explanation(
+        code="B0005",
+        level="error",
+        title="an element is given an instance that is already started",
+        meaning="A part given to a bot is unstarted: the bot starts it, once, as part of its body.",
+        why=(
+            "A started instance already belongs to whatever started it. Construct a new one for this bot; "
+            "construction has no side effects, so that costs nothing."
+        ),
+        wrong=(
+            "handset = await mosfet.started(environment, phone.Phone(), phone.Phone.model)\n"
+            'model = bot.define("greeter", bot.cognition(processor), bot.attach(handset))'
+        ),
+        right='model = bot.define("greeter", bot.cognition(processor), bot.attach(phone.Phone()))',
+    ),
+    Explanation(
+        code="B0006",
+        level="error",
+        title="an element is given something it does not take",
+        meaning=(
+            "`bot.attach` takes a device or an ability; `bot.input` and `bot.output` take an ability; "
+            "`bot.register` takes a `memory.StmMemory`; `bot.cognition` takes a `processing.Processor` first, "
+            "and `memory=` takes a `memory.Memory`. The help names the element that takes what was given."
+        ),
+        why=(
+            "Each element is one part of the body: a device is held, a sense organ is an input, a processor is "
+            "cognition's. Giving a part to the wrong element would wire it where it cannot work."
+        ),
+        wrong='model = bot.define("greeter", bot.cognition(processor), bot.input(phone.Phone()))',
+        right='model = bot.define("greeter", bot.cognition(processor), bot.attach(phone.Phone()))',
+    ),
+    Explanation(
+        code="B0007",
+        level="error",
+        title="a device or ability uses a reserved id",
+        meaning="The ids `bot`, `cognition` and `firmware` are the body's own.",
+        why="Cognition addresses the body, its cognition and its firmware by those keys, so no part may take one.",
+        wrong='model = bot.define("greeter", bot.cognition(processor), bot.attach(phone.Phone(id="bot")))',
+        right='model = bot.define("greeter", bot.cognition(processor), bot.attach(phone.Phone(id="phone")))',
+    ),
+    Explanation(
+        code="B0008",
+        level="error",
+        title="an element is written inside another element",
+        meaning=(
+            "Every part of a bot is an argument of `bot.define` itself. `bot.cognition` takes a processor and "
+            "keyword flags, not `bot.attach` or another element."
+        ),
+        why="A bot is one flat list of parts; nesting would suggest an ownership the body does not have.",
+        wrong='model = bot.define("greeter", bot.cognition(processor, bot.attach(phone.Phone())))',
+        right='model = bot.define("greeter", bot.cognition(processor), bot.attach(phone.Phone()))',
+    ),
+    Explanation(
+        code="B0009",
+        level="error",
+        title="an element a bot has once is given twice",
+        meaning="A bot has at most one `bot.traits`, `bot.cognition`, `bot.timeouts` and `bot.register`.",
+        why="Each is one thing about the bot. Merge the two into one, for example one `bot.traits` with every trait.",
+        wrong=(
+            'model = bot.define(\n    "greeter",\n    bot.traits("curious"),\n    bot.traits("patient"),\n'
+            "    bot.cognition(processor),\n    bot.attach(phone.Phone()),\n)"
+        ),
+        right=(
+            'model = bot.define(\n    "greeter",\n    bot.traits("curious", "patient"),\n'
+            "    bot.cognition(processor),\n    bot.attach(phone.Phone()),\n)"
+        ),
+    ),
+    Explanation(
+        code="B0010",
+        level="error",
+        title="the traits are not one to 24 short traits",
+        meaning="`bot.traits` takes one to 24 traits, each a word or a short phrase of at most 200 characters.",
+        why=(
+            "Traits are the owner's fixed seed of who the bot is. The bot grows its own description on top of "
+            "them, so they stay few and short."
+        ),
+        wrong='model = bot.define("greeter", bot.traits(), bot.cognition(processor), bot.attach(phone.Phone()))',
+        right=(
+            'model = bot.define("greeter", bot.traits("curious"), bot.cognition(processor), bot.attach(phone.Phone()))'
+        ),
+    ),
+    Explanation(
+        code="B0011",
+        level="error",
+        title="a timeout is not a positive `datetime.timedelta`",
+        meaning="Each of `bot.timeouts(processing=, deactivation=, attachment=)` is a positive `datetime.timedelta`.",
+        why="A timeout bounds how long the body waits for something; zero or less would never wait at all.",
+        wrong=(
+            'model = bot.define(\n    "greeter",\n    bot.cognition(processor),\n    bot.attach(phone.Phone()),\n'
+            "    bot.timeouts(processing=datetime.timedelta(0)),\n)"
+        ),
+        right=(
+            'model = bot.define(\n    "greeter",\n    bot.cognition(processor),\n    bot.attach(phone.Phone()),\n'
+            "    bot.timeouts(processing=datetime.timedelta(seconds=30)),\n)"
+        ),
+    ),
+    Explanation(
+        code="B0015",
+        level="error",
+        title="an observer is given to `bot.define`",
+        meaning="An observer (`hsm.observe(...)`) is not part of a bot's definition.",
+        why=(
+            "An observer watches a bot while it runs, for logs and records, and never acts on it. It is given "
+            "where the bot is started, `bot.start(..., observe=(...))`."
+        ),
+        wrong=(
+            "def log(ctx, instance, event):\n    print(event.name)\n\n\n"
+            'model = bot.define("greeter", bot.cognition(processor), bot.attach(phone.Phone()), hsm.observe(log))'
+        ),
+        right='model = bot.define("greeter", bot.cognition(processor), bot.attach(phone.Phone()))',
+    ),
+    Explanation(
+        code="B0016",
+        level="error",
+        title="a held device has no id",
+        meaning=(
+            "Every device has an id, set by `mosfet.device.Device.__init__`. A device class whose `__init__` "
+            "never calls its base's has none."
+        ),
+        why="The id is how the bot addresses the device; a device without one cannot be held.",
+        wrong=(
+            "class Lamp(mosfet.device.Device):\n    def __init__(self):\n        pass\n\n\n"
+            'model = bot.define("greeter", bot.cognition(processor), bot.attach(Lamp()))'
+        ),
+        right=(
+            "class Lamp(mosfet.device.Device):\n    def __init__(self, *, id=None):\n"
+            "        super().__init__(id=id)\n\n\n"
+            'model = bot.define("greeter", bot.cognition(processor), bot.attach(Lamp()))'
+        ),
+    ),
+    Explanation(
+        code="B0017",
+        level="error",
+        title="`bot.define` is given something that is not a bot element",
+        meaning=(
+            "`bot.define` takes the bot's name, then elements: `bot.attach`, `bot.input`, `bot.output`, "
+            "`bot.register`, `bot.traits`, `bot.cognition` and `bot.timeouts`. A device, a processor or a "
+            "tuple of elements given directly is this error, and the help says which element takes it."
+        ),
+        why="Each element says what a part is to the body; a bare part has no place in it until it is given to one.",
+        wrong='model = bot.define("greeter", bot.cognition(processor), phone.Phone())',
+        right='model = bot.define("greeter", bot.cognition(processor), bot.attach(phone.Phone()))',
+    ),
+)
+"""Every code and lint, in code order. A retired code keeps its entry and is never reused.
+
+The examples assume ``from mosfet import bot``, ``from mosfet.devices import phone``, ``import hsm``,
+``import mosfet``, ``import datetime``, a ``processor`` (a ``processing.Processor``) and an
+``environment`` (an ``Environment``); a test runs every one of them.
+"""
 
 
 def explain(code: str) -> str:
@@ -252,9 +467,9 @@ def explain(code: str) -> str:
                 (
                     f"{explanation.level}[{explanation.code}]: {explanation.title}",
                     "",
-                    explanation.meaning,
+                    textwrap.fill(explanation.meaning, width=100),
                     "",
-                    f"Why: {explanation.why}",
+                    textwrap.fill(f"Why: {explanation.why}", width=100),
                     "",
                     "Wrong:",
                     "",
@@ -283,6 +498,9 @@ def document() -> str:
         "code, the source span, notes on why, and a `help:` that shows the rewrite. Errors (`B00xx` from",
         "`bot.define`, `B01xx` from `bot.start` and `bot.run`) stop the bot; lints (snake_case names) are",
         'warnings. `bot.explain("<code>")` prints any entry below.',
+        "",
+        "The examples assume `from mosfet import bot`, `from mosfet.devices import phone`, `import hsm`,",
+        "`import mosfet`, `import datetime`, a `processor` (a `processing.Processor`) and an `environment`.",
         "",
     ]
     lines.extend(
@@ -384,6 +602,26 @@ def node_span(location: Span, node: ast.expr | ast.keyword, label: str = "") -> 
         end_col=node.end_col_offset or node.col_offset,
         label=label,
     )
+
+
+def argument(span: Span, key: int | str) -> tuple[Span, ast.expr] | None:
+    """Positional argument ``key`` (or keyword argument ``key``) of the call under ``span``, and its span.
+
+    ``None`` when the call does not parse, has no such argument, or unpacks ``*args`` before it.
+    """
+
+    node = call(span)
+    if node is None:
+        return None
+    if isinstance(key, int):
+        if key >= len(node.args) or any(isinstance(item, ast.Starred) for item in node.args[: key + 1]):
+            return None
+        expression = node.args[key]
+    else:
+        expression = next((keyword.value for keyword in node.keywords if keyword.arg == key), None)
+        if expression is None:
+            return None
+    return node_span(span, expression), expression
 
 
 def text(span: Span) -> str:
@@ -622,6 +860,7 @@ __all__ = [
     "Location",
     "Span",
     "Suggestion",
+    "argument",
     "call",
     "cause",
     "document",

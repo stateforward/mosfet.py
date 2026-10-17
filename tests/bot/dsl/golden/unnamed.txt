@@ -1,0 +1,29 @@
+error[B0003]: device id `speaker` is used twice
+  --> greeter.py:12:5
+   |
+11 |     bot.attach(audio.Speaker()),
+   |     --------------------------- first used here
+12 |     bot.attach(audio.Speaker()),
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^ used again here
+   |
+   = note: a bot keys its devices and abilities by `id`; the bot addresses `speaker` by it
+help: give the second device its own id
+   |
+12 |     bot.attach(audio.Speaker(id="speaker_2")),
+   |                ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+   = explain: bot.explain("B0003")
+
+error[B0007]: id `cognition` is reserved
+  --> greeter.py:13:5
+   |
+13 |     bot.attach(audio.Microphone(id="cognition")),
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `cognition` is the body's own
+   |
+   = note: the body keeps `bot`, `cognition` and `firmware` for itself, the way cognition addresses them
+help: give it another id
+   |
+13 |     bot.attach(audio.Microphone(id="microphone")),
+   |                                    ~~~~~~~~~~~~
+   = explain: bot.explain("B0007")
+
+error: could not define bot `greeter`: 2 errors

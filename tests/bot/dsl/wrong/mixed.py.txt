@@ -1,0 +1,18 @@
+"""Five mistakes in one bot file, each with a rewrite that clears it."""
+
+from mosfet import bot
+from mosfet.devices import audio, phone
+
+from tests.bot.dsl import support
+
+API_KEY = "sk-SENTINEL-NEIGHBOUR"
+
+model = bot.define(
+    "Greeter Bot",
+    bot.cognition(support.Silent()),
+    bot.attach(phone.Phone(id="desk")),
+    bot.attach(audio.Speaker(id="desk")),
+    bot.attach(audio.Microphone),
+    bot.input(phone.Phone(id="handset")),
+    audio.Speaker(id="voice"), bot.traits("sk-SENTINEL-SAME-LINE"),
+)

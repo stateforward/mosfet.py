@@ -1,0 +1,15 @@
+"""B0011: a timeout of zero."""
+
+import datetime
+
+from mosfet import bot
+from mosfet.devices import phone
+
+from tests.bot.dsl import support
+
+model = bot.define(
+    "greeter",
+    bot.cognition(support.Silent()),
+    bot.attach(phone.Phone()),
+    bot.timeouts(processing=datetime.timedelta(0)),
+)

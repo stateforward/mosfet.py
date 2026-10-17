@@ -1,0 +1,12 @@
+error[B0010]: these traits are not one to 24 words or short phrases
+ --> greeter.py:8:31
+  |
+8 | model = bot.define("…", bot.traits(), bot.cognition(support.Silent()), bot.attach(phone.Phone()))
+  |                         ^^^^^^^^^^^^ the bot's traits
+  |
+  = note: ValidationError: traits: Tuple should have at least 1 item after validation, not 0
+  = note: traits are the owner's fixed seed: one to 24, each at most 200 characters
+help: give one to 24 short traits: `bot.traits("curious", "patient")`
+  = explain: bot.explain("B0010")
+
+error: could not define bot `greeter`: 1 error

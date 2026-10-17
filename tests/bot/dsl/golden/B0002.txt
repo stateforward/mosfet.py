@@ -1,0 +1,14 @@
+error[B0002]: bot `greeter` has no `bot.cognition`
+ --> greeter.py:6:9
+  |
+6 | model = bot.define("…", bot.attach(phone.Phone()))
+  |         ^^^^^^^^^^ no cognition
+  |
+  = note: cognition is what perceives and decides; a bot without one is a body with no mind
+help: give it a cognition that thinks with a `processing.Processor`
+  |
+6 | model = bot.define("…", bot.attach(phone.Phone()), bot.cognition(processor))
+  |                                                  ~~~~~~~~~~~~~~~~~~~~~~~~~~
+  = explain: bot.explain("B0002")
+
+error: could not define bot `greeter`: 1 error

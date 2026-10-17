@@ -27,6 +27,7 @@ import hsm
 import pytest
 import sqlalchemy
 
+from mosfet import bot
 from mosfet.abilities import cognition, communication, embedding, memory, persona, processing, speaking, vocal
 from mosfet.abilities.cognition import autonomy, routines
 from mosfet.abilities.communication import behaviors, conversation
@@ -181,6 +182,31 @@ def test_construction_does_no_io_and_starts_nothing(case: str, tmp_path: pathlib
     except _Forbidden:
         pass
     assert calls == []
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_defining_a_bot_does_no_io_and_starts_nothing(tmp_path: pathlib.Path) -> None:
+    """``bot.define`` holds the instances it is given and reads, opens and starts nothing (DSL-3)."""
+
+    calls: list[str] = []
+    model = None
+    try:
+        with _guarded() as calls:
+            store = memory.Memory()
+            model = bot.define(
+                "greeter",
+                bot.traits("curious"),
+                bot.cognition(_Processor(), memory=store, associative=True, consolidation=True, autonomy=True),
+                bot.attach(phone.Phone(id="desk")),
+                bot.input(memory.Memory(id="senses")),
+                bot.output(memory.Memory(id="voice")),
+                bot.register(memory.StmMemory()),
+                bot.timeouts(processing=datetime.timedelta(seconds=5)),
+            )
+    except _Forbidden:
+        pass
+    assert calls == []
+    assert model is not None
     assert list(tmp_path.iterdir()) == []
 
 

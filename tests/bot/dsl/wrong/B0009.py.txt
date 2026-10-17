@@ -1,0 +1,14 @@
+"""B0009: two bot.traits."""
+
+from mosfet import bot
+from mosfet.devices import phone
+
+from tests.bot.dsl import support
+
+model = bot.define(
+    "greeter",
+    bot.traits("curious"),
+    bot.cognition(support.Silent()),
+    bot.attach(phone.Phone()),
+    bot.traits("patient"),
+)

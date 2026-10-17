@@ -1,0 +1,14 @@
+"""B0016: a device class whose __init__ never calls its base's."""
+
+import mosfet
+from mosfet import bot
+
+from tests.bot.dsl import support
+
+
+class Lamp(mosfet.device.Device):
+    def __init__(self) -> None:
+        pass
+
+
+model = bot.define("greeter", bot.cognition(support.Silent()), bot.attach(Lamp()))
