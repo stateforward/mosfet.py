@@ -1,0 +1,36 @@
+# minimal_bot under compose: the generic image (docker/Dockerfile) built for this project, pointed at the lab
+# box's OpenAI-compatible endpoint. Copy .env.example to .env and fill it in, and put the endpoint's API key,
+# or any non-empty placeholder when the endpoint needs none, in secrets/openai_api_key. README.md has the steps.
+services:
+  minimal:
+    build:
+      context: ../..
+      dockerfile: docker/Dockerfile
+      args:
+        PROJECT: examples/minimal_bot
+    command: ["minimal_bot_example:build"]
+    # Docker's bundled init is PID 1; mosfet receives the SIGTERM it forwards.
+    init: true
+    read_only: true
+    # The ready file lives on a tmpfs, so it is gone on every restart.
+    tmpfs:
+      - /run/mosfet:uid=10001,gid=10001,mode=0700,size=64k
+      - /tmp:size=16m
+    volumes:
+      - minimal-data:/var/lib/mosfet
+    secrets:
+      - openai_api_key
+    env_file: .env
+    # mosfet run exits within --stop-grace (8 s) plus 1.5 s.
+    stop_grace_period: 10s
+    restart: on-failure:5
+    user: "10001:10001"
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+
+volumes:
+  minimal-data:
+
+secrets:
+  openai_api_key:
+    file: ./secrets/openai_api_key
