@@ -8,6 +8,7 @@ import typing
 import uuid
 
 import hsm
+import mosfet.lifecycle
 import pydantic
 import pytest
 
@@ -187,6 +188,41 @@ def test_a_link_the_transport_will_not_carry_refuses_its_firmware(register: str)
     assert attached.data.kind == attachment.FailureKind.CONFLICT
     assert isinstance(detached.data, attachment.DetachedData) and detached.data.removed is False
     assert state == "/ComputerLink/refused"
+
+
+def test_a_link_with_no_transport_is_unplugged_registers_nothing_and_never_comes_up() -> None:
+    """DSL-28b: an unplugged link holds its one firmware and tells it nothing, since no peer can connect."""
+
+    async def run() -> tuple[str, list[hsm.Event[typing.Any]], list[object], bool]:
+        environment = Environment()
+        firmware, second = Controller(), Controller()
+        await start(environment, firmware, "firmware")
+        await start(environment, second, "second")
+        link = computer.Link(transport=None, peer_id="desk", device_id="desk", channels=computer.channels(ports()))
+        await start(environment, link, "link")
+        state = link.state()
+        terminals = [
+            await request(link, attach(firmware)),
+            await request(link, attach(second)),
+            await request(link, attach(firmware)),
+            await request(link, detach(firmware)),
+            await request(link, detach(firmware)),
+        ]
+        await settle()
+        await hsm.stop(link)
+        return state, terminals, told(firmware), mosfet.lifecycle.is_started(link)
+
+    state, terminals, observations, started = asyncio.run(run())
+
+    assert state == "/ComputerLink/unplugged"
+    attached, refused, again, detached, absent = (terminal.data for terminal in terminals)
+    assert isinstance(attached, attachment.AttachCompleteData) and attached.created is True
+    assert isinstance(refused, attachment.FailedData) and refused.kind == attachment.FailureKind.CONFLICT
+    assert isinstance(again, attachment.AttachCompleteData) and again.created is False
+    assert isinstance(detached, attachment.DetachedData) and detached.removed is True
+    assert isinstance(absent, attachment.DetachedData) and absent.removed is False
+    assert observations == []
+    assert started is False
 
 
 def test_link_refuses_a_second_firmware_and_answers_the_first_again() -> None:

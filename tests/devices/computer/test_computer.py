@@ -185,6 +185,31 @@ def test_bring_up_registers_the_link_with_the_ports_channels_then_wires_every_po
     assert port_states == ["attached"] * 7
 
 
+def test_a_computer_with_no_transport_is_unplugged_and_runs_with_nothing_else() -> None:
+    """DSL-28b: no transport, no remote side; it brings up, wires its ports, stays unlinked, and stops."""
+
+    async def run() -> tuple[str, list[str], bool]:
+        environment = Environment()
+        device = computer.Computer(id="desk")
+        _ = await mosfet.started(environment, device, typing.cast(hsm.Model, device.model))
+        _ = await held(environment, device)
+        ports = device_peripherals(device)
+        await wait_until(lambda: all(port.state().endswith("/attached") for port in ports))
+        firmware = device_firmware(device)
+        assert firmware is not None
+        await settle()
+        unlinked = firmware_state(device)
+        port_states = [port.state().rpartition("/")[2] for port in ports]
+        await device.stop(environment)
+        return unlinked, port_states, mosfet.lifecycle.is_started(firmware)
+
+    unlinked, port_states, firmware_started = asyncio.run(run())
+
+    assert unlinked == "/Computer/unlinked"
+    assert port_states == ["attached"] * 7
+    assert firmware_started is False
+
+
 @pytest.mark.parametrize("register", ["refuse", "silent"])
 def test_bring_up_fails_when_the_transport_will_not_carry_the_computer(register: str) -> None:
     async def run() -> str:

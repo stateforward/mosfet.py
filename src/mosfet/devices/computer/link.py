@@ -5,7 +5,8 @@ carries that stream decodes into the port and encodes what the port sends (``pro
 The link registers the computer's peer and its channel table — :func:`channels`, which port owns
 which stream through which codec — with one transport, answers ``attachment.attach`` /
 ``attachment.detach`` for the computer's firmware, accepts one connection at a time (a newer one
-supersedes it), and tells the firmware ``computer.link.up`` / ``computer.link.down``.
+supersedes it), and tells the firmware ``computer.link.up`` / ``computer.link.down``. A link given no
+transport is unplugged: it registers nothing, holds its firmware, and never comes up.
 """
 
 from mosfet.devices import audio, hid
@@ -134,6 +135,9 @@ class Link(Traced, attachment.Attachment):
     reported while no firmware is attached is let go (``peer.close{released}``). Stopping the link
     unregisters it.
 
+    With no ``transport`` the link is unplugged, a port with no cable in it: it registers with nothing,
+    attaches one firmware and answers its detach, and never comes up, since no connection can reach it.
+
     The link never reads a message, a port, or a stream: identity is the registration and the
     transport's stamp.
     """
@@ -143,8 +147,8 @@ class Link(Traced, attachment.Attachment):
     _attachment_timeout: datetime.timedelta
     _attachment_request_id: str
 
-    # Addresses: dispatched to, never read.
-    _transport: hsm.Instance
+    # Addresses: dispatched to, never read. No transport: the link is unplugged.
+    _transport: hsm.Instance | None
     _peer_id: str
     _device_id: str
     _channels: tuple[transport.ChannelData, ...]
@@ -157,13 +161,15 @@ class Link(Traced, attachment.Attachment):
     def __init__(
         self,
         *,
-        transport: hsm.Instance,
+        transport: hsm.Instance | None,
         peer_id: str,
         device_id: str,
         channels: collections.abc.Iterable[transport.ChannelData],
         register_timeout: datetime.timedelta = _DEFAULT_REGISTER_TIMEOUT,
     ) -> None:
         """Build an unstarted link for ``device_id``'s remote machine, known to ``transport`` as ``peer_id``.
+
+        ``transport=None`` builds an unplugged link: nothing carries it, so it registers nothing.
 
         Raises:
             ValueError: If ``register_timeout`` is not positive, ``peer_id`` is not a valid
@@ -212,6 +218,8 @@ class Link(Traced, attachment.Attachment):
         """Ask the transport to carry this peer, with the channel table its streams are handed to."""
 
         target = instance._transport
+        # Only a plugged link registers: the plugging choice sends an unplugged one elsewhere.
+        assert target is not None
         _ = hsm.dispatch(
             ctx,
             target,
@@ -237,6 +245,7 @@ class Link(Traced, attachment.Attachment):
         """Let the transport forget this peer; whatever it answers, the link is going."""
 
         target = instance._transport
+        assert target is not None
         _ = hsm.dispatch(
             ctx,
             target,
@@ -254,7 +263,15 @@ class Link(Traced, attachment.Attachment):
         """Correlate a registration answer with the one transport this link registered with."""
 
         del ctx
-        return event.source == hsm.id(instance._transport)
+        target = instance._transport
+        return target is not None and event.source == hsm.id(target)
+
+    @staticmethod
+    def _unplugged(ctx: hsm.Context, instance: "Link", event: hsm.Event[typing.Any]) -> bool:
+        """Whether nothing carries this link: it was given no transport."""
+
+        del ctx, event
+        return instance._transport is None
 
     @staticmethod
     def _register_timeout_value(ctx: hsm.Context, instance: "Link", event: hsm.Event[typing.Any]) -> datetime.timedelta:
@@ -429,7 +446,26 @@ class Link(Traced, attachment.Attachment):
 
     model: typing.ClassVar[hsm.Model] = define(
         "ComputerLink",
-        hsm.initial(hsm.target("registering")),
+        hsm.initial(hsm.target("plugging")),
+        hsm.choice(
+            "plugging",
+            hsm.transition(hsm.guard(_unplugged), hsm.target("unplugged")),
+            hsm.transition(hsm.target("registering")),
+        ),
+        # No cable: one firmware attaches and detaches, and no connection ever reaches the link.
+        hsm.state(
+            "unplugged",
+            hsm.transition(
+                hsm.on(attachment.AttachEvent),
+                hsm.guard(_accepts_firmware),
+                hsm.effect(attachment.Attachment._attach, attachment.Attachment._dispatch_attach_complete_created),
+            ),
+            hsm.transition(
+                hsm.on(attachment.DetachEvent),
+                hsm.guard(attachment.Attachment._detach_last_attachment),
+                hsm.effect(attachment.Attachment._detach, attachment.Attachment._dispatch_detach_complete_removed),
+            ),
+        ),
         hsm.state(
             "registering",
             hsm.entry(_register),
@@ -529,7 +565,8 @@ class Link(Traced, attachment.Attachment):
         ),
         hsm.observe(observer),
     )
-    """Registering, then refused or registered: detached, awaiting a peer, or linked to one connection."""
+    """Unplugged with no transport; otherwise registering, then refused or registered: detached, awaiting a
+    peer, or linked to one connection."""
 
 
 __all__ = ["Link", "Ports", "channels"]

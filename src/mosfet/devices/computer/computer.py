@@ -78,7 +78,8 @@ class Computer(mosfet.device.Device):
     computer's peer and channel table with ``transport``, attaches its firmware to it by
     ``attachment.attach`` (a refusal or no answer within ``link_timeout`` fails bring-up), detaches by
     ``attachment.detach`` at stop (an unanswered release is counted and never blocks teardown), then
-    stops it.
+    stops it. A computer given no transport is unplugged: its link registers nothing and never comes
+    up, so its operating system stays ``unlinked`` and no person can reach it.
 
     What the operating system observes reaches the computer as ``device.firmware.observed``. A camera
     still or microphone audio is put into the room at the computer's placement; anything else — text
@@ -101,7 +102,7 @@ class Computer(mosfet.device.Device):
         self,
         *,
         id: mosfet.device.DeviceId = "computer",
-        transport: hsm.Instance,
+        transport: hsm.Instance | None = None,
         peer_id: str | None = None,
         person_id: str | None = None,
         link_timeout: datetime.timedelta = _DEFAULT_LINK_TIMEOUT,
@@ -119,7 +120,8 @@ class Computer(mosfet.device.Device):
         """Build a computer the bot holding it knows as ``id``, its remote machine reached through ``transport``.
 
         The transport knows the remote machine as ``peer_id`` (a ``computer.PeerId``), ``id`` by default. ``transport`` is an address the
-        computer's link registers with; the computer neither starts nor stops it. The default
+        computer's link registers with; the computer neither starts nor stops it. With no ``transport`` the
+        computer is unplugged: it starts and runs with nothing else, and nothing reaches it. The default
         mouthpiece hears at the computer's ``placement``. ``clock`` is the computer's own ``hsm.Clock``
         (see ``mosfet.device.Device``).
 
