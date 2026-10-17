@@ -68,7 +68,7 @@ def test_spec_defaults_are_the_closed_unprivileged_ephemeral_bench() -> None:
 
     assert spec.resources == sandbox.Resources()
     assert spec.workspace == "/workspace"
-    assert spec.env == {}
+    assert spec.env == {"HOME": "/workspace"}
     assert spec.user == "unprivileged"
     assert spec.max_lifetime == datetime.timedelta(hours=8)
 
@@ -110,9 +110,19 @@ def test_spec_max_lifetime_is_one_minute_to_one_day() -> None:
         _ = _spec(max_lifetime=datetime.timedelta(hours=24, seconds=1))
 
 
+def test_spec_gives_home_the_workspace_unless_env_sets_it() -> None:
+    """DSL-28d: the root is read-only, so ``HOME`` is the workspace, where a tool writing ``~`` can write."""
+
+    assert _spec(env={"LANG": "C.UTF-8"}).env == {"LANG": "C.UTF-8", "HOME": "/workspace"}
+    assert _spec(workspace="/work").env == {"HOME": "/work"}
+    assert _spec(env={"HOME": "/workspace/home"}).env == {"HOME": "/workspace/home"}
+
+
 def test_spec_env_is_bounded_plain_text() -> None:
-    assert _spec(env={"LANG": "C.UTF-8"}).env == {"LANG": "C.UTF-8"}
-    assert len(_spec(env={f"V{index}": "x" for index in range(32)}).env) == 32
+    assert len(_spec(env={f"V{index}": "x" for index in range(31)}).env) == 32
+    assert len(_spec(env={"HOME": "/workspace", **{f"V{index}": "x" for index in range(31)}}).env) == 32
+    with pytest.raises(pydantic.ValidationError, match="HOME"):
+        _ = _spec(env={f"V{index}": "x" for index in range(32)})
     with pytest.raises(pydantic.ValidationError):
         _ = _spec(env={f"V{index}": "x" for index in range(33)})
     with pytest.raises(pydantic.ValidationError):

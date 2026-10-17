@@ -32,7 +32,7 @@ def test_the_create_body_maps_every_row_of_the_bench() -> None:
         "Cmd": [],
         "User": "65532:65532",
         "WorkingDir": "/workspace",
-        "Env": ["LANG=C.UTF-8", "PYTHONDONTWRITEBYTECODE=1"],
+        "Env": ["LANG=C.UTF-8", "PYTHONDONTWRITEBYTECODE=1", "HOME=/workspace"],
         "Labels": {"org.stateforward.mosfet.sandbox": "1", "org.stateforward.mosfet.owner": "builder/7f3a"},
         "HostConfig": {
             "NanoCpus": 1_500_000_000,
@@ -81,7 +81,8 @@ def test_egress_without_an_owner_bridge_is_refused() -> None:
 def test_the_host_environment_never_reaches_the_machine() -> None:
     body = mapping.create_body(sandbox.Spec(image="python:3.13-slim"), owner="o", runtime="runc", egress_network=None)
 
-    assert body["Env"] == []
+    # Only what the spec gives: its HOME, which is the workspace.
+    assert body["Env"] == ["HOME=/workspace"]
     assert "PATH" not in json.dumps(body)
 
 

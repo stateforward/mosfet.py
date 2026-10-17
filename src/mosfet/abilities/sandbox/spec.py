@@ -31,6 +31,7 @@ NO_NUL_PATTERN: typing.Final = r"^[^\x00]*$"
 """Text a sandbox hands to a process (an argument, an environment value) never holds a NUL character."""
 
 _ENV_NAME_PATTERN: typing.Final = r"^[A-Za-z_][A-Za-z0-9_]{0,127}$"
+_MAX_ENV: typing.Final = 32
 _COMPONENT: typing.Final = r"[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*"
 _DOMAIN: typing.Final = r"[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)*"
 _IMAGE_PATTERN: typing.Final = (
@@ -139,7 +140,8 @@ class Spec(pydantic.BaseModel):
     """The owner's bench for a sandbox: never model-callable, and never a place for a secret.
 
     Every machine of a sandbox is created from this one spec. ``env`` is plain text handed to every command in the
-    machine, so no secret, credential or token may be put here; a ``pydantic.SecretStr`` value is refused.
+    machine, so no secret, credential or token may be put here; a ``pydantic.SecretStr`` value is refused. The root
+    is read-only, so ``HOME`` is the workspace unless ``env`` sets it.
     """
 
     model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
@@ -181,10 +183,14 @@ class Spec(pydantic.BaseModel):
     )
     env: typing.Annotated[
         collections.abc.Mapping[EnvName, EnvValue],
-        pydantic.Field(max_length=32),
+        pydantic.Field(max_length=_MAX_ENV),
     ] = pydantic.Field(
         default_factory=dict,
-        description="Plain environment variables every command gets, at most 32. Never a secret.",
+        validate_default=True,
+        description=(
+            "Plain environment variables every command gets, at most 32 with HOME, which is the workspace unless set"
+            " here. Never a secret."
+        ),
         examples=[{"LANG": "C.UTF-8"}],
     )
     user: typing.Literal["unprivileged"] = pydantic.Field(
@@ -199,6 +205,19 @@ class Spec(pydantic.BaseModel):
         description="How old a machine may get; an older one is replaced the next time it is idle.",
         examples=["PT8H"],
     )
+
+    @pydantic.field_validator("env", mode="after")
+    @classmethod
+    def _home_in_workspace(
+        cls, env: collections.abc.Mapping[str, str], info: pydantic.ValidationInfo
+    ) -> collections.abc.Mapping[str, str]:
+        # A workspace that failed validation is reported on its own; there is no HOME to give then.
+        workspace = info.data.get("workspace")
+        if "HOME" in env or not isinstance(workspace, str):
+            return env
+        if len(env) >= _MAX_ENV:
+            raise ValueError(f"env holds at most {_MAX_ENV} variables with HOME, which is the workspace unless set")
+        return {**env, "HOME": workspace}
 
     @pydantic.model_validator(mode="after")
     def _validate_workspace(self) -> typing.Self:

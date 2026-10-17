@@ -65,9 +65,9 @@ class BuilderBot(mosfet.Bot):
 def bench(*, image: str, network: sandbox.Network) -> sandbox.Spec:
     """The owner's bench: ``image`` on the default limits, ``network``, and a writable home in the workspace.
 
-    The limits are one CPU, 1 GiB without swap, 256 pids and a 512 MiB workspace at ``/workspace``, which is
-    also ``HOME``, since the machine's root is read-only. Python writes no bytecode and pip never prompts. No
-    secret goes into this environment. A machine lives at most the spec's default eight hours.
+    The limits are one CPU, 1 GiB without swap, 256 pids and a 512 MiB workspace at ``/workspace``, which the
+    spec makes ``HOME``, since the machine's root is read-only. Python writes no bytecode and pip never prompts.
+    No secret goes into this environment. A machine lives at most the spec's default eight hours.
     """
 
     return sandbox.Spec(
@@ -75,7 +75,7 @@ def bench(*, image: str, network: sandbox.Network) -> sandbox.Spec:
         resources=sandbox.Resources(),
         network=network,
         workspace=_WORKSPACE,
-        env={"HOME": _WORKSPACE, "PYTHONDONTWRITEBYTECODE": "1", "PIP_NO_INPUT": "1"},
+        env={"PYTHONDONTWRITEBYTECODE": "1", "PIP_NO_INPUT": "1"},
     )
 
 

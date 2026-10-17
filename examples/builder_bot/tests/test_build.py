@@ -154,8 +154,9 @@ def test_the_bench_is_the_owners_fixed_policy() -> None:
         resources=sandbox.Resources(),
         network=sandbox.Network.NONE,
         workspace="/workspace",
-        env={"HOME": "/workspace", "PYTHONDONTWRITEBYTECODE": "1", "PIP_NO_INPUT": "1"},
+        env={"PYTHONDONTWRITEBYTECODE": "1", "PIP_NO_INPUT": "1"},
     )
+    assert closed.env["HOME"] == "/workspace"
     assert open_.network is sandbox.Network.EGRESS
     assert builder_bot_example.DEFAULT_IMAGE == "localhost/mosfet-bench:1"
     assert builder_bot_example.DEFAULT_TRAITS == persona.Traits(traits=("careful", "curious", "candid"))
