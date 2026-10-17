@@ -9,7 +9,6 @@ from mosfet.device.events import (
     ObservedData,
     ObservedEvent,
 )
-from mosfet.device.sandbox import Sandbox
 
 __all__ = [
     "Device",
@@ -19,5 +18,4 @@ __all__ = [
     "FirmwareInitializingFailedEventData",
     "ObservedData",
     "ObservedEvent",
-    "Sandbox",
 ]
