@@ -1025,7 +1025,7 @@ def test_a_computer_typed_into_through_the_room_tells_its_holder() -> None:
         rooms = Rooms()
         room_transport = make_transport(rooms)
         await start(environment, room_transport, "transport")
-        device = computer.Computer(device_id="studio-laptop", transport=room_transport, peer_id=PEER, person_id="p-1")
+        device = computer.Computer(id="studio-laptop", transport=room_transport, peer_id=PEER, person_id="p-1")
         await start(environment, device, "computer")
         await wait_until(lambda: device.state() == "/Device/detached" and room_transport.state() == ACCEPTED)
         holder = Holder()

@@ -311,7 +311,7 @@ def test_the_link_up_turn_offers_the_computer_and_the_bench_and_a_silent_bot_doe
 
     woke = stimulus(link_up_calls[0])
     assert isinstance(woke, mosfet.StimulusData)
-    assert woke.data == computer.LinkUpData(device_id=PEER, transport="websocket")
+    assert woke.data == computer.LinkUpData(device_id="desk", transport="websocket")
     assert any(TOOLS <= offered(call) for call in link_up_calls)
     # Nothing chose to show anything or to use the bench, so nothing did.
     assert [screen.strip() for screen in screens] == [""]

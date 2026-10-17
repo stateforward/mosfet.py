@@ -526,7 +526,7 @@ class AddressableBot(mosfet.Bot):
         cognition: abilities.Ability[typing.Any, typing.Any],
         input: tuple[abilities.Ability[typing.Any, typing.Any], ...],
     ) -> None:
-        super().__init__(devices={}, cognition=cognition, input=input)
+        super().__init__(devices=(), cognition=cognition, input=input)
 
 
 def test_being_addressed_reaches_cognition_through_the_body() -> None:

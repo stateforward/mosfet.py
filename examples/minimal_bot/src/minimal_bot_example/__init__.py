@@ -16,7 +16,7 @@ class MinimalBot(mosfet.Bot):
     """A bot with no devices and no abilities beyond the cognition it is given."""
 
     def __init__(self, *, cognition: cognition.Cognition) -> None:
-        super().__init__({}, cognition=cognition)
+        super().__init__((), cognition=cognition)
 
 
 def build(config: runtime.Config) -> runtime.Assembly:

@@ -1353,6 +1353,7 @@ class Phone(mosfet.device.Device):
     def __init__(
         self,
         *,
+        id: mosfet.device.DeviceId | None = None,
         microphone: audio.Microphone | None = None,
         speaker: audio.Speaker | None = None,
         display: Display | None = None,
@@ -1369,9 +1370,11 @@ class Phone(mosfet.device.Device):
         bring-up, attaches its firmware with ``attachment.attach``, detaches it with
         ``attachment.detach`` at stop, then stops it; ``service_timeout`` bounds each request.
         ``None`` is a handset with no line: firmware drops what it publishes and records each drop.
+        ``id`` is the id the bot holding the handset knows it by, its kind (``"phone"``) when omitted.
 
         Raises:
-            ValueError: If ``service_timeout`` is not positive.
+            ValueError: If ``service_timeout`` is not positive, or ``id`` is not a valid
+                ``mosfet.device.DeviceId``.
             TypeError: If ``service`` is not an HSM instance whose class declares its ``model``.
         """
 
@@ -1388,6 +1391,7 @@ class Phone(mosfet.device.Device):
         # separate devices. The display shows caller ID rather than producing acoustic energy, so
         # it carries no placement of its own.
         super().__init__(
+            id=id,
             peripherals=(resolved_microphone, resolved_speaker, resolved_display, *tuple(peripherals)),
             placement=placement,
         )

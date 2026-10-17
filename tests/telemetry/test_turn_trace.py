@@ -200,7 +200,7 @@ class _NoChange(processing.Processor):
 
 class _PhoneBot(mosfet.Bot):
     def __init__(self, *, handset: phone.Phone, cognition_ability: cognition.Cognition) -> None:
-        super().__init__({"phone": handset}, cognition=cognition_ability)
+        super().__init__((handset,), cognition=cognition_ability)
 
 
 async def _idle(settle: float = 0.3, limit: float = 10.0) -> None:

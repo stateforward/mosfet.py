@@ -328,7 +328,7 @@ def test_a_computer_typed_into_through_the_server_tells_its_holder_and_shows_on_
         server = make_server(serve)
         await start(environment, server, "server")
         await wait_until(lambda: server.state() == LISTENING)
-        device = computer.Computer(device_id=PEER_ID, transport=server, person_id="p-1")
+        device = computer.Computer(id=PEER_ID, transport=server, person_id="p-1")
         _ = await started(environment, device, typing.cast(hsm.Model, device.model))
         holder = Holder()
         _ = await started(environment, holder, holder.model)

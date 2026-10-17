@@ -103,7 +103,7 @@ async def _see(
 ) -> tuple[RecordingCognition, RecordingSeeing]:
     mind = RecordingCognition(processor)
     eye = RecordingSeeing() if eye is None else eye
-    body = AbilityAgent(devices={}, cognition=mind, input=(eye,))
+    body = AbilityAgent(devices=(), cognition=mind, input=(eye,))
     _ = await start_bot_with_devices(body)
     still = dataclasses.replace(VisualEvent.with_data(VisualData(image=_PNG, kind="camera")), source="camera-1")
     _ = await body.dispatch(body.context(), still)

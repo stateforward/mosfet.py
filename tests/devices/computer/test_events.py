@@ -88,6 +88,15 @@ def test_text_entered_must_carry_text() -> None:
     assert entered.person_id is None
 
 
+@pytest.mark.parametrize("device_id", ["desk", "my_desk"])
+def test_observations_carry_the_id_the_bot_knows_the_computer_by(device_id: str) -> None:
+    """DSL-30: ``device_id`` is the computer's ``mosfet.device.DeviceId``, not its peer name."""
+
+    assert computer.LinkUpData(device_id=device_id, transport="websocket").device_id == device_id
+    with pytest.raises(pydantic.ValidationError):
+        _ = computer.LinkUpData(device_id="Desk", transport="websocket")
+
+
 def test_link_reasons_are_closed() -> None:
     with pytest.raises(pydantic.ValidationError):
         _ = computer.LinkDownData.model_validate({"device_id": "studio-laptop", "reason": "lost"})

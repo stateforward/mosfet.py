@@ -322,6 +322,8 @@ class Bot(Traced):
     # (ability.py is not owned by this change; the timeout travels in typed event
     # data, which the recipient adopts as its own attaching/detaching deadline).
     _attachment_timeout: datetime.timedelta
+    # Device id (Device.identity(), fixed at construction) → device. The id is the body's
+    # reference: cognition sees it on the tool menu, as the focus target, and in owned_devices.
     _devices: dict[str, Device]
     # Live actor id → configured device reference. Built when owned devices (and the
     # peripherals they power) start; cleared when they stop. Hot-path ownership is map
@@ -354,7 +356,7 @@ class Bot(Traced):
 
     def __init__(
         self,
-        devices: collections.abc.Mapping[str, Device],
+        devices: collections.abc.Sequence[Device],
         *,
         cognition: abilities.Ability[cognition.InputData, typing.Any],
         input: tuple[abilities.Ability[typing.Any, typing.Any], ...] = (),
@@ -365,6 +367,13 @@ class Bot(Traced):
         attachment_timeout: datetime.timedelta | None = None,
         stm_memory: memory.StmMemory | None = None,
     ) -> None:
+        """Build an unstarted body holding ``devices``, each known by its ``Device.identity()``.
+
+        Raises:
+            ValueError: If two devices share one id (one device given twice included), or a timeout
+                is not positive.
+        """
+
         super().__init__()
         if processing_timeout is not None and processing_timeout <= datetime.timedelta():
             raise ValueError("processing_timeout must be positive.")
@@ -381,7 +390,13 @@ class Bot(Traced):
         self._attachment_timeout = (
             attachment_timeout if attachment_timeout is not None else _DEFAULT_BOT_ATTACHMENT_TIMEOUT
         )
-        self._devices = dict(devices)
+        held: dict[str, Device] = {}
+        for device in devices:
+            identity = device.identity()
+            if identity in held:
+                raise ValueError(f"Bot devices must have distinct ids; {identity!r} is given twice.")
+            held[identity] = device
+        self._devices = held
         self._device_source_refs = {}
         self._cognition = cognition
         self._cognition_id = None
@@ -1497,7 +1512,8 @@ class Bot(Traced):
     def _describe_owned_devices(ctx: hsm.Context, instance: "Bot", event: hsm.Event[typing.Any]) -> None:
         """Declare owned devices on the body snapshot and rebuild the flat ownership map.
 
-        The devices map is fixed at construction, so the references are one unchanging truth;
+        The devices map is fixed at construction and keyed by each device's own construction-time
+        id (``Device.identity()``), so the references are one unchanging truth;
         the runtime ids bind only once the devices are actually up, which is why this restates
         on every activation (a restarted device is a new actor with a new id) and never
         earlier — an id that does not exist yet is not stamped.

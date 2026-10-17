@@ -1239,7 +1239,7 @@ class ListenSpeakBot(mosfet.Bot):
             self._cognition_config = CognitionConfig()
             cognition_instance = cognition(self._speaking)
         super().__init__(
-            devices={},
+            devices=(),
             cognition=cognition_instance,
             input=(self._listening,),
             output=(self._speaking,),

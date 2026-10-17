@@ -52,12 +52,14 @@ _IMAGE: pydantic.TypeAdapter[str] = pydantic.TypeAdapter(sandbox.ImageRef)
 class BuilderBot(mosfet.Bot):
     """A bot that holds one person's computer, ``desk``, and keeps a sandbox ``bench`` to build and test on.
 
+    The bot knows the computer by the id it was built with (``computer.Computer(id="desk", ...)``).
+
     It adds no behavior to ``mosfet.Bot``: what reaches it from the computer and the bench wakes its cognition,
     and what it does next is that cognition's to choose.
     """
 
     def __init__(self, *, desk: computer.Computer, bench: sandbox.Sandbox, cognition: cognition.Cognition) -> None:
-        super().__init__({"desk": desk}, cognition=cognition, acquired_abilities=(bench,))
+        super().__init__((desk,), cognition=cognition, acquired_abilities=(bench,))
 
 
 def bench(*, image: str, network: sandbox.Network) -> sandbox.Spec:
@@ -92,9 +94,10 @@ def compose(
 ) -> runtime.Assembly:
     """Assemble the builder from constructed collaborators; nothing is started here.
 
-    ``processor`` is the one model every faculty thinks with. ``server`` carries the person's computer, whose
-    device and peer id is ``peer``; ``person_id`` is who uses it, when the owner knows. ``host`` is an unstarted
-    sandbox host the bench owns from here on, declaring ``capacity``; ``spec`` is the owner's bench on it.
+    ``processor`` is the one model every faculty thinks with. ``server`` carries the person's computer, ``desk``,
+    whose remote machine the server knows as ``peer``; ``person_id`` is who uses it, when the owner knows.
+    ``host`` is an unstarted sandbox host the bench owns from here on, declaring ``capacity``; ``spec`` is the
+    owner's bench on it.
     ``traits`` are the owner's seed of who the bot is, and ``database`` is where its memory is kept. ``clock``
     is the UTC wall time the routines the bot authors are scheduled by.
 
@@ -102,7 +105,7 @@ def compose(
         ValueError: ``spec`` asks for a network or limit beyond ``capacity``, or ``host`` is already started.
     """
 
-    desk = computer.Computer(device_id=peer, transport=server, person_id=person_id)
+    desk = computer.Computer(id="desk", transport=server, peer_id=peer, person_id=person_id)
     workbench = sandbox.Sandbox(host=host, capacity=capacity, spec=spec, max_output_chars=MAX_OUTPUT_CHARS)
     store = memory.Memory(database=database)
     self_knowledge = persona.Persona(traits=traits, memory=store)

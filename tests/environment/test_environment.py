@@ -616,13 +616,13 @@ def test_model_snapshot_resolves_owned_devices_from_the_environments_own_scope()
         _ = await mosfet.started(environment, owner, typing.cast(hsm.Model, owner.model))
         return environment.model_snapshot(owner), hsm.id(device)
 
-    instructions, device_id = asyncio.run(run())
+    instructions, runtime_id = asyncio.run(run())
     assert instructions is not None
     root = xml.etree.ElementTree.fromstring(instructions)
     device_element = root.find("self/owned_devices/device")
     assert device_element is not None
     assert device_element.get("ref") == "phone"
-    assert device_element.get("id") == device_id
+    assert device_element.get("id") == runtime_id
 
 
 def test_model_snapshot_drops_an_owned_reference_the_environment_cannot_resolve() -> None:

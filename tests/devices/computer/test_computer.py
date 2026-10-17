@@ -76,7 +76,7 @@ async def started_computer(
     resolved = transport if transport is not None else FakeTransport()
     if not mosfet.lifecycle.is_started(resolved):
         _ = await mosfet.started(environment, resolved, FakeTransport.model, hsm.Config(id=f"transport-{device_id}"))
-    device = computer.Computer(device_id=device_id, transport=resolved, person_id="p-1", link_timeout=link_timeout)
+    device = computer.Computer(id=device_id, transport=resolved, person_id="p-1", link_timeout=link_timeout)
     _ = await mosfet.started(environment, device, typing.cast(hsm.Model, device.model))
     return device, resolved
 
@@ -113,18 +113,33 @@ async def joined_ears(environment: Environment) -> Ears:
 def test_computer_rejects_invalid_construction() -> None:
     fake = FakeTransport()
     with pytest.raises(ValueError, match="link_timeout"):
-        _ = computer.Computer(device_id=DEVICE_ID, transport=fake, link_timeout=datetime.timedelta(0))
+        _ = computer.Computer(id=DEVICE_ID, transport=fake, link_timeout=datetime.timedelta(0))
     with pytest.raises(pydantic.ValidationError):
-        _ = computer.Computer(device_id="Not A Device", transport=fake)
+        _ = computer.Computer(id="Not A Device", transport=fake)
     with pytest.raises(pydantic.ValidationError):
-        _ = computer.Computer(device_id=DEVICE_ID, transport=fake, person_id="")
+        _ = computer.Computer(id=DEVICE_ID, transport=fake, person_id="")
     with pytest.raises(pydantic.ValidationError):
-        _ = computer.Computer(device_id=DEVICE_ID, transport=fake, peer_id="not a peer")
+        _ = computer.Computer(id=DEVICE_ID, transport=fake, peer_id="not a peer")
+    # A valid device id is not always a valid peer id: the default peer id is the id itself.
+    with pytest.raises(pydantic.ValidationError):
+        _ = computer.Computer(id="my_desk", transport=fake)
+
+
+def test_a_computer_is_known_by_its_id_and_its_remote_machine_by_its_peer_id() -> None:
+    """DSL-30: ``id`` is the body's reference, ``"computer"`` by default; ``peer_id`` names the remote machine."""
+
+    assert computer.Computer(transport=FakeTransport()).identity() == "computer"
+    assert computer.Computer(id="desk", transport=FakeTransport()).identity() == "desk"
+    assert computer.Computer(id="my_desk", transport=FakeTransport(), peer_id="my-desk").identity() == "my_desk"
+    peer_ids: pydantic.TypeAdapter[str] = pydantic.TypeAdapter(computer.PeerId)
+    assert peer_ids.validate_python("studio-laptop") == "studio-laptop"
+    with pytest.raises(pydantic.ValidationError):
+        _ = peer_ids.validate_python("my_desk")
 
 
 def test_computer_owns_seven_ports_and_its_mouthpiece_sits_with_it() -> None:
     placement = space.Placement(position=space.Position(x=1.0, y=2.0))
-    device = computer.Computer(device_id=DEVICE_ID, transport=FakeTransport(), placement=placement)
+    device = computer.Computer(id=DEVICE_ID, transport=FakeTransport(), placement=placement)
 
     kinds = [type(port) for port in device_peripherals(device)]
 
@@ -146,7 +161,7 @@ def test_bring_up_registers_the_link_with_the_ports_channels_then_wires_every_po
         environment = Environment()
         fake = FakeTransport()
         _ = await mosfet.started(environment, fake, FakeTransport.model, hsm.Config(id="transport"))
-        device = computer.Computer(device_id=DEVICE_ID, transport=fake, peer_id=peer_id, person_id="p-1")
+        device = computer.Computer(id=DEVICE_ID, transport=fake, peer_id=peer_id, person_id="p-1")
         _ = await mosfet.started(environment, device, typing.cast(hsm.Model, device.model))
         await wait_until(lambda: device.state() == "/Device/detached")
         ports = device_peripherals(device)
@@ -300,10 +315,10 @@ def test_a_still_and_remote_audio_are_put_into_the_room_from_the_computer() -> N
         await settle()
         return ears.received, holder.observations(), hsm.id(remote.device)
 
-    room, told, device_id = asyncio.run(run())
+    room, told, runtime_id = asyncio.run(run())
 
     assert sorted(event.name for event in room) == sorted([VisualEvent.name, SoundEvent.name])
-    assert all(event.source == device_id for event in room)
+    assert all(event.source == runtime_id for event in room)
     assert told == []
 
 

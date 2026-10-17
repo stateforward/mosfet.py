@@ -528,7 +528,7 @@ def test_exhaustion_stops_the_other_bots_and_exits_70_even_after_a_first_signal(
     _assemble(
         monkeypatch,
         lambda config: runtime.Assembly(
-            bots={"failing": factories.QuietBot({"device": factories.FailingDevice()}), "mute": mute}
+            bots={"failing": factories.QuietBot((factories.FailingDevice(),)), "mute": mute}
         ),
     )
     policy = _policy(

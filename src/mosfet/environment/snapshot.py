@@ -128,7 +128,9 @@ def _render_owned_devices(
     """Render a perspective's ``owned_devices`` declaration as live, fully-described device elements.
 
     The one attribute this module treats specially, because its values are not attribute
-    content: they are runtime ids naming live actors elsewhere in scope. ``resolve_device`` looks
+    content: they are runtime ids naming live actors elsewhere in scope. Its keys are the
+    perspective's references, each the id its device was built with (``Device.identity()``),
+    rendered as ``ref``. ``resolve_device`` looks
     up a live actor by runtime id in the owning environment's own addressing scope — never a
     caller-supplied actor map, which would let cognition decide what the world contains. A
     reference the perspective names but the environment cannot currently give an honest snapshot

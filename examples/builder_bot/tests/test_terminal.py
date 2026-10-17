@@ -215,7 +215,7 @@ async def desk() -> Desk:
     server = websocket.Server(host="127.0.0.1", port=port, verifier=TOKENS)
     _ = await mosfet.started(environment, server, websocket.Server.model)
     await wait_until(lambda: server.state() == LISTENING)
-    device = computer.Computer(device_id=PEER, transport=server, person_id="person-1")
+    device = computer.Computer(id=PEER, transport=server, person_id="person-1")
     _ = await mosfet.started(environment, device, typing.cast(hsm.Model, device.model))
     holder = Holder()
     _ = await mosfet.started(environment, holder, Holder.model)

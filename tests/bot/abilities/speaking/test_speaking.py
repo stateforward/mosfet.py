@@ -1431,7 +1431,7 @@ def test_cognition_does_not_directly_select_speaking_output() -> None:
         class Probe(mosfet.Bot):
             def __init__(self) -> None:
                 super().__init__(
-                    devices={"phone": Device()},
+                    devices=(Device(id="phone"),),
                     cognition=as_cognition(processor),
                     output=(speaking_ability,),
                 )

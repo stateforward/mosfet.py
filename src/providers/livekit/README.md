@@ -87,7 +87,7 @@ room = livekit.RoomTransport(
     token=pydantic.SecretStr("bot-jwt"),  # grants only this peer's room
 )
 laptop = computer.Computer(
-    device_id="studio-laptop", transport=room, peer_id="computer-studio-laptop", person_id="person-42"
+    id="studio-laptop", transport=room, peer_id="computer-studio-laptop", person_id="person-42"
 )
 ```
 

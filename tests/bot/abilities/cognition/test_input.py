@@ -278,7 +278,7 @@ def test_build_processing_input_composes_live_device_state_instructions() -> Non
         )
         return built, hsm.id(device)
 
-    built, device_id = asyncio.run(run())
+    built, runtime_id = asyncio.run(run())
     instructions = built.instructions
     assert instructions is not None
     # Well-formed XML, no header text around the block.
@@ -306,7 +306,7 @@ def test_build_processing_input_composes_live_device_state_instructions() -> Non
     assert len(devices) == 1
     device_element = devices[0]
     assert device_element.get("ref") == "phone"
-    assert device_element.get("id") == device_id
+    assert device_element.get("id") == runtime_id
     assert device_element.get("state") == "/SnapshotAttributeFirmware/ringing"
 
     # Snapshot attributes as child elements: scalar text, protocol fragment as-is, drops.

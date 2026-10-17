@@ -14,6 +14,7 @@ carries media, so the model is never asked to emit bytes.
 import typing
 
 import hsm
+import mosfet.device
 import pydantic
 
 from mosfet import environment, event, media
@@ -24,18 +25,19 @@ MAX_MESSAGE_BYTES: typing.Final = 64 * 1024
 MAX_ELEMENTS: typing.Final = 64
 """Most elements one display content (and one layout) may hold."""
 
-DeviceId = typing.Annotated[
+PeerId = typing.Annotated[
     str,
     pydantic.Field(
         pattern=r"^[a-z0-9][a-z0-9-]{2,62}$",
         description=(
-            "Stable identifier of one computer, chosen by whoever deploys it: 3 to 63 lower-case letters, "
-            "digits, or hyphens, starting with a letter or digit. It is also the peer id a transport "
-            "authenticates the remote machine as, unless the computer is given another."
+            "The name a transport knows one computer's remote machine by, and authenticates it as: 3 to 63 "
+            "lower-case letters, digits, or hyphens, starting with a letter or digit. It is the computer's "
+            "id unless the computer is given another."
         ),
         examples=["studio-laptop", "kiosk-1"],
     ),
 ]
+_COMPUTER_ID_DESCRIPTION = "The computer's id: the one the bot holding it knows it by."
 PersonId = typing.Annotated[
     str,
     pydantic.Field(
@@ -310,13 +312,11 @@ class TextEnteredData(pydantic.BaseModel):
     model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
         frozen=True,
         json_schema_extra={
-            "examples": [
-                {"device_id": "studio-laptop", "person_id": "person-42", "field_id": "answer", "text": "A bird house"}
-            ],
+            "examples": [{"device_id": "desk", "person_id": "person-42", "field_id": "answer", "text": "A bird house"}],
         },
     )
 
-    device_id: DeviceId
+    device_id: mosfet.device.DeviceId = pydantic.Field(description=_COMPUTER_ID_DESCRIPTION)
     person_id: PersonId | None = pydantic.Field(default=None, description="Who uses the computer, when known.")
     field_id: ElementId
     text: str = pydantic.Field(
@@ -333,11 +333,11 @@ class ActivatedData(pydantic.BaseModel):
     model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
         frozen=True,
         json_schema_extra={
-            "examples": [{"device_id": "studio-laptop", "person_id": "person-42", "element_id": "submit"}],
+            "examples": [{"device_id": "desk", "person_id": "person-42", "element_id": "submit"}],
         },
     )
 
-    device_id: DeviceId
+    device_id: mosfet.device.DeviceId = pydantic.Field(description=_COMPUTER_ID_DESCRIPTION)
     person_id: PersonId | None = pydantic.Field(default=None, description="Who uses the computer, when known.")
     element_id: ElementId
 
@@ -347,10 +347,10 @@ class LinkUpData(pydantic.BaseModel):
 
     model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
         frozen=True,
-        json_schema_extra={"examples": [{"device_id": "studio-laptop", "transport": "livekit"}]},
+        json_schema_extra={"examples": [{"device_id": "desk", "transport": "livekit"}]},
     )
 
-    device_id: DeviceId
+    device_id: mosfet.device.DeviceId = pydantic.Field(description=_COMPUTER_ID_DESCRIPTION)
     transport: typing.Literal["livekit", "websocket"] = pydantic.Field(
         description="Which kind of link carries the remote machine.",
         examples=["livekit", "websocket"],
@@ -362,10 +362,10 @@ class LinkDownData(pydantic.BaseModel):
 
     model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
         frozen=True,
-        json_schema_extra={"examples": [{"device_id": "studio-laptop", "reason": "device_left"}]},
+        json_schema_extra={"examples": [{"device_id": "desk", "reason": "device_left"}]},
     )
 
-    device_id: DeviceId
+    device_id: mosfet.device.DeviceId = pydantic.Field(description=_COMPUTER_ID_DESCRIPTION)
     reason: typing.Literal["device_left", "transport_lost", "superseded", "detached"] = pydantic.Field(
         description=(
             "Why: the remote machine left, the transport was lost, a newer connection replaced it, or the "

@@ -39,6 +39,32 @@ _DEFAULT_FIRMWARE = mosfet.define(
 )
 _DEFAULT_FIRMWARE_INITIALIZING_TIMEOUT = datetime.timedelta(minutes=5)
 
+DeviceId = typing.Annotated[
+    str,
+    pydantic.Field(
+        pattern=r"^[a-z][a-z0-9_-]{0,62}$",
+        description=(
+            "The id the bot holding a device knows it by: on its tool menu, as its focus target, and in "
+            "the devices it owns. Set when the device is built and never changed, so it survives restarts, "
+            "and local to the bot that holds the device; it is not the runtime id an actor gets when it "
+            "starts. 1 to 63 lower-case letters, digits, underscores or hyphens, starting with a letter. "
+            "A device built without one is known by its kind."
+        ),
+        examples=["desk", "phone", "computer"],
+    ),
+]
+_DEVICE_ID: pydantic.TypeAdapter[str] = pydantic.TypeAdapter(DeviceId)
+
+
+def _kind(device: "Device") -> str:
+    """A device's kind: its class name in snake case (``SmartPhone`` is ``smart_phone``)."""
+
+    # Shared helper lives on conversation; a top-level import would cycle
+    # device -> abilities -> devices through the package inits.
+    from mosfet.abilities.communication.conversation.conversation import snake_case
+
+    return snake_case(type(device).__name__.lstrip("_"))
+
 
 class _FirmwareInitializingCleanupData(pydantic.BaseModel):
     """Result details for rollback after firmware initialization fails."""
@@ -125,14 +151,31 @@ class Device(Traced, attachment.Attachment):
     _attachments: list[hsm.Instance]
     _attachment_timeout: datetime.timedelta
     _attachment_request_id: str
+    # Construction-time and never rewritten: the body-local id a holder knows this device by.
+    _identity: str
 
     def __init__(
         self,
         *,
+        id: DeviceId | None = None,
         peripherals: collections.abc.Iterable["Device"] = (),
         placement: space.Placement | None = None,
     ) -> None:
+        """Build an unstarted device.
+
+        Args:
+            id: The id the bot holding this device knows it by (:data:`DeviceId`); its kind when omitted.
+            peripherals: Devices this device owns and powers.
+            placement: Where this device is in the environment, if known.
+
+        Raises:
+            ValueError: If ``id`` (or the kind it defaults to) is not a valid :data:`DeviceId`
+                (``pydantic.ValidationError`` is a ``ValueError``), or two peripherals declare one
+                observation name.
+        """
+
         super().__init__()
+        self._identity = _DEVICE_ID.validate_python(_kind(self) if id is None else id)
         # Where this device is, and how quiet a sound can get before it stops hearing. No class
         # default: a device cannot know where the robot holding it stands, and defaulting would
         # silently co-locate every device at the origin — perfect cross-talk with no error.
@@ -159,6 +202,16 @@ class Device(Traced, attachment.Attachment):
         self._firmware = None
         self._firmware_init_operation_id = None
         self._firmware_cleanup_operation_id = None
+
+    def identity(self) -> DeviceId:
+        """The id the bot holding this device knows it by, fixed when the device was built.
+
+        It is the one construction-time fact a peer may ask a device for, the way an hsm element
+        has an ``id``; everything else about a device is learned through its events and snapshot.
+        It is not :func:`hsm.id`, the runtime id the device gets each time it starts.
+        """
+
+        return self._identity
 
     @staticmethod
     def device_tree(*roots: "Device") -> tuple["Device", ...]:
@@ -566,7 +619,7 @@ class Device(Traced, attachment.Attachment):
 
     @staticmethod
     async def _initialize_firmware_activity(ctx: hsm.Context, instance: "Device", event: hsm.Event) -> None:
-        device_id = hsm.id(instance)
+        runtime_id = hsm.id(instance)
         operation_id = event.id or uuid.uuid4().hex
         instance._firmware_init_operation_id = operation_id
         try:
@@ -586,8 +639,8 @@ class Device(Traced, attachment.Attachment):
                 dataclasses.replace(
                     result,
                     id=operation_id,
-                    source=device_id,
-                    target=device_id,
+                    source=runtime_id,
+                    target=runtime_id,
                     metadata=dict(event.metadata),
                 ),
             )
@@ -604,14 +657,14 @@ class Device(Traced, attachment.Attachment):
     ) -> bool:
         del ctx
         data = event.data
-        device_id = hsm.id(instance)
+        runtime_id = hsm.id(instance)
         if not isinstance(data, (FirmwareInitializingDoneEventData, FirmwareInitializingFailedEventData)):
             return False
         return (
             instance._firmware_init_operation_id == data.operation_id
             and event.id == data.operation_id
-            and event.source == device_id
-            and event.target == device_id
+            and event.source == runtime_id
+            and event.target == runtime_id
         )
 
     @staticmethod
@@ -625,7 +678,7 @@ class Device(Traced, attachment.Attachment):
 
     @staticmethod
     async def _cleanup_failed_firmware_activity(ctx: hsm.Context, instance: "Device", event: hsm.Event) -> None:
-        device_id = hsm.id(instance)
+        runtime_id = hsm.id(instance)
         operation_id = event.id or uuid.uuid4().hex
         instance._firmware_cleanup_operation_id = operation_id
         try:
@@ -653,8 +706,8 @@ class Device(Traced, attachment.Attachment):
                         dataclasses.replace(
                             result,
                             id=operation_id,
-                            source=device_id,
-                            target=device_id,
+                            source=runtime_id,
+                            target=runtime_id,
                             metadata=dict(event.metadata),
                         ),
                     )
@@ -670,8 +723,8 @@ class Device(Traced, attachment.Attachment):
                 dataclasses.replace(
                     result,
                     id=operation_id,
-                    source=device_id,
-                    target=device_id,
+                    source=runtime_id,
+                    target=runtime_id,
                     metadata=dict(event.metadata),
                 ),
             )
@@ -704,13 +757,13 @@ class Device(Traced, attachment.Attachment):
     ) -> bool:
         del ctx
         data = event.data
-        device_id = hsm.id(instance)
+        runtime_id = hsm.id(instance)
         return (
             isinstance(data, _FirmwareInitializingCleanupData)
             and instance._firmware_cleanup_operation_id == data.operation_id
             and event.id == data.operation_id
-            and event.source == device_id
-            and event.target == device_id
+            and event.source == runtime_id
+            and event.target == runtime_id
             and instance._firmware is None
         )
 

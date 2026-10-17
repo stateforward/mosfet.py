@@ -202,7 +202,7 @@ def test_bot_conversation_contribution_reaches_cognition_without_direct_speaking
         class Probe(Bot):
             def __init__(self) -> None:
                 super().__init__(
-                    devices={"phone": Device()},
+                    devices=(Device(id="phone"),),
                     cognition=as_cognition(processor),
                     output=(speaking_ability,),
                     acquired_abilities=(communication_ability,),
@@ -264,7 +264,7 @@ def test_bot_image_only_contribution_reaches_cognition_with_image_part(decoder_e
         class Probe(Bot):
             def __init__(self) -> None:
                 super().__init__(
-                    devices={"phone": Device()},
+                    devices=(Device(id="phone"),),
                     cognition=as_cognition(processor),
                     output=(speaking_ability,),
                     acquired_abilities=(communication_ability,),
@@ -322,7 +322,7 @@ def test_bot_ignores_host_encoded_conversation_response() -> None:
         class Probe(Bot):
             def __init__(self) -> None:
                 super().__init__(
-                    devices={"phone": Device()},
+                    devices=(Device(id="phone"),),
                     cognition=as_cognition(processor),
                 )
 
@@ -362,7 +362,7 @@ def test_bot_ignores_response_without_text_product() -> None:
         class Probe(Bot):
             def __init__(self) -> None:
                 super().__init__(
-                    devices={"phone": Device()},
+                    devices=(Device(id="phone"),),
                     cognition=as_cognition(processor),
                 )
 
@@ -393,7 +393,7 @@ def test_bot_accepts_contribution_with_empty_text_product() -> None:
         class Probe(Bot):
             def __init__(self) -> None:
                 super().__init__(
-                    devices={"phone": Device()},
+                    devices=(Device(id="phone"),),
                     cognition=as_cognition(processor),
                 )
 
@@ -433,7 +433,7 @@ def test_bot_accepts_contribution_via_dispatch_to_id() -> None:
         class Probe(Bot):
             def __init__(self) -> None:
                 super().__init__(
-                    devices={"phone": Device()},
+                    devices=(Device(id="phone"),),
                     cognition=as_cognition(processor),
                     output=(speaking_ability,),
                 )
@@ -473,7 +473,7 @@ def test_bot_product_path_does_not_use_host_turn() -> None:
         class Probe(Bot):
             def __init__(self) -> None:
                 super().__init__(
-                    devices={"phone": Device()},
+                    devices=(Device(id="phone"),),
                     cognition=as_cognition(processor),
                     output=(speaking_ability,),
                     acquired_abilities=(communication_ability,),
@@ -541,7 +541,7 @@ def test_bot_defers_second_conversation_contribution_until_idle() -> None:
         class Probe(Bot):
             def __init__(self) -> None:
                 super().__init__(
-                    devices={"phone": Device()},
+                    devices=(Device(id="phone"),),
                     cognition=as_cognition(processor),
                     output=(speaking_ability,),
                     acquired_abilities=(communication_ability,),
@@ -623,7 +623,7 @@ def test_listening_speech_reaches_cognition_without_conversation_dispatch() -> N
         class Probe(Bot):
             def __init__(self) -> None:
                 super().__init__(
-                    devices={"phone": Device()},
+                    devices=(Device(id="phone"),),
                     cognition=cognitive,
                     input=(listening_ability,),
                     output=(speaking_ability,),
@@ -684,7 +684,7 @@ def test_listening_stt_product_reaches_cognition_without_conversation_dispatch()
         class Probe(Bot):
             def __init__(self) -> None:
                 super().__init__(
-                    devices={"phone": Device()},
+                    devices=(Device(id="phone"),),
                     cognition=cognitive,
                     input=(listening_ability,),
                     output=(speaking_ability,),

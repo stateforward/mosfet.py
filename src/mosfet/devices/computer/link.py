@@ -16,12 +16,12 @@ from .display import Display
 from .events import (
     MAX_MESSAGE_BYTES,
     ContentEvent,
-    DeviceId,
     LayoutEvent,
     LinkDownData,
     LinkDownEvent,
     LinkUpData,
     LinkUpEvent,
+    PeerId,
 )
 from .microphone import Microphone
 from .mouthpiece import Mouthpiece
@@ -35,6 +35,7 @@ import typing
 import uuid
 
 import hsm
+import mosfet.device
 import pydantic
 from opentelemetry import metrics
 
@@ -46,8 +47,8 @@ from mosfet.telemetry.hsm import Traced
 _DEFAULT_REGISTER_TIMEOUT = datetime.timedelta(seconds=10)
 
 _LOG = logging.getLogger(__name__)
-_DEVICE_ID: pydantic.TypeAdapter[str] = pydantic.TypeAdapter(DeviceId)
-_PEER_ID: pydantic.TypeAdapter[str] = pydantic.TypeAdapter(transport.PeerId)
+_DEVICE_ID: pydantic.TypeAdapter[str] = pydantic.TypeAdapter(mosfet.device.DeviceId)
+_PEER_ID: pydantic.TypeAdapter[str] = pydantic.TypeAdapter(PeerId)
 # Attribute: the transport's own low-cardinality name, stamped by the transport.
 _SESSIONS = metrics.get_meter("bot.devices.computer").create_up_down_counter(
     "bot.devices.computer.link.session.active",
@@ -70,10 +71,10 @@ class Ports:
     only to the computer's firmware.
 
     Raises:
-        pydantic.ValidationError: If ``device_id`` is not a valid :data:`DeviceId`.
+        pydantic.ValidationError: If ``device_id`` is not a valid ``mosfet.device.DeviceId``.
     """
 
-    device_id: DeviceId
+    device_id: mosfet.device.DeviceId
     keyboard: hid.Keyboard
     pointer: hid.Pointer
     camera: Camera
@@ -166,8 +167,8 @@ class Link(Traced, attachment.Attachment):
 
         Raises:
             ValueError: If ``register_timeout`` is not positive, ``peer_id`` is not a valid
-                ``transport.PeerId``, ``device_id`` is not a valid :data:`DeviceId`, or ``channels`` names
-                a channel twice (``pydantic.ValidationError`` is a ``ValueError``).
+                :data:`PeerId`, ``device_id`` is not a valid ``mosfet.device.DeviceId``, or ``channels``
+                names a channel twice (``pydantic.ValidationError`` is a ``ValueError``).
         """
 
         super().__init__()

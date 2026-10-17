@@ -38,13 +38,13 @@ class QuietBot(mosfet.Bot):
 
     def __init__(
         self,
-        devices: collections.abc.Mapping[str, Device] | None = None,
+        devices: collections.abc.Sequence[Device] = (),
         *,
         cognition: StubCognition | None = None,
         deactivation_timeout: datetime.timedelta | None = None,
     ) -> None:
         super().__init__(
-            dict(devices or {}),
+            devices,
             cognition=cognition or StubCognition(),
             deactivation_timeout=deactivation_timeout,
         )
@@ -253,7 +253,7 @@ def quiet(config: runtime.Config) -> runtime.Assembly:
 def activating(config: runtime.Config) -> runtime.Assembly:
     """One bot that never finishes activating; ``<data_dir>/activating`` appears once it has begun."""
 
-    return runtime.Assembly(bots={"slow": QuietBot({"device": MarkingDevice(config.data_dir / "activating")})})
+    return runtime.Assembly(bots={"slow": QuietBot((MarkingDevice(config.data_dir / "activating"),))})
 
 
 def mute(config: runtime.Config) -> runtime.Assembly:
@@ -274,7 +274,7 @@ def failing(config: runtime.Config) -> runtime.Assembly:
     """One bot whose activation always fails, so it exhausts its restart budget."""
 
     del config
-    return runtime.Assembly(bots={"failing": QuietBot({"device": FailingDevice()})})
+    return runtime.Assembly(bots={"failing": QuietBot((FailingDevice(),))})
 
 
 def blocking(config: runtime.Config) -> runtime.Assembly:

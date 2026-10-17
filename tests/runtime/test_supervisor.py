@@ -130,7 +130,7 @@ def test_activation_reports_running_under_the_first_operation_id() -> None:
 
 def test_failed_activations_restart_with_doubling_capped_backoff_until_exhausted() -> None:
     async def run() -> tuple[list[tuple[str, str]], list[hsm.Event[typing.Any]], list[datetime.timedelta]]:
-        bot = factories.QuietBot({"device": factories.FailingDevice()})
+        bot = factories.QuietBot((factories.FailingDevice(),))
         supervised = await _supervise(bot, _policy(max_restarts=4, backoff_initial=10 * _MS, backoff_max=25 * _MS))
         await factories.wait_until(lambda: supervised.owner.reports != [])
         backoffs = [delay for delay in supervised.delays if delay < datetime.timedelta(seconds=1)]
@@ -158,7 +158,7 @@ def test_failed_activations_restart_with_doubling_capped_backoff_until_exhausted
 def test_restart_after_activation_failure_brings_the_bot_and_its_devices_back() -> None:
     async def run() -> tuple[list[tuple[str, str]], runtime.SupervisorData, int, str]:
         device = factories.FailingDevice(failures=1)
-        bot = factories.QuietBot({"device": device})
+        bot = factories.QuietBot((device,))
         supervised = await _supervise(bot, _policy())
         await factories.wait_until(lambda: supervised.owner.reports != [])
         report = supervised.owner.reports[0].data
@@ -180,7 +180,7 @@ def test_restart_after_activation_failure_brings_the_bot_and_its_devices_back() 
 def test_a_stale_activation_terminal_is_ignored() -> None:
     async def run() -> list[str]:
         gate = asyncio.Event()
-        bot = factories.QuietBot({"device": factories.GatedDevice(gate)})
+        bot = factories.QuietBot((factories.GatedDevice(gate),))
         supervised = await _supervise(bot, _policy())
         await factories.wait_until(lambda: bot.state() == "/Bot/activating")
         _ = await hsm.dispatch(
@@ -199,7 +199,7 @@ def test_a_stale_activation_terminal_is_ignored() -> None:
 
 def test_degraded_after_a_stable_run_restarts_from_the_initial_backoff() -> None:
     async def run() -> tuple[list[datetime.timedelta], list[tuple[str, str]], list[str]]:
-        bot = factories.QuietBot({"device": factories.FailingDevice(failures=1)})
+        bot = factories.QuietBot((factories.FailingDevice(failures=1),))
         supervised = await _supervise(bot, _policy(stable_after=30 * _MS))
         await factories.wait_until(lambda: supervised.owner.reports != [])
         # Running stably for stable_after clears the failed attempt counted before this run.
@@ -235,7 +235,7 @@ def test_attach_raising_is_recovered_and_counts_against_the_budget() -> None:
 
 def test_stop_while_the_bot_activates_ends_graceful_and_releases_it() -> None:
     async def run() -> tuple[runtime.SupervisorStoppedData | None, list[tuple[str, str]], bool]:
-        bot = factories.QuietBot({"device": factories.GatedDevice(asyncio.Event())})
+        bot = factories.QuietBot((factories.GatedDevice(asyncio.Event()),))
         supervised = await _supervise(bot, _policy())
         await factories.wait_until(lambda: bot.state() == "/Bot/activating")
         await supervised.stop()
@@ -297,7 +297,7 @@ def test_stop_while_recovering_waits_for_the_release_and_never_restarts() -> Non
     async def run() -> tuple[runtime.SupervisorStoppedData | None, list[tuple[str, str]], bool]:
         # The bot fails to activate and then never answers the recovery's deactivate, so the supervisor
         # sits in recovering until its stop bound.
-        bot = factories.MuteBot({"device": factories.FailingDevice()})
+        bot = factories.MuteBot((factories.FailingDevice(),))
         supervised = await _supervise(bot, _policy(bot_stop_timeout=100 * _MS))
         await factories.wait_until(lambda: supervised.supervisor.state() == "/Supervisor/recovering/detaching")
         await supervised.stop()
@@ -313,7 +313,7 @@ def test_stop_while_recovering_waits_for_the_release_and_never_restarts() -> Non
 
 def test_stop_from_backoff_is_immediate() -> None:
     async def run() -> tuple[runtime.SupervisorStoppedData | None, float]:
-        bot = factories.QuietBot({"device": factories.FailingDevice()})
+        bot = factories.QuietBot((factories.FailingDevice(),))
         supervised = await _supervise(
             bot,
             _policy(backoff_initial=datetime.timedelta(seconds=30), backoff_max=datetime.timedelta(seconds=30)),
@@ -332,7 +332,7 @@ def test_stop_from_backoff_is_immediate() -> None:
 
 def test_stop_when_exhausted_is_immediate() -> None:
     async def run() -> list[str]:
-        bot = factories.QuietBot({"device": factories.FailingDevice()})
+        bot = factories.QuietBot((factories.FailingDevice(),))
         supervised = await _supervise(bot, _policy(max_restarts=1))
         await factories.wait_until(lambda: supervised.owner.reports != [])
         await supervised.stop()
@@ -363,7 +363,7 @@ def test_stop_matches_the_terminal_of_the_bots_own_detach_timeout() -> None:
     async def run() -> tuple[runtime.SupervisorStoppedData | None, list[tuple[str, str]]]:
         # The device never answers the detach, so the bot's own deactivation bound ends its detach and
         # its cleanup answers on that timer path.
-        bot = factories.QuietBot({"device": factories.DeafDevice()}, deactivation_timeout=30 * _MS)
+        bot = factories.QuietBot((factories.DeafDevice(),), deactivation_timeout=30 * _MS)
         supervised = await _supervise(bot, _policy(bot_stop_timeout=datetime.timedelta(seconds=2)))
         await factories.wait_until(lambda: supervised.owner.reports != [])
         await supervised.stop()
@@ -378,7 +378,7 @@ def test_stop_matches_the_terminal_of_the_bots_own_detach_timeout() -> None:
 
 def test_the_largest_restart_budget_with_the_smallest_backoff_still_reports_exhaustion() -> None:
     async def run() -> tuple[list[hsm.Event[typing.Any]], datetime.timedelta]:
-        bot = factories.QuietBot({"device": factories.FailingDevice()})
+        bot = factories.QuietBot((factories.FailingDevice(),))
         tiny = datetime.timedelta(microseconds=1)
         supervised = await _supervise(
             bot, _policy(max_restarts=runtime.MAX_RESTARTS, backoff_initial=tiny, backoff_max=tiny)
@@ -399,7 +399,7 @@ def test_the_largest_restart_budget_with_the_smallest_backoff_still_reports_exha
 
 def test_a_release_that_raises_while_recovering_reports_exhaustion_without_waiting_for_its_bound() -> None:
     async def run() -> tuple[list[str], float]:
-        bot = factories.UnreleasableBot({"device": factories.FailingDevice()})
+        bot = factories.UnreleasableBot((factories.FailingDevice(),))
         supervised = await _supervise(
             bot,
             _policy(stop_grace=datetime.timedelta(seconds=60), bot_release_timeout=datetime.timedelta(seconds=30)),

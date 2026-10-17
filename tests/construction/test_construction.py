@@ -128,7 +128,7 @@ _CASES: dict[str, collections.abc.Callable[[pathlib.Path], object]] = {
     "sensitivity.Sensitivity": lambda tmp: sensitivity.Sensitivity(),
     "audio.Microphone": lambda tmp: audio.Microphone(),
     "audio.Speaker": lambda tmp: audio.Speaker(),
-    "computer.Computer": lambda tmp: computer.Computer(device_id="desk", transport=hsm.Instance()),
+    "computer.Computer": lambda tmp: computer.Computer(id="desk", transport=hsm.Instance()),
     "computer.Camera": lambda tmp: computer.Camera(),
     "computer.Display": lambda tmp: computer.Display(),
     "computer.Microphone": lambda tmp: computer.Microphone(),

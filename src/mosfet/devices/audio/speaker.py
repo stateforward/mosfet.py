@@ -21,7 +21,7 @@ import hsm
 import mosfet
 from opentelemetry import metrics
 
-from mosfet.device import Device
+from mosfet.device import Device, DeviceId
 from mosfet.environment import SoundData, SoundEvent, Environment, space
 
 _MEDIA_TYPE = "audio/pcm"
@@ -133,6 +133,7 @@ class Speaker(Device):
     def __init__(
         self,
         *,
+        id: DeviceId | None = None,
         peripherals: collections.abc.Iterable[Device] = (),
         placement: space.Placement | None = None,
         amplitude_db: float | None = None,
@@ -143,6 +144,7 @@ class Speaker(Device):
         """Build a speaker.
 
         Args:
+            id: The id the bot holding this speaker knows it by; ``"speaker"`` when omitted.
             peripherals: Devices this speaker powers.
             placement: Where this transducer is in the environment, if known.
             amplitude_db: How loud it plays at the reference distance; ``None`` carries everywhere.
@@ -151,14 +153,15 @@ class Speaker(Device):
             clock: Monotonic seconds the playout schedule is kept against.
 
         Raises:
-            ValueError: ``frame`` is not positive or ``max_buffered`` is shorter than ``frame``.
+            ValueError: ``frame`` is not positive, ``max_buffered`` is shorter than ``frame``, or ``id`` is
+                not a valid ``mosfet.device.DeviceId``.
         """
 
         if frame <= datetime.timedelta(0):
             raise ValueError(f"Speaker frame must be positive, got {frame}.")
         if max_buffered < frame:
             raise ValueError(f"Speaker max_buffered must hold at least one frame, got {max_buffered}.")
-        super().__init__(peripherals=peripherals, placement=placement)
+        super().__init__(id=id, peripherals=peripherals, placement=placement)
         # How loud this transducer plays, measured at the reference distance. A handset earpiece
         # and a room speaker are different hardware; without a value the sound carries everywhere,
         # which is what keeps geometry opt-in.

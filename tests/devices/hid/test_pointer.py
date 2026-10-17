@@ -53,8 +53,15 @@ def pointer_event(data: object) -> hsm.Event[typing.Any]:
     )
 
 
-async def start(environment: Environment, device: Device, device_id: str) -> None:
-    _ = await mosfet.started(environment, device, typing.cast(hsm.Model, device.model), hsm.Config(id=device_id))
+async def start(environment: Environment, device: Device, runtime_id: str) -> None:
+    _ = await mosfet.started(environment, device, typing.cast(hsm.Model, device.model), hsm.Config(id=runtime_id))
+
+
+def test_pointer_is_known_by_its_kind() -> None:
+    """DSL-28g: a held device's default id is its kind."""
+
+    assert hid.Pointer().identity() == "pointer"
+    assert hid.Pointer(id="left-pointer").identity() == "left-pointer"
 
 
 def test_pointer_is_a_transducer_without_firmware_or_observation() -> None:

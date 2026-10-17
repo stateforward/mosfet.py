@@ -10,7 +10,7 @@ transport (``mosfet.protocols.transport``) and the ports' streams decode through
 
     from mosfet.devices import computer
 
-    computer.Computer(device_id="studio-laptop", transport=transport, person_id="person-42")
+    computer.Computer(id="desk", transport=transport, peer_id="studio-laptop", person_id="person-42")
     computer.ShowEvent
 """
 
@@ -29,7 +29,6 @@ from .events import (
     ButtonElement,
     ContentData,
     ContentEvent,
-    DeviceId,
     Element,
     ElementId,
     FieldElement,
@@ -42,6 +41,7 @@ from .events import (
     LinkUpData,
     LinkUpEvent,
     MicrophoneSoundData,
+    PeerId,
     PersonId,
     ShowData,
     ShowEvent,
@@ -69,7 +69,6 @@ __all__ = [
     "Computer",
     "ContentData",
     "ContentEvent",
-    "DeviceId",
     "Display",
     "Element",
     "ElementId",
@@ -87,6 +86,7 @@ __all__ = [
     "Microphone",
     "MicrophoneSoundData",
     "Mouthpiece",
+    "PeerId",
     "PersonId",
     "Ports",
     "ShowData",

@@ -26,7 +26,7 @@ from mosfet.providers import websocket
 
 tokens = websocket.HmacTokens(pydantic.SecretStr(secret))
 server = websocket.Server(host="0.0.0.0", port=8765, verifier=tokens)  # Assembly.actors
-laptop = computer.Computer(device_id="studio-laptop", transport=server)
+laptop = computer.Computer(id="studio-laptop", transport=server)
 ```
 
 An endpoint (the computer's link) registers its peer with `attachment.attach` carrying a

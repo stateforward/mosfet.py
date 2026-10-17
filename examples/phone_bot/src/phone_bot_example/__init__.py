@@ -958,7 +958,7 @@ class PhoneBot(mosfet.Bot):
         )
         super().__init__(
             # Phone first: an unfocused turn falls back to the first configured device.
-            devices={"phone": self._phone},
+            devices=(self._phone,),
             cognition=cognition_instance,
             input=(self._listening,),
             output=(self._speaking,),

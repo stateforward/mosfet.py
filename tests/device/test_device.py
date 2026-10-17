@@ -346,6 +346,42 @@ def test_device_construction_rejects_colliding_peripheral_observation_names() ->
         _ = Device(peripherals=(first, second))
 
 
+class HandheldRadio(Device):
+    """A device kind with a two-word class name, so its default id shows the snake-cased kind."""
+
+
+def test_device_id_defaults_to_its_kind() -> None:
+    """DSL-28g: a device built without an id is known by its kind."""
+
+    assert Device().identity() == "device"
+    assert HandheldRadio().identity() == "handheld_radio"
+
+
+def test_device_id_is_the_one_it_was_built_with_and_is_not_the_runtime_id() -> None:
+    """DSL-30: the id is set at construction, outlives the run, and is not hsm's runtime id."""
+
+    async def run() -> tuple[str, str]:
+        device = Device(id="desk")
+        _ = await start_device_in_environment(device)
+        runtime_id = hsm.id(device)
+        await hsm.stop(device)
+        return device.identity(), runtime_id
+
+    identity, runtime_id = asyncio.run(run())
+
+    assert identity == "desk"
+    assert runtime_id != "desk"
+
+
+@pytest.mark.parametrize("bad", ["", "Desk", "1desk", "desk lamp", "d" * 64])
+def test_device_id_must_be_a_device_id(bad: str) -> None:
+    device_ids: pydantic.TypeAdapter[str] = pydantic.TypeAdapter(mosfet.device.DeviceId)
+    with pytest.raises(pydantic.ValidationError):
+        _ = Device(id=bad)
+    with pytest.raises(pydantic.ValidationError):
+        _ = device_ids.validate_python(bad)
+
+
 def test_device_describes_environment_interaction_surface() -> None:
     device = Device()
 

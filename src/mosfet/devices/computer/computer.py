@@ -100,7 +100,7 @@ class Computer(mosfet.device.Device):
     def __init__(
         self,
         *,
-        device_id: str,
+        id: mosfet.device.DeviceId = "computer",
         transport: hsm.Instance,
         peer_id: str | None = None,
         person_id: str | None = None,
@@ -115,20 +115,22 @@ class Computer(mosfet.device.Device):
         peripherals: collections.abc.Iterable[mosfet.device.Device] = (),
         placement: space.Placement | None = None,
     ) -> None:
-        """Build a computer whose remote machine ``transport`` carries as ``peer_id`` (default ``device_id``).
+        """Build a computer the bot holding it knows as ``id``, its remote machine reached through ``transport``.
 
-        ``transport`` is an address the computer's link registers with; the computer neither starts
-        nor stops it. The default mouthpiece hears at the computer's ``placement``.
+        The transport knows the remote machine as ``peer_id`` (a ``computer.PeerId``), ``id`` by default. ``transport`` is an address the
+        computer's link registers with; the computer neither starts nor stops it. The default
+        mouthpiece hears at the computer's ``placement``.
 
         Raises:
-            ValueError: If ``link_timeout`` is not positive, or ``device_id``, ``peer_id`` or
-                ``person_id`` is invalid (``pydantic.ValidationError`` is a ``ValueError``).
+            ValueError: If ``link_timeout`` is not positive, or ``id``, ``peer_id`` or ``person_id`` is
+                invalid (``pydantic.ValidationError`` is a ``ValueError``). An ``id`` that is a valid
+                ``mosfet.device.DeviceId`` but not a valid ``computer.PeerId`` needs a ``peer_id``.
         """
 
         if link_timeout <= datetime.timedelta():
             raise ValueError("link_timeout must be a positive duration.")
         ports = Ports(
-            device_id=device_id,
+            device_id=id,
             keyboard=keyboard if keyboard is not None else hid.Keyboard(),
             pointer=pointer if pointer is not None else hid.Pointer(),
             camera=camera if camera is not None else Camera(),
@@ -138,12 +140,12 @@ class Computer(mosfet.device.Device):
             # The mouthpiece sits with the computer, as a handset's mouthpiece sits with the handset.
             mouthpiece=mouthpiece if mouthpiece is not None else Mouthpiece(placement=placement),
         )
-        super().__init__(peripherals=(*_wiring_order(ports), *tuple(peripherals)), placement=placement)
+        super().__init__(id=id, peripherals=(*_wiring_order(ports), *tuple(peripherals)), placement=placement)
         self._ports = ports
         self._link = Link(
             transport=transport,
-            peer_id=device_id if peer_id is None else peer_id,
-            device_id=device_id,
+            peer_id=id if peer_id is None else peer_id,
+            device_id=id,
             channels=channels(ports),
             register_timeout=link_timeout,
         )

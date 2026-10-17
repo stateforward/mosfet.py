@@ -7,7 +7,7 @@ import uuid
 
 import hsm
 
-from mosfet.device import Device
+from mosfet.device import Device, DeviceId
 from mosfet.environment import space
 from mosfet.protocols import transform
 
@@ -44,10 +44,11 @@ class Display(Device):
     def __init__(
         self,
         *,
+        id: DeviceId | None = None,
         peripherals: collections.abc.Iterable[Device] = (),
         placement: space.Placement | None = None,
     ) -> None:
-        super().__init__(peripherals=peripherals, placement=placement)
+        super().__init__(id=id, peripherals=peripherals, placement=placement)
         self._stream = None
 
     @staticmethod

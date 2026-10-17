@@ -2687,6 +2687,7 @@ class Phone(phone.Phone):
     def __init__(
         self,
         *,
+        id: mosfet.device.DeviceId | None = None,
         url: str | None = None,
         token: str | None = None,
         track_name: str = "bot-audio",
@@ -2700,6 +2701,7 @@ class Phone(phone.Phone):
         loop: asyncio.AbstractEventLoop | None = None,
     ) -> None:
         super().__init__(
+            id=id,
             microphone=microphone,
             speaker=speaker,
             peripherals=peripherals,

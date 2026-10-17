@@ -36,7 +36,7 @@ from tests.bot.abilities.cognition.metadata_contract import assert_metadata_key_
 
 from mosfet.bot import body
 from mosfet.bot.body import Bot
-from mosfet.device import Device
+from mosfet.device import Device, DeviceId
 from mosfet import event as event_contract
 from mosfet import media
 from mosfet.event import event_json_schema
@@ -555,7 +555,7 @@ class BasicAgent(Bot):
     actions: list[cognition.types.OutputData]
     failures: list[mosfet.ProcessingFailedEventData]
 
-    def __init__(self, devices: collections.abc.Mapping[str, Device]) -> None:
+    def __init__(self, devices: collections.abc.Sequence[Device]) -> None:
         super().__init__(devices=devices, cognition=as_cognition(IgnoreAbility()))
         self.actions = []
         self.failures = []
@@ -576,7 +576,7 @@ class BasicAgent(Bot):
 class LifecycleRecordingAgent(BasicAgent):
     lifecycle_events: list[hsm.Event[typing.Any]]
 
-    def __init__(self, devices: collections.abc.Mapping[str, Device]) -> None:
+    def __init__(self, devices: collections.abc.Sequence[Device]) -> None:
         super().__init__(devices)
         self.lifecycle_events = []
 
@@ -602,7 +602,7 @@ class FocusedAgent(Bot):
 
     def __init__(
         self,
-        devices: collections.abc.Mapping[str, Device],
+        devices: collections.abc.Sequence[Device],
         *,
         cognition: processing.Processing | None = None,
         acquired_abilities: tuple[abilities.Ability[typing.Any, typing.Any], ...] = (),
@@ -623,7 +623,7 @@ class AbilityAgent(Bot):
 
     def __init__(
         self,
-        devices: collections.abc.Mapping[str, Device],
+        devices: collections.abc.Sequence[Device],
         *,
         cognition: abilities.Ability[typing.Any, typing.Any] | processing.Processing,
         input: tuple[abilities.Ability[typing.Any, typing.Any], ...] = (),
@@ -708,7 +708,7 @@ class OccasionAgent(AbilityAgent):
 
     def __init__(
         self,
-        devices: collections.abc.Mapping[str, Device],
+        devices: collections.abc.Sequence[Device],
         *,
         cognition: abilities.Ability[typing.Any, typing.Any] | processing.Processing,
     ) -> None:
@@ -738,8 +738,8 @@ class SlowInitializingDevice(Device):
     _firmware_initializing_timeout: typing.ClassVar[datetime.timedelta] = datetime.timedelta(seconds=1)
     release: asyncio.Event
 
-    def __init__(self, release: asyncio.Event) -> None:
-        super().__init__()
+    def __init__(self, release: asyncio.Event, *, id: DeviceId | None = None) -> None:
+        super().__init__(id=id)
         self.release = release
 
     @typing.override
@@ -788,7 +788,7 @@ class SnapshotFailingPhone(phone_device.Phone):
     fail_snapshots: bool
 
     def __init__(self) -> None:
-        super().__init__()
+        super().__init__(id="phone")
         self.fail_snapshots = False
 
     @typing.override
@@ -802,7 +802,7 @@ class ContextRecordingPhone(phone_device.Phone):
     event_metadata: list[dict[str, object]]
 
     def __init__(self) -> None:
-        super().__init__()
+        super().__init__(id="phone")
         self.event_metadata = []
 
     @typing.override
@@ -812,12 +812,12 @@ class ContextRecordingPhone(phone_device.Phone):
         return super().dispatch(ctx, event)
 
 
-def basic_agent(*, devices: collections.abc.Mapping[str, Device] | None = None) -> BasicAgent:
-    return BasicAgent(devices=devices or {})
+def basic_agent(*, devices: collections.abc.Sequence[Device] = ()) -> BasicAgent:
+    return BasicAgent(devices=devices)
 
 
-def configured_devices(*references: str) -> dict[str, Device]:
-    return {reference: Device() for reference in references}
+def configured_devices(*ids: str) -> tuple[Device, ...]:
+    return tuple(Device(id=identity) for identity in ids)
 
 
 async def start_bot_with_devices(active_bot: Bot, *, placement: space.Placement | None = None) -> Environment:
@@ -906,7 +906,7 @@ def test_cognition_reboot_request_during_activation_forces_cleanup_then_restarts
 ) -> None:
     async def run() -> tuple[str, int]:
         cognition_ability = as_cognition(IgnoreAbility())
-        active_bot = AbilityAgent(devices={}, cognition=cognition_ability)
+        active_bot = AbilityAgent(devices=(), cognition=cognition_ability)
         original_attach = attachment.Group.attach
         first_attach_started = asyncio.Event()
         blocked = asyncio.Event()
@@ -977,7 +977,7 @@ def test_cognition_reboot_detach_timeout_resets_stuck_group_before_restart(monke
         stuck = FirstDetachHangsAbility()
         cognition_ability = as_cognition(IgnoreAbility())
         active_bot = FastRebootAbilityAgent(
-            devices={},
+            devices=(),
             cognition=cognition_ability,
             acquired_abilities=(stuck,),
         )
@@ -1025,7 +1025,7 @@ def test_cognition_reboot_detach_timeout_resets_stuck_group_before_restart(monke
 
 def test_bot_attach_rejects_started_agent_from_another_environment() -> None:
     async def run() -> None:
-        active_bot = basic_agent(devices={})
+        active_bot = basic_agent(devices=())
         first_environment = Environment()
         second_environment = Environment()
 
@@ -1055,7 +1055,7 @@ def test_bot_attach_with_otlp_endpoint_opens_no_event_injection_channel(monkeypa
     monkeypatch.setattr(grpc, "insecure_channel", recording_insecure_channel)
 
     async def run() -> None:
-        active_bot = basic_agent(devices={})
+        active_bot = basic_agent(devices=())
         environment = Environment()
         _ = await active_bot.attach(environment)
         await asyncio.sleep(0.2)
@@ -1067,26 +1067,9 @@ def test_bot_attach_with_otlp_endpoint_opens_no_event_injection_channel(monkeypa
     assert importlib.util.find_spec("mosfet.telemetry.control") is None
 
 
-def test_bot_activation_deduplicates_device_aliases() -> None:
-    async def run() -> tuple[str, bool]:
-        shared_device = Device()
-        active_bot = basic_agent(devices={"one": shared_device, "two": shared_device})
-        environment = Environment()
-
-        _ = await active_bot.attach(environment)
-        await wait_until(lambda: active_bot.state() == "/Bot/active/unfocused")
-
-        return active_bot.state(), device_bots(shared_device) == (active_bot,)
-
-    state, attached_to_agent = asyncio.run(run())
-
-    assert state == "/Bot/active/unfocused"
-    assert attached_to_agent
-
-
 def test_bot_and_nested_cognition_use_private_attachment_groups(monkeypatch: pytest.MonkeyPatch) -> None:
     async def run() -> tuple[int, int, bool, str]:
-        active_bot = basic_agent(devices={"device": Device()})
+        active_bot = basic_agent(devices=(Device(id="device"),))
         environment = Environment()
         attach_calls = 0
         detach_calls = 0
@@ -1134,7 +1117,7 @@ def test_bot_and_nested_cognition_use_private_attachment_groups(monkeypatch: pyt
 def test_bot_rejects_environment_started_lifecycle_ability_without_stopping_it() -> None:
     async def run() -> tuple[str, str, bool]:
         cognition_ability = as_cognition(IgnoreAbility())
-        active_bot = AbilityAgent(devices={}, cognition=cognition_ability)
+        active_bot = AbilityAgent(devices=(), cognition=cognition_ability)
         environment = Environment()
         model = cognition_ability.model
         assert model is not None
@@ -1161,7 +1144,7 @@ def test_bot_deduplicates_repeated_lifecycle_ability_instance() -> None:
     async def run() -> str:
         shared = ProbeAbility()
         active_bot = AbilityAgent(
-            devices={},
+            devices=(),
             cognition=IgnoreAbility(),
             input=(shared,),
             output=(shared,),
@@ -1179,9 +1162,9 @@ def test_bot_deduplicates_repeated_lifecycle_ability_instance() -> None:
 
 def test_bot_attachment_group_preserves_preexisting_device_attachment() -> None:
     async def run() -> tuple[str, bool]:
-        first_device = Device()
-        failing_device = ImmediatelyFailingInitializingDevice()
-        active_bot = basic_agent(devices={"first": first_device, "failing": failing_device})
+        first_device = Device(id="first")
+        failing_device = ImmediatelyFailingInitializingDevice(id="failing")
+        active_bot = basic_agent(devices=(first_device, failing_device))
         environment = Environment()
 
         _ = await mosfet.started(environment, active_bot, active_bot.model)
@@ -1210,7 +1193,7 @@ def test_bot_activation_waits_for_device_attach_events() -> None:
     async def run() -> tuple[str, str, tuple[hsm.Instance, ...]]:
         release = asyncio.Event()
         device = SlowInitializingDevice(release)
-        active_bot = basic_agent(devices={"slow": device})
+        active_bot = basic_agent(devices=(device,))
         environment = Environment()
 
         _ = await active_bot.attach(environment)
@@ -1238,7 +1221,7 @@ def test_bot_detach_during_activation_stops_owned_lifecycle_tree() -> None:
         input_ability = ProbeAbility()
         output_ability = ProbeAbility()
         active_bot = AbilityAgent(
-            devices={"slow": device},
+            devices=(device,),
             cognition=cognition_ability,
             input=(input_ability,),
             output=(output_ability,),
@@ -1270,9 +1253,9 @@ def test_bot_detach_during_activation_stops_owned_lifecycle_tree() -> None:
 def test_bot_activation_rolls_back_when_device_firmware_initialization_fails() -> None:
     async def run() -> tuple[str, tuple[hsm.Instance, ...], bool, bool]:
         release = asyncio.Event()
-        first_device = Device()
-        failing_device = FailingInitializingDevice(release)
-        active_bot = basic_agent(devices={"first": first_device, "failing": failing_device})
+        first_device = Device(id="first")
+        failing_device = FailingInitializingDevice(release, id="failing")
+        active_bot = basic_agent(devices=(first_device, failing_device))
         environment = Environment()
 
         _ = await active_bot.attach(environment)
@@ -1297,9 +1280,9 @@ def test_bot_activation_rolls_back_when_device_firmware_initialization_fails() -
 
 def test_bot_activation_rolls_back_when_device_failed_before_attachment() -> None:
     async def run() -> tuple[str, tuple[hsm.Instance, ...], bool, bool]:
-        first_device = Device()
-        failing_device = ImmediatelyFailingInitializingDevice()
-        active_bot = basic_agent(devices={"first": first_device, "failing": failing_device})
+        first_device = Device(id="first")
+        failing_device = ImmediatelyFailingInitializingDevice(id="failing")
+        active_bot = basic_agent(devices=(first_device, failing_device))
         environment = Environment()
 
         _ = await active_bot.attach(environment)
@@ -1322,9 +1305,9 @@ def test_bot_activation_rolls_back_when_device_failed_before_attachment() -> Non
 
 def test_bot_attachment_group_uses_modeled_device_events_not_dispatch_override() -> None:
     async def run() -> tuple[str, tuple[hsm.Instance, ...], bool]:
-        first_device = LifecycleDispatchFailingDevice()
-        failing_device = ImmediatelyFailingInitializingDevice()
-        active_bot = basic_agent(devices={"first": first_device, "failing": failing_device})
+        first_device = LifecycleDispatchFailingDevice(id="first")
+        failing_device = ImmediatelyFailingInitializingDevice(id="failing")
+        active_bot = basic_agent(devices=(first_device, failing_device))
         environment = Environment()
 
         _ = await active_bot.attach(environment)
@@ -1341,9 +1324,9 @@ def test_bot_attachment_group_uses_modeled_device_events_not_dispatch_override()
 
 def test_bot_activation_dispatch_failure_uses_modeled_rollback(monkeypatch: pytest.MonkeyPatch) -> None:
     async def run() -> tuple[str, tuple[hsm.Instance, ...], bool, bool]:
-        first_device = Device()
-        failing_device = Device()
-        active_bot = basic_agent(devices={"first": first_device, "failing": failing_device})
+        first_device = Device(id="first")
+        failing_device = Device(id="failing")
+        active_bot = basic_agent(devices=(first_device, failing_device))
         environment = Environment()
         original_dispatch = hsm.Instance.dispatch
 
@@ -1380,16 +1363,10 @@ def test_bot_activation_dispatch_failure_uses_modeled_rollback(monkeypatch: pyte
 def test_bot_attachment_group_handles_multiple_firmware_initialization_failures() -> None:
     async def run() -> tuple[str, tuple[hsm.Instance, ...], bool, bool, bool]:
         release = asyncio.Event()
-        first_device = Device()
-        first_failing_device = FailingInitializingDevice(release)
-        second_failing_device = FailingInitializingDevice(release)
-        active_bot = basic_agent(
-            devices={
-                "first": first_device,
-                "first_failing": first_failing_device,
-                "second_failing": second_failing_device,
-            }
-        )
+        first_device = Device(id="first")
+        first_failing_device = FailingInitializingDevice(release, id="first_failing")
+        second_failing_device = FailingInitializingDevice(release, id="second_failing")
+        active_bot = basic_agent(devices=(first_device, first_failing_device, second_failing_device))
         environment = Environment()
 
         _ = await active_bot.attach(environment)
@@ -1415,24 +1392,6 @@ def test_bot_attachment_group_handles_multiple_firmware_initialization_failures(
     assert first_stopped
     assert first_failing_stopped
     assert second_failing_stopped
-
-
-def test_bot_deactivation_detaches_shared_device_alias() -> None:
-    async def run() -> tuple[str, tuple[hsm.Instance, ...], bool]:
-        shared_device = LifecycleDispatchFailingDevice()
-        active_bot = basic_agent(devices={"one": shared_device, "two": shared_device})
-        environment = await start_bot_with_devices(active_bot)
-
-        _ = await active_bot.detach(environment)
-        await wait_until(lambda: active_bot.state() == "/Bot/inactive")
-
-        return active_bot.state(), device_bots(shared_device), shared_device.state() in {"", "/Device"}
-
-    state, agents, shared_stopped = asyncio.run(run())
-
-    assert state == "/Bot/inactive"
-    assert agents == ()
-    assert not shared_stopped
 
 
 async def wait_until(condition: typing.Callable[[], bool], *, timeout: float = 2.0) -> None:
@@ -1498,34 +1457,43 @@ def test_bot_uses_hsm_instance_identity() -> None:
     assert not hasattr(bot_instance, "name")
 
 
-def test_bot_snapshot_declares_owned_devices() -> None:
-    """Ownership binds each configured reference to the live actor's runtime id."""
+def test_bot_snapshot_declares_owned_devices_by_their_ids() -> None:
+    """DSL-30: the body keys each device by the id it was built with, bound to its live runtime id."""
 
     async def run() -> None:
-        devices = configured_devices("phone", "browser")
-        active_bot = basic_agent(devices=devices)
+        desk = Device(id="desk")
+        radio = Device()
+        active_bot = basic_agent(devices=(desk, radio))
         _ = await start_bot_with_devices(active_bot)
         snapshot = active_bot.take_snapshot()
         assert snapshot.Attributes is not None
-        assert snapshot.Attributes["/Bot/owned_devices"] == {
-            "phone": hsm.id(devices["phone"]),
-            "browser": hsm.id(devices["browser"]),
-        }
+        assert snapshot.Attributes["/Bot/owned_devices"] == {"desk": hsm.id(desk), "device": hsm.id(radio)}
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("twice", ["one device twice", "two devices with one id"])
+def test_bot_refuses_two_devices_with_one_id(twice: str) -> None:
+    """DSL-30: one id names one device; the body never resolves a duplicate by order."""
+
+    desk = Device(id="desk")
+    other = desk if twice == "one device twice" else Device(id="desk")
+
+    with pytest.raises(ValueError, match="'desk'"):
+        _ = basic_agent(devices=(desk, other))
 
 
 def test_bot_is_concrete_with_no_hard_coded_innate_abilities() -> None:
     """DSL-1: the body constructs as it is; a bot is defined by what it is given, not by a subclass."""
 
-    instance = Bot({}, cognition=as_cognition(IgnoreAbility()))
+    instance = Bot((), cognition=as_cognition(IgnoreAbility()))
 
     assert not inspect.isabstract(Bot)
     assert type(instance) is Bot
 
 
 def test_concrete_agent_can_declare_and_instantiate_innate_ability() -> None:
-    bot_instance = FocusedAgent(devices={})
+    bot_instance = FocusedAgent(devices=())
 
     assert isinstance(bot_instance.probe, ProbeAbility)
 
@@ -1808,9 +1776,9 @@ def test_unfocused_agent_does_not_focus_anonymous_device_type_name() -> None:
 def test_bot_copies_configured_devices_at_construction() -> None:
     async def run() -> tuple[str, bool, list[processing.InputData]]:
         ability = IgnoreAbility()
-        devices = configured_devices("phone")
+        devices = [Device(id="phone")]
         active_bot = AbilityAgent(devices=devices, cognition=ability, input=(ring_hearing(),))
-        devices["browser"] = Device()
+        devices.append(Device(id="browser"))
 
         _ = await start_bot_with_devices(active_bot)
         await active_bot.dispatch(
@@ -1860,7 +1828,7 @@ def test_bot_processing_input_includes_event_derived_operations() -> None:
         ability = IgnoreAbility()
         phone = phone_device.Phone()
         active_bot = AbilityAgent(
-            devices={"phone": phone},
+            devices=(phone,),
             cognition=ability,
             input=(ring_hearing(),),
         )
@@ -1897,7 +1865,7 @@ def test_bot_snapshot_merges_focused_device_transitions() -> None:
     async def run() -> tuple[set[str], set[str]]:
         ability = IgnoreAbility()
         phone = phone_device.Phone()
-        active_bot = AbilityAgent(devices={"phone": phone}, cognition=ability, input=(ring_hearing(),))
+        active_bot = AbilityAgent(devices=(phone,), cognition=ability, input=(ring_hearing(),))
 
         _ = await start_bot_with_devices(active_bot)
         before_focus = {
@@ -1933,10 +1901,8 @@ def test_bot_processing_operations_follow_focused_device_not_observed_device() -
     async def run() -> list[processing.InputData]:
         ability = IgnoreAbility()
         phone = phone_device.Phone()
-        browser_phone = phone_device.Phone()
-        active_bot = AbilityAgent(
-            devices={"phone": phone, "browser": browser_phone}, cognition=ability, input=(ring_hearing(),)
-        )
+        browser_phone = phone_device.Phone(id="browser")
+        active_bot = AbilityAgent(devices=(phone, browser_phone), cognition=ability, input=(ring_hearing(),))
 
         _ = await start_bot_with_devices(active_bot)
         await ring_phone(phone)
@@ -1968,7 +1934,7 @@ def test_bot_processes_environment_broadcast_from_configured_device_event() -> N
     async def run() -> tuple[str, bool, list[processing.InputData], list[cognition.types.OutputData]]:
         ability = IgnoreAbility()
         phone = phone_device.Phone()
-        active_bot = AbilityAgent(devices={"phone": phone}, cognition=ability, input=(ring_hearing(),))
+        active_bot = AbilityAgent(devices=(phone,), cognition=ability, input=(ring_hearing(),))
 
         _ = await start_bot_with_devices(active_bot)
         await emit_phone_service_event(
@@ -2184,7 +2150,7 @@ def test_bot_fans_out_sound_event_to_input_listening() -> None:
     ]:
         ability = IgnoreAbility()
         listening_ability = RecordingListening()
-        active_bot = AbilityAgent(devices={}, cognition=ability, input=(listening_ability,))
+        active_bot = AbilityAgent(devices=(), cognition=ability, input=(listening_ability,))
         environment = await start_bot_with_devices(active_bot)
         sound = SoundEvent.with_data(
             SoundData(audio=b"heard-chunk", media_type="audio/pcm", sample_rate_hz=48_000, channels=1)
@@ -2221,7 +2187,7 @@ def test_bot_fans_out_visual_event_to_input_without_cognition() -> None:
     async def run() -> tuple[list[processing.InputData], str]:
         ability = IgnoreAbility()
         listening_ability = RecordingListening()
-        active_bot = AbilityAgent(devices={}, cognition=ability, input=(listening_ability,))
+        active_bot = AbilityAgent(devices=(), cognition=ability, input=(listening_ability,))
         _ = await start_bot_with_devices(active_bot)
         frame = media.Image(content=b"\x89PNG\r\n\x1a\n" + b"frame-bytes", media_type="image/png")
         visual = VisualEvent.with_data(VisualData(image=frame, kind="camera"))
@@ -2356,7 +2322,7 @@ def test_bot_stimuli_without_a_product_neither_wake_nor_hold_cognition_awake() -
             consolidation=consolidation,
             rest_after=datetime.timedelta(milliseconds=50),
         )
-        active_bot = AbilityAgent(devices={}, cognition=ability, input=())
+        active_bot = AbilityAgent(devices=(), cognition=ability, input=())
         _ = await start_bot_with_devices(active_bot)
         frame = media.Image(content=b"\x89PNG\r\n\x1a\n" + b"frame-bytes", media_type="image/png")
         sent = 0
@@ -2388,7 +2354,7 @@ def test_bot_records_environment_stimuli_in_stm_register() -> None:
     async def run() -> memory.ObservedEvent | None:
         register = memory.StmMemory()
         ability = IgnoreAbility()
-        active_bot = AbilityAgent(devices={}, cognition=ability, input=(), stm_memory=register)
+        active_bot = AbilityAgent(devices=(), cognition=ability, input=(), stm_memory=register)
         _ = await start_bot_with_devices(active_bot)
         sound = SoundEvent.with_data(
             SoundData(audio=b"heard-chunk", media_type="audio/pcm", sample_rate_hz=48_000, channels=1)
@@ -2421,7 +2387,7 @@ def test_bot_without_register_admits_stimuli_normally() -> None:
 
     async def run() -> str:
         ability = IgnoreAbility()
-        active_bot = AbilityAgent(devices={}, cognition=ability, input=())
+        active_bot = AbilityAgent(devices=(), cognition=ability, input=())
         _ = await start_bot_with_devices(active_bot)
         sound = SoundEvent.with_data(
             SoundData(audio=b"heard-chunk", media_type="audio/pcm", sample_rate_hz=48_000, channels=1)
@@ -2443,7 +2409,7 @@ def test_bot_does_not_send_speaker_environment_sound_to_cognition() -> None:
     ]:
         ability = IgnoreAbility()
         phone = phone_device.Phone()
-        active_bot = AbilityAgent(devices={"phone": phone}, cognition=ability, input=(ring_hearing(),))
+        active_bot = AbilityAgent(devices=(phone,), cognition=ability, input=(ring_hearing(),))
         data = audio.OutputData(audio=b"playback-audio", media_type="audio/pcm", sample_rate_hz=48_000, channels=1)
 
         environment = await start_bot_with_devices(active_bot)
@@ -2493,8 +2459,8 @@ def test_same_environment_sibling_bots_do_not_send_speaker_sound_to_cognition() 
         owner_ability = IgnoreAbility()
         sibling_ability = IgnoreAbility()
         phone = phone_device.Phone()
-        owning_agent = AbilityAgent(devices={"phone": phone}, cognition=owner_ability, input=(ring_hearing(),))
-        sibling_agent = AbilityAgent(devices={}, cognition=sibling_ability)
+        owning_agent = AbilityAgent(devices=(phone,), cognition=owner_ability, input=(ring_hearing(),))
+        sibling_agent = AbilityAgent(devices=(), cognition=sibling_ability)
         data = audio.OutputData(audio=b"playback-audio", media_type="audio/pcm", sample_rate_hz=48_000, channels=1)
 
         environment = await start_bot_with_devices(owning_agent)
@@ -2542,8 +2508,8 @@ def test_same_environment_sibling_agent_without_phone_config_ignores_phone_broad
         owner_ability = IgnoreAbility()
         sibling_ability = IgnoreAbility()
         phone = phone_device.Phone()
-        owning_agent = AbilityAgent(devices={"phone": phone}, cognition=owner_ability, input=(ring_hearing(),))
-        sibling_agent = AbilityAgent(devices={}, cognition=sibling_ability)
+        owning_agent = AbilityAgent(devices=(phone,), cognition=owner_ability, input=(ring_hearing(),))
+        sibling_agent = AbilityAgent(devices=(), cognition=sibling_ability)
 
         environment = await start_bot_with_devices(owning_agent)
         _ = await sibling_agent.attach(environment)
@@ -2578,7 +2544,7 @@ def test_bot_processes_observed_device_event_with_trace_metadata() -> None:
     ]:
         ability = MetadataRecordingAbility()
         phone = phone_device.Phone()
-        active_bot = AbilityAgent(devices={"phone": phone}, cognition=ability, input=(ring_hearing(),))
+        active_bot = AbilityAgent(devices=(phone,), cognition=ability, input=(ring_hearing(),))
         metadata = {"traceparent": "00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-01"}
 
         _ = await start_bot_with_devices(active_bot)
@@ -2613,7 +2579,7 @@ def test_bot_preserves_trace_metadata_when_dispatching_operation_to_device() -> 
             )
         )
         phone = ContextRecordingPhone()
-        active_bot = AbilityAgent(devices={"phone": phone}, cognition=ability, input=(ring_hearing(),))
+        active_bot = AbilityAgent(devices=(phone,), cognition=ability, input=(ring_hearing(),))
         metadata = {"traceparent": "00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-01"}
 
         _ = await start_bot_with_devices(active_bot)
@@ -2638,7 +2604,7 @@ def test_bot_routes_operation_snapshot_failure_to_processing_failed_event() -> N
     async def run() -> tuple[str, list[processing.InputData], list[mosfet.ProcessingFailedEventData]]:
         ability = IgnoreAbility()
         phone = SnapshotFailingPhone()
-        active_bot = AbilityAgent(devices={"phone": phone}, cognition=ability, input=(ring_hearing(),))
+        active_bot = AbilityAgent(devices=(phone,), cognition=ability, input=(ring_hearing(),))
 
         _ = await start_bot_with_devices(active_bot)
         phone.fail_snapshots = True
@@ -2716,7 +2682,7 @@ def test_focused_agent_dispatches_operation_output_to_target_device() -> None:
             )
         )
         phone = phone_device.Phone()
-        active_bot = AbilityAgent(devices={"phone": phone}, cognition=ability, input=(ring_hearing(),))
+        active_bot = AbilityAgent(devices=(phone,), cognition=ability, input=(ring_hearing(),))
 
         _ = await start_bot_with_devices(active_bot)
         firmware = device_firmware(phone)
@@ -2780,7 +2746,7 @@ def test_focused_agent_stale_device_selection_drops_at_device(monkeypatch: pytes
         )
         ability = BlockingSequenceAbility(release=release, block_on_call=1, outputs=((answer_selection,),))
         phone = phone_device.Phone()
-        active_bot = AbilityAgent(devices={"phone": phone}, cognition=ability, input=(ring_hearing(),))
+        active_bot = AbilityAgent(devices=(phone,), cognition=ability, input=(ring_hearing(),))
 
         _ = await start_bot_with_devices(active_bot)
         firmware = device_firmware(phone)
@@ -2850,7 +2816,7 @@ def test_focused_agent_rejects_operation_output_that_does_not_match_event_schema
                 reason="hang up a call the phone is not on",
             ),
         )
-        active_bot = AbilityAgent(devices={"phone": phone_device.Phone()}, cognition=ability)
+        active_bot = AbilityAgent(devices=(phone_device.Phone(id="phone"),), cognition=ability)
 
         _ = await start_bot_with_devices(active_bot)
         await active_bot.dispatch(
@@ -2926,7 +2892,7 @@ def test_focused_agent_rejects_operation_target_not_offered_by_input() -> None:
                 reason="answer incoming call",
             ),
         )
-        active_bot = AbilityAgent(devices={"phone": phone_device.Phone(), "browser": Device()}, cognition=ability)
+        active_bot = AbilityAgent(devices=(phone_device.Phone(id="phone"), Device(id="browser")), cognition=ability)
 
         _ = await start_bot_with_devices(active_bot)
         await active_bot.dispatch(
@@ -3010,7 +2976,7 @@ def test_focused_agent_dispatches_operation_with_ref_backed_event_data_schema() 
             lambda: (firmware := device_firmware(phone)) is not None
             and firmware.state() == "/Phone/answered/media_ready"
         )
-        active_bot = AbilityAgent(devices={"phone": phone}, cognition=ability, input=(ring_hearing(),))
+        active_bot = AbilityAgent(devices=(phone,), cognition=ability, input=(ring_hearing(),))
 
         _ = await active_bot.attach(environment)
         await wait_until(lambda: active_bot.state() == "/Bot/active/unfocused")
@@ -3074,7 +3040,7 @@ def test_focused_agent_rejects_operation_data_that_does_not_match_event_schema()
             lambda: (firmware := device_firmware(phone)) is not None
             and firmware.state() == "/Phone/answered/media_ready"
         )
-        active_bot = AbilityAgent(devices={"phone": phone}, cognition=ability, input=(ring_hearing(),))
+        active_bot = AbilityAgent(devices=(phone,), cognition=ability, input=(ring_hearing(),))
 
         _ = await active_bot.attach(environment)
         await wait_until(lambda: active_bot.state() == "/Bot/active/unfocused")
@@ -3188,7 +3154,7 @@ def test_focused_agent_dispatches_multi_event_answer_then_focus() -> None:
                 *focus_output("phone", "also keep focus"),
             )
         )
-        active_bot = AbilityAgent(devices={"phone": phone}, cognition=ability, input=(ring_hearing(),))
+        active_bot = AbilityAgent(devices=(phone,), cognition=ability, input=(ring_hearing(),))
 
         _ = await start_bot_with_devices(active_bot)
         await ring_phone(phone)
@@ -3328,7 +3294,7 @@ def test_focused_agent_rejects_stale_completion_focus_outside_current_input() ->
 
 def test_bot_rejects_forged_focus_for_unconfigured_device() -> None:
     async def run() -> str:
-        active_bot = basic_agent(devices={})
+        active_bot = basic_agent(devices=())
         _ = await start_bot_with_devices(active_bot)
         forged = dataclasses.replace(
             mosfet.FocusDeviceEvent.with_data(mosfet.FocusDeviceEventData(device="ghost")),
@@ -3542,7 +3508,7 @@ def test_bot_processing_state_defers_observed_phone_event_until_processing_compl
             ),
         )
         phone = phone_device.Phone()
-        active_bot = AbilityAgent(devices={"phone": phone}, cognition=ability, input=(ring_hearing(),))
+        active_bot = AbilityAgent(devices=(phone,), cognition=ability, input=(ring_hearing(),))
 
         _ = await start_bot_with_devices(active_bot)
         await active_bot.dispatch(
@@ -3580,7 +3546,7 @@ def test_bot_processing_state_ignores_device_event_while_processing() -> None:
             outputs=(no_output("initial"),),
         )
         phone = phone_device.Phone()
-        active_bot = AbilityAgent(devices={"phone": phone}, cognition=ability, input=(ring_hearing(),))
+        active_bot = AbilityAgent(devices=(phone,), cognition=ability, input=(ring_hearing(),))
 
         _ = await start_bot_with_devices(active_bot)
         await active_bot.dispatch(
@@ -3706,7 +3672,7 @@ def test_deferred_input_replays_after_clear_focus_completion() -> None:
 def test_bot_processing_state_rejects_malformed_input_event_data() -> None:
     async def run() -> tuple[str, list[processing.InputData]]:
         ability = IgnoreAbility()
-        active_bot = AbilityAgent(devices={}, cognition=ability, input=(ring_hearing(),))
+        active_bot = AbilityAgent(devices=(), cognition=ability, input=(ring_hearing(),))
 
         _ = await start_bot_with_devices(active_bot)
         malformed = mosfet.InputEvent.with_data(typing.cast(mosfet.InputEventData, object()))
@@ -4148,7 +4114,7 @@ def test_detach_is_idempotent_for_unstarted_bot() -> None:
 def test_bot_activation_dispatches_completion_after_queueing_device_notifications() -> None:
     async def run() -> None:
         device = Device()
-        active_bot = basic_agent(devices={"phone": device})
+        active_bot = basic_agent(devices=(device,))
 
         environment = await start_bot_with_devices(active_bot)
         _ = await active_bot.detach(environment)
@@ -4169,7 +4135,7 @@ def test_bot_activation_dispatches_completion_after_queueing_device_notification
 
 def test_bot_activation_emits_correlated_public_completion_after_attachment() -> None:
     async def run() -> hsm.Event[typing.Any]:
-        active_bot = LifecycleRecordingAgent(devices={"phone": Device()})
+        active_bot = LifecycleRecordingAgent(devices=(Device(id="phone"),))
         environment = Environment()
         _ = await mosfet.started(environment, active_bot, active_bot.model)
         environment.join(active_bot)
@@ -4198,7 +4164,7 @@ def test_bot_activation_emits_correlated_public_completion_after_attachment() ->
 
 def test_bot_activation_emits_public_failure_without_public_completion() -> None:
     async def run() -> tuple[hsm.Event[typing.Any], ...]:
-        active_bot = LifecycleRecordingAgent(devices={"failing": ImmediatelyFailingInitializingDevice()})
+        active_bot = LifecycleRecordingAgent(devices=(ImmediatelyFailingInitializingDevice(id="failing"),))
         environment = Environment()
         _ = await active_bot.attach(environment)
         await wait_until(lambda: active_bot.state() == "/Bot/inactive" and len(active_bot.lifecycle_events) == 1)
@@ -4214,7 +4180,7 @@ def test_bot_activation_emits_public_failure_without_public_completion() -> None
 
 def test_bot_deactivation_emits_correlated_public_completion_after_cleanup() -> None:
     async def run() -> hsm.Event[typing.Any]:
-        active_bot = LifecycleRecordingAgent(devices={"phone": Device()})
+        active_bot = LifecycleRecordingAgent(devices=(Device(id="phone"),))
         environment = await start_bot_with_devices(active_bot)
         active_bot.lifecycle_events.clear()
         request = dataclasses.replace(
@@ -4244,7 +4210,7 @@ def test_bot_rejects_stale_attachment_terminal_from_previous_activation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def run() -> tuple[str, str]:
-        active_bot = basic_agent(devices={"phone": Device()})
+        active_bot = basic_agent(devices=(Device(id="phone"),))
         environment = Environment()
         original_attach = attachment.Group.attach
         prior_request: hsm.Event[attachment.AttachData] | None = None
@@ -4327,7 +4293,7 @@ def test_bot_deactivation_stops_input_output_abilities() -> None:
         input_ability = ProbeAbility()
         output_ability = ProbeAbility()
         active_bot = AbilityAgent(
-            devices={},
+            devices=(),
             cognition=cognition_ability,
             input=(input_ability,),
             output=(output_ability,),
@@ -4376,7 +4342,7 @@ def test_bot_ignores_unhandled_device_event() -> None:
         probe = hsm.Event[dict[str, object]](name="phone.probe.signal")
         ability = IgnoreAbility()
         phone = Device()
-        active_bot = AbilityAgent(devices={"phone": phone}, cognition=ability)
+        active_bot = AbilityAgent(devices=(phone,), cognition=ability)
 
         _ = await start_bot_with_devices(active_bot)
         assert active_bot.state() == "/Bot/active/unfocused"
@@ -4408,7 +4374,7 @@ def test_bot_cleanup_timeout_reports_degraded_state(monkeypatch: pytest.MonkeyPa
             return super().dispatch(ctx, event)
 
     async def run() -> str:
-        active_bot = FastDeactivationTimeoutAgent(devices={"stuck": HangOnDetachDevice()})
+        active_bot = FastDeactivationTimeoutAgent(devices=(HangOnDetachDevice(id="stuck"),))
         environment = await start_bot_with_devices(active_bot)
         await wait_until(lambda: active_bot.state() == "/Bot/active/unfocused")
         original_stop = hsm.stop
@@ -4433,9 +4399,9 @@ def test_bot_cleanup_timeout_reports_degraded_state(monkeypatch: pytest.MonkeyPa
 
 def test_bot_activation_attaches_started_and_unstarted_devices() -> None:
     async def run() -> None:
-        started_device = Device()
-        unstarted_device = Device()
-        active_bot = basic_agent(devices={"started": started_device, "unstarted": unstarted_device})
+        started_device = Device(id="started")
+        unstarted_device = Device(id="unstarted")
+        active_bot = basic_agent(devices=(started_device, unstarted_device))
 
         environment = Environment()
         started_device_model = started_device.model
@@ -4456,7 +4422,7 @@ def test_bot_activation_attaches_started_and_unstarted_devices() -> None:
 def test_bot_activation_starts_phone_peripherals_in_agent_environment() -> None:
     async def run() -> tuple[str, str, str, str, bool, bool, bool, bool]:
         phone = phone_device.Phone()
-        active_bot = basic_agent(devices={"phone": phone})
+        active_bot = basic_agent(devices=(phone,))
 
         environment = await start_bot_with_devices(active_bot)
         firmware = device_firmware(phone)
@@ -4494,7 +4460,7 @@ def test_bot_activation_starts_phone_peripherals_in_agent_environment() -> None:
 
 def test_bot_lifecycle_starts_and_stops_innate_ability() -> None:
     async def run() -> tuple[list[processing.InputData], str]:
-        bot_instance = FocusedAgent(devices={})
+        bot_instance = FocusedAgent(devices=())
         probe = bot_instance.probe
 
         environment = await start_bot_with_devices(bot_instance)
@@ -4516,7 +4482,7 @@ def test_bot_lifecycle_starts_and_stops_acquired_abilities() -> None:
     async def run() -> tuple[list[processing.InputData], str]:
         acquired = ProbeAbility()
         bot_instance = AbilityAgent(
-            devices={},
+            devices=(),
             cognition=IgnoreAbility(),
             acquired_abilities=(acquired,),
         )
@@ -4549,7 +4515,7 @@ def test_a_placed_bot_only_hears_what_is_loud_enough_where_it_stands() -> None:
 
     async def run() -> tuple[int, int]:
         ability = IgnoreAbility()
-        active_bot = AbilityAgent(devices={}, cognition=ability, input=(ring_hearing(),))
+        active_bot = AbilityAgent(devices=(), cognition=ability, input=(ring_hearing(),))
         here = space.Position(x=0.0, y=0.0)
 
         environment = await start_bot_with_devices(
@@ -4648,7 +4614,7 @@ def test_a_bot_hears_words_somebody_speaks_in_its_environment() -> None:
 
     async def run() -> list[hsm.Event[typing.Any]]:
         ability = IgnoreAbility()
-        active_bot = AbilityAgent(devices={}, cognition=ability, input=(RecordingListening(),))
+        active_bot = AbilityAgent(devices=(), cognition=ability, input=(RecordingListening(),))
         environment = await start_bot_with_devices(
             active_bot,
             placement=space.Placement(position=space.Position(x=0.0, y=0.0), threshold_db=20.0),
@@ -4682,7 +4648,7 @@ def test_words_spoken_from_across_the_room_never_reach_the_bot() -> None:
     async def run() -> tuple[int, int]:
         ability = IgnoreAbility()
         listening_ability = RecordingListening()
-        active_bot = AbilityAgent(devices={}, cognition=ability, input=(listening_ability,))
+        active_bot = AbilityAgent(devices=(), cognition=ability, input=(listening_ability,))
         environment = await start_bot_with_devices(
             active_bot,
             placement=space.Placement(position=space.Position(x=0.0, y=0.0), threshold_db=20.0),
@@ -4775,7 +4741,7 @@ async def a_bot_with_a_voice(
         speaker=mouth,
         listening=(listening_ability,),
     )
-    active_bot = AbilityAgent(devices={}, cognition=ability, input=(listening_ability,), output=(voice,))
+    active_bot = AbilityAgent(devices=(), cognition=ability, input=(listening_ability,), output=(voice,))
     # The mouth is powered by the Speaking ability it was injected into — part of the bot, not a
     # device the body starts — so bringing the bot up is what brings the mouth up.
     environment = await start_bot_with_devices(
@@ -5067,7 +5033,7 @@ def test_a_bot_gets_a_turn_because_something_happened_and_never_because_of_what(
     async def run() -> tuple[list[processing.InputData], list[mosfet.ProcessingFailedEventData], str]:
         ability = IgnoreAbility()
         device = ReportingDevice()
-        active_bot = OccasionAgent(devices={"widget": device}, cognition=ability)
+        active_bot = OccasionAgent(devices=(device,), cognition=ability)
         environment = await start_bot_with_devices(active_bot)
 
         device.happen("became one thing")
@@ -5109,7 +5075,7 @@ def test_an_occasion_carries_the_envelope_of_the_happening_that_caused_it() -> N
     async def run() -> tuple[list[hsm.Event[typing.Any]], list[processing.InputData]]:
         ability = IgnoreAbility()
         device = ReportingDevice()
-        active_bot = OccasionAgent(devices={"widget": device}, cognition=ability)
+        active_bot = OccasionAgent(devices=(device,), cognition=ability)
         environment = await start_bot_with_devices(active_bot)
 
         device.happen("first")
@@ -5145,7 +5111,7 @@ def test_a_happening_during_a_busy_turn_is_still_waiting_afterwards() -> None:
         release = asyncio.Event()
         ability = BlockingAbility(release=release)
         device = ReportingDevice()
-        active_bot = OccasionAgent(devices={"widget": device}, cognition=ability)
+        active_bot = OccasionAgent(devices=(device,), cognition=ability)
         environment = await start_bot_with_devices(active_bot)
 
         device.happen("first")
@@ -5175,7 +5141,7 @@ def test_a_bot_that_is_not_awake_has_no_moments() -> None:
     async def run() -> tuple[int, int, int, int]:
         ability = IgnoreAbility()
         device = ReportingDevice()
-        active_bot = OccasionAgent(devices={"widget": device}, cognition=ability)
+        active_bot = OccasionAgent(devices=(device,), cognition=ability)
 
         # Constructed but never attached: no environment, no lifetime, no moments. The device
         # is not attached to anything either, so there is nothing for it to report to.
@@ -5220,7 +5186,7 @@ def test_body_handles_device_reports_in_arrival_order_regardless_of_priority() -
     async def run() -> list[processing.InputData]:
         ability = IgnoreAbility()
         device = _PriorityReportingDevice()
-        active_bot = OccasionAgent(devices={"widget": device}, cognition=ability)
+        active_bot = OccasionAgent(devices=(device,), cognition=ability)
         environment = await start_bot_with_devices(active_bot)
 
         device.happen_with_priority("background thought", priority=10)
@@ -5276,7 +5242,7 @@ def test_body_never_fans_environment_stimuli_out_to_output_abilities() -> None:
         ability = IgnoreAbility()
         listening_ability = RecordingListening()
         output_tap = _OutputTap()
-        active_bot = AbilityAgent(devices={}, cognition=ability, input=(listening_ability,), output=(output_tap,))
+        active_bot = AbilityAgent(devices=(), cognition=ability, input=(listening_ability,), output=(output_tap,))
         environment = await start_bot_with_devices(active_bot)
         sound = SoundEvent.with_data(
             SoundData(audio=b"heard-chunk", media_type="audio/pcm", sample_rate_hz=48_000, channels=1)
@@ -5451,13 +5417,13 @@ class LifecycleAgent(Bot):
 
     def __init__(
         self,
-        devices: collections.abc.Mapping[str, Device] | None = None,
+        devices: collections.abc.Sequence[Device] = (),
         *,
         cognition: abilities.Ability[typing.Any, typing.Any] | None = None,
         deactivation_timeout: datetime.timedelta | None = None,
     ) -> None:
         super().__init__(
-            devices=devices or {},
+            devices=devices,
             cognition=cognition or as_cognition(IgnoreAbility()),
             deactivation_timeout=deactivation_timeout,
         )
@@ -5600,7 +5566,7 @@ def test_bot_answers_activation_and_deactivation_to_the_reply_target_under_the_o
 def test_bot_answers_failed_activation_to_the_reply_target_under_the_operation_id() -> None:
     async def run() -> tuple[list[tuple[str, str]], str]:
         replies = await started_replies()
-        active_bot = LifecycleAgent({"failing": ImmediatelyFailingInitializingDevice()})
+        active_bot = LifecycleAgent((ImmediatelyFailingInitializingDevice(id="failing"),))
         _ = await active_bot.attach(Environment(), reply_to=replies, operation_id="op-1")
         await wait_until(lambda: active_bot.state() == "/Bot/inactive" and len(replies.terminals) == 1)
         await settle()
@@ -5894,7 +5860,7 @@ def test_bot_keeps_the_operation_id_when_the_detach_answer_times_out() -> None:
         replies = await started_replies()
         # Long enough for the cleanup that follows the detach timer to finish inside its own bound.
         active_bot = LifecycleAgent(
-            {"stuck": NeverDetachingDevice()},
+            (NeverDetachingDevice(id="stuck"),),
             deactivation_timeout=datetime.timedelta(milliseconds=200),
         )
         environment = Environment()
@@ -5995,7 +5961,7 @@ def test_body_rebuild_carries_a_products_stamped_participants_into_cognition() -
     async def run() -> list[cognition.InputData]:
         ability = IgnoreAbility()
         cognitive = InputRecordingCognition(ability)
-        active_bot = AbilityAgent(devices={}, cognition=cognitive, input=(RecordingListening(),))
+        active_bot = AbilityAgent(devices=(), cognition=cognitive, input=(RecordingListening(),))
         environment = await start_bot_with_devices(active_bot)
         heard = SoundData(
             audio=b"heard-chunk", media_type="audio/pcm", sample_rate_hz=48_000, channels=1, participants=(ada,)

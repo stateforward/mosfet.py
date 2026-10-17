@@ -5,7 +5,7 @@ from mosfet.providers import websocket
 
 tokens = websocket.HmacTokens(secret)
 server = websocket.Server(host="0.0.0.0", port=8765, verifier=tokens)  # in Assembly.actors
-computer.Computer(device_id="studio-laptop", transport=server)
+computer.Computer(id="studio-laptop", transport=server)
 """
 
 from .connection import Connection, Socket
