@@ -10,7 +10,7 @@ definition DSL (``from mosfet import bot``), so it re-exports nothing from the b
         bot.attach(phone.Phone()),
     )
 
-:func:`start` builds the body around the model's parts and brings it to life in an environment,
+:func:`describe` is the JSON view of defined bots. :func:`start` builds the body around the model's parts and brings it to life in an environment,
 and :func:`stop` deactivates and stops it::
 
     greeter = await bot.start(Environment(), model)
@@ -23,6 +23,7 @@ all of them in one :class:`DefinitionError`; clippy-style lints are :class:`Lint
 """
 
 from .define import DefinitionError, Error, Finalizer, RedefinableBot, Validator, define, redefine
+from .describe import Description, Outline, Part, describe
 from .diagnostics import Diagnostic, Help, Location, Span, Suggestion, explain
 from .elements import Element, Model, allow, attach, cognition, input, output, register, timeouts, traits
 from .lints import LintWarning, check
@@ -30,6 +31,7 @@ from .start import StartError, start, stop
 
 __all__ = [
     "DefinitionError",
+    "Description",
     "Diagnostic",
     "Element",
     "Error",
@@ -38,6 +40,8 @@ __all__ = [
     "LintWarning",
     "Location",
     "Model",
+    "Outline",
+    "Part",
     "RedefinableBot",
     "Span",
     "StartError",
@@ -48,6 +52,7 @@ __all__ = [
     "check",
     "cognition",
     "define",
+    "describe",
     "explain",
     "input",
     "output",

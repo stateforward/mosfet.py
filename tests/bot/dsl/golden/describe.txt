@@ -1,0 +1,61 @@
+{
+  "bots": [
+    {
+      "name": "greeter",
+      "traits": [
+        "curious",
+        "patient"
+      ],
+      "faculties": [
+        "intuition",
+        "reasoning",
+        "reflection",
+        "associative",
+        "routines"
+      ],
+      "memory": "Memory",
+      "parts": [
+        {
+          "id": "desk",
+          "kind": "device",
+          "roles": [
+            "attach"
+          ],
+          "constructor": "Phone"
+        },
+        {
+          "id": "senses",
+          "kind": "ability",
+          "roles": [
+            "attach",
+            "input"
+          ],
+          "constructor": "Memory"
+        },
+        {
+          "id": "voice",
+          "kind": "ability",
+          "roles": [
+            "output"
+          ],
+          "constructor": "Memory"
+        },
+        {
+          "id": "speaker",
+          "kind": "device",
+          "roles": [
+            "attach"
+          ],
+          "constructor": "Speaker"
+        }
+      ],
+      "sensory_register": "StmMemory",
+      "timeouts": [
+        "processing"
+      ],
+      "allowed": [
+        "ability_without_tools"
+      ]
+    }
+  ]
+}
