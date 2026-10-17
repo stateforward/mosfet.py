@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import logging
 import typing
 
 import hsm
@@ -104,6 +105,23 @@ def test_register_refreshes_owner_without_restarting_instance(monkeypatch: pytes
     owner = live_payload.get("owner")
     assert isinstance(owner, str)
     assert owner == "/OwnerTwo"
+
+
+def test_register_of_a_stopped_instance_publishes_it_without_an_address(caplog: pytest.LogCaptureFixture) -> None:
+    """A device republishes its topology after it stops; a stopped machine has no address to register."""
+
+    model = _demo()
+
+    async def run() -> None:
+        environment = Environment()
+        demo = await mosfet.started(environment, Demo(), model)
+        await hsm.stop(demo, environment)
+        _ = mosfet.register(demo, model, clear_owner=True)
+
+    with caplog.at_level(logging.WARNING, logger="mosfet.start"):
+        asyncio.run(run())
+
+    assert [record.getMessage() for record in caplog.records] == []
 
 
 def test_started_without_otlp_does_not_publish_live(monkeypatch: pytest.MonkeyPatch) -> None:

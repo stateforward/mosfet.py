@@ -224,7 +224,10 @@ def register(
     owner: Owner | None = None,
     clear_owner: bool = False,
 ) -> tuple[str, str]:
-    """Refresh topology/live registration for an already-started instance without restarting it."""
+    """Refresh topology/live registration for an instance without restarting it.
+
+    A stopped instance is published as not live and registers no address: it has none until it starts again.
+    """
 
     resolved_model = model if model is not None else bound_model(instance)
     with span.operation(
@@ -233,7 +236,8 @@ def register(
         component=type(instance).__name__,
         stage="register",
     ) as active:
-        _register_address(instance, instance.context())
+        if lifecycle.is_started(instance):
+            _register_address(instance, instance.context())
         outcomes = _register(instance, resolved_model, owner, instance.context(), clear_owner)
         _record(active, *outcomes)
         return outcomes
