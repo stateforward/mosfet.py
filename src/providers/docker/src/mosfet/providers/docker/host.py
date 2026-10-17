@@ -87,7 +87,7 @@ from mosfet.telemetry import span
 from mosfet.telemetry.hsm import Traced
 
 from . import mapping, stream
-from .capacity import Runtime
+from .capacity import Runtime, capacity as runtime_capacity  # aliased: Host's ``capacity`` parameter shadows it
 
 Step = typing.Literal[
     "ping",
@@ -311,7 +311,7 @@ class Host(Traced):
         self,
         *,
         socket: pathlib.Path,
-        capacity: sandbox.Capacity,
+        capacity: sandbox.Capacity | None = None,
         images: frozenset[str],
         owner: str,
         egress_network: str | None = None,
@@ -326,7 +326,9 @@ class Host(Traced):
     ) -> None:
         """Serve sandboxes on the Engine API at the unix ``socket``, which must be a rootless daemon's.
 
-        ``capacity`` is the value the factory declared (``docker.capacity``) and injected into the ability as well.
+        ``capacity`` is the value the factory declared (``docker.capacity``) and injected into the ability as well;
+        by default it is ``docker.capacity(max_resources=sandbox.Resources(), runtime=runtime)``, this host's own
+        runtime with the default ceilings.
         ``images`` is the owner's allowlist: nothing is ever pulled, and a create for another image is refused
         ``unsupported``. ``owner`` labels every container so a later host of the same owner sweeps what a dead one
         left. ``egress_network`` is the owner's bridge for ``Network.EGRESS``; without it egress is refused.
@@ -357,7 +359,10 @@ class Host(Traced):
             raise ValueError("docker.Host runtime must be 'runc' or 'runsc'.")
         if re.fullmatch(_API_VERSION_PATTERN, api_version) is None:
             raise ValueError("docker.Host api_version must look like 'v1.41'.")
-        if capacity.isolation is not _ISOLATION[runtime] or not capacity.files:
+        declared = (
+            capacity if capacity is not None else runtime_capacity(max_resources=sandbox.Resources(), runtime=runtime)
+        )
+        if declared.isolation is not _ISOLATION[runtime] or not declared.files:
             raise ValueError("docker.Host capacity must be the one docker.capacity declares for its runtime.")
         _positive(
             open_timeout=open_timeout,
@@ -369,7 +374,7 @@ class Host(Traced):
             raise ValueError("docker.Host reopen_max cannot be shorter than reopen_initial.")
         super().__init__()
         self._socket = socket
-        self._capacity = capacity
+        self._capacity = declared
         self._images = images
         self._owner = owner
         self._egress_network = egress_network

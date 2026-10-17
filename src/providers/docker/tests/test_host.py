@@ -1330,6 +1330,28 @@ def test_construction_refuses_a_bad_configuration(settings: dict[str, typing.Any
         _ = _host(Engine(), **settings)
 
 
+@pytest.mark.parametrize("runtime", ["runc", "runsc"])
+def test_a_host_given_no_capacity_declares_its_runtimes_with_the_default_ceilings(runtime: docker.Runtime) -> None:
+    """DSL-28c: ``capacity`` defaults to ``docker.capacity(max_resources=sandbox.Resources(), runtime=runtime)``."""
+
+    engine = Engine()
+    beyond = sandbox.Spec(image=_IMAGE, resources=sandbox.Resources(cpus=2.0))
+
+    async def scenario() -> None:
+        harness = await _harness(_host(engine, capacity=None, runtime=runtime))
+        try:
+            await harness.opened()
+            _ = await harness.create(sandbox.Spec(image=_IMAGE))
+            refused = await harness.ask(sandbox.host.CreateEvent, sandbox.CreateData(spec=beyond))
+            assert _kind(refused) is sandbox.FailureKind.UNSUPPORTED
+        finally:
+            await harness.stop()
+
+    if runtime == "runsc":
+        engine.info["Runtimes"] = {"runc": {"path": "runc"}, "runsc": {"path": "runsc"}}
+    _within(scenario)
+
+
 def test_by_default_each_exchange_uses_a_unix_socket_transport_without_retries(monkeypatch: pytest.MonkeyPatch) -> None:
     engine = Engine()
     made: list[dict[str, object]] = []

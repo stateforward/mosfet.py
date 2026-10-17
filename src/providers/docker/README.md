@@ -27,8 +27,10 @@ The ability starts the host under its own lifetime context, so the host announce
 opens and `down` each time it fails to open or loses the daemon (W5-17). The ability makes its machine only after
 `serving`, and resumes on the next `serving` after a `down`.
 
-The factory builds one `capacity` and injects it into both the host and the ability (W5-7). `runtime="runsc"`
-runs containers on gVisor and declares `Isolation.USER_KERNEL` (W5-9); the daemon must list `runsc`.
+The factory builds one `capacity` and injects it into both the host and the ability (W5-7). A host given no
+`capacity` declares `docker.capacity(max_resources=sandbox.Resources(), runtime=runtime)`: its own runtime with
+the default ceilings. `socket`, `images` and `owner` have no default. `runtime="runsc"` runs containers on gVisor
+and declares `Isolation.USER_KERNEL` (W5-9); the daemon must list `runsc`.
 
 ## What the host refuses
 
