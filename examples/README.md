@@ -14,6 +14,19 @@ OPENAI_BASE_URL=... OPENAI_MODEL=... OPENAI_API_KEY=... \
   examples/minimal_bot/.venv/bin/mosfet run minimal_bot_example:build
 ```
 
+`builder_bot` is one bot, for one person, reached through a computer, that builds and tests software on a
+sandbox bench of its own: a `computer.Computer` served by a `websocket.Server`, a `sandbox.Sandbox` on a
+rootless Docker or Podman socket, and the full cognition on one local OpenAI-compatible model. The person sits
+at the computer's far side, `builder-terminal`. Nothing is scripted: what the bot shows, runs, or leaves alone
+is its own choice. See [`builder_bot/README.md`](builder_bot/README.md) for the bench image, the settings and
+the security posture:
+
+```bash
+uv sync --project examples/builder_bot
+examples/builder_bot/.venv/bin/mosfet run builder_bot_example:build --secrets-dir examples/builder_bot/secrets
+examples/builder_bot/.venv/bin/builder-terminal --secret-file examples/builder_bot/secrets/computer_token_secret
+```
+
 The other examples run as programs from the repository root:
 
 ```bash
