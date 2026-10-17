@@ -52,6 +52,11 @@ failed, not which library raised:
 | `measure_failed` | a change measure could not measure a view; nothing was handed on; check the change measure's provider |
 | `stage_failed` | a perception stage (objects, faces, description) answered with a failure; the view's field for it is empty; the span's `bot.seeing.stage` says which stage |
 | `design_failed` | a voice source could not make a voice from its description for a reason no narrower kind names; nothing was kept |
+| `unsupported` | a sandbox request is well formed but beyond what the host offers (its capacity, its image allowlist, or files at all); nothing was run |
+| `not_found` | a path to read in a sandbox machine is missing or is not a regular file |
+| `too_large` | a file to read from a sandbox machine is larger than the host will move |
+| `busy` | the sandbox's request queue was full; the request was not taken |
+| `failed` | a sandbox host failed for a reason no narrower kind names |
 | `unknown` | derivation produced nothing usable — a bug in the call site |
 
 Add a kind only when an operator would act differently on it. Two kinds that

@@ -78,6 +78,15 @@ remaining gaps without duplicating them.
 | `tests/bot/abilities/embedding/test_embedder.py` | `src/mosfet/abilities/embedding/embedder.py` (`Instructions.render` prefixes, `EMBEDDING_GEMMA_2`, `Capacity` bounds, `Error.failure_kind`, plain-attribute `Embedder` satisfied by a frozen dataclass) |
 | `tests/bot/abilities/embedding/test_embedding.py` | `src/mosfet/abilities/embedding/embedding.py` (HSM runtime: admission, FIFO queue, overload, `hsm.after` timeout with a late result ignored, invalid responses, composite attach/detach of the embedder's attachments, `UNAVAILABLE` while not serving, metric attribute sets) |
 
+## Sandbox ability
+
+| Test | Source under test |
+| --- | --- |
+| `tests/bot/abilities/sandbox/test_spec.py` | `src/mosfet/abilities/sandbox/spec.py` (`Network` defaults to `none`; `Isolation` includes `user_kernel` (W5-9); every `Resources` bound and default; `Spec` defaults, OCI-style image references, no root, `max_lifetime` 1 min..24 h, bounded plain env with NUL and `SecretStr` refused, a workspace apart from `/tmp`; `AbsolutePath` refuses relative paths, NUL, `..`, empty segments and overlong paths; `Spec.admits` by whole segments under the workspace or `/tmp`; `Capacity.check` refuses a network or limit beyond the host, W5-7) |
+| `tests/bot/abilities/sandbox/test_command.py` | `src/mosfet/abilities/sandbox/command.py` (`RunData` argv bounds kept verbatim, cwd, env, UTF-8 stdin and timeout bounds, its model-facing JSON schema golden; `RanData` exit code exactly when exited and output within `MAX_OUTPUT_CHARS`; whole-file `WriteData` within 256 KiB of UTF-8, `WrittenData`, `ReadData`, `ContentsData`; empty `ResetData`/`FreshData`; every model frozen, closed, described and its examples valid) |
+| `tests/bot/abilities/sandbox/test_host_protocol.py` | `src/mosfet/abilities/sandbox/host.py` (canonical `bot.sandbox.host.*` request and terminal names, completion/error kinds, payload schemas, none model-callable; the closed `FailureKind`; bounded `Machine`, output bounds and `HostFailureData` messages; the `bot.sandbox.host.serving` and `down` notifications and their empty payloads, `announce` sending one from the host to the machine that started it, logged and dropped for a host started by no machine) and `src/mosfet/abilities/sandbox/testing.py` (`assert_host` starts the host under its probe, waits for its `serving` notice and passes a scripted fake host; it refuses one that gives no terminal, two terminals, a terminal with the wrong id or address, or anything but `unavailable` while not serving, one that never announces `serving`, announces it before it serves, announces it while down or misaddresses a notice; a host without a lifecycle model) |
+| `tests/bot/abilities/test_init.py::test_abilities_export_the_sandbox_package_with_its_host_protocol_module` | `src/mosfet/abilities/__init__.py`, `src/mosfet/abilities/sandbox/__init__.py` (`sandbox` exported with its `host` and `testing` modules and its schemas; no `events` module) |
+
 ## llama.cpp provider
 
 Paths are relative to `src/providers/llama_cpp/`.

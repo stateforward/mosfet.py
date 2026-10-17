@@ -1,7 +1,7 @@
 import hsm
 
 from mosfet import abilities
-from mosfet.abilities import embedding, identification, seeing
+from mosfet.abilities import embedding, identification, sandbox, seeing
 
 
 def test_ability_defines_operation_contract() -> None:
@@ -35,3 +35,12 @@ def test_abilities_export_the_seeing_package() -> None:
     assert abilities.Seeing is seeing.Seeing
     assert {"seeing", "Seeing"} <= set(abilities.__all__)
     assert "events" not in seeing.__all__
+
+
+def test_abilities_export_the_sandbox_package_with_its_host_protocol_module() -> None:
+    assert abilities.sandbox is sandbox
+    assert "sandbox" in abilities.__all__
+    assert "events" not in sandbox.__all__
+    assert {"host", "testing", "Spec", "Capacity", "RunData", "RanData", "Machine", "FailureKind"} <= set(
+        sandbox.__all__
+    )
