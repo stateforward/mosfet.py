@@ -64,7 +64,6 @@ from mosfet.abilities import speaking
 from mosfet.abilities import vocal
 from mosfet.abilities.communication import conversation
 from mosfet.abilities.hearing import voice
-from mosfet.bot import Bot
 from mosfet.providers.gemini import ChatClient as GeminiChatClient
 from mosfet.providers.gemini import Processor as GeminiProcessor
 from mosfet.providers.mlx_audio import SpeechDecoder
@@ -1117,7 +1116,7 @@ class _TrackedCommunication(communication.Communication):
     )
 
 
-class ListenSpeakBot(Bot):
+class ListenSpeakBot(mosfet.Bot):
     """Bot with no devices: real Listening input plus cognition and an internal Speaking port."""
 
     _processing_timeout: typing.ClassVar[datetime.timedelta] = datetime.timedelta(seconds=120)
@@ -1439,7 +1438,7 @@ class ListenSpeakBot(Bot):
         instance._deactivation_terminals.publish(event)
 
     model: typing.ClassVar[hsm.Model] = hsm.redefine(
-        Bot.model,
+        mosfet.Bot.model,
         "ListenSpeakBot",
         hsm.transition(
             hsm.source("active"),

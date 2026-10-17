@@ -25,7 +25,7 @@ from mosfet.abilities import vocal
 from mosfet.abilities.hearing import speech
 from mosfet.abilities.hearing import voice as hearing_voice
 from mosfet.abilities.language import text
-from mosfet.bot import Bot
+from mosfet.bot.body import Bot
 from mosfet.device import Device
 from mosfet.devices import audio
 from mosfet.environment import SoundData, SoundEvent, Environment

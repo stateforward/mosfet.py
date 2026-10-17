@@ -24,7 +24,6 @@ import mosfet
 import mosfet.telemetry
 import pytest
 from mosfet.abilities import cognition, memory, processing
-from mosfet.bot import Bot
 from mosfet.devices import phone, smart_phone
 from mosfet.environment import Environment
 from mosfet.protocols import attachment
@@ -199,7 +198,7 @@ class _NoChange(processing.Processor):
         return ()
 
 
-class _PhoneBot(Bot):
+class _PhoneBot(mosfet.Bot):
     def __init__(self, *, handset: phone.Phone, cognition_ability: cognition.Cognition) -> None:
         super().__init__({"phone": handset}, cognition=cognition_ability)
 

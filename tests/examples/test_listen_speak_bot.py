@@ -33,6 +33,7 @@ from typing import ClassVar, Protocol, TypeVar, override
 
 import hsm
 import httpx
+import mosfet
 import openai
 import pytest
 
@@ -1594,7 +1595,7 @@ def test_listen_speak_closes_owned_decoder_and_vad_when_attach_fails(
         del instance, environment, placement, reply_to, operation_id
         raise RuntimeError("attach failed")
 
-    monkeypatch.setattr(example.Bot, "attach", fail_attach)
+    monkeypatch.setattr(mosfet.Bot, "attach", fail_attach)
 
     async def run() -> None:
         body = ListenSpeakBot(reply_wav=tmp_path / "reply.wav", cognition=_empty_cognition)

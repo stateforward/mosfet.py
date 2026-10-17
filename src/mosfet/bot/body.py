@@ -22,7 +22,7 @@ from mosfet import abilities
 from mosfet import lifecycle
 from mosfet import scope
 from mosfet.protocols import attachment
-from . import events
+from mosfet import events
 
 from mosfet.device import Device
 from mosfet import telemetry

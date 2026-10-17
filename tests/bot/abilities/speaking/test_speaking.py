@@ -1407,7 +1407,6 @@ def test_speaking_powers_an_unstarted_mouth_and_stops_only_the_mouth_it_started(
 def test_cognition_does_not_directly_select_speaking_output() -> None:
     """Body output wiring is absent from cognition's actor/tool inventory."""
 
-    from mosfet.bot import Bot
     from mosfet.device import Device
     from tests.bot.test_bot import as_cognition
 
@@ -1429,7 +1428,7 @@ def test_cognition_does_not_directly_select_speaking_output() -> None:
         speaking_ability = speaking.Speaking(encoder=script, speaker=audio.Speaker())
         processor = SpeakProcessor()
 
-        class Probe(Bot):
+        class Probe(mosfet.Bot):
             def __init__(self) -> None:
                 super().__init__(
                     devices={"phone": Device()},

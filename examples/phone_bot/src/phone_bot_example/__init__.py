@@ -29,7 +29,6 @@ import typing
 import hsm
 
 from mosfet import device
-from mosfet.bot import Bot
 
 from . import person
 
@@ -880,13 +879,13 @@ def _log_phone_bot_observation(
     )
 
 
-class PhoneBot(Bot):
+class PhoneBot(mosfet.Bot):
     """Bot with LiveKit phone, input Listening, output Speaking, and optional conversation."""
 
     _processing_timeout: typing.ClassVar[datetime.timedelta] = datetime.timedelta(seconds=600)
     model: typing.ClassVar[hsm.Model] = mosfet.define(
         "PhoneBot",
-        Bot.model,
+        mosfet.Bot.model,
         hsm.observe(_log_phone_bot_observation),
         hsm.observe(mosfet.ProcessingCompletedEvent, _record_phone_bot_output),
         hsm.observe(mosfet.ProcessingFailedEvent, _record_phone_bot_failure),

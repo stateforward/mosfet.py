@@ -81,12 +81,12 @@ from mosfet.start import register, start, started
 from mosfet import abilities, behavior, skills, address
 
 if TYPE_CHECKING:
-    from mosfet.bot import Bot
+    from mosfet.bot.body import Bot
 
 
 def __getattr__(name: str) -> object:
     if name == "Bot":
-        from mosfet.bot import Bot
+        from mosfet.bot.body import Bot
 
         return Bot
     raise AttributeError(name)

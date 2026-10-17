@@ -28,7 +28,7 @@ def _xml(parts: tuple[text.ContentPart, ...]) -> str:
 
 
 def test_bot_body_events_import_from_agent_domain_without_ability_barrel_cycle() -> None:
-    _ = importlib.import_module("mosfet.bot")
+    _ = importlib.import_module("mosfet.bot.body")
 
     assert mosfet.ProcessingCompletedEvent.name == "bot.processing.completed"
 

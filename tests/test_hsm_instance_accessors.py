@@ -66,7 +66,7 @@ _FORBIDDEN_PUBLIC_HSM_OWNED_MEMBER_ANNOTATIONS = {
     "src/providers/livekit/src/mosfet/providers/livekit/room_audio.py:RoomAudioTrackPath.local_track_sid",
     "src/providers/livekit/src/mosfet/providers/livekit/room_audio.py:RoomAudioTrackPath.remote_audio_bytes",
     "src/providers/livekit/src/mosfet/providers/livekit/room_audio.py:RoomAudioTrackPath.remote_audio_chunks",
-    "src/mosfet/bot.py:Bot.focused_device",
+    "src/mosfet/bot/body.py:Bot.focused_device",
     "src/mosfet/devices/phone/phone.py:Phone.firmware_instance",
     "src/mosfet/devices/phone/phone.py:Firmware.closed_call_ids",
     "src/mosfet/devices/phone/phone.py:Firmware.current_call_id",

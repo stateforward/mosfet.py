@@ -34,8 +34,8 @@ import pytest
 
 from tests.bot.abilities.cognition.metadata_contract import assert_metadata_key_prefix_is_absent
 
-from mosfet.bot import Bot
-import mosfet.bot as bot_module
+from mosfet.bot import body
+from mosfet.bot.body import Bot
 from mosfet.device import Device
 from mosfet import event as event_contract
 from mosfet import media
@@ -4361,9 +4361,9 @@ def test_bot_core_does_not_import_device_audio_events() -> None:
     import mosfet
 
     assert mosfet.InputEvent.name == "bot.input"
-    assert not hasattr(bot_module, "OutputEvent")
-    assert not hasattr(bot_module, "_RAW_AUDIO_EVENT_NAMES")
-    assert "bot.devices.audio" not in Path(bot_module.__file__).read_text()
+    assert not hasattr(body, "OutputEvent")
+    assert not hasattr(body, "_RAW_AUDIO_EVENT_NAMES")
+    assert "bot.devices.audio" not in Path(body.__file__).read_text()
 
 
 def test_bot_ignores_unhandled_device_event() -> None:
@@ -4532,7 +4532,7 @@ def test_bot_lifecycle_starts_and_stops_acquired_abilities() -> None:
 
 
 def test_bot_processing_does_not_define_coordination_metadata_keys() -> None:
-    assert_metadata_key_prefix_is_absent(bot_module, "_PROCESSING_")
+    assert_metadata_key_prefix_is_absent(body, "_PROCESSING_")
 
 
 def test_a_placed_bot_only_hears_what_is_loud_enough_where_it_stands() -> None:
