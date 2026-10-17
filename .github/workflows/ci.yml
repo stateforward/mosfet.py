@@ -99,6 +99,15 @@ jobs:
           uv run --locked --project examples/minimal_bot basedpyright --project examples/minimal_bot
           uv run --locked --project examples/minimal_bot python -m pytest -q examples/minimal_bot/tests
 
+      - name: Builder example quality gates
+        run: |
+          uv run --locked --project examples/builder_bot ruff check examples/builder_bot/src examples/builder_bot/tests
+          uv run --locked --project examples/builder_bot ruff format --check \
+            examples/builder_bot/src \
+            examples/builder_bot/tests
+          uv run --locked --project examples/builder_bot basedpyright --project examples/builder_bot
+          uv run --locked --project examples/builder_bot python -m pytest -q examples/builder_bot/tests
+
       - name: Ruff
         run: |
           # Provider list derived via glob so new providers are covered automatically.
