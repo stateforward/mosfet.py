@@ -63,7 +63,8 @@ The process boundary creates one `mosfet.Environment`, passes it to the `Runtime
 non-private child of that environment.
 
 ```
-booting               build the assembly            -> starting_actors | failed (78) | stopped (0, on stop)
+booting               remove a stale ready file, build the assembly
+                                                     -> starting_actors | failed (78) | stopped (0, on stop)
 starting_actors       start each actor in order      -> starting_supervisors | stopping
 starting_supervisors  start one Supervisor per bot   -> running | stopping
 running               settling -> ready (all bots reported running; the ready file exists only here)
@@ -92,6 +93,11 @@ stopping              one stop_grace bound           -> stopped (0, 70 or 78) | 
   actor whose stop ignores cancellation therefore cannot hold the Runtime past `stop_grace`: the grace
   timer still forces exit `1`, and the stop that outlived it is left to the process boundary.
 * `on_exit(runtime.ExitedData)` is called exactly once, by the transition into a final state.
+* The ready file is touched on entry to `running/ready` and removed on its exit. A run killed without
+  leaving `ready` (SIGKILL, an OOM kill, a host crash) cannot remove it, and a restarted container keeps
+  its writable layer, so `booting` removes any ready file left by an earlier run before it does anything
+  else. The file therefore exists exactly while this run is ready, across crashes too. A failure to remove
+  it is logged with its failure kind only.
 
 ### Exit codes
 

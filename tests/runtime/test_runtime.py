@@ -572,6 +572,34 @@ def test_ready_file_exists_only_while_ready(tmp_path: pathlib.Path, monkeypatch:
     assert not after
 
 
+def test_a_ready_file_left_by_an_earlier_run_is_removed_at_boot(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ready = tmp_path / "ready"
+    # A SIGKILL, OOM kill or host crash skips the ready state's exit, so the previous run's file remains.
+    ready.touch()
+    seen_while_booting: list[bool] = []
+
+    def build(config: runtime.Config) -> runtime.Assembly:
+        seen_while_booting.append(ready.exists())
+        return factories.quiet(config)
+
+    _assemble(monkeypatch, build)
+
+    async def run() -> runtime.ExitedData:
+        started = await _run(tmp_path, ready_file=ready, clock=_ManualClock())
+        # Boot has looked, and the file exists again: touched by this run's ready entry.
+        await factories.wait_until(lambda: bool(seen_while_booting) and ready.exists())
+        await started.stop()
+        return await started.exit()
+
+    exited = asyncio.run(run())
+
+    assert seen_while_booting == [False]
+    assert exited == runtime.ExitedData(code=0, reason="stopped")
+    assert not ready.exists()
+
+
 def test_a_stop_request_a_supervisor_fails_to_take_still_stops_the_actors_and_exits_0(
     tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -109,7 +109,7 @@ mosfet-provider-llama-cpp`, not by a unit test.
 | `tests/runtime/test_assembly.py` | `src/mosfet/runtime/assembly.py` (bot names and count, actor class models, placement keys) |
 | `tests/runtime/test_events.py` | `src/mosfet/runtime/events.py` (payload schemas, exit code per reason, no tool-kind event) |
 | `tests/runtime/test_supervisor.py` | `src/mosfet/runtime/supervisor.py` (operation ids, recovery and backoff, exhaustion, bounded stop) |
-| `tests/runtime/test_runtime.py` | `src/mosfet/runtime/runtime.py` (boot, bring-up, readiness, single-grace stop, exit codes) |
+| `tests/runtime/test_runtime.py` | `src/mosfet/runtime/runtime.py` (boot, stale ready file removal, bring-up, readiness, single-grace stop, exit codes) |
 | `tests/test_cli.py` | `src/mosfet/cli.py` (exit codes 0/1/64/70/78, signals in a child process, bounded process exit) |
 | `examples/minimal_bot/tests/test_minimal_bot.py` | `examples/minimal_bot` (`build` assembly and its configuration; the installed `mosfet run minimal_bot_example:build` reaches ready and exits 0 on SIGTERM) |
 

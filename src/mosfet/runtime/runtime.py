@@ -421,6 +421,9 @@ class Runtime(Traced):
         hsm.initial(hsm.target("booting")),
         hsm.state(
             "booting",
+            # A run killed without leaving ready (SIGKILL, OOM, host crash) left its ready file behind: remove
+            # it before anything else, so the file exists exactly while this run is ready.
+            hsm.entry(_remove_ready_file),
             hsm.activity(_boot),
             hsm.transition(
                 hsm.on(events.BootedEvent),
