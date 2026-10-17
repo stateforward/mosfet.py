@@ -19,7 +19,8 @@ and :func:`stop` deactivates and stops it::
 A bot file's mistakes come back as rustc-style :class:`Diagnostic`\\ s (``mosfet.bot.diagnostics``),
 all of them in one :class:`DefinitionError`; clippy-style lints are :class:`LintWarning`\\ s that
 :func:`allow` allows per bot and :func:`check` returns; :func:`start`'s are :class:`StartError`\\ s; and
-:func:`explain` says what any code means.
+:func:`explain` says what any code means. ``mosfet.bot.testing`` is what a bot's tests need: a scripted
+model, a bot running for an ``async with`` block, and its snapshot.
 """
 
 from .define import DefinitionError, Error, Finalizer, RedefinableBot, Validator, define, redefine
