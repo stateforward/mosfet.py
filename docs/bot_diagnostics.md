@@ -388,7 +388,7 @@ model = bot.define("greeter", bot.cognition(processor), bot.allow("no_devices"))
 
 `bot.start` builds one bot around the very parts a model holds. Starting a model again, or another model that shares one of its parts, while any of those parts runs is an error; the labels name the parts that are running.
 
-Why: A part is one real thing: a phone is held by one body, and a memory remembers for one mind. Two bots cannot hold it at once, so each bot is defined from parts of its own, and a model starts once.
+Why: A part is one real thing: a phone is held by one body, and a memory remembers for one mind. Two bots cannot hold it at once, so each bot is defined from parts of its own, and a model runs one bot at a time: `bot.stop` stops its parts, and then it starts again.
 
 Wrong:
 

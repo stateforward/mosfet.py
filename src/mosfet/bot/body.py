@@ -502,6 +502,25 @@ class Bot(Traced):
         environment.leave(self)
         return self
 
+    @typing.override
+    async def stop(self, ctx: hsm.Context) -> None:
+        """Stop the body, then every part it started, in reverse: its abilities, cognition and the register among them, then its devices.
+
+        Whoever starts a part stops it, and each part stops what it started: a device the
+        peripherals it powers, a composite ability its children (cognition its faculties and its
+        memory, which closes the database it opened). So nothing the body started outlives it, and
+        a body built again from the same parts starts again. Stopping a part that never started,
+        or already stopped, does nothing.
+        """
+
+        await hsm.Instance.stop(self, ctx)
+        await hsm.stop(self._attachments, ctx)
+        for ability in reversed(Bot._lifecycle_abilities(self)):
+            await hsm.stop(ability, ctx)
+        # Device.stop stops the peripherals that device powers, so this owns configured devices only.
+        for device in reversed(list(self._devices.values())):
+            await device.stop(ctx)
+
     @staticmethod
     def _lifecycle_abilities(instance: "Bot") -> tuple[abilities.Ability[typing.Any, typing.Any], ...]:
         # The short-term register is perception machinery the body owns: it attaches with the

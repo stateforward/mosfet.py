@@ -359,6 +359,9 @@ class Group(Traced, Attachment, hsm.Dispatchable):
         self._op_failure: events.FailedData | None = None
         self._op_created: tuple[int, ...] = ()
         self._op_fallback: bool = False
+        # The members this group's own attach started, in start order: whoever starts a member
+        # stops it, so stop stops these and never a member someone else started.
+        self._started: list[hsm.Instance] = []
 
     @staticmethod
     async def _attach_members_activity(ctx: hsm.Context, instance: "Group", event: hsm.Event[typing.Any]) -> None:
@@ -1108,6 +1111,7 @@ class Group(Traced, Attachment, hsm.Dispatchable):
                     # Members must outlive the request that attaches them: parent them under the
                     # group's owning context, not the caller's transient ``ctx`` (HSM-CONTEXT-001).
                     _ = await mosfet.started(self.context(), member, model)
+                    self._started.append(member)
                 except Exception:
                     reply_to = data.actor if data.reply_to is None else data.reply_to
                     await hsm.dispatch(
@@ -1160,6 +1164,15 @@ class Group(Traced, Attachment, hsm.Dispatchable):
         )
         task.add_done_callback(lambda done: None if done.cancelled() else done.exception())
         return task
+
+    @typing.override
+    async def stop(self, ctx: hsm.Context) -> None:
+        """Stop this group, then the members its attach started, in reverse; members started elsewhere run on."""
+
+        await hsm.Instance.stop(self, ctx)
+        started, self._started = self._started, []
+        for member in reversed(started):
+            await hsm.stop(member, ctx)
 
     @typing.override
     def detach(

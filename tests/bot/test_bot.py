@@ -4149,6 +4149,44 @@ def test_detach_is_idempotent_for_unstarted_bot() -> None:
     asyncio.run(run())
 
 
+def test_stopping_the_body_stops_every_part_it_started_and_what_each_part_started() -> None:
+    """D-W7-9: the body stops its devices and its abilities, the register and cognition among them, and each
+    part stops what it started: a device its peripherals, cognition its faculties and its memory."""
+
+    async def run() -> dict[str, bool]:
+        speaker = audio.Speaker()
+        handset = phone_device.Phone(id="desk", speaker=speaker)
+        register = memory.StmMemory()
+        store = memory.Memory()
+        intuition = cognition.Intuition(processor=IgnoreProcessor())
+        mind = cognition.Cognition(
+            intuition=intuition,
+            reasoning=cognition.Reasoning(processor=_NoopReasoningProcessor()),
+            reflection=_reflection_for_test(store),
+            memory=store,
+        )
+        active_bot = Bot(devices=(handset,), cognition=mind, stm_memory=register)
+        environment = await start_bot_with_devices(active_bot)
+        assert active_bot.state().startswith("/Bot/active")
+        _ = await active_bot.detach(environment)
+        await wait_until(lambda: active_bot.state() == "/Bot/inactive")
+        await hsm.stop(active_bot, environment)
+        parts = {
+            "body": active_bot,
+            "phone": handset,
+            "speaker": speaker,
+            "register": register,
+            "cognition": mind,
+            "intuition": intuition,
+            "memory": store,
+        }
+        return {name: mosfet.lifecycle.is_started(part) for name, part in parts.items()}
+
+    assert asyncio.run(run()) == dict.fromkeys(
+        ("body", "phone", "speaker", "register", "cognition", "intuition", "memory"), False
+    )
+
+
 def test_bot_activation_dispatches_completion_after_queueing_device_notifications() -> None:
     async def run() -> None:
         device = Device()

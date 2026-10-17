@@ -10,6 +10,7 @@ import hsm
 import mosfet
 import pytest
 
+from mosfet import lifecycle
 from mosfet.protocols import attachment
 
 
@@ -669,6 +670,48 @@ def test_group_does_not_roll_back_preexisting_members_after_reattach_failure() -
     assert existing.detach_calls == []
     assert len(existing.attach_calls) == 2
     assert len(failing.attach_calls) == 2
+
+
+def test_group_stops_the_members_it_started_when_it_stops() -> None:
+    """Who starts a member stops it: the group stops what its attach started, never a member started elsewhere."""
+
+    async def run() -> tuple[bool, bool, bool]:
+        ctx = hsm.Context()
+        actor = LifecycleRecorder()
+        started_here = TestAttachment()
+        started_elsewhere = TestAttachment()
+        group = attachment.Group(started_here, started_elsewhere)
+        _ = await mosfet.started(ctx, actor, actor.model)
+        _ = await mosfet.started(ctx, started_elsewhere, started_elsewhere.model)
+        _ = await mosfet.started(ctx, group, group.model)
+        _ = await group.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=actor)))
+        _ = await asyncio.wait_for(actor.recorded.wait(), timeout=1)
+        started = lifecycle.is_started(started_here)
+        await hsm.stop(group, ctx)
+        return started, lifecycle.is_started(started_here), lifecycle.is_started(started_elsewhere)
+
+    assert asyncio.run(run()) == (True, False, True)
+
+
+def test_a_stopped_group_starts_its_members_again_on_its_next_attach() -> None:
+    async def run() -> tuple[list[str], bool]:
+        ctx = hsm.Context()
+        actor = LifecycleRecorder()
+        member = TestAttachment()
+        group = attachment.Group(member)
+        _ = await mosfet.started(ctx, actor, actor.model)
+        for _attempt in range(2):
+            _ = await mosfet.started(ctx, group, group.model)
+            actor.recorded.clear()
+            _ = await group.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=actor)))
+            _ = await asyncio.wait_for(actor.recorded.wait(), timeout=1)
+            await hsm.stop(group, ctx)
+        return [event.name for event in actor.events], lifecycle.is_started(member)
+
+    names, still_started = asyncio.run(run())
+
+    assert names == [attachment.AttachCompleteEvent.name, attachment.AttachCompleteEvent.name]
+    assert not still_started
 
 
 def test_group_composes_nested_group_lifecycles() -> None:

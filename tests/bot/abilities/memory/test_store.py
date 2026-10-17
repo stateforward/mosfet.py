@@ -14,7 +14,7 @@ import pytest
 from sqlalchemy.engine import Engine
 
 from tests import metric_reader
-from tests.bot.abilities.memory.memory_fixtures import execute_on
+from tests.bot.abilities.memory.memory_fixtures import disposed_engines, execute_on
 from tests.bot.abilities.support import dispatch_ability_for_test, shared_hsm_context, start_abilities_for_test
 
 
@@ -482,3 +482,55 @@ def test_a_store_that_does_not_open_within_its_attach_timeout_is_degraded() -> N
     waiting, state = asyncio.run(run())
     assert waiting == "/_NeverOpensLifecycle/attached/behavior/opening"
     assert state == "/_NeverOpensLifecycle/attached/behavior/degraded"
+
+
+def test_a_store_closes_the_database_it_opened_when_it_stops(tmp_path: pathlib.Path) -> None:
+    """D-W7-9: a stopped store leaves no database open; what it committed is there for the next to open it."""
+
+    path = tmp_path / "store.db"
+
+    async def run(disposed: list[Engine]) -> tuple[int, tuple[str, ...]]:
+        ctx = shared_hsm_context()
+        first = memory.MemoryStore(database=str(path))
+        await start_abilities_for_test(ctx, first)
+        _ = await memory.transact(
+            ctx, first, memory.InputData(statements=(_insert_content(content="kept", query_tags="k"),))
+        )
+        await hsm.stop(first, ctx)
+        closed = len(disposed)
+        second = memory.MemoryStore(database=str(path))
+        await start_abilities_for_test(ctx, second)
+        found = await memory.transact(
+            ctx, second, memory.InputData(statements=(_select_by_query_tags(query_tags="k"),))
+        )
+        await hsm.stop(second, ctx)
+        return closed, found.contents()
+
+    with disposed_engines() as disposed:
+        assert asyncio.run(run(disposed)) == (1, ("kept",))
+    assert len(disposed) == 2
+
+
+def test_a_store_leaves_an_engine_it_was_given_open_when_it_stops() -> None:
+    """Whoever opens a database closes it: an injected engine is its owner's to dispose."""
+
+    from mosfet.abilities.memory import store as store_module
+
+    engine = store_module.open_sqlite_engine()
+
+    async def run() -> None:
+        injected = memory.MemoryStore(engine=engine)
+        ctx = shared_hsm_context()
+        await start_abilities_for_test(ctx, injected)
+        _ = await memory.transact(
+            ctx, injected, memory.InputData(statements=(_insert_content(content="theirs", query_tags="t"),))
+        )
+        await hsm.stop(injected, ctx)
+
+    with disposed_engines() as disposed:
+        asyncio.run(run())
+
+    assert disposed == []
+    selected = execute_on(engine, memory.InputData(statements=(_select_by_query_tags(query_tags="t"),)))
+    assert selected.contents() == ("theirs",)
+    engine.dispose()

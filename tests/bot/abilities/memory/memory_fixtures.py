@@ -6,12 +6,14 @@ from mosfet.protocols import attachment
 
 import asyncio
 import collections.abc
+import contextlib
 import datetime
 import typing
 import uuid
 
 import hsm
 import mosfet
+import sqlalchemy.event
 from sqlalchemy.engine import Engine
 
 from tests.hsm_instance_state import ability_terminal_owner, remember_ability_terminal_owner
@@ -167,3 +169,19 @@ def execute_on(engine: Engine, data: memory.InputData) -> memory.OutputData:
             else:
                 results.append(memory.StatementResult(rowcount=max(cursor.rowcount, 0)))
     return memory.OutputData(results=tuple(results))
+
+
+@contextlib.contextmanager
+def disposed_engines() -> collections.abc.Generator[list[Engine]]:
+    """Every engine disposed inside the block, through SQLAlchemy's public ``engine_disposed`` event."""
+
+    found: list[Engine] = []
+
+    def record(engine: Engine) -> None:
+        found.append(engine)
+
+    sqlalchemy.event.listen(Engine, "engine_disposed", record)
+    try:
+        yield found
+    finally:
+        sqlalchemy.event.remove(Engine, "engine_disposed", record)

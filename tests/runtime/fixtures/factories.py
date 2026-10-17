@@ -83,13 +83,9 @@ class UnreleasableBot(QuietBot):
     """Its machine refuses to stop: every release of it raises."""
 
     @typing.override
-    def stop(self, ctx: hsm.Context) -> collections.abc.Awaitable[None]:
+    async def stop(self, ctx: hsm.Context) -> None:
         del ctx
-
-        async def refuse() -> None:
-            raise RuntimeError("bot machine refused to stop")
-
-        return refuse()
+        raise RuntimeError("bot machine refused to stop")
 
 
 class FailingDevice(Device):

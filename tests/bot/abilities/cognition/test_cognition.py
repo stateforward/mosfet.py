@@ -4266,7 +4266,7 @@ def test_reasoning_may_recall_a_memory_and_the_recollection_becomes_an_observati
     """Recall is offered to reasoning (effort M) and not to intuition; what comes to mind is a new turn."""
 
     async def run() -> tuple[
-        list[processing.InputData], list[processing.InputData], hsm.Event[typing.Any], str, str, str
+        list[processing.InputData], list[processing.InputData], hsm.Event[typing.Any], str, str, str, str
     ]:
         store = memory.Memory()
         associative = memory.Associative(memory=store)
@@ -4297,16 +4297,20 @@ def test_reasoning_may_recall_a_memory_and_the_recollection_becomes_an_observati
                 earlier.node_id,
                 hsm.id(ability),
                 hsm.id(associative),
+                # Read while it runs: stopping cognition stops the faculties it started.
+                hsm.id(reasoning_processor.calls[0].actors["memory"]),
             )
         finally:
             await ability.stop(ctx)
 
-    intuition_calls, reasoning_calls, handoff, node_id, cognition_id, associative_id = asyncio.run(run())
+    intuition_calls, reasoning_calls, handoff, node_id, cognition_id, associative_id, offered_memory_id = asyncio.run(
+        run()
+    )
 
     assert memory.RecallEvent.name not in {event.name for event in intuition_calls[0].schemas}
     (reasoning_frame,) = reasoning_calls
     assert memory.RecallEvent.name in {event.name for event in reasoning_frame.schemas}
-    assert hsm.id(reasoning_frame.actors["memory"]) == associative_id
+    assert offered_memory_id == associative_id
     assert handoff.name == cognition.InputEvent.name
     assert handoff.source == cognition_id
     data = handoff.data

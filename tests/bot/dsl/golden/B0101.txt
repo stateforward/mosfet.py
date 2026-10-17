@@ -7,8 +7,8 @@ error[B0101]: bot `greeter` is already started
 15 |         _ = await bot.start(environment, model)
    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ started again here
    |
-   = note: a model holds the very parts its bot file built, and they run in one bot, once per process
-help: define a second model, with new parts, for a second bot
+   = note: a model holds the very parts its bot file built, and they run in one bot at a time
+help: stop the running bot with `bot.stop` first, or define a second model, with new parts, for a second bot
    = explain: bot.explain("B0101")
 
 error: could not start bot `greeter`: 1 error

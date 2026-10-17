@@ -489,6 +489,24 @@ class MemoryStore(ability.Ability[InputData, OutputData]):
 
         return self._connect()
 
+    @typing.override
+    async def stop(self, ctx: hsm.Context) -> None:
+        """Stop, then close the database this store opened; one it was given, as an engine or a connection, is left open.
+
+        Whoever opens a database closes it: an injected engine or connection is its owner's. A store
+        started again opens its database again.
+        """
+
+        await super().stop(ctx)
+        engine, self._engine = self._engine, None
+        if engine is not None and self._injected is None and self._connection is None:
+            self._close_engine(engine)
+
+    def _close_engine(self, engine: Engine) -> None:
+        """Close the database this store opened; here on the event loop, where this store runs its SQL."""
+
+        engine.dispose()
+
     def _opened_engine(self) -> Engine:
         """The open database; only states after ``opening`` run statements, so it is always open there."""
 

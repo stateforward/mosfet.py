@@ -371,6 +371,8 @@ class Memory(store.MemoryStore):
     # waits for the previous one to drain, so a job left running by a timeout, a detach or a stop can
     # never overlap a later one on the same connection.
     _worker: concurrent.futures.ThreadPoolExecutor | None
+    # The jobs submitted to the worker and not yet done, so stop can close the database after the last.
+    _jobs: set[concurrent.futures.Future[typing.Any]]
     # Durable machine data: the request in its SQL step, the requests waiting on an embed (by
     # the embed's id; the reply's id selects one), and the unit leased for consolidation.
     _in_flight: _InFlight | None
@@ -405,6 +407,7 @@ class Memory(store.MemoryStore):
         self._clock = clock if clock is not None else (lambda: datetime.datetime.now(datetime.UTC))
         self._operation_timeout = operation_timeout
         self._worker = None
+        self._jobs = set()
         self._in_flight = None
         self._waiting = {}
         self._lease = None
@@ -425,11 +428,28 @@ class Memory(store.MemoryStore):
 
     @typing.override
     async def stop(self, ctx: hsm.Context) -> None:
-        """Stop, then let the database worker exit: queued jobs are cancelled, a running one finishes."""
+        """Stop, close the database it opened, and let the database worker exit: queued jobs are cancelled, a running one finishes."""
 
         await super().stop(ctx)
         if self._worker is not None:
             self._worker.shutdown(wait=False, cancel_futures=True)
+
+    @typing.override
+    def _close_engine(self, engine: Engine) -> None:
+        """Close the database once the worker's last job is done: queued jobs are cancelled, a running one finishes first.
+
+        Stop never waits on that job: the engine is disposed on the worker, right after it.
+        """
+
+        worker = self._worker
+        if worker is not None:
+            worker.shutdown(wait=False, cancel_futures=True)
+        # One worker: once the queue is cancelled, at most the job it is running is not done.
+        running = next((job for job in self._jobs if not job.done()), None)
+        if running is None:
+            engine.dispose()
+            return
+        running.add_done_callback(lambda _: engine.dispose())
 
     @typing.override
     async def _open_engine(self) -> Engine:
@@ -760,7 +780,10 @@ class Memory(store.MemoryStore):
         if worker is None:
             raise RuntimeError("Memory runs database jobs only while started.")
         bound = span.bind(job)
-        return await asyncio.wrap_future(worker.submit(bound, *args, **kwargs))
+        submitted = worker.submit(bound, *args, **kwargs)
+        instance._jobs.add(submitted)
+        submitted.add_done_callback(instance._jobs.discard)
+        return await asyncio.wrap_future(submitted)
 
     @staticmethod
     def _done(

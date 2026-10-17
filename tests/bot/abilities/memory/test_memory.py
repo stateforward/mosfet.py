@@ -26,6 +26,8 @@ from mosfet import environment, media
 from mosfet.abilities import ability, embedding, memory, processing
 from mosfet.abilities.language import text
 from mosfet.protocols import attachment
+from tests.bot.abilities.memory.memory_fixtures import disposed_engines
+from tests.bot.abilities.support import shared_hsm_context, start_abilities_for_test
 
 _PNG = b"\x89PNG\r\n\x1a\n" + b"png-body"
 _SPACE = embedding.Space(model="test/embedder", dimensions=2)
@@ -1275,3 +1277,24 @@ def test_the_database_worker_lives_from_start_to_stop() -> None:
     workers, alive = _run(scenario)
     assert len(workers) == 1
     assert alive == set()
+
+
+def test_a_stopped_memory_closes_the_database_it_opened_once_its_worker_is_done(tmp_path: pathlib.Path) -> None:
+    """D-W7-9: the engine is disposed on the database worker after its last job, so nothing it opened stays open."""
+
+    async def run(disposed: list[Engine]) -> tuple[int, int]:
+        existing = _memory_threads()
+        store = memory.Memory(database=str(tmp_path / "memory.db"))
+        ctx = shared_hsm_context()
+        await start_abilities_for_test(ctx, store)
+        _ = await memory.transact(
+            ctx, store, memory.InputData(statements=(memory.Statement(sql="SELECT count(*) FROM bot_memory_node"),))
+        )
+        workers = _memory_threads() - existing
+        await hsm.stop(store, ctx)
+        for worker in workers:
+            await asyncio.to_thread(worker.join, 5)
+        return len(workers), len(disposed)
+
+    with disposed_engines() as disposed:
+        assert asyncio.run(run(disposed)) == (1, 1)

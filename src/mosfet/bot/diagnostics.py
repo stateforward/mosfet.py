@@ -467,7 +467,8 @@ EXPLANATIONS: tuple[Explanation, ...] = (
         ),
         why=(
             "A part is one real thing: a phone is held by one body, and a memory remembers for one mind. Two bots "
-            "cannot hold it at once, so each bot is defined from parts of its own, and a model starts once."
+            "cannot hold it at once, so each bot is defined from parts of its own, and a model runs one bot at a "
+            "time: `bot.stop` stops its parts, and then it starts again."
         ),
         wrong=(
             'model = bot.define("greeter", bot.cognition(processor), bot.attach(phone.Phone()))\n'

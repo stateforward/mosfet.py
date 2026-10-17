@@ -15,10 +15,12 @@ body's answer to its activation::
 A body that activates answers ``bot.activated``; one whose parts fail to attach answers the typed
 ``bot.activating.failed`` and is returned as it is, inactive, for ``bot.stop`` to stop. ``bot.stop``
 asks the body to deactivate, awaits its answer (``bot.deactivated``, or ``bot.degraded`` when its
-teardown could not finish), takes it out of the environment, and stops it.
+teardown could not finish), takes it out of the environment, and stops it, and the body stops every
+part it started: its devices, its abilities, its register, and its cognition with its faculties and
+memory, which closes the database it opened.
 
-A model holds the instances its bot file built, so it starts once per process: starting it again
-while any of its parts runs is ``B0101``. A part that raises while the bot is built is ``B0102``, and
+A model holds the instances its bot file built, so it runs one bot at a time: starting it again
+while any of its parts runs is ``B0101``, and once ``bot.stop`` has stopped them it starts again. A part that raises while the bot is built is ``B0102``, and
 a ``ctx`` that is not an ``Environment`` is ``B0103``. Each is a :class:`StartError` rendered like
 ``bot.define``'s errors, pointing at the bot file's own ``bot.start`` call or at the element that
 declared the part.
@@ -164,8 +166,9 @@ def _deactivate(reply_to: hsm.Instance) -> hsm.Event[typing.Any]:
 async def stop(instance: body.Bot) -> None:
     """Deactivate the bot ``bot.start`` started, await its answer, take it out of its environment and stop it.
 
-    A bot that is not running is already stopped. A body that answers ``bot.degraded``, or never
-    answers, is stopped all the same.
+    Stopping the body stops every part it started, so the model it was built from can be started
+    again. A bot that is not running is already stopped. A body that answers ``bot.degraded``, or
+    never answers, is stopped all the same.
     """
 
     if not lifecycle.is_started(instance):
@@ -335,8 +338,11 @@ def _again(
             message=f"bot `{name}` is already started",
             primary=diagnostics.Span.of(location, "started again here"),
             secondary=tuple(diagnostics.Span.of(member.location, label(member)) for _, member in running),
-            notes=("a model holds the very parts its bot file built, and they run in one bot, once per process",),
-            help=diagnostics.Help(message="define a second model, with new parts, for a second bot"),
+            notes=("a model holds the very parts its bot file built, and they run in one bot at a time",),
+            help=diagnostics.Help(
+                message="stop the running bot with `bot.stop` first, or define a second model, with new parts, "
+                + "for a second bot"
+            ),
         ),
         "already_started",
     )

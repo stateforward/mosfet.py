@@ -6,6 +6,7 @@ DSL-7 and DSL-9 of the wave 7 bot DSL design (W7-30; OQ-55).
 import asyncio
 import collections.abc
 import datetime
+import gc
 import pathlib
 import typing
 import warnings
@@ -359,20 +360,68 @@ def test_start_takes_a_bot_model() -> None:
 # Stopping
 
 
-def test_stop_waits_for_the_body_to_detach_its_parts_then_stops_it() -> None:
-    store, desk = memory.Memory(), phone.Phone()
-    model = bot.define("greeter", bot.cognition(support.Silent(), memory=store), bot.attach(desk))
+def test_stop_stops_the_body_and_every_part_it_started() -> None:
+    """D-W7-9: the body detaches its parts, then stops them and itself: devices, cognition, its memory, the register."""
 
-    async def run() -> tuple[bool, str, str]:
+    store, desk, register = memory.Memory(), phone.Phone(), memory.StmMemory()
+    model = bot.define(
+        "greeter", bot.cognition(support.Silent(), memory=store), bot.attach(desk), bot.register(register)
+    )
+
+    async def run() -> list[bool]:
         started, _ = await _started(model)
         await bot.stop(started)
-        return lifecycle.is_started(started), store.state(), desk.state()
+        return [lifecycle.is_started(part) for part in (started, store, desk, register)]
 
-    still_started, store_state, desk_state = asyncio.run(run())
+    assert asyncio.run(run()) == [False, False, False, False]
 
-    assert not still_started
-    assert store_state.endswith("/detached")
-    assert desk_state.endswith("/detached")
+
+def test_a_stopped_model_starts_again_and_leaves_nothing_open() -> None:
+    """D-W7-9: the same model starts, stops and starts again, and no database it opened is left unclosed."""
+
+    def twice() -> list[str]:
+        model = bot.define(
+            "greeter",
+            bot.cognition(support.Silent(), associative=True, consolidation=True, autonomy=True),
+            bot.attach(phone.Phone(id="desk")),
+            bot.register(memory.StmMemory()),
+        )
+
+        async def run() -> list[str]:
+            states: list[str] = []
+            for _ in range(2):
+                started, _ = await _started(model)
+                states.append(started.state())
+                await bot.stop(started)
+            return states
+
+        return asyncio.run(run())
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always", ResourceWarning)
+        states = twice()
+        _ = gc.collect()
+
+    assert [state.split("/")[2] for state in states] == ["active", "active"]
+    assert [str(warning.message) for warning in caught if issubclass(warning.category, ResourceWarning)] == []
+
+
+def test_a_stopped_model_redefines_and_its_stopped_parts_define_another_bot() -> None:
+    """D-W7-9, W7-19: once bot.stop has stopped its parts, the model redefines like hsm's, and its parts are free."""
+
+    desk = phone.Phone(id="desk")
+    model = bot.define("greeter", bot.cognition(support.Silent()), bot.attach(desk))
+
+    async def run() -> None:
+        started, _ = await _started(model)
+        await bot.stop(started)
+
+    asyncio.run(run())
+    again = bot.redefine(model)
+    other = bot.define("other", bot.cognition(support.Silent()), bot.attach(desk))
+
+    assert list(again.members) == list(model.members)
+    assert list(other.members) == ["/other", "/other/.cognition", "/other/desk"]
 
 
 def test_stopping_a_stopped_bot_does_nothing() -> None:
