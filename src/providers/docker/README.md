@@ -1,6 +1,7 @@
 # mosfet-provider-docker
 
-A sandbox host for `sandbox.Sandbox` on the Docker Engine API, over a **rootless** daemon's unix socket. `docker.Host`
+A sandbox host for `sandbox.Sandbox` on the Docker Engine API, over a **rootless** daemon's unix socket: rootless
+Docker, or rootless Podman's Docker-compatible API socket. `docker.Host`
 is a state machine that answers the canonical `sandbox.host` event protocol; the ability owns it unstarted and
 reaches it only by events. Every Engine API exchange is one state whose activity makes one request on an `httpx`
 client with no timeout, no retries and no redirects: the state's own `hsm.after` bounds it.
@@ -12,7 +13,7 @@ from mosfet.providers import docker
 capacity = docker.capacity(max_resources=sandbox.Resources(cpus=2.0, memory_bytes=2 * 1024**3))
 bench = sandbox.Sandbox(
     host=docker.Host(
-        socket=config.sandbox_socket,  # for example $XDG_RUNTIME_DIR/docker.sock
+        socket=config.sandbox_socket,  # $XDG_RUNTIME_DIR/docker.sock, or $XDG_RUNTIME_DIR/podman/podman.sock
         capacity=capacity,
         images=frozenset({"ghcr.io/stateforward/builder:1.0"}),
         owner=f"{config.name}/{config.instance_id}",
@@ -105,4 +106,15 @@ python src/providers/docker/scripts/live_check.py --socket "$XDG_RUNTIME_DIR/doc
     --image python:3.13-slim-bookworm --rootful-socket /var/run/docker.sock
 ```
 
-Podman's Docker-compatible socket is not claimed until its own live check passes (W5-6).
+## Podman
+
+Rootless Podman's Docker-compatible API socket is supported (W5-6): the live check passes against it in full. On
+Linux that is `$XDG_RUNTIME_DIR/podman/podman.sock` (`systemctl --user enable --now podman.socket`); on macOS a
+rootless `podman machine` exposes it on the host, at the path `podman machine inspect` reports as
+`ConnectionInfo.PodmanSocket.Path`. Its `/info` reports `name=rootless`, so the host opens on it, and the
+workspace tmpfs uses `mode=1777`, which Podman accepts (W5-15). The image must already be in the machine's store:
+
+```sh
+python src/providers/docker/scripts/live_check.py --socket "$XDG_RUNTIME_DIR/podman/podman.sock" \
+    --image python:3.13-slim-bookworm --rootful-socket /var/run/docker.sock
+```
