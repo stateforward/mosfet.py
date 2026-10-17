@@ -1,13 +1,14 @@
-"""The builder bot example: one person, reached through a computer, and the bot that builds on its bench.
+"""The builder bot: one person, reached through a computer, and the bot that builds on its bench.
 
-    mosfet run builder_bot_example:build --ready-file /tmp/ready
+    python -m builder_bot_example --ready-file /tmp/ready
     builder-terminal --url ws://127.0.0.1:8765 --peer builder-desk --secret-file secrets/computer_token_secret
 
-``build`` assembles one bot, ``builder``, for one person. The person reaches it through a ``computer.Computer``
-served by a ``websocket.Server`` on this host; :mod:`builder_bot_example.terminal` is that computer's far side
-in a terminal. The bot builds and tests on a ``sandbox.Sandbox`` bench backed by a ``docker.Host`` on a rootless
-Docker or Podman socket. Its mind is the full cognition (memory, reflection, its persona and the routines it
-authors) on one OpenAI-compatible local model.
+:func:`builder` defines one bot, ``builder``, for one person, with ``bot.define``. The person reaches it through a
+``computer.Computer``, ``desk``, served by a ``websocket.Server`` on this host; :mod:`builder_bot_example.terminal`
+is that computer's far side in a terminal. The bot builds and tests on a ``sandbox.Sandbox`` bench backed by a
+``docker.Host`` on a rootless Docker or Podman socket. Its mind is the full cognition (memory, reflection, its
+persona and the routines it authors) on one OpenAI-compatible local model. ``__main__`` reads the owner's
+:class:`Settings` and the process's secrets, builds those parts, and runs the bot with ``bot.run``.
 
 Nothing here tells the bot what to do. It is given no seeded behavior, no skill and no instruction text: what
 it can do comes from the tools its computer and its bench offer on each turn, and what it does with them is
@@ -15,20 +16,16 @@ its own to choose, including nothing. The owner fixes only who it is (its traits
 """
 
 import collections.abc
-import datetime
-import functools
-import logging
 import pathlib
 import typing
 
 import hsm
-import mosfet
 import pydantic
-from mosfet import runtime
-from mosfet.abilities import cognition, memory, persona, processing, sandbox
+from mosfet import bot
+from mosfet.abilities import memory, persona, processing, sandbox
+from mosfet.behavior import schedule
 from mosfet.devices import computer
 from mosfet.providers import docker
-from mosfet.providers import openai_compat
 from mosfet.providers import websocket
 
 DEFAULT_IMAGE: typing.Final = "localhost/mosfet-bench:1"
@@ -39,27 +36,7 @@ MAX_OUTPUT_CHARS: typing.Final = 8_192
 """Most characters the bench keeps of each output stream and file read, so a turn's observations fit a local
 model's context."""
 
-_LOG = logging.getLogger(__name__)
-_DEFAULT_HOST = "127.0.0.1"
-_DEFAULT_PORT = 8765
-_DEFAULT_PEER = "builder-desk"
-_DEFAULT_RUNTIME: docker.Runtime = "runc"
-_RUNTIMES: tuple[docker.Runtime, ...] = ("runc", "runsc")
 _WORKSPACE = "/workspace"
-_IMAGE: pydantic.TypeAdapter[str] = pydantic.TypeAdapter(sandbox.ImageRef)
-
-
-class BuilderBot(mosfet.Bot):
-    """A bot that holds one person's computer, ``desk``, and keeps a sandbox ``bench`` to build and test on.
-
-    The bot knows the computer by the id it was built with (``computer.Computer(id="desk", ...)``).
-
-    It adds no behavior to ``mosfet.Bot``: what reaches it from the computer and the bench wakes its cognition,
-    and what it does next is that cognition's to choose.
-    """
-
-    def __init__(self, *, desk: computer.Computer, bench: sandbox.Sandbox, cognition: cognition.Cognition) -> None:
-        super().__init__((desk,), cognition=cognition, acquired_abilities=(bench,))
 
 
 def bench(*, image: str, network: sandbox.Network) -> sandbox.Spec:
@@ -79,168 +56,135 @@ def bench(*, image: str, network: sandbox.Network) -> sandbox.Spec:
     )
 
 
-def compose(
+def builder(
     *,
     processor: processing.Processor,
     server: websocket.Server,
-    peer: str,
-    person_id: str | None,
     host: hsm.Instance,
     capacity: sandbox.Capacity,
     spec: sandbox.Spec,
-    traits: persona.Traits,
-    database: str,
-    now: collections.abc.Callable[[], datetime.datetime],
-) -> runtime.Assembly:
-    """Assemble the builder from constructed collaborators; nothing is started here.
+    peer: str,
+    person_id: str | None,
+    traits: tuple[persona.Trait, ...],
+    store: memory.Memory,
+    clock: schedule.WallClock,
+) -> bot.Model:
+    """The builder: one person's computer as ``desk``, a bench to build on, and the full cognition.
 
     ``processor`` is the one model every faculty thinks with. ``server`` carries the person's computer, ``desk``,
-    whose remote machine the server knows as ``peer``; ``person_id`` is who uses it, when the owner knows.
-    ``host`` is an unstarted sandbox host the bench owns from here on, declaring ``capacity``; ``spec`` is the
-    owner's bench on it.
-    ``traits`` are the owner's seed of who the bot is, and ``database`` is where its memory is kept. ``now``
-    is the UTC wall time the routines the bot authors are scheduled by.
+    whose remote machine the server knows as ``peer``; ``person_id`` is who uses it, when the owner knows. ``host``
+    is an unstarted sandbox host the bench owns from here on, declaring ``capacity``; ``spec`` is the owner's bench
+    on it. ``traits`` are the owner's seed of who the bot is, ``store`` is where its memory is kept, and ``clock``
+    is the UTC wall time the routines the bot authors are scheduled by. Nothing is started here: ``bot.run``
+    starts the server as a shared actor, then the bot.
 
     Raises:
         ValueError: ``spec`` asks for a network or limit beyond ``capacity``, or ``host`` is already started.
     """
 
-    desk = computer.Computer(id="desk", transport=server, peer_id=peer, person_id=person_id)
-    workbench = sandbox.Sandbox(host=host, capacity=capacity, spec=spec, max_output_chars=MAX_OUTPUT_CHARS)
-    store = memory.Memory(database=database)
-    self_knowledge = persona.Persona(traits=traits, memory=store)
-    mind = cognition.Cognition(
-        autonomy=cognition.Autonomy(memory=store),
-        intuition=cognition.Intuition(processor=processor),
-        reasoning=cognition.Reasoning(processor=processor),
-        reflection=cognition.Reflection(processor=processor, memory=store, persona=self_knowledge),
-        routines=cognition.Routines(memory=store, now=now),
-        memory=store,
-        associative=memory.Associative(memory=store),
-        consolidation=memory.Consolidation(memory=store, processor=processor),
-        persona=self_knowledge,
+    return bot.define(
+        "builder",
+        bot.traits(*traits),
+        bot.cognition(processor, memory=store, associative=True, consolidation=True, autonomy=True, routines=clock),
+        bot.attach(computer.Computer(id="desk", transport=server, peer_id=peer, person_id=person_id)),
+        bot.attach(sandbox.Sandbox(host=host, capacity=capacity, spec=spec, max_output_chars=MAX_OUTPUT_CHARS)),
     )
-    builder = BuilderBot(desk=desk, bench=workbench, cognition=mind)
-    return runtime.Assembly(bots={"builder": builder}, actors=(server,))
 
 
-def _required(config: runtime.Config, name: str) -> str:
-    value = config.environ.get(name)
-    if not value:
-        raise ValueError(f"set {name}")
-    return value
+class Settings(pydantic.BaseModel):
+    """The owner's settings for the builder, read from the process environment by ``__main__``.
 
-
-def _port(config: runtime.Config) -> int:
-    text = config.environ.get("BUILDER_COMPUTER_PORT") or str(_DEFAULT_PORT)
-    if not text.isdecimal() or not 1 <= int(text) <= 65_535:
-        raise ValueError(f"BUILDER_COMPUTER_PORT must be a port number from 1 to 65535, got {text!r}")
-    return int(text)
-
-
-def _runtime(config: runtime.Config) -> docker.Runtime:
-    text = config.environ.get("BUILDER_SANDBOX_RUNTIME") or _DEFAULT_RUNTIME
-    for known in _RUNTIMES:
-        if text == known:
-            return known
-    raise ValueError(f"BUILDER_SANDBOX_RUNTIME must be one of {', '.join(_RUNTIMES)}, got {text!r}")
-
-
-def _traits(config: runtime.Config) -> persona.Traits:
-    text = config.environ.get("BUILDER_TRAITS")
-    if text is None:
-        return DEFAULT_TRAITS
-    given = tuple(trait.strip() for trait in text.split(","))
-    if not all(given):
-        raise ValueError("BUILDER_TRAITS must be comma-separated traits, none of them empty")
-    try:
-        return persona.Traits(traits=given)
-    except pydantic.ValidationError as error:
-        raise ValueError(f"BUILDER_TRAITS is not a set of traits: {error.errors()[0]['msg']}") from error
-
-
-def _image(config: runtime.Config) -> str:
-    text = config.environ.get("BUILDER_SANDBOX_IMAGE") or DEFAULT_IMAGE
-    try:
-        return _IMAGE.validate_python(text)
-    except pydantic.ValidationError as error:
-        raise ValueError(f"BUILDER_SANDBOX_IMAGE must be an image reference, got {text!r}") from error
-
-
-def build(config: runtime.Config) -> runtime.Assembly:
-    """Build the builder from the process configuration, for ``mosfet run``.
-
-    Reads ``config.environ`` and ``config.secrets`` only:
-
-    * ``OPENAI_BASE_URL`` and ``OPENAI_MODEL`` (required): the local OpenAI-compatible endpoint and its model;
-    * the ``openai_api_key`` secret (required; a placeholder for a keyless local server);
-    * ``BUILDER_SANDBOX_SOCKET`` (required): the rootless Docker or Podman socket the bench runs on;
-    * ``BUILDER_SANDBOX_IMAGE`` (default ``localhost/mosfet-bench:1``): the one image the bench may use;
-    * ``BUILDER_SANDBOX_EGRESS_NETWORK``: the owner's egress bridge; unset, the bench has no network;
-    * ``BUILDER_SANDBOX_RUNTIME`` (default ``runc``): ``runc``, or ``runsc`` for gVisor;
-    * ``BUILDER_COMPUTER_HOST`` and ``BUILDER_COMPUTER_PORT`` (default ``127.0.0.1`` and ``8765``): where the
-      person's computer is served;
-    * ``BUILDER_COMPUTER_PEER`` (default ``builder-desk``): the computer's device and peer id;
-    * the ``computer_token_secret`` secret (required): the key the terminal's token is signed with;
-    * ``BUILDER_PERSON_ID``: who uses the computer, when the owner knows;
-    * ``BUILDER_TRAITS`` (default ``careful,curious,candid``): the owner's traits for the bot, comma separated.
-
-    Memory is kept in ``config.data_dir / "memory.sqlite3"``.
-
-    Raises:
-        ValueError: a required setting is unset or empty, or a setting is malformed; the message names it.
-        runtime.MissingSecretError: no source provides ``openai_api_key`` or ``computer_token_secret``.
+    Each field is read from the variable its alias names; a variable set to the empty string is unset. A value
+    is never shown in an error: the error names the variable and what is wrong with it.
     """
 
-    base_url = _required(config, "OPENAI_BASE_URL")
-    model = _required(config, "OPENAI_MODEL")
-    socket = pathlib.Path(_required(config, "BUILDER_SANDBOX_SOCKET"))
-    image = _image(config)
-    egress_network = config.environ.get("BUILDER_SANDBOX_EGRESS_NETWORK") or None
-    oci_runtime = _runtime(config)
-    listen_host = config.environ.get("BUILDER_COMPUTER_HOST") or _DEFAULT_HOST
-    port = _port(config)
-    peer = config.environ.get("BUILDER_COMPUTER_PEER") or _DEFAULT_PEER
-    person_id = config.environ.get("BUILDER_PERSON_ID") or None
-    traits = _traits(config)
-    api_key = config.secrets.get("openai_api_key")
-    token_secret = config.secrets.get("computer_token_secret")
-
-    network = sandbox.Network.NONE if egress_network is None else sandbox.Network.EGRESS
-    capacity = docker.capacity(max_resources=sandbox.Resources(), runtime=oci_runtime)
-    assembly = compose(
-        processor=openai_compat.Processor(
-            client=openai_compat.ChatClient(model=model, base_url=base_url, api_key=api_key.get_secret_value()),
-            provider="builder_bot",
-        ),
-        server=websocket.Server(host=listen_host, port=port, verifier=websocket.HmacTokens(token_secret)),
-        peer=peer,
-        person_id=person_id,
-        host=docker.Host(
-            socket=socket,
-            capacity=capacity,
-            images=frozenset({image}),
-            owner=f"{config.name}/{config.instance_id}",
-            egress_network=egress_network,
-            runtime=oci_runtime,
-        ),
-        capacity=capacity,
-        spec=bench(image=image, network=network),
-        traits=traits,
-        database=str(config.data_dir / "memory.sqlite3"),
-        now=functools.partial(datetime.datetime.now, datetime.UTC),
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
+        frozen=True, extra="ignore", hide_input_in_errors=True
     )
-    _LOG.info(
-        "builder wired: model=%s bench_image=%s network=%s runtime=%s computer=ws://%s:%d/v1/%s",
-        model,
-        image,
-        network.value,
-        oci_runtime,
-        listen_host,
-        port,
-        peer,
+
+    base_url: str = pydantic.Field(
+        alias="OPENAI_BASE_URL",
+        min_length=1,
+        description="The local OpenAI-compatible endpoint.",
+        examples=["http://127.0.0.1:8080/v1"],
     )
-    return assembly
+    model: str = pydantic.Field(
+        alias="OPENAI_MODEL", min_length=1, description="The model that endpoint serves.", examples=["qwen3-coder"]
+    )
+    socket: pathlib.Path = pydantic.Field(
+        alias="BUILDER_SANDBOX_SOCKET",
+        description="The rootless Docker or Podman API socket the bench runs on; it has no safe default.",
+        examples=["/run/user/1000/podman/podman.sock"],
+    )
+    image: sandbox.ImageRef = pydantic.Field(
+        default=DEFAULT_IMAGE,
+        alias="BUILDER_SANDBOX_IMAGE",
+        description="The one image the bench may use.",
+        examples=[DEFAULT_IMAGE],
+    )
+    egress_network: str | None = pydantic.Field(
+        default=None,
+        alias="BUILDER_SANDBOX_EGRESS_NETWORK",
+        description="The owner's egress bridge network; unset, the bench has no network at all.",
+        examples=["builder-egress"],
+    )
+    runtime: docker.Runtime = pydantic.Field(
+        default="runc",
+        alias="BUILDER_SANDBOX_RUNTIME",
+        description="The OCI runtime: `runc`, or `runsc` for gVisor.",
+        examples=["runc"],
+    )
+    host: str = pydantic.Field(
+        default="127.0.0.1",
+        alias="BUILDER_COMPUTER_HOST",
+        min_length=1,
+        description="Where the person's computer is served; loopback by default.",
+        examples=["127.0.0.1"],
+    )
+    port: int = pydantic.Field(
+        default=8765,
+        alias="BUILDER_COMPUTER_PORT",
+        ge=1,
+        le=65_535,
+        description="The port the person's computer is served on.",
+        examples=[8765],
+    )
+    peer: computer.PeerId = pydantic.Field(
+        default="builder-desk",
+        alias="BUILDER_COMPUTER_PEER",
+        description="The name the computer's far side connects as.",
+        examples=["builder-desk"],
+    )
+    person_id: str | None = pydantic.Field(
+        default=None,
+        alias="BUILDER_PERSON_ID",
+        description="Who uses the computer, stamped on what it observes, when the owner knows.",
+        examples=["person-1"],
+    )
+    traits: persona.Traits = pydantic.Field(
+        default=DEFAULT_TRAITS,
+        alias="BUILDER_TRAITS",
+        description="The owner's traits for the bot, comma separated.",
+        examples=["careful,curious,candid"],
+    )
+
+    @pydantic.model_validator(mode="before")
+    @classmethod
+    def _unset_empty(cls, data: object) -> object:
+        if isinstance(data, collections.abc.Mapping):
+            given = typing.cast(collections.abc.Mapping[object, object], data)
+            return {name: value for name, value in given.items() if value != ""}
+        return data
+
+    @pydantic.field_validator("traits", mode="before")
+    @classmethod
+    def _split_traits(cls, value: object) -> object:
+        if not isinstance(value, str):
+            return value
+        given = tuple(trait.strip() for trait in value.split(","))
+        if not all(given):
+            raise ValueError("must be comma-separated traits, none of them empty")
+        return persona.Traits(traits=given)
 
 
-__all__ = ["DEFAULT_IMAGE", "DEFAULT_TRAITS", "MAX_OUTPUT_CHARS", "BuilderBot", "bench", "build", "compose"]
+__all__ = ["DEFAULT_IMAGE", "DEFAULT_TRAITS", "MAX_OUTPUT_CHARS", "Settings", "bench", "builder"]

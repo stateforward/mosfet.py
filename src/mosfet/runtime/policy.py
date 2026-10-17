@@ -12,6 +12,20 @@ import pydantic
 MAX_RESTARTS = 100
 """Upper bound on ``Policy.max_restarts``; it also bounds the ``attempt`` telemetry attribute."""
 
+MAX_BOTS = 32
+"""Most bots one process supervises. Bot names are telemetry attributes, so this bounds their cardinality."""
+
+BotName = typing.Annotated[
+    str,
+    pydantic.Field(
+        pattern=r"^[a-z][a-z0-9_]*$",
+        max_length=64,
+        description="Author-chosen name of one supervised bot: lower snake case, at most 64 characters.",
+        examples=["builder"],
+    ),
+]
+"""The name ``bot.define`` gives a bot, and its supervisor reports it under."""
+
 
 class Policy(pydantic.BaseModel):
     """Bounds for supervising bots and for stopping the process.
@@ -107,4 +121,4 @@ class Policy(pydantic.BaseModel):
         return self
 
 
-__all__ = ["MAX_RESTARTS", "Policy"]
+__all__ = ["MAX_BOTS", "MAX_RESTARTS", "BotName", "Policy"]

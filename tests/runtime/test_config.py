@@ -1,7 +1,5 @@
 import pathlib
-import typing
 
-import pydantic
 import pytest
 from mosfet import runtime
 
@@ -54,37 +52,3 @@ def test_secrets_repr_lists_no_values(tmp_path: pathlib.Path) -> None:
 
     assert "hunter2" not in repr(secrets)
     assert "API_KEY" not in repr(secrets)
-
-
-def test_config_is_a_frozen_snapshot_that_hides_the_environment(tmp_path: pathlib.Path) -> None:
-    environ = {"API_KEY": "hunter2"}
-    config = runtime.Config(
-        name="builder_bot",
-        instance_id="host-1",
-        data_dir=tmp_path,
-        environ=environ,
-        secrets=_secrets(tmp_path),
-    )
-    environ["API_KEY"] = "changed"
-
-    assert config.environ == {"API_KEY": "hunter2"}
-    with pytest.raises(TypeError):
-        typing.cast(dict[str, str], config.environ)["API_KEY"] = "mutated"
-    with pytest.raises(pydantic.ValidationError):
-        setattr(config, "name", "other")
-    assert "hunter2" not in repr(config)
-
-
-@pytest.mark.parametrize("field", ["name", "instance_id"])
-def test_config_requires_names(tmp_path: pathlib.Path, field: str) -> None:
-    values: dict[str, object] = {
-        "name": "builder_bot",
-        "instance_id": "host-1",
-        "data_dir": tmp_path,
-        "environ": {},
-        "secrets": _secrets(tmp_path),
-    }
-    values[field] = ""
-
-    with pytest.raises(pydantic.ValidationError):
-        _ = runtime.Config.model_validate(values)

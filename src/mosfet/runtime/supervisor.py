@@ -1,4 +1,4 @@
-"""One bot's keeper inside a ``mosfet run`` process."""
+"""One bot's keeper inside a ``bot.run`` process."""
 
 import datetime
 import logging
@@ -9,7 +9,7 @@ import mosfet
 import pydantic
 from opentelemetry import metrics
 
-from mosfet.environment import Environment, space
+from mosfet.environment import Environment
 from mosfet.telemetry import observer, span
 from mosfet.telemetry.hsm import Traced
 
@@ -98,7 +98,6 @@ class Supervisor(Traced):
     _name: str
     _bot: "mosfet.Bot"
     _environment: Environment
-    _placement: space.Placement | None
     _policy: policy.Policy
     _owner: hsm.Instance
     # Monotonic count of bot requests and the operation id of the latest one; every guard that accepts a
@@ -116,7 +115,6 @@ class Supervisor(Traced):
         name: str,
         bot: "mosfet.Bot",
         environment: Environment,
-        placement: space.Placement | None,
         policy: policy.Policy,
         owner: hsm.Instance,
     ) -> None:
@@ -124,7 +122,6 @@ class Supervisor(Traced):
         self._name = name
         self._bot = bot
         self._environment = environment
-        self._placement = placement
         self._policy = policy
         self._owner = owner
         self._serial = 0
@@ -156,7 +153,6 @@ class Supervisor(Traced):
             try:
                 _ = await instance._bot.attach(
                     instance._environment,
-                    placement=instance._placement,
                     reply_to=instance,
                     operation_id=operation_id,
                 )

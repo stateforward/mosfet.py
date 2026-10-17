@@ -4,7 +4,7 @@ from mosfet.devices import computer
 from mosfet.providers import websocket
 
 tokens = websocket.HmacTokens(secret)
-server = websocket.Server(host="0.0.0.0", port=8765, verifier=tokens)  # in Assembly.actors
+server = websocket.Server(host="0.0.0.0", port=8765, verifier=tokens)  # bot.run(model, actors=(server,))
 computer.Computer(id="studio-laptop", transport=server)
 """
 

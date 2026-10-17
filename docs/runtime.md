@@ -1,41 +1,77 @@
-# Process runtime (`mosfet.runtime`)
+# Running bots (`bot.run`, `bot.process`, `mosfet.runtime`)
 
-`mosfet.runtime` runs one process's bots: it builds them from a factory, keeps each one running within a
-restart budget, and stops the whole process gracefully within one bound. Two decomposed state machines do
-the work: `runtime.Runtime` owns the process lifecycle, and one `runtime.Supervisor` per bot owns that bot.
-All waiting is bounded by `hsm.after`, and all asynchronous work runs in activities that end in typed
-events.
+A bot file is a plain Python file: it defines its bots with `bot.define` and runs them from its
+`__main__` with `bot.run`, the way an hsm program defines and starts its machines.
 
-## The factory and what it returns
+```python
+from mosfet import bot
 
-A process runs a factory `build(config: runtime.Config) -> runtime.Assembly`, named by a
-`runtime.Target` (`module.path:attribute`). The module is imported from the installed environment;
-nothing is added to `sys.path`. The runtime resolves the target and calls the factory off the event loop.
+if __name__ == "__main__":
+    process = bot.process()
+    bot.run(greeter(processor=...), actors=(server,), process=process)
+```
 
-`runtime.Config` is the frozen process configuration, built once at the process boundary:
+`bot.run` runs one process's bots: it builds them from their models, keeps each one running within a
+restart budget, and stops the whole process gracefully within one bound. Two decomposed state machines in
+`mosfet.runtime` do the work: `runtime.Runtime` owns the process lifecycle, and one `runtime.Supervisor` per
+bot owns that bot. All waiting is bounded by `hsm.after`, and all asynchronous work runs in activities that
+end in typed events.
 
-| Field | Meaning |
-|---|---|
-| `name` | Service name; also the OTEL `service.name` |
-| `instance_id` | Process or container identity; also the OTEL `service.instance.id` |
-| `data_dir` | Directory for durable state (for example the SQLite memory store) |
-| `environ` | Immutable snapshot of the process environment; left out of `repr` |
-| `secrets` | `runtime.Secrets` resolver |
+## What `bot.run` runs
 
-`Secrets.get(name)` returns a `pydantic.SecretStr` from the first source that has it: the file
-`<secrets dir>/<name lowercased>` (the Docker `/run/secrets` convention), then the file named by the
-environment variable `<NAME>_FILE`, then the environment variable `<NAME>`. A missing secret raises
-`runtime.MissingSecretError`, whose message names the secret and never a value.
+`bot.run(*models, actors=(), process=None)` is synchronous and never returns: it ends the process with its
+exit code.
 
-`runtime.Assembly` is the factory's result:
+* `models`: 1 to 32 `bot.Model`s, each given once (`B0105`), each under a name of its own (`B0104`). A
+  bot's name is its supervisor's name and a telemetry attribute, so `MAX_BOTS` bounds that cardinality.
+* `actors`: shared actors such as a websocket server or an embedding model. Each must be an `hsm.Instance`
+  whose class declares `model` (`B0106`); the process starts each one with exactly that model before any
+  bot and stops them in reverse after every bot.
+* `process`: the process's options, `bot.process()` when omitted.
 
-* `bots`: 1 to 32 bots under author-chosen names (lower snake case, at most 64 characters). One bot
-  instance may appear under one name only.
-* `actors`: shared root-owned actors such as a websocket server or an embedding model. Each actor's class
-  must declare `model` as an `hsm.Model`; the runtime starts each one with exactly that model.
-* `placements`: where a named bot joins the process environment.
+A violation is printed to stderr like `bot.define`'s errors, with the span of the bot file's own `bot.run`
+call, and the process exits `78` (`invalid_models`). Then `bot.run` creates the data dir `0700`, configures
+telemetry once, and builds each bot from its model as `bot.start` does: a model whose parts already run is
+`B0101`, and a part that raises while it is built is `B0102` (`constructor_raised`), both exit `78`, with the
+traceback only under `MOSFET_TRACEBACK=1`. [`bot_diagnostics.md`](bot_diagnostics.md) explains each code.
 
-A violation raises `runtime.BootError` with kind `invalid_assembly`.
+Errors the bot file raises itself before it calls `bot.run` (its own settings, a secret it asks for) are
+its own: they end the process with Python's exit status `1`.
+
+## Process options (`bot.process`)
+
+`bot.process(argv=None, environ=None)` reads the options once, at the bot file's `__main__` boundary: the
+`MOSFET_*` variables first, then the flags after the bot's module (`python -m greeter --ready-file
+/tmp/ready`), so a flag wins over its variable. It returns a frozen `bot.Process`. It knows only its own
+options: a bot file that takes flags of its own reads them itself and passes the rest as `argv=`.
+
+| Flag | Variable | Default | Meaning |
+|---|---|---|---|
+| `--name NAME` | `MOSFET_NAME` | the `__main__` package | `Process.name`, `service.name` |
+| `--instance-id ID` | `MOSFET_INSTANCE_ID` | `$HOSTNAME`, else the host name | `Process.instance_id`, `service.instance.id` |
+| `--data-dir PATH` | `MOSFET_DATA_DIR` | `./.mosfet` | `Process.data_dir`, created `0700` when absent |
+| `--secrets-dir PATH` | `MOSFET_SECRETS_DIR` | `/run/secrets` | Directory searched first by `Process.secrets` |
+| `--ready-file PATH` | `MOSFET_READY_FILE` | unset | Exists exactly while the Runtime is `running/ready` (for `HEALTHCHECK test -f`) |
+| `--stop-grace SECONDS` | `MOSFET_STOP_GRACE` | `8` | `Policy.stop_grace` |
+| `--bot-stop-timeout SECONDS` | `MOSFET_BOT_STOP_TIMEOUT` | `4` | `Policy.bot_stop_timeout` |
+| `--bot-release-timeout SECONDS` | `MOSFET_BOT_RELEASE_TIMEOUT` | `1` | `Policy.bot_release_timeout` |
+| `--start-timeout SECONDS` | `MOSFET_START_TIMEOUT` | `120` | `Policy.start_timeout` |
+| `--max-restarts N` | `MOSFET_MAX_RESTARTS` | `5` | `Policy.max_restarts` |
+| `--backoff-initial SECONDS` | `MOSFET_BACKOFF_INITIAL` | `1` | `Policy.backoff_initial` |
+| `--backoff-max SECONDS` | `MOSFET_BACKOFF_MAX` | `60` | `Policy.backoff_max` |
+| `--stable-after SECONDS` | `MOSFET_STABLE_AFTER` | `60` | `Policy.stable_after` |
+
+The policy options are generated from the `runtime.Policy` fields, so an omitted option keeps the policy
+default. An unknown option, a value that does not parse, or policy values that do not fit together (for
+example `--bot-stop-timeout` plus `--bot-release-timeout` not below `--stop-grace`) is `B0107`: it is printed
+to stderr naming the option or variable, never its value, and the process exits `64`. `--help` prints the
+options and exits `0`. An empty variable is unset. `MOSFET_TRACEBACK=1` makes `bot.run` print the traceback
+of a bot it could not build. `BOT_OTEL_*` and `OTEL_*` keep their telemetry meaning.
+
+`Process.secrets` is a `runtime.Secrets` reader. `get(name)` returns a `pydantic.SecretStr` from the first
+source that has it: the file `<secrets dir>/<name lowercased>` (the Docker `/run/secrets` convention), then
+the file named by the environment variable `<NAME>_FILE`, then the environment variable `<NAME>`. A missing
+secret raises `runtime.MissingSecretError`, whose message names the secret and never a value.
 
 ## Policy
 
@@ -58,14 +94,13 @@ and the shared actors still get the remainder.
 
 ## Process lifecycle (`runtime.Runtime`)
 
-The process boundary creates one `mosfet.Environment`, passes it to the `Runtime`, and starts it with
-`mosfet.started(environment, runtime, Runtime.model)`. The Runtime's own context is therefore a
-non-private child of that environment.
+`bot.run` creates one `mosfet.Environment`, passes it to the `Runtime` with the bots it built and the
+shared actors, and starts it with `mosfet.started(environment, runtime, Runtime.model)`. The Runtime's own
+context is therefore a non-private child of that environment.
 
 ```
-booting               remove a stale ready file, build the assembly
-                                                     -> starting_actors | failed (78) | stopped (0, on stop)
-starting_actors       start each actor in order      -> starting_supervisors | stopping
+starting_actors       remove a stale ready file, then start each actor in order
+                                                     -> starting_supervisors | stopping
 starting_supervisors  start one Supervisor per bot   -> running | stopping
 running               settling -> ready (all bots reported running; the ready file exists only here)
 stopping              one stop_grace bound           -> stopped (0, 70 or 78) | forced (1)
@@ -76,8 +111,8 @@ stopping              one stop_grace bound           -> stopped (0, 70 or 78) | 
 
 * Actors start with `mosfet.started(runtime context, actor, type(actor).model)`; supervisors start in the
   same context, and every bot attaches to the same environment.
-* A stop request during boot or bring-up leaves at once; nothing is deferred. Everything bring-up recorded
-  is stopped.
+* A stop request during bring-up leaves at once; nothing is deferred. Everything bring-up recorded is
+  stopped.
 * A bot can activate, or exhaust its budget, before the last supervisor has started. Those
   `runtime.supervisor.running` and `runtime.supervisor.exhausted` reports are deferred in
   `starting_supervisors`, so readiness and exit code `70` never depend on start timing.
@@ -95,8 +130,8 @@ stopping              one stop_grace bound           -> stopped (0, 70 or 78) | 
 * `on_exit(runtime.ExitedData)` is called exactly once, by the transition into a final state.
 * The ready file is touched on entry to `running/ready` and removed on its exit. A run killed without
   leaving `ready` (SIGKILL, an OOM kill, a host crash) cannot remove it, and a restarted container keeps
-  its writable layer, so `booting` removes any ready file left by an earlier run before it does anything
-  else. The file therefore exists exactly while this run is ready, across crashes too. A failure to remove
+  its writable layer, so `starting_actors` removes any ready file left by an earlier run before it starts
+  anything. The file therefore exists exactly while this run is ready, across crashes too. A failure to remove
   it is logged with its failure kind only.
 
 ### Exit codes
@@ -106,59 +141,29 @@ stopping              one stop_grace bound           -> stopped (0, 70 or 78) | 
 | `0` | `stopped` | Graceful stop within the grace (signal or `runtime.StopEvent`), from any state. A bot force-released inside the grace still counts as graceful. |
 | `1` | `forced` | The grace expired, or a second **signal** arrived while stopping. A programmatic stop request never forces. |
 | `70` | `exhausted` | A bot used up its restart budget. Kept when a first signal arrives during that stop. |
-| `78` | `boot_failed` | Import failed, factory missing or raised, invalid assembly, missing secret, or actor or supervisor bring-up failed or timed out. Kept when a first signal arrives during that stop. |
+| `78` | `boot_failed` | Actor or supervisor bring-up failed or timed out. Kept when a first signal arrives during that stop. `bot.run` also exits `78` before any Runtime exists: invalid models or actors, a bot that could not be built, a data dir it cannot create, or telemetry it cannot configure. |
 
-`64` (usage error) belongs to the command-line boundary, which rejects bad arguments before a Runtime
-exists.
+`64` (a bad process option) belongs to `bot.process`, which rejects it before a Runtime exists. `1` is
+also the exit status of a bot file that raises before it calls `bot.run`.
 
-## Command line (`mosfet run`)
+## The process boundary (`bot.run`)
 
-```bash
-mosfet run [flags] module.path:attribute
-```
-
-The command is the application boundary. It parses the flags, snapshots the process environment once into
-the `runtime.Config`, creates the data directory, configures telemetry once with `service.name` and
-`service.instance.id`, creates the one process `Environment`, starts the `Runtime` in it, and exits with
-the code the Runtime reports. Stdout stays empty; diagnostics go to stderr. The command reads no
-environment variables of its own beyond the `HOSTNAME` default below; `BOT_OTEL_*` and `OTEL_*` keep their
-telemetry meaning.
-
-| Flag | Default | Meaning |
-|---|---|---|
-| `--name NAME` | top-level package of the target | `Config.name`, `service.name` |
-| `--instance-id ID` | `$HOSTNAME`, else the host name | `Config.instance_id`, `service.instance.id` |
-| `--data-dir PATH` | `./.mosfet` | `Config.data_dir`, created `0700` when absent |
-| `--secrets-dir PATH` | `/run/secrets` | Directory searched first by `Config.secrets` |
-| `--ready-file PATH` | unset | Exists exactly while the Runtime is `running/ready` (for `HEALTHCHECK test -f`) |
-| `--stop-grace SECONDS` | `8` | `Policy.stop_grace` |
-| `--bot-stop-timeout SECONDS` | `4` | `Policy.bot_stop_timeout` |
-| `--bot-release-timeout SECONDS` | `1` | `Policy.bot_release_timeout` |
-| `--start-timeout SECONDS` | `120` | `Policy.start_timeout` |
-| `--max-restarts N` | `5` | `Policy.max_restarts` |
-| `--backoff-initial SECONDS` | `1` | `Policy.backoff_initial` |
-| `--backoff-max SECONDS` | `60` | `Policy.backoff_max` |
-| `--stable-after SECONDS` | `60` | `Policy.stable_after` |
-
-The policy flags are generated from the `runtime.Policy` fields, so an omitted flag keeps the policy
-default and an out-of-range value (for example `--bot-stop-timeout` plus `--bot-release-timeout` not below
-`--stop-grace`) is a usage error, `64`. A data directory that cannot be created, or a telemetry
-configuration that fails, is a configuration failure, `78`.
-
-* **Signals.** While the Runtime runs, SIGTERM and SIGINT each dispatch `runtime.StopEvent` with reason
-  `signal`; the first starts the graceful stop and a second one forces it. The handlers are removed once
-  the Runtime reports its exit. SIGHUP keeps its default disposition.
-* **Bounded exit.** After the Runtime reports its exit, the command cancels every remaining task and waits
-  at most 1 s for them and for threads running blocking calls (for example a factory that has not
-  returned), then flushes telemetry for at most 0.5 s. If anything is still running, it ends the process
-  with `os._exit` and the Runtime's exit code; `atexit` handlers do not run on that path. From SIGTERM to
-  process exit therefore takes at most `--stop-grace` plus 1.5 s, 9.5 s by default, which is under
-  Docker's 10 s SIGKILL. Raising `--stop-grace` needs a matching `docker run --stop-timeout`.
+* **Stdout** stays empty; diagnostics go to stderr. `bot.run` configures logging to stderr at `WARNING`.
+* **Signals.** SIGTERM and SIGINT each dispatch `runtime.StopEvent` with reason `signal`; the first starts
+  the graceful stop and a second one forces it. The handlers are installed before the Runtime starts, so a
+  signal during bring-up is delivered once its start returns, and removed once the Runtime reports its exit.
+  SIGHUP keeps its default disposition.
+* **Bounded exit.** After the Runtime reports its exit, `bot.run` cancels every remaining task and waits
+  at most 1 s for them and for threads running blocking calls, then flushes telemetry for at most 0.5 s. If
+  anything is still running, it ends the process with `os._exit` and the Runtime's exit code; `atexit`
+  handlers do not run on that path. From SIGTERM to process exit therefore takes at most `stop_grace` plus
+  1.5 s, 9.5 s by default, which is under Docker's 10 s SIGKILL. Raising `stop_grace` needs a matching
+  `docker run --stop-timeout`.
 
 ## Running in a container
 
-`docker/Dockerfile` is one image recipe for any factory. The build context is the repository root, and the
-`PROJECT` build argument names the project to install from its own `uv.lock`:
+`docker/Dockerfile` is one image recipe for any bot project with a `__main__`. The build context is the
+repository root, and the `PROJECT` build argument names the project to install from its own `uv.lock`:
 
 ```bash
 docker build --build-arg PROJECT=examples/minimal_bot -f docker/Dockerfile -t minimal-bot .
@@ -179,27 +184,29 @@ runtime image is laid out for a read-only root:
   is `/var/lib/mosfet/data`, and the JSONL telemetry files are written next to it in the working directory,
   where they grow until something rotates them.
 * `/run/mosfet` holds the ready file. Mount a tmpfs there (`--tmpfs
-  /run/mosfet:uid=10001,gid=10001,mode=0700`) so the file is gone on every restart. Without one, `booting`
-  still removes a ready file that a killed run left behind.
+  /run/mosfet:uid=10001,gid=10001,mode=0700`) so the file is gone on every restart. Without one, the
+  Runtime still removes a ready file that a killed run left behind.
 * `PYTHONDONTWRITEBYTECODE=1` and `PYTHONUNBUFFERED=1`; the bytecode is compiled at build time.
 
-The entrypoint fixes the flags the layout depends on, in exec form, so `mosfet` is the process Docker
-signals:
+The image fixes the options the layout depends on as `ENV MOSFET_READY_FILE=/run/mosfet/ready` and
+`MOSFET_DATA_DIR=/var/lib/mosfet/data`, and its entrypoint is `python -m` in exec form, so the bot's own
+Python is the process Docker signals:
 
 ```
-mosfet run --ready-file /run/mosfet/ready --data-dir /var/lib/mosfet/data
+/opt/mosfet/venv/bin/python -m
 ```
 
-The command supplies the target and any other flag; the default command is `minimal_bot_example:build`.
+The command supplies the bot's package and any other flag (`docker run IMAGE minimal_bot_example
+--stop-grace 6`); the default command is `minimal_bot_example`.
 `HEALTHCHECK` runs `test -f /run/mosfet/ready` every 10 s with a 130 s start period, the default
 `--start-timeout` plus margin. A container therefore turns healthy only once its Runtime is `running/ready`,
 and unhealthy after three failed checks once it leaves.
 
 Run it with `--init` (compose `init: true`) so Docker's bundled init is PID 1 and reaps any orphaned
-grandchild a provider leaves; `mosfet` still receives the forwarded SIGTERM. `docker stop` sends SIGTERM,
+grandchild a provider leaves; the bot's Python still receives the forwarded SIGTERM. `docker stop` sends SIGTERM,
 and the process exits within `--stop-grace` plus 1.5 s, 9.5 s by default, inside Docker's default 10 s
-(compose `stop_grace_period: 10s`). Raise `--stop-grace` only together with `docker run --stop-timeout` or
-`stop_grace_period`.
+(compose `stop_grace_period: 10s`). Raise `MOSFET_STOP_GRACE` only together with `docker run --stop-timeout`
+or `stop_grace_period`.
 
 ```bash
 docker run --init --read-only --tmpfs /run/mosfet:uid=10001,gid=10001,mode=0700 --tmpfs /tmp \
@@ -207,11 +214,12 @@ docker run --init --read-only --tmpfs /run/mosfet:uid=10001,gid=10001,mode=0700 
   -v "$PWD/openai_api_key:/run/secrets/openai_api_key:ro" minimal-bot
 ```
 
-Secrets come from `/run/secrets`, which `Config.secrets` reads first; the image holds none. A bind-mounted
+Secrets come from `/run/secrets`, which `Process.secrets` reads first; the image holds none. A bind-mounted
 secret keeps its host owner and mode, so the host file must be readable by uid `10001`. `mlx-audio`
-and `mlx-vlm` are macOS-only, so a containerized factory must choose providers that are not mlx-based.
+and `mlx-vlm` are macOS-only, so a containerized bot must choose providers that are not mlx-based.
 `scripts/docker_smoke.sh` builds the minimal_bot image and checks this contract: health, uid, the read-only
-root, the data dir mode, the stop bound, exit codes `78` and `64`, and the stale ready file.
+root, the data dir mode, the stop bound, exit codes `1` (no secret) and `64` (a bad flag), and the stale
+ready file.
 
 ## Bot supervision (`runtime.Supervisor`)
 
@@ -237,14 +245,14 @@ stopping     detaching -> releasing                          -> stopped (report 
 
 The bot's own deactivation bound defaults to 5 minutes and its attachment bound to 30 seconds, both far
 above the default `bot_stop_timeout`. With those defaults a bot whose teardown hangs is force-released by
-its supervisor before the bot's own timers fire. A factory that wants the bot's own timer path (its
-`bot.deactivated` or `bot.degraded` answer) to win should construct bots with a `deactivation_timeout`
-below `bot_stop_timeout`.
+its supervisor before the bot's own timers fire. A bot file that wants the bot's own timer path (its
+`bot.deactivated` or `bot.degraded` answer) to win gives it `bot.timeouts(deactivation=...)` below
+`bot_stop_timeout`.
 
 ## Telemetry
 
-Meter scope `bot.runtime`. Every attribute is a closed set or an assembly bot name (at most 32 per
-process), so cardinality stays bounded; operation ids, secrets and messages are never attributes.
+Meter scope `bot.runtime`. Every attribute is a closed set or a bot's name (at most 32 per process), so
+cardinality stays bounded; operation ids, secrets and messages are never attributes.
 
 | Instrument | Attributes |
 |---|---|
@@ -259,10 +267,11 @@ process), so cardinality stays bounded; operation ids, secrets and messages are 
 
 The machines read no clock of their own: every bound is an `hsm.after` timer on the machine's injected
 `hsm` clock, so a test that injects a clock decides when each bound expires. The wall-clock
-`bot.runtime.stop.duration` is therefore recorded by `mosfet run`, the process boundary: the time from the
+`bot.runtime.stop.duration` is therefore recorded by `bot.run`, the process boundary: the time from the
 first stop signal to the Runtime's exit, `forced` when the Runtime exits `forced`. A stop that no signal
 started (exhaustion, bring-up failure) is not timed.
 
-Spans: `runtime.boot` (failure kind on failure), `runtime.supervisor.attempt` (one bot attach request:
-`bot.name`, `bot.runtime.attempt`), `runtime.stop` (stopping the supervisors and actors:
-`bot.runtime.stop.reason`, `process.exit.code`). Logs name the failure kind, bot name and target only.
+Spans: `runtime.boot` (`bot.run` building the bots from their models; `constructor_raised` or
+`invalid_models` on failure), `runtime.supervisor.attempt` (one bot attach request: `bot.name`,
+`bot.runtime.attempt`), `runtime.stop` (stopping the supervisors and actors: `bot.runtime.stop.reason`,
+`process.exit.code`). Logs name the failure kind, bot name and counts only.

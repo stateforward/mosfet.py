@@ -8,8 +8,8 @@ services:
       dockerfile: docker/Dockerfile
       args:
         PROJECT: examples/minimal_bot
-    command: ["minimal_bot_example:build"]
-    # Docker's bundled init is PID 1; mosfet receives the SIGTERM it forwards.
+    command: ["minimal_bot_example"]
+    # Docker's bundled init is PID 1; the bot's python receives the SIGTERM it forwards.
     init: true
     read_only: true
     # The ready file lives on a tmpfs, so it is gone on every restart.
@@ -21,7 +21,7 @@ services:
     secrets:
       - openai_api_key
     env_file: .env
-    # mosfet run exits within --stop-grace (8 s) plus 1.5 s.
+    # bot.run exits within its stop grace (MOSFET_STOP_GRACE, 8 s) plus 1.5 s.
     stop_grace_period: 10s
     restart: on-failure:5
     user: "10001:10001"

@@ -1,20 +1,18 @@
-"""Test-only bot factories and doubles for the ``mosfet run`` runtime.
+"""Test-only doubles for the process runtime: bots, devices and shared actors with one behavior each.
 
-Factories here are importable targets (``tests.runtime.fixtures.factories:<name>``), run in process by
-``tests/runtime`` and as ``mosfet run`` children by ``tests/test_cli.py``. ``configured`` is a
-placeholder each test replaces with the factory it runs.
+``tests/runtime`` gives them to ``runtime.Runtime`` and ``runtime.Supervisor`` in process, and the bot
+files under ``tests/bot/run/fixtures`` attach them to the bots ``bot.run`` runs in a child process.
 """
 
 import asyncio
 import collections.abc
 import datetime
 import pathlib
-import time
 import typing
 
 import hsm
 import mosfet
-from mosfet import abilities, runtime
+from mosfet import abilities
 from mosfet.abilities import cognition
 from mosfet.device import Device
 from mosfet.environment import Environment
@@ -237,79 +235,6 @@ class StubbornActor(RecordingActor):
                 return
 
         return refuse()
-
-
-def quiet(config: runtime.Config) -> runtime.Assembly:
-    """One bot that activates promptly and does nothing else."""
-
-    del config
-    return runtime.Assembly(bots={"quiet": QuietBot()})
-
-
-def activating(config: runtime.Config) -> runtime.Assembly:
-    """One bot that never finishes activating; ``<data_dir>/activating`` appears once it has begun."""
-
-    return runtime.Assembly(bots={"slow": QuietBot((MarkingDevice(config.data_dir / "activating"),))})
-
-
-def mute(config: runtime.Config) -> runtime.Assembly:
-    """One bot that activates and then never answers a stop."""
-
-    del config
-    return runtime.Assembly(bots={"mute": MuteBot()})
-
-
-def stubborn(config: runtime.Config) -> runtime.Assembly:
-    """One prompt bot and a shared actor whose stop ignores cancellation and is never released."""
-
-    del config
-    return runtime.Assembly(bots={"quiet": QuietBot()}, actors=(StubbornActor("stubborn", []),))
-
-
-def failing(config: runtime.Config) -> runtime.Assembly:
-    """One bot whose activation always fails, so it exhausts its restart budget."""
-
-    del config
-    return runtime.Assembly(bots={"failing": QuietBot((FailingDevice(),))})
-
-
-def blocking(config: runtime.Config) -> runtime.Assembly:
-    """A factory stuck in a blocking call for a minute; ``<data_dir>/booting`` appears once it is."""
-
-    (config.data_dir / "booting").touch()
-    time.sleep(60)
-    return quiet(config)
-
-
-def configured(config: runtime.Config) -> runtime.Assembly:
-    """Placeholder that each runtime test replaces with the factory it runs."""
-
-    del config
-    raise NotImplementedError("a test must replace factories.configured before booting it")
-
-
-def raising(config: runtime.Config) -> runtime.Assembly:
-    """A factory that raises."""
-
-    del config
-    raise RuntimeError("factory exploded")
-
-
-def wrong_type(config: runtime.Config) -> object:
-    """A factory that returns something other than an Assembly."""
-
-    del config
-    return 42
-
-
-def needs_secret(config: runtime.Config) -> runtime.Assembly:
-    """A factory that asks for a secret before building."""
-
-    _ = config.secrets.get("api_key")
-    return quiet(config)
-
-
-not_callable = 42
 
 
 async def wait_until(condition: collections.abc.Callable[[], bool], *, timeout: float = 5.0) -> None:

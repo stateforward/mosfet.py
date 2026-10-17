@@ -5,12 +5,8 @@ import pydantic
 import pytest
 from mosfet import event, runtime
 
-from tests.runtime.fixtures import factories
-
 _EVENTS: tuple[hsm.Event[typing.Any], ...] = (
     runtime.StopEvent,
-    runtime.BootedEvent,
-    runtime.BootFailedEvent,
     runtime.ActorsStartedEvent,
     runtime.ActorsFailedEvent,
     runtime.ActorsStoppedEvent,
@@ -46,15 +42,6 @@ def test_exit_code_follows_its_reason(
         _ = runtime.ExitedData.model_validate({"code": 0 if code else 1, "reason": reason})
 
 
-def test_booted_carries_the_assembly_at_runtime_only() -> None:
-    assembly = runtime.Assembly(bots={"builder": factories.QuietBot()})
-    data = runtime.BootedData(assembly=assembly)
-
-    assert data.assembly is assembly
-    assert data.model_dump() == {}
-    assert "assembly" not in runtime.BootedData.model_json_schema().get("properties", {})
-
-
 def test_supervisor_reports_carry_bounded_bot_names() -> None:
     assert runtime.SupervisorData(name="builder", attempt=1).name == "builder"
     with pytest.raises(pydantic.ValidationError):
@@ -63,9 +50,3 @@ def test_supervisor_reports_carry_bounded_bot_names() -> None:
         _ = runtime.SupervisorData(name="builder", attempt=0)
     with pytest.raises(pydantic.ValidationError):
         _ = runtime.SupervisorStoppedData(name="builder", outcome=typing.cast(typing.Any, "lost"))
-
-
-def test_boot_failure_kinds_are_closed() -> None:
-    assert runtime.BootFailedData(kind="missing_secret", message="secret 'x' is not provided").kind == "missing_secret"
-    with pytest.raises(pydantic.ValidationError):
-        _ = runtime.BootFailedData(kind=typing.cast(typing.Any, "exploded"), message="")

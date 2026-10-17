@@ -1,10 +1,11 @@
-"""The process lifecycle of ``mosfet run``: boot, bring-up, supervision, and one bounded graceful stop."""
+"""The process lifecycle ``bot.run`` drives: bring-up, supervision, and one bounded graceful stop."""
 
 import asyncio
 import collections.abc
 import datetime
 import logging
 import pathlib
+import types
 import typing
 
 import hsm
@@ -17,13 +18,9 @@ from mosfet.environment import Environment
 from mosfet.telemetry import observer, span
 from mosfet.telemetry.hsm import Traced
 
-from . import assembly
-from . import config
-from . import errors
 from . import events
 from . import policy
 from . import supervisor
-from . import target
 
 _LOG = logging.getLogger(__name__)
 _SCOPE = "bot.runtime"
@@ -43,7 +40,7 @@ class _UnreachableData(pydantic.BaseModel):
 
     model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(frozen=True, extra="forbid")
 
-    name: assembly.BotName
+    name: policy.BotName
 
 
 # Dispatched only by the Runtime's own stop activity to itself: the typed drop or failure outcome of a
@@ -54,30 +51,31 @@ _UnreachableEvent = hsm.Event[_UnreachableData](
 
 
 class Runtime(Traced):
-    """One ``mosfet run`` process: builds the assembly, brings it up, keeps its bots running, and stops it.
+    """One ``bot.run`` process: brings its bots and shared actors up, keeps the bots running, and stops it.
 
-    Boot imports the target factory and builds the ``Assembly`` off the event loop. Bring-up starts the
-    shared actors in order under this machine's own (non-private) context, a child of the process
+    ``bots`` are the bodies ``bot.run`` built from its models, under their names; ``actors`` are the shared
+    actors their parts use. ``bot.run`` has checked both: one to ``MAX_BOTS`` bots, and each actor an
+    ``hsm.Instance`` whose class declares ``model``. Bring-up first removes a ready file an earlier run left,
+    then starts the actors in order under this machine's own (non-private) context, a child of the process
     ``Environment``, then one :class:`~mosfet.runtime.supervisor.Supervisor` per bot; every bot attaches to
     that same environment. ``running`` waits for every supervisor to report its bot running, then touches
     the ready file. One ``stopping`` composite with a single ``stop_grace`` bound stops every supervisor,
     then every actor in reverse order.
 
     ``on_exit`` is called exactly once, from the transition into a final state, with the exit code and
-    reason. A stop request during boot or bring-up leaves at once; nothing is deferred. A second *signal*
-    while stopping forces the stop; a programmatic stop request never does.
+    reason. A stop request during bring-up leaves at once; nothing is deferred. A second *signal* while
+    stopping forces the stop; a programmatic stop request never does.
 
     Time enters only through this machine's injected ``hsm`` clock: the bring-up and stop bounds are
     ``hsm.after`` timers. The wall-clock length of a stop belongs to the process boundary, not this machine.
     """
 
-    _target: target.Target
-    _config: config.Config
+    _bots: collections.abc.Mapping[str, "mosfet.Bot"]
+    _shared: tuple[hsm.Instance, ...]
     _policy: policy.Policy
     _environment: Environment
     _ready_file: pathlib.Path | None
     _on_exit: collections.abc.Callable[[events.ExitedData], None]
-    _assembly: assembly.Assembly | None
     # Recorded before each start is invoked, so a start that bring-up's cancellation interrupts is still
     # stopped. Only this machine's own activities write them.
     _actors: list[hsm.Instance]
@@ -93,21 +91,20 @@ class Runtime(Traced):
     def __init__(
         self,
         *,
-        target: target.Target,
-        config: config.Config,
+        bots: collections.abc.Mapping[str, "mosfet.Bot"],
+        actors: collections.abc.Sequence[hsm.Instance],
         policy: policy.Policy,
         environment: Environment,
         ready_file: pathlib.Path | None,
         on_exit: collections.abc.Callable[[events.ExitedData], None],
     ) -> None:
         super().__init__()
-        self._target = target
-        self._config = config
+        self._bots = types.MappingProxyType(dict(bots))
+        self._shared = tuple(actors)
         self._policy = policy
         self._environment = environment
         self._ready_file = ready_file
         self._on_exit = on_exit
-        self._assembly = None
         self._actors = []
         self._supervisors = {}
         self._running = set()
@@ -116,59 +113,14 @@ class Runtime(Traced):
         self._signal_seen = False
 
     @staticmethod
-    async def _boot(ctx: hsm.Context, instance: "Runtime", event: hsm.Event[typing.Any]) -> None:
-        """Import the factory and build the assembly off the event loop; report either outcome."""
-
-        del event
-        target, config = instance._target, instance._config
-
-        def build() -> assembly.Assembly:
-            factory = target.resolve()
-            try:
-                # The factory is untyped user code: check what it returned, not its annotation.
-                built = typing.cast(object, factory(config))
-            except errors.BootError:
-                raise
-            except Exception as error:
-                raise errors.BootError("factory_raised", f"{target} raised {type(error).__name__}: {error}") from error
-            if not isinstance(built, assembly.Assembly):
-                raise errors.BootError(
-                    "invalid_assembly", f"{target} returned {type(built).__name__}, not runtime.Assembly"
-                )
-            return built
-
-        with span.operation("runtime.boot", scope=_SCOPE, component=_COMPONENT, stage="boot") as active:
-            try:
-                built = await asyncio.to_thread(build)
-            except errors.BootError as error:
-                span.record_failure(active, error.kind)
-                _LOG.error("runtime boot failed kind=%s target=%s", error.kind, target)
-                _ = hsm.dispatch(
-                    ctx,
-                    instance,
-                    events.BootFailedEvent.with_data(events.BootFailedData(kind=error.kind, message=str(error))),
-                )
-                return
-        _ = hsm.dispatch(ctx, instance, events.BootedEvent.with_data(events.BootedData(assembly=built)))
-
-    @staticmethod
-    def _record_assembly(ctx: hsm.Context, instance: "Runtime", event: hsm.Event[typing.Any]) -> None:
-        del ctx
-        data = event.data
-        assert isinstance(data, events.BootedData)
-        instance._assembly = data.assembly
-
-    @staticmethod
     async def _start_actors(ctx: hsm.Context, instance: "Runtime", event: hsm.Event[typing.Any]) -> None:
         """Start the shared actors in order, each with its class model under this machine's lifetime."""
 
         del event
-        built = instance._assembly
-        assert built is not None, "bring-up follows boot"
         try:
-            for actor in built.actors:
+            for actor in instance._shared:
                 model = getattr(type(actor), "model", None)
-                assert isinstance(model, hsm.Model), "Assembly validates every actor's class model"
+                assert isinstance(model, hsm.Model), "bot.run validates every actor's class model"
                 instance._actors.append(actor)
                 _ = await mosfet.started(instance.context(), actor, model)
         except Exception as error:
@@ -193,15 +145,12 @@ class Runtime(Traced):
         """
 
         del event
-        built = instance._assembly
-        assert built is not None, "bring-up follows boot"
         try:
-            for name, bot in built.bots.items():
+            for name, bot in instance._bots.items():
                 keeper = supervisor.Supervisor(
                     name=name,
                     bot=bot,
                     environment=instance._environment,
-                    placement=built.placements.get(name),
                     policy=instance._policy,
                     owner=instance,
                 )
@@ -252,13 +201,13 @@ class Runtime(Traced):
     @staticmethod
     def _bring_up_failed(ctx: hsm.Context, instance: "Runtime", event: hsm.Event[typing.Any]) -> None:
         del ctx, event
-        _LOG.error("runtime bring-up failed target=%s", instance._target)
+        _LOG.error("runtime bring-up failed bots=%d actors=%d", len(instance._bots), len(instance._shared))
         instance._reason = "boot_failed"
 
     @staticmethod
     def _bring_up_timed_out(ctx: hsm.Context, instance: "Runtime", event: hsm.Event[typing.Any]) -> None:
         del ctx, event
-        _LOG.error("runtime bring-up timed out target=%s", instance._target)
+        _LOG.error("runtime bring-up timed out bots=%d actors=%d", len(instance._bots), len(instance._shared))
         instance._reason = "boot_failed"
 
     @staticmethod
@@ -411,39 +360,14 @@ class Runtime(Traced):
         _LOG.error("runtime stop forced reason=%s", instance._reason)
         instance._on_exit(events.ExitedData.for_reason("forced"))
 
-    @staticmethod
-    def _exit_boot_failed(ctx: hsm.Context, instance: "Runtime", event: hsm.Event[typing.Any]) -> None:
-        del ctx, event
-        instance._on_exit(events.ExitedData.for_reason("boot_failed"))
-
     model: typing.ClassVar[hsm.Model] = mosfet.define(
         "Runtime",
-        hsm.initial(hsm.target("booting")),
+        hsm.initial(hsm.target("starting_actors")),
         hsm.state(
-            "booting",
+            "starting_actors",
             # A run killed without leaving ready (SIGKILL, OOM, host crash) left its ready file behind: remove
             # it before anything else, so the file exists exactly while this run is ready.
             hsm.entry(_remove_ready_file),
-            hsm.activity(_boot),
-            hsm.transition(
-                hsm.on(events.BootedEvent),
-                hsm.effect(_record_assembly),
-                hsm.target("/Runtime/starting_actors"),
-            ),
-            hsm.transition(
-                hsm.on(events.BootFailedEvent),
-                hsm.effect(_exit_boot_failed),
-                hsm.target("/Runtime/failed"),
-            ),
-            # Nothing is started yet, so there is nothing to stop.
-            hsm.transition(
-                hsm.on(events.StopEvent),
-                hsm.effect(_stop_requested, _exit_stopped),
-                hsm.target("/Runtime/stopped"),
-            ),
-        ),
-        hsm.state(
-            "starting_actors",
             hsm.activity(_start_actors),
             hsm.transition(hsm.on(events.ActorsStartedEvent), hsm.target("/Runtime/starting_supervisors")),
             hsm.transition(
@@ -562,7 +486,6 @@ class Runtime(Traced):
         ),
         hsm.final("stopped"),
         hsm.final("forced"),
-        hsm.final("failed"),
         hsm.observe(observer),
     )
 

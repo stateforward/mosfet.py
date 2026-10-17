@@ -1,63 +1,27 @@
-"""The smallest bot factory ``mosfet run`` runs: one device-free bot with a full cognition.
+"""The smallest bot: no devices, and a cognition with memory that recalls and consolidates.
 
-    mosfet run minimal_bot_example:build --ready-file /tmp/ready
+    python -m minimal_bot_example
 
-The bot has no devices, so nothing reaches it until a device or an acquired ability is added; what it
-does with what it perceives is its cognition's to decide.
+With no devices nothing reaches the bot, so it activates, stays ready, and stops cleanly; add a device or
+an acquired ability to give it something to perceive. What it does with what it perceives is its
+cognition's to decide.
 """
 
-import mosfet
-from mosfet import runtime
-from mosfet.abilities import cognition, memory
-from mosfet.providers import openai_compat
+from mosfet import bot
+from mosfet.abilities import memory, processing
 
 
-class MinimalBot(mosfet.Bot):
-    """A bot with no devices and no abilities beyond the cognition it is given."""
+def minimal(*, processor: processing.Processor, store: memory.Memory) -> bot.Model:
+    """The minimal bot, thinking with ``processor`` and remembering in ``store``.
 
-    def __init__(self, *, cognition: cognition.Cognition) -> None:
-        super().__init__((), cognition=cognition)
-
-
-def build(config: runtime.Config) -> runtime.Assembly:
-    """Build one bot whose cognition runs on the OpenAI-compatible endpoint the process is configured for.
-
-    Reads from the process configuration:
-
-    * ``OPENAI_BASE_URL``: the endpoint, for example ``https://api.openai.com/v1`` or a local server;
-    * ``OPENAI_MODEL``: the model that endpoint serves;
-    * the ``openai_api_key`` secret: the Docker secret ``openai_api_key``, the file named by
-      ``OPENAI_API_KEY_FILE``, or ``OPENAI_API_KEY``.
-
-    Raises:
-        ValueError: ``OPENAI_BASE_URL`` or ``OPENAI_MODEL`` is unset or empty.
-        runtime.MissingSecretError: no source provides ``openai_api_key``.
+    It has nothing to perceive yet, which ``bot.allow("no_devices")`` says is deliberate.
     """
 
-    base_url = config.environ.get("OPENAI_BASE_URL")
-    model = config.environ.get("OPENAI_MODEL")
-    if not base_url or not model:
-        raise ValueError("set OPENAI_BASE_URL and OPENAI_MODEL to the OpenAI-compatible endpoint and its model")
-    processor = openai_compat.Processor(
-        client=openai_compat.ChatClient(
-            model=model,
-            base_url=base_url,
-            api_key=config.secrets.get("openai_api_key").get_secret_value(),
-        ),
-        provider="minimal_bot",
+    return bot.define(
+        "minimal",
+        bot.cognition(processor, memory=store, associative=True, consolidation=True),
+        bot.allow("no_devices"),
     )
-    store = memory.Memory()
-    bot = MinimalBot(
-        cognition=cognition.Cognition(
-            intuition=cognition.Intuition(processor=processor),
-            reasoning=cognition.Reasoning(processor=processor),
-            reflection=cognition.Reflection(processor=processor, memory=store),
-            memory=store,
-            associative=memory.Associative(memory=store),
-            consolidation=memory.Consolidation(memory=store, processor=processor),
-        ),
-    )
-    return runtime.Assembly(bots={"minimal": bot})
 
 
-__all__ = ["MinimalBot", "build"]
+__all__ = ["minimal"]

@@ -1,7 +1,7 @@
-"""The immutable process configuration a bot factory is built from.
+"""The named secrets a process is given: Docker secrets first, then files and variables.
 
-The process boundary (the CLI) reads the environment once and hands the factory this snapshot, so no
-factory reads ``os.environ`` or the current directory itself (PY-FUNC-001, PY-CONFIG-001).
+``bot.process`` reads the environment once, at the bot file's ``__main__`` boundary, and builds the one
+``Secrets`` reader the bot file asks for its credentials (PY-FUNC-001, PY-CONFIG-001).
 """
 
 import collections.abc
@@ -26,8 +26,8 @@ class Secrets:
     2. the file whose path is in the environment variable ``<NAME>_FILE``;
     3. the environment variable ``<NAME>``.
 
-    Reading a file is blocking I/O: call :meth:`get` from the factory, which the runtime runs off the
-    event loop. Values are never part of ``repr`` or of any raised error.
+    Reading a file is blocking I/O: call :meth:`get` from the bot file's ``__main__``, before ``bot.run``
+    starts the event loop. Values are never part of ``repr`` or of any raised error.
     """
 
     _directory: pathlib.Path
@@ -68,47 +68,4 @@ class Secrets:
         return f"Secrets(directory={str(self._directory)!r})"
 
 
-class Config(pydantic.BaseModel):
-    """What a bot factory is told about the process it runs in.
-
-    Built once at the process boundary and frozen. ``environ`` is an immutable snapshot of the process
-    environment taken at that moment; it is left out of ``repr`` because environment values may be
-    credentials.
-    """
-
-    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
-        frozen=True,
-        extra="forbid",
-        arbitrary_types_allowed=True,
-    )
-
-    name: str = pydantic.Field(
-        min_length=1,
-        description="Service name of this deployment; also the OTEL `service.name`.",
-        examples=["builder_bot"],
-    )
-    instance_id: str = pydantic.Field(
-        min_length=1,
-        description="Identity of this process or container; also the OTEL `service.instance.id`.",
-        examples=["3f2a9c1b7d4e"],
-    )
-    data_dir: pathlib.Path = pydantic.Field(
-        description="Directory the factory keeps durable state in (for example the SQLite memory store).",
-        examples=["./.mosfet"],
-    )
-    environ: collections.abc.Mapping[str, str] = pydantic.Field(
-        repr=False,
-        description="Immutable snapshot of the process environment, taken once by the process boundary.",
-        examples=[{"LOG_LEVEL": "info"}],
-    )
-    secrets: Secrets = pydantic.Field(
-        description="Resolver for named secrets (Docker secrets mount, then `<NAME>_FILE`, then `<NAME>`).",
-    )
-
-    @pydantic.field_validator("environ", mode="after")
-    @classmethod
-    def _freeze_environ(cls, value: collections.abc.Mapping[str, str]) -> collections.abc.Mapping[str, str]:
-        return types.MappingProxyType(dict(value))
-
-
-__all__ = ["Config", "Secrets"]
+__all__ = ["Secrets"]

@@ -30,6 +30,10 @@ The examples assume `from mosfet import bot`, `from mosfet.devices import phone`
 - [`B0101`](#b0101) (error): a model is started again while its parts run
 - [`B0102`](#b0102) (error): a part raised while `bot.start` built the bot
 - [`B0103`](#b0103) (error): `bot.start` is given something that is not an `Environment`
+- [`B0104`](#b0104) (error): two bots given to `bot.run` share a name
+- [`B0105`](#b0105) (error): one model is given to `bot.run` twice
+- [`B0106`](#b0106) (error): `bot.run` is given a shared actor that is not an actor
+- [`B0107`](#b0107) (error): a process option is unknown or its value is bad
 - [`ability_without_tools`](#ability_without_tools) (warning): an acquired ability offers cognition nothing to select
 - [`empty_timeouts`](#empty_timeouts) (warning): `bot.timeouts()` sets no timeout
 - [`instruction_like_traits`](#instruction_like_traits) (warning): a trait reads as an instruction
@@ -447,6 +451,94 @@ Right:
 ```python
 model = bot.define("greeter", bot.cognition(processor), bot.attach(phone.Phone()))
 greeter = await bot.start(environment, model)
+```
+
+## B0104
+
+**error:** two bots given to `bot.run` share a name
+
+`bot.run` runs every bot it is given under its name, so the names of the models it is given are all different. The diagnostic points at the second `bot.define` that used the name.
+
+Why: A bot's name is its supervisor's name, its topology name and its telemetry name in the process; two bots under one name could not be told apart.
+
+Wrong:
+
+```python
+greeter = bot.define("greeter", bot.cognition(processor), bot.attach(phone.Phone()))
+helper = bot.define("greeter", bot.cognition(processor), bot.attach(phone.Phone()))
+bot.run(greeter, helper)
+```
+
+Right:
+
+```python
+greeter = bot.define("greeter", bot.cognition(processor), bot.attach(phone.Phone()))
+helper = bot.define("helper", bot.cognition(processor), bot.attach(phone.Phone()))
+bot.run(greeter, helper)
+```
+
+## B0105
+
+**error:** one model is given to `bot.run` twice
+
+Each model given to `bot.run` runs as one bot, so a model is given once.
+
+Why: A model holds the very parts its bot file built, and a part is held by one bot. A second bot needs a second model, with parts of its own.
+
+Wrong:
+
+```python
+greeter = bot.define("greeter", bot.cognition(processor), bot.attach(phone.Phone()))
+bot.run(greeter, greeter)
+```
+
+Right:
+
+```python
+greeter = bot.define("greeter", bot.cognition(processor), bot.attach(phone.Phone()))
+bot.run(greeter)
+```
+
+## B0106
+
+**error:** `bot.run` is given a shared actor that is not an actor
+
+`actors=` holds the machines the process shares among its bots, such as a `websocket.Server`: each an `hsm.Instance` whose class declares `model`. The process starts them in order before any bot and stops them in reverse after every bot.
+
+Why: The process starts each actor on its class's model; anything else has nothing to start. A part of one bot goes to that bot's `bot.define`, and a processor to its `bot.cognition`.
+
+Wrong:
+
+```python
+greeter = bot.define("greeter", bot.cognition(processor), bot.attach(phone.Phone()))
+bot.run(greeter, actors=(processor,))
+```
+
+Right:
+
+```python
+greeter = bot.define("greeter", bot.cognition(processor), bot.attach(phone.Phone()))
+bot.run(greeter)
+```
+
+## B0107
+
+**error:** a process option is unknown or its value is bad
+
+`bot.process` reads the process options from the `MOSFET_*` variables, then from the flags after the bot's module, and knows only its own: `--name`, `--instance-id`, `--data-dir`, `--secrets-dir`, `--ready-file` and one per `runtime.Policy` field, such as `--stop-grace SECONDS`. The process exits 64, and the help shows how the option is written.
+
+Why: A process that guessed at a bad option would run with bounds nobody chose. A bot file with flags of its own reads them itself and passes `bot.process` the rest as `argv=`.
+
+Wrong:
+
+```python
+process = bot.process(argv=["--stop-grace", "soon"])
+```
+
+Right:
+
+```python
+process = bot.process(argv=["--stop-grace", "8"])
 ```
 
 ## ability_without_tools

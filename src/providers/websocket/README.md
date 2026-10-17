@@ -4,7 +4,7 @@ A device-agnostic yamux-over-WebSocket transport (`mosfet.protocols.transport`).
 `websockets` dependency and the socket pump; `mosfet.protocols.yamux` stays sans-IO in core. It carries
 bytes only: which port owns which stream, and through which codec, comes from the endpoint that registers.
 
-- `Server` — one per process, a shared actor (`runtime.Assembly.actors`): listens, authenticates each
+- `Server` — one per process, a shared actor (`bot.run(actors=...)`): listens, authenticates each
   socket, and binds it to the endpoint registered for its peer
 - `Connection` — one accepted socket: the token, then one server-role yamux session and its streams
 - `HmacTokens` — per-peer tokens derived from one secret (`TokenVerifier`)
@@ -25,7 +25,7 @@ from mosfet.devices import computer
 from mosfet.providers import websocket
 
 tokens = websocket.HmacTokens(pydantic.SecretStr(secret))
-server = websocket.Server(verifier=tokens)  # Assembly.actors
+server = websocket.Server(verifier=tokens)  # bot.run(model, actors=(server,))
 laptop = computer.Computer(id="studio-laptop", transport=server)
 ```
 

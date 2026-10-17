@@ -4,27 +4,27 @@ Examples live outside `src` so they stay out of the distributable stateforward.m
 Each single-file example is a `uv` script with its own inline metadata, which keeps
 example-only dependencies out of the root project and provider packages.
 
-`minimal_bot` is the smallest bot factory for `mosfet run`: one device-free bot with a full
-cognition on any OpenAI-compatible endpoint. Its own project installs `mosfet` and the factory, so
-the command runs exactly as documented; see [`minimal_bot/README.md`](minimal_bot/README.md):
+`builder_bot` is the first example: one bot, for one person, reached through a computer, that builds and tests
+software on a sandbox bench of its own. `builder_bot_example.builder` defines it with `bot.define`: a
+`computer.Computer` served by a `websocket.Server`, a `sandbox.Sandbox` on a rootless Docker or Podman socket, and
+the full cognition on one local OpenAI-compatible model. The person sits at the computer's far side,
+`builder-terminal`. Nothing is scripted: what the bot shows, runs, or leaves alone is its own choice. See
+[`builder_bot/README.md`](builder_bot/README.md) for the bench image, the settings and the security posture:
+
+```bash
+uv sync --project examples/builder_bot
+examples/builder_bot/.venv/bin/python -m builder_bot_example --secrets-dir examples/builder_bot/secrets
+examples/builder_bot/.venv/bin/builder-terminal --secret-file examples/builder_bot/secrets/computer_token_secret
+```
+
+`minimal_bot` is the smallest bot: one device-free bot with a cognition on any OpenAI-compatible endpoint, run
+with `python -m minimal_bot_example`. Its own project installs `mosfet` and the bot, so the command runs exactly
+as documented; see [`minimal_bot/README.md`](minimal_bot/README.md):
 
 ```bash
 uv sync --project examples/minimal_bot
 OPENAI_BASE_URL=... OPENAI_MODEL=... OPENAI_API_KEY=... \
-  examples/minimal_bot/.venv/bin/mosfet run minimal_bot_example:build
-```
-
-`builder_bot` is one bot, for one person, reached through a computer, that builds and tests software on a
-sandbox bench of its own: a `computer.Computer` served by a `websocket.Server`, a `sandbox.Sandbox` on a
-rootless Docker or Podman socket, and the full cognition on one local OpenAI-compatible model. The person sits
-at the computer's far side, `builder-terminal`. Nothing is scripted: what the bot shows, runs, or leaves alone
-is its own choice. See [`builder_bot/README.md`](builder_bot/README.md) for the bench image, the settings and
-the security posture:
-
-```bash
-uv sync --project examples/builder_bot
-examples/builder_bot/.venv/bin/mosfet run builder_bot_example:build --secrets-dir examples/builder_bot/secrets
-examples/builder_bot/.venv/bin/builder-terminal --secret-file examples/builder_bot/secrets/computer_token_secret
+  examples/minimal_bot/.venv/bin/python -m minimal_bot_example
 ```
 
 The other examples run as programs from the repository root:

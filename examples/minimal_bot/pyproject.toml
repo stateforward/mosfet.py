@@ -1,7 +1,7 @@
 [project]
 name = "bot-example-minimal-bot"
 version = "0.1.0"
-description = "The smallest stateforward.mosfet bot factory: one device-free bot run by `mosfet run`."
+description = "The smallest stateforward.mosfet bot: one device-free bot, run with `python -m minimal_bot_example`."
 requires-python = ">=3.13"
 dependencies = [
   "stateforward.mosfet",

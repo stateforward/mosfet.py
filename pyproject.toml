@@ -17,9 +17,6 @@ dependencies = [
   "sqlalchemy>=2.0.0,<3.0.0",
 ]
 
-[project.scripts]
-mosfet = "mosfet.cli:main"
-
 [dependency-groups]
 dev = [
   "basedpyright>=1.39.9",

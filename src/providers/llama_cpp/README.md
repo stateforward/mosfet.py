@@ -64,20 +64,20 @@ the owning `embedding.Embedding` ability uses. `embedding_capacity` derives what
 configuration the model loads with.
 
 The composition root owns the model's lifetime. It starts the model in a long-lived scope before the bots and
-stops it after them; abilities only attach and detach. Under `mosfet run`, put the model in `Assembly.actors`:
+stops it after them; abilities only attach and detach. With `bot.run`, pass the model as a shared actor:
 
 ```python
+import os
 import pathlib
 
-from mosfet import runtime
+from mosfet import bot
 from mosfet.abilities import embedding
 from mosfet.providers import llama_cpp
 
-
-def build(config: runtime.Config) -> runtime.Assembly:
+if __name__ == "__main__":
     weights = llama_cpp.Weights(
-        model=pathlib.Path(config.environ["EMBEDDING_MODEL"]),
-        projector=pathlib.Path(config.environ["EMBEDDING_PROJECTOR"]),
+        model=pathlib.Path(os.environ["EMBEDDING_MODEL"]),
+        projector=pathlib.Path(os.environ["EMBEDDING_PROJECTOR"]),
     )
     context = llama_cpp.EmbeddingContext()
     space = embedding.Space(model="google/embeddinggemma-2", dimensions=768)
@@ -87,8 +87,8 @@ def build(config: runtime.Config) -> runtime.Assembly:
         capacity=llama_cpp.embedding_capacity(weights, context, space=space),
         instructions=embedding.EMBEDDING_GEMMA_2,
     )
-    bot = ...  # an embedding.Embedding(embedder=embedder) inside the bot's cognition
-    return runtime.Assembly(bots={"main": bot}, actors=(model,))  # started before the bots, stopped after
+    main = ...  # a bot.define(...) whose cognition embeds with an embedding.Embedding(embedder=embedder)
+    bot.run(main, actors=(model,))  # started before the bots, stopped after
 ```
 
 A script root does the same by hand: `await mosfet.started(environment, model, llama_cpp.EmbeddingModel.model)`

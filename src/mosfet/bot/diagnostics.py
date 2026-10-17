@@ -523,6 +523,84 @@ EXPLANATIONS: tuple[Explanation, ...] = (
         ),
     ),
     Explanation(
+        code="B0104",
+        level="error",
+        title="two bots given to `bot.run` share a name",
+        meaning=(
+            "`bot.run` runs every bot it is given under its name, so the names of the models it is given are "
+            "all different. The diagnostic points at the second `bot.define` that used the name."
+        ),
+        why=(
+            "A bot's name is its supervisor's name, its topology name and its telemetry name in the process; two "
+            "bots under one name could not be told apart."
+        ),
+        wrong=(
+            'greeter = bot.define("greeter", bot.cognition(processor), bot.attach(phone.Phone()))\n'
+            'helper = bot.define("greeter", bot.cognition(processor), bot.attach(phone.Phone()))\n'
+            "bot.run(greeter, helper)"
+        ),
+        right=(
+            'greeter = bot.define("greeter", bot.cognition(processor), bot.attach(phone.Phone()))\n'
+            'helper = bot.define("helper", bot.cognition(processor), bot.attach(phone.Phone()))\n'
+            "bot.run(greeter, helper)"
+        ),
+    ),
+    Explanation(
+        code="B0105",
+        level="error",
+        title="one model is given to `bot.run` twice",
+        meaning="Each model given to `bot.run` runs as one bot, so a model is given once.",
+        why=(
+            "A model holds the very parts its bot file built, and a part is held by one bot. A second bot needs a "
+            "second model, with parts of its own."
+        ),
+        wrong=(
+            'greeter = bot.define("greeter", bot.cognition(processor), bot.attach(phone.Phone()))\n'
+            "bot.run(greeter, greeter)"
+        ),
+        right=(
+            'greeter = bot.define("greeter", bot.cognition(processor), bot.attach(phone.Phone()))\nbot.run(greeter)'
+        ),
+    ),
+    Explanation(
+        code="B0106",
+        level="error",
+        title="`bot.run` is given a shared actor that is not an actor",
+        meaning=(
+            "`actors=` holds the machines the process shares among its bots, such as a `websocket.Server`: each an "
+            "`hsm.Instance` whose class declares `model`. The process starts them in order before any bot and stops "
+            "them in reverse after every bot."
+        ),
+        why=(
+            "The process starts each actor on its class's model; anything else has nothing to start. A part of one "
+            "bot goes to that bot's `bot.define`, and a processor to its `bot.cognition`."
+        ),
+        wrong=(
+            'greeter = bot.define("greeter", bot.cognition(processor), bot.attach(phone.Phone()))\n'
+            "bot.run(greeter, actors=(processor,))"
+        ),
+        right=(
+            'greeter = bot.define("greeter", bot.cognition(processor), bot.attach(phone.Phone()))\nbot.run(greeter)'
+        ),
+    ),
+    Explanation(
+        code="B0107",
+        level="error",
+        title="a process option is unknown or its value is bad",
+        meaning=(
+            "`bot.process` reads the process options from the `MOSFET_*` variables, then from the flags after the "
+            "bot's module, and knows only its own: `--name`, `--instance-id`, `--data-dir`, `--secrets-dir`, "
+            "`--ready-file` and one per `runtime.Policy` field, such as `--stop-grace SECONDS`. The process exits "
+            "64, and the help shows how the option is written."
+        ),
+        why=(
+            "A process that guessed at a bad option would run with bounds nobody chose. A bot file with flags of "
+            "its own reads them itself and passes `bot.process` the rest as `argv=`."
+        ),
+        wrong='process = bot.process(argv=["--stop-grace", "soon"])',
+        right='process = bot.process(argv=["--stop-grace", "8"])',
+    ),
+    Explanation(
         code="ability_without_tools",
         level="warning",
         title="an acquired ability offers cognition nothing to select",

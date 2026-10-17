@@ -1,9 +1,20 @@
 # builder_bot
 
 One bot, for one person, that the person reaches through a computer and that builds and tests software on a
-sandbox bench of its own. `builder_bot_example:build` assembles that bot, `builder`, for `mosfet run`:
+sandbox bench of its own. `builder_bot_example.builder` defines that bot, `builder`, with `bot.define`, and
+`python -m builder_bot_example` runs it with `bot.run`:
 
-* **Its computer** is a `computer.Computer`, `builder-desk`, served on this host by a `websocket.Server`. The
+```python
+return bot.define(
+    "builder",
+    bot.traits(*traits),
+    bot.cognition(processor, memory=store, associative=True, consolidation=True, autonomy=True, routines=clock),
+    bot.attach(computer.Computer(id="desk", transport=server, peer_id=peer, person_id=person_id)),
+    bot.attach(sandbox.Sandbox(host=host, capacity=capacity, spec=spec, max_output_chars=MAX_OUTPUT_CHARS)),
+)
+```
+
+* **Its computer** is a `computer.Computer`, `desk`, served on this host by a `websocket.Server`. The
   person sits at its far side, `builder-terminal`: the screen shows what the bot shows, and the keyboard types
   into the field the bot focused.
 * **Its bench** is a `sandbox.Sandbox` on a `docker.Host` over a rootless Docker or Podman socket. The bot may
@@ -65,13 +76,14 @@ chmod 0600 examples/builder_bot/secrets/*
 | `BUILDER_SANDBOX_EGRESS_NETWORK` | env | unset | The owner's egress bridge; unset, the bench has no network |
 | `BUILDER_SANDBOX_RUNTIME` | env | `runc` | `runc`, or `runsc` for gVisor |
 | `BUILDER_COMPUTER_HOST`, `BUILDER_COMPUTER_PORT` | env | `127.0.0.1`, `8765` | Where the computer is served |
-| `BUILDER_COMPUTER_PEER` | env | `builder-desk` | The computer's device and peer id |
+| `BUILDER_COMPUTER_PEER` | env | `builder-desk` | The name the computer's far side connects as (its peer id) |
 | `computer_token_secret` | secret, required | | The key the terminal's token is signed with |
 | `BUILDER_PERSON_ID` | env | unset | Who uses the computer, stamped on what it observes |
 | `BUILDER_TRAITS` | env | `careful,curious,candid` | The owner's traits for the bot, comma separated |
 
-A secret is read from `--secrets-dir`, then from the file `<NAME>_FILE` names, then from `<NAME>`. The bench is
-fixed by the factory (`builder_bot_example.bench`). It gets the default limits: one CPU, 1 GiB without swap, 256
+`builder_bot_example.Settings` reads the variables; an empty one is unset. A secret is read from `--secrets-dir`
+(`MOSFET_SECRETS_DIR`), then from the file `<NAME>_FILE` names, then from `<NAME>`. The bench is fixed by the bot
+file (`builder_bot_example.bench`). It gets the default limits: one CPU, 1 GiB without swap, 256
 pids and a 512 MiB workspace at `/workspace`, which is also `HOME`. Each output stream and file read is kept to
 8 Ki characters, so a turn's observations fit a local model's context.
 
@@ -81,7 +93,7 @@ Start the bot, then sit down at its computer in another terminal:
 
 ```bash
 set -a; . examples/builder_bot/.env; set +a
-examples/builder_bot/.venv/bin/mosfet run builder_bot_example:build \
+examples/builder_bot/.venv/bin/python -m builder_bot_example \
   --secrets-dir examples/builder_bot/secrets --data-dir examples/builder_bot/.mosfet --ready-file /tmp/builder.ready
 ```
 
@@ -93,17 +105,17 @@ examples/builder_bot/.venv/bin/builder-terminal --url ws://127.0.0.1:8765 --peer
 A plain line is typed into the field the bot focused, then Enter. A line longer than 4095 characters is not typed,
 and the terminal says so. `/click <id>` presses the element with that id. `/quit` leaves. When nothing is focused,
 the line goes nowhere, and the terminal says so. The process stays up until SIGTERM or SIGINT and exits `0`. A
-missing or malformed setting or secret exits `78`, and the message names it.
-[`docs/runtime.md`](../../docs/runtime.md) lists every flag and exit code.
+missing or malformed setting or secret exits `1` before anything starts, and the message names it.
+[`docs/runtime.md`](../../docs/runtime.md) lists every `bot.process` option and exit code.
 
 ## The live check (manual)
 
 The automated tests never run a model. To see the builder on the real surface, its owner runs this by hand
 against rootless Podman and a local model:
 
-1. `mosfet run builder_bot_example:build`, as above, reaches ready (the ready file exists) with the Podman socket.
+1. `python -m builder_bot_example`, as above, reaches ready (the ready file exists) with the Podman socket.
 2. `builder-terminal` connects, and within a bound the bot is given a turn for `computer.link.up`.
-   `uv run python scripts/otel_turns.py --dir <the directory mosfet run ran in>` prints each turn from
+   `uv run python scripts/otel_turns.py --dir <the directory the bot ran in>` prints each turn from
    `otel-spans.jsonl` and `otel-logs.jsonl`.
 3. That turn offered `computer.show` and `bot.ability.sandbox.{run,write,read,reset}`. Run with
    `BOT_OTEL_CAPTURE=full` to see the offered tools and the captured turn input.
@@ -135,7 +147,8 @@ a pass condition. A bot that shows nothing has not failed the check. The questio
 uv run --project examples/builder_bot python -m pytest examples/builder_bot/tests -q
 ```
 
-`test_build.py` checks the configuration and what `build` assembles, and runs `mosfet run` as a child process.
-`test_terminal.py` runs the terminal against a real loopback server and computer. `test_builder.py` brings the
-composed bot up with a scripted model and a scripted sandbox host. The terminal connects, and the model's choices
-reach the screen, the bench and the next turn. A model that chooses nothing changes nothing.
+`test_build.py` checks the settings and the bot `builder` defines, and runs `python -m builder_bot_example` as a
+child process. `test_terminal.py` runs the terminal against a real loopback server and computer. `test_builder.py`
+runs the bot with `testing.running`, a scripted model (`testing.Scripted`) and a scripted sandbox host. The
+terminal connects, and the model's choices reach the screen, the bench and the next turn. A model that chooses
+nothing changes nothing.

@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Build the generic image (docker/Dockerfile) for examples/minimal_bot and check what it promises a container:
-# it becomes healthy only while the bot is ready, runs as uid 10001 on a read-only root with a 0700 data dir,
-# stops with exit 0 inside Docker's 10 s SIGKILL, exits 78 without its secret and 64 on a bad flag, and a ready
-# file a SIGKILLed run left behind is gone before the next boot can be healthy. With --compose it instead brings
-# up examples/minimal_bot/compose.yaml with its endpoint and secret overridden, waits for healthy, stops it and
-# checks exit 0.
+# `python -m minimal_bot_example` becomes healthy only while the bot is ready, runs as uid 10001 on a read-only
+# root with a 0700 data dir, stops with exit 0 inside Docker's 10 s SIGKILL, exits 1 (the bot file's own error)
+# without its secret and 64 on a bad flag, and a ready file a SIGKILLed run left behind is gone once the next run
+# boots. With --compose it instead brings up examples/minimal_bot/compose.yaml with its endpoint and secret
+# overridden, waits for healthy, stops it and checks exit 0.
 #
 # Usage: scripts/docker_smoke.sh [--compose]
 #
@@ -164,12 +164,12 @@ elapsed=$(($(date +%s) - started))
 code="$(state "$bot" .State.ExitCode)"
 [[ "$code" == "0" ]] || fail "docker stop exited $code, not 0"
 
-echo "docker_smoke: a missing secret exits 78, a bad flag 64" >&2
+echo "docker_smoke: a missing secret exits 1, a bad flag 64" >&2
 code=0
 docker run --rm --label "$label" --init "${endpoint[@]}" "$image" >/dev/null 2>&1 || code=$?
-[[ "$code" == "78" ]] || fail "a run without its secret exited $code, not 78"
+[[ "$code" == "1" ]] || fail "a run without its secret exited $code, not 1"
 code=0
-docker run --rm --label "$label" --init "$image" --no-such-flag minimal_bot_example:build >/dev/null 2>&1 || code=$?
+docker run --rm --label "$label" --init "$image" minimal_bot_example --no-such-flag >/dev/null 2>&1 || code=$?
 [[ "$code" == "64" ]] || fail "a run with a bad flag exited $code, not 64"
 
 # No tmpfs here: the ready file lives in the container's writable layer, which a restart keeps, so the boot's
@@ -185,12 +185,16 @@ done
 docker kill --signal KILL "$bot" >/dev/null
 wait_exited "$bot" 30
 docker cp "$bot:/run/mosfet/ready" - >/dev/null || fail "the SIGKILLed run left no ready file to test with"
-# Without its secret the next boot fails (78) and never becomes ready, so any ready file left now is stale.
-secrets 'rm /secrets/openai_api_key'
+# With its memory database replaced by a file that is not one, the next run boots, but its bot never activates:
+# it spends its restart budget (70) and never becomes ready, so any ready file left once it exits is the stale one.
+corrupt="$(mktemp)"
+printf 'not a database' > "$corrupt"
+docker cp "$corrupt" "$bot:/var/lib/mosfet/data/memory.sqlite3"
+rm -f "$corrupt"
 docker start "$bot" >/dev/null
-wait_exited "$bot" 60
+wait_exited "$bot" 90
 code="$(state "$bot" .State.ExitCode)"
-[[ "$code" == "78" ]] || fail "the restarted run exited $code, not 78"
+[[ "$code" == "70" ]] || fail "the restarted run exited $code, not 70"
 if docker cp "$bot:/run/mosfet/ready" - >/dev/null 2>&1; then
   fail "the stale ready file survived the next boot"
 fi

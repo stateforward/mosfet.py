@@ -57,3 +57,18 @@ def test_a_bot_stop_must_fit_strictly_inside_the_grace() -> None:
 def test_policy_is_frozen() -> None:
     with pytest.raises(pydantic.ValidationError):
         setattr(runtime.Policy(), "max_restarts", 2)
+
+
+@pytest.mark.parametrize("name", ["builder", "b", "builder_2"])
+def test_bot_names_are_lower_snake_case(name: str) -> None:
+    assert pydantic.TypeAdapter[str](runtime.BotName).validate_python(name) == name
+
+
+@pytest.mark.parametrize("name", ["Builder", "1builder", "builder-bot", "", "b" * 65])
+def test_bot_names_are_bounded(name: str) -> None:
+    with pytest.raises(pydantic.ValidationError):
+        _ = pydantic.TypeAdapter[str](runtime.BotName).validate_python(name)
+
+
+def test_one_process_runs_at_most_32_bots() -> None:
+    assert runtime.MAX_BOTS == 32

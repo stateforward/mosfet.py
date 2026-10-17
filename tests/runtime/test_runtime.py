@@ -2,9 +2,7 @@ import asyncio
 import collections.abc
 import dataclasses
 import datetime
-import logging
 import pathlib
-import threading
 import typing
 
 import hsm
@@ -14,10 +12,9 @@ from mosfet import lifecycle, runtime, scope
 from mosfet.environment import Environment
 
 from tests import metric_reader
-from tests.runtime.fixtures import factories
+from tests.runtime.fixtures import doubles
 
 _MS = datetime.timedelta(milliseconds=1)
-_TARGET_MODULE = "tests.runtime.fixtures.factories"
 
 
 def _policy(**overrides: object) -> runtime.Policy:
@@ -54,25 +51,18 @@ class _Run:
 
 
 async def _run(
-    tmp_path: pathlib.Path,
-    attribute: str = "configured",
+    bots: collections.abc.Mapping[str, mosfet.Bot],
+    actors: collections.abc.Sequence[hsm.Instance] = (),
     *,
     policy: runtime.Policy | None = None,
     ready_file: pathlib.Path | None = None,
-    module: str = _TARGET_MODULE,
     clock: hsm.Clock | None = None,
 ) -> _Run:
     environment = Environment()
     exited: asyncio.Future[runtime.ExitedData] = asyncio.get_running_loop().create_future()
     process = runtime.Runtime(
-        target=runtime.Target(module=module, attribute=attribute),
-        config=runtime.Config(
-            name="test",
-            instance_id="test-1",
-            data_dir=tmp_path,
-            environ={},
-            secrets=runtime.Secrets(directory=tmp_path / "secrets", environ={}),
-        ),
+        bots=bots,
+        actors=actors,
         policy=policy or _policy(),
         environment=environment,
         ready_file=ready_file,
@@ -107,12 +97,6 @@ class _ManualClock(hsm.Clock):
                 timer.set_result(fired)
 
 
-def _assemble(
-    monkeypatch: pytest.MonkeyPatch, build: collections.abc.Callable[[runtime.Config], runtime.Assembly]
-) -> None:
-    monkeypatch.setattr(factories, "configured", build)
-
-
 def _gate_second_supervisor_start(monkeypatch: pytest.MonkeyPatch, *, gate: asyncio.Event, started_first: bool) -> None:
     """Hold the second supervisor's start inside ``mosfet.started`` until ``gate`` opens.
 
@@ -141,55 +125,25 @@ def _gate_second_supervisor_start(monkeypatch: pytest.MonkeyPatch, *, gate: asyn
     monkeypatch.setattr(mosfet, "started", started)
 
 
-@pytest.mark.parametrize(
-    ("module", "attribute", "kind"),
-    [
-        ("tests.runtime.fixtures.absent", "build", "import_failed"),
-        (_TARGET_MODULE, "absent", "factory_missing"),
-        (_TARGET_MODULE, "not_callable", "factory_missing"),
-        (_TARGET_MODULE, "raising", "factory_raised"),
-        (_TARGET_MODULE, "wrong_type", "invalid_assembly"),
-        (_TARGET_MODULE, "needs_secret", "missing_secret"),
-    ],
-)
-def test_boot_failure_exits_78_and_logs_its_kind(
-    tmp_path: pathlib.Path, caplog: pytest.LogCaptureFixture, module: str, attribute: str, kind: str
-) -> None:
-    async def run() -> runtime.ExitedData:
-        started = await _run(tmp_path, attribute, module=module)
-        return await started.exit()
-
-    with caplog.at_level(logging.ERROR, logger="mosfet.runtime.runtime"):
-        exited = asyncio.run(run())
-
-    assert exited == runtime.ExitedData(code=78, reason="boot_failed")
-    assert f"runtime boot failed kind={kind} target={module}:{attribute}" in caplog.text
-
-
-def test_graceful_stop_stops_every_bot_before_the_actors_in_reverse_order(
-    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_graceful_stop_stops_every_bot_before_the_actors_in_reverse_order(tmp_path: pathlib.Path) -> None:
     journal: list[str] = []
-    bots = (factories.QuietBot(), factories.QuietBot())
+    bots = (doubles.QuietBot(), doubles.QuietBot())
 
-    class CheckingActor(factories.RecordingActor):
+    class CheckingActor(doubles.RecordingActor):
         @typing.override
         def stop(self, ctx: hsm.Context) -> collections.abc.Awaitable[None]:
             journal.append(f"bots started: {any(lifecycle.is_started(bot) for bot in bots)}")
             return super().stop(ctx)
 
-    _assemble(
-        monkeypatch,
-        lambda config: runtime.Assembly(
-            bots={"first": bots[0], "second": bots[1]},
-            actors=(CheckingActor("a", journal), CheckingActor("b", journal)),
-        ),
-    )
     ready = tmp_path / "ready"
 
     async def run() -> runtime.ExitedData:
-        started = await _run(tmp_path, ready_file=ready)
-        await factories.wait_until(ready.exists)
+        started = await _run(
+            bots={"first": bots[0], "second": bots[1]},
+            actors=(CheckingActor("a", journal), CheckingActor("b", journal)),
+            ready_file=ready,
+        )
+        await doubles.wait_until(ready.exists)
         await started.stop()
         return await started.exit()
 
@@ -201,17 +155,14 @@ def test_graceful_stop_stops_every_bot_before_the_actors_in_reverse_order(
     assert bots[1].terminals == [("bot.activated", "second:1"), ("bot.deactivated", "second:2")]
 
 
-def test_actors_and_bots_share_the_one_process_environment(
-    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    actor = factories.RecordingActor("shared", [])
-    bot = factories.QuietBot()
-    _assemble(monkeypatch, lambda config: runtime.Assembly(bots={"only": bot}, actors=(actor,)))
+def test_actors_and_bots_share_the_one_process_environment(tmp_path: pathlib.Path) -> None:
+    actor = doubles.RecordingActor("shared", [])
+    bot = doubles.QuietBot()
     ready = tmp_path / "ready"
 
     async def run() -> tuple[bool, bool, bool]:
-        started = await _run(tmp_path, ready_file=ready)
-        await factories.wait_until(ready.exists)
+        started = await _run(bots={"only": bot}, actors=(actor,), ready_file=ready)
+        await doubles.wait_until(ready.exists)
         observed = (
             Environment.from_context(actor.context()) is started.environment,
             scope.is_private(actor.context()),
@@ -228,46 +179,16 @@ def test_actors_and_bots_share_the_one_process_environment(
     assert bot_in_environment
 
 
-def test_stop_while_booting_exits_0(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    building = threading.Event()
-    release = threading.Event()
-
-    def slow(config: runtime.Config) -> runtime.Assembly:
-        building.set()
-        _ = release.wait(5)
-        return factories.quiet(config)
-
-    _assemble(monkeypatch, slow)
-
-    async def run() -> runtime.ExitedData:
-        started = await _run(tmp_path)
-        await factories.wait_until(building.is_set)
-        await started.stop()
-        try:
-            return await started.exit()
-        finally:
-            release.set()
-
-    assert asyncio.run(run()) == runtime.ExitedData(code=0, reason="stopped")
-
-
-def test_stop_while_actors_start_exits_0_and_stops_what_bring_up_recorded(
-    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_stop_while_actors_start_exits_0_and_stops_what_bring_up_recorded() -> None:
     journal: list[str] = []
     gate = asyncio.Event()
-    bot = factories.QuietBot()
-    _assemble(
-        monkeypatch,
-        lambda config: runtime.Assembly(
-            bots={"only": bot},
-            actors=(factories.RecordingActor("a", journal), factories.GatedActor("b", journal, gate)),
-        ),
-    )
+    bot = doubles.QuietBot()
 
     async def run() -> runtime.ExitedData:
-        started = await _run(tmp_path)
-        await factories.wait_until(lambda: journal == ["start:a"])
+        started = await _run(
+            bots={"only": bot}, actors=(doubles.RecordingActor("a", journal), doubles.GatedActor("b", journal, gate))
+        )
+        await doubles.wait_until(lambda: journal == ["start:a"])
         await started.stop()
         return await started.exit()
 
@@ -281,36 +202,32 @@ def test_stop_while_actors_start_exits_0_and_stops_what_bring_up_recorded(
 def test_a_bot_that_activates_before_the_last_supervisor_starts_still_makes_the_process_ready(
     tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    first = factories.QuietBot()
-    _assemble(monkeypatch, lambda config: runtime.Assembly(bots={"first": first, "second": factories.QuietBot()}))
+    first = doubles.QuietBot()
     gate = asyncio.Event()
     _gate_second_supervisor_start(monkeypatch, gate=gate, started_first=False)
     ready = tmp_path / "ready"
 
     async def run() -> runtime.ExitedData:
-        started = await _run(tmp_path, ready_file=ready)
+        started = await _run(bots={"first": first, "second": doubles.QuietBot()}, ready_file=ready)
         # The first bot activates and its supervisor reports running while bring-up is still starting
         # the second supervisor.
-        await factories.wait_until(lambda: first.terminals == [("bot.activated", "first:1")])
+        await doubles.wait_until(lambda: first.terminals == [("bot.activated", "first:1")])
         await asyncio.sleep(0.05)
         gate.set()
-        await factories.wait_until(ready.exists)
+        await doubles.wait_until(ready.exists)
         await started.stop()
         return await started.exit()
 
     assert asyncio.run(run()) == runtime.ExitedData(code=0, reason="stopped")
 
 
-def test_stop_before_a_supervisor_start_ran_does_not_wait_for_it(
-    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    first, second = factories.QuietBot(), factories.QuietBot()
-    _assemble(monkeypatch, lambda config: runtime.Assembly(bots={"first": first, "second": second}))
+def test_stop_before_a_supervisor_start_ran_does_not_wait_for_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    first, second = doubles.QuietBot(), doubles.QuietBot()
     _gate_second_supervisor_start(monkeypatch, gate=asyncio.Event(), started_first=False)
 
     async def run() -> runtime.ExitedData:
-        started = await _run(tmp_path)
-        await factories.wait_until(lambda: first.terminals == [("bot.activated", "first:1")])
+        started = await _run(bots={"first": first, "second": second})
+        await doubles.wait_until(lambda: first.terminals == [("bot.activated", "first:1")])
         await started.stop()
         # The grace is 30 s: exiting within the default 5 s wait proves nothing waited on the second.
         return await started.exit()
@@ -322,16 +239,13 @@ def test_stop_before_a_supervisor_start_ran_does_not_wait_for_it(
     assert second.terminals == []
 
 
-def test_stop_that_interrupts_a_supervisor_start_still_stops_its_bot(
-    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    second = factories.QuietBot()
-    _assemble(monkeypatch, lambda config: runtime.Assembly(bots={"first": factories.QuietBot(), "second": second}))
+def test_stop_that_interrupts_a_supervisor_start_still_stops_its_bot(monkeypatch: pytest.MonkeyPatch) -> None:
+    second = doubles.QuietBot()
     _gate_second_supervisor_start(monkeypatch, gate=asyncio.Event(), started_first=True)
 
     async def run() -> runtime.ExitedData:
-        started = await _run(tmp_path)
-        await factories.wait_until(lambda: second.terminals == [("bot.activated", "second:1")])
+        started = await _run(bots={"first": doubles.QuietBot(), "second": second})
+        await doubles.wait_until(lambda: second.terminals == [("bot.activated", "second:1")])
         await started.stop()
         return await started.exit()
 
@@ -343,9 +257,8 @@ def test_stop_that_interrupts_a_supervisor_start_still_stops_its_bot(
 
 
 def test_supervisor_start_failure_with_none_started_exits_78_without_waiting_for_the_grace(
-    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _assemble(monkeypatch, factories.quiet)
     original = mosfet.started
 
     async def started(
@@ -358,40 +271,33 @@ def test_supervisor_start_failure_with_none_started_exits_78_without_waiting_for
     monkeypatch.setattr(mosfet, "started", started)
 
     async def run() -> runtime.ExitedData:
-        return await (await _run(tmp_path)).exit()
+        return await (await _run(bots={"quiet": doubles.QuietBot()})).exit()
 
     assert asyncio.run(run()) == runtime.ExitedData(code=78, reason="boot_failed")
 
 
-def test_actor_start_failure_exits_78_without_waiting_for_the_grace(
-    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_actor_start_failure_exits_78_without_waiting_for_the_grace() -> None:
     journal: list[str] = []
-    _assemble(
-        monkeypatch,
-        lambda config: runtime.Assembly(
-            bots={"only": factories.QuietBot()},
-            actors=(factories.RecordingActor("a", journal), factories.FailingActor("b", journal)),
-        ),
-    )
 
     async def run() -> runtime.ExitedData:
-        return await (await _run(tmp_path)).exit()
+        return await (
+            await _run(
+                bots={"only": doubles.QuietBot()},
+                actors=(doubles.RecordingActor("a", journal), doubles.FailingActor("b", journal)),
+            )
+        ).exit()
 
     assert asyncio.run(run()) == runtime.ExitedData(code=78, reason="boot_failed")
     assert journal == ["start:a", "stop:b", "stop:a"]
 
 
-def test_a_bot_that_never_answers_is_force_released_and_the_process_still_exits_0(
-    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    bot = factories.MuteBot()
-    _assemble(monkeypatch, lambda config: runtime.Assembly(bots={"mute": bot}))
+def test_a_bot_that_never_answers_is_force_released_and_the_process_still_exits_0() -> None:
+    bot = doubles.MuteBot()
     policy = _policy(stop_grace=800 * _MS, bot_stop_timeout=200 * _MS, bot_release_timeout=200 * _MS)
 
     async def run() -> runtime.ExitedData:
-        started = await _run(tmp_path, policy=policy)
-        await factories.wait_until(lambda: bot.terminals == [("bot.activated", "mute:1")])
+        started = await _run(bots={"mute": bot}, policy=policy)
+        await doubles.wait_until(lambda: bot.terminals == [("bot.activated", "mute:1")])
         await started.stop()
         return await started.exit()
 
@@ -399,19 +305,13 @@ def test_a_bot_that_never_answers_is_force_released_and_the_process_still_exits_
     assert not lifecycle.is_started(bot)
 
 
-def test_an_actor_stop_that_hangs_forces_exit_1_at_the_single_grace(
-    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    bot = factories.QuietBot()
-    _assemble(
-        monkeypatch,
-        lambda config: runtime.Assembly(bots={"only": bot}, actors=(factories.HangingActor("stuck", []),)),
-    )
+def test_an_actor_stop_that_hangs_forces_exit_1_at_the_single_grace() -> None:
+    bot = doubles.QuietBot()
     policy = _policy(stop_grace=400 * _MS, bot_stop_timeout=100 * _MS, bot_release_timeout=100 * _MS)
 
     async def run() -> tuple[runtime.ExitedData, float]:
-        started = await _run(tmp_path, policy=policy)
-        await factories.wait_until(lambda: bot.terminals == [("bot.activated", "only:1")])
+        started = await _run(bots={"only": bot}, actors=(doubles.HangingActor("stuck", []),), policy=policy)
+        await doubles.wait_until(lambda: bot.terminals == [("bot.activated", "only:1")])
         stopping = asyncio.get_running_loop().time()
         await started.stop()
         exited = await started.exit()
@@ -427,20 +327,18 @@ def test_an_actor_stop_that_hangs_forces_exit_1_at_the_single_grace(
 def test_the_stop_grace_runs_on_the_injected_clock_and_the_runtime_reads_no_wall_clock(
     tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    bot = factories.QuietBot()
-    _assemble(
-        monkeypatch,
-        lambda config: runtime.Assembly(bots={"only": bot}, actors=(factories.HangingActor("stuck", []),)),
-    )
+    bot = doubles.QuietBot()
     grace = datetime.timedelta(seconds=30)
     policy = _policy(stop_grace=grace, bot_stop_timeout=100 * _MS, bot_release_timeout=100 * _MS)
     clock = _ManualClock()
 
     async def run() -> tuple[bool, runtime.ExitedData]:
-        started = await _run(tmp_path, policy=policy, clock=clock)
-        await factories.wait_until(lambda: bot.terminals == [("bot.activated", "only:1")])
+        started = await _run(
+            bots={"only": bot}, actors=(doubles.HangingActor("stuck", []),), policy=policy, clock=clock
+        )
+        await doubles.wait_until(lambda: bot.terminals == [("bot.activated", "only:1")])
         await started.stop()
-        await factories.wait_until(lambda: any(requested == grace for requested, _ in clock.timers))
+        await doubles.wait_until(lambda: any(requested == grace for requested, _ in clock.timers))
         # Wall time passes; only the injected clock ends the stuck stop.
         _ = await asyncio.wait([started.exited], timeout=0.2)
         exited_early = started.exited.done()
@@ -461,17 +359,14 @@ def test_the_stop_grace_runs_on_the_injected_clock_and_the_runtime_reads_no_wall
     assert after == before
 
 
-def test_an_actor_stop_that_ignores_cancellation_still_forces_exit_1_at_the_single_grace(
-    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    bot = factories.QuietBot()
-    actor = factories.StubbornActor("stubborn", [])
-    _assemble(monkeypatch, lambda config: runtime.Assembly(bots={"only": bot}, actors=(actor,)))
+def test_an_actor_stop_that_ignores_cancellation_still_forces_exit_1_at_the_single_grace() -> None:
+    bot = doubles.QuietBot()
+    actor = doubles.StubbornActor("stubborn", [])
     policy = _policy(stop_grace=400 * _MS, bot_stop_timeout=100 * _MS, bot_release_timeout=100 * _MS)
 
     async def run() -> tuple[runtime.ExitedData, float]:
-        started = await _run(tmp_path, policy=policy)
-        await factories.wait_until(lambda: bot.terminals == [("bot.activated", "only:1")])
+        started = await _run(bots={"only": bot}, actors=(actor,), policy=policy)
+        await doubles.wait_until(lambda: bot.terminals == [("bot.activated", "only:1")])
         stopping = asyncio.get_running_loop().time()
         await started.stop()
         try:
@@ -487,16 +382,15 @@ def test_an_actor_stop_that_ignores_cancellation_still_forces_exit_1_at_the_sing
     assert 0.35 <= elapsed < 0.75
 
 
-def test_a_stop_request_while_stopping_is_consumed(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    bot = factories.MuteBot()
-    _assemble(monkeypatch, lambda config: runtime.Assembly(bots={"mute": bot}))
+def test_a_stop_request_while_stopping_is_consumed() -> None:
+    bot = doubles.MuteBot()
     policy = _policy(
         stop_grace=datetime.timedelta(seconds=2), bot_stop_timeout=300 * _MS, bot_release_timeout=100 * _MS
     )
 
     async def run() -> runtime.ExitedData:
-        started = await _run(tmp_path, policy=policy)
-        await factories.wait_until(lambda: bot.terminals == [("bot.activated", "mute:1")])
+        started = await _run(bots={"mute": bot}, policy=policy)
+        await doubles.wait_until(lambda: bot.terminals == [("bot.activated", "mute:1")])
         await started.stop()
         await started.stop()
         return await started.exit()
@@ -504,16 +398,15 @@ def test_a_stop_request_while_stopping_is_consumed(tmp_path: pathlib.Path, monke
     assert asyncio.run(run()) == runtime.ExitedData(code=0, reason="stopped")
 
 
-def test_a_second_signal_while_stopping_forces_exit_1(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    bot = factories.MuteBot()
-    _assemble(monkeypatch, lambda config: runtime.Assembly(bots={"mute": bot}))
+def test_a_second_signal_while_stopping_forces_exit_1() -> None:
+    bot = doubles.MuteBot()
     policy = _policy(
         stop_grace=datetime.timedelta(seconds=2), bot_stop_timeout=500 * _MS, bot_release_timeout=100 * _MS
     )
 
     async def run() -> runtime.ExitedData:
-        started = await _run(tmp_path, policy=policy)
-        await factories.wait_until(lambda: bot.terminals == [("bot.activated", "mute:1")])
+        started = await _run(bots={"mute": bot}, policy=policy)
+        await doubles.wait_until(lambda: bot.terminals == [("bot.activated", "mute:1")])
         await started.stop("signal")
         await started.stop("signal")
         return await started.exit()
@@ -521,16 +414,8 @@ def test_a_second_signal_while_stopping_forces_exit_1(tmp_path: pathlib.Path, mo
     assert asyncio.run(run()) == runtime.ExitedData(code=1, reason="forced")
 
 
-def test_exhaustion_stops_the_other_bots_and_exits_70_even_after_a_first_signal(
-    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    mute = factories.MuteBot()
-    _assemble(
-        monkeypatch,
-        lambda config: runtime.Assembly(
-            bots={"failing": factories.QuietBot((factories.FailingDevice(),)), "mute": mute}
-        ),
-    )
+def test_exhaustion_stops_the_other_bots_and_exits_70_even_after_a_first_signal(tmp_path: pathlib.Path) -> None:
+    mute = doubles.MuteBot()
     policy = _policy(
         stop_grace=datetime.timedelta(seconds=2),
         bot_stop_timeout=300 * _MS,
@@ -540,10 +425,14 @@ def test_exhaustion_stops_the_other_bots_and_exits_70_even_after_a_first_signal(
     ready = tmp_path / "ready"
 
     async def run() -> runtime.ExitedData:
-        started = await _run(tmp_path, policy=policy, ready_file=ready)
+        started = await _run(
+            bots={"failing": doubles.QuietBot((doubles.FailingDevice(),)), "mute": mute},
+            policy=policy,
+            ready_file=ready,
+        )
         # The signal must arrive after the exhaustion has begun the stop; the mute bot holds that stop open
         # for bot_stop_timeout, so the first signal lands inside it.
-        await factories.wait_until(lambda: started.process.state().startswith("/Runtime/stopping"))
+        await doubles.wait_until(lambda: started.process.state().startswith("/Runtime/stopping"))
         await started.stop("signal")
         return await started.exit()
 
@@ -554,14 +443,13 @@ def test_exhaustion_stops_the_other_bots_and_exits_70_even_after_a_first_signal(
     assert not ready.exists()
 
 
-def test_ready_file_exists_only_while_ready(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    _assemble(monkeypatch, factories.quiet)
+def test_ready_file_exists_only_while_ready(tmp_path: pathlib.Path) -> None:
     ready = tmp_path / "ready"
 
     async def run() -> tuple[bool, bool]:
-        started = await _run(tmp_path, ready_file=ready)
+        started = await _run(bots={"quiet": doubles.QuietBot()}, ready_file=ready)
         before = ready.exists()
-        await factories.wait_until(ready.exists)
+        await doubles.wait_until(ready.exists)
         await started.stop()
         _ = await started.exit()
         return before, ready.exists()
@@ -572,43 +460,39 @@ def test_ready_file_exists_only_while_ready(tmp_path: pathlib.Path, monkeypatch:
     assert not after
 
 
-def test_a_ready_file_left_by_an_earlier_run_is_removed_at_boot(
-    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_a_ready_file_left_by_an_earlier_run_is_removed_before_bring_up(tmp_path: pathlib.Path) -> None:
     ready = tmp_path / "ready"
     # A SIGKILL, OOM kill or host crash skips the ready state's exit, so the previous run's file remains.
     ready.touch()
-    seen_while_booting: list[bool] = []
+    seen_at_bring_up: list[bool] = []
 
-    def build(config: runtime.Config) -> runtime.Assembly:
-        seen_while_booting.append(ready.exists())
-        return factories.quiet(config)
-
-    _assemble(monkeypatch, build)
+    class LookingActor(doubles.RecordingActor):
+        @typing.override
+        def start(self, ctx: hsm.Context, data: object = None) -> collections.abc.Awaitable[typing.Self]:
+            seen_at_bring_up.append(ready.exists())
+            return super().start(ctx, data)
 
     async def run() -> runtime.ExitedData:
-        started = await _run(tmp_path, ready_file=ready, clock=_ManualClock())
-        # Boot has looked, and the file exists again: touched by this run's ready entry.
-        await factories.wait_until(lambda: bool(seen_while_booting) and ready.exists())
+        started = await _run(
+            {"quiet": doubles.QuietBot()}, (LookingActor("a", []),), ready_file=ready, clock=_ManualClock()
+        )
+        # Bring-up has looked, and the file exists again: touched by this run's ready entry.
+        await doubles.wait_until(lambda: bool(seen_at_bring_up) and ready.exists())
         await started.stop()
         return await started.exit()
 
     exited = asyncio.run(run())
 
-    assert seen_while_booting == [False]
+    assert seen_at_bring_up == [False]
     assert exited == runtime.ExitedData(code=0, reason="stopped")
     assert not ready.exists()
 
 
 def test_a_stop_request_a_supervisor_fails_to_take_still_stops_the_actors_and_exits_0(
-    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     journal: list[str] = []
-    bot = factories.QuietBot()
-    _assemble(
-        monkeypatch,
-        lambda config: runtime.Assembly(bots={"only": bot}, actors=(factories.RecordingActor("a", journal),)),
-    )
+    bot = doubles.QuietBot()
     original = runtime.Supervisor.dispatch
 
     def dispatch(
@@ -625,8 +509,8 @@ def test_a_stop_request_a_supervisor_fails_to_take_still_stops_the_actors_and_ex
     monkeypatch.setattr(runtime.Supervisor, "dispatch", dispatch)
 
     async def run() -> runtime.ExitedData:
-        started = await _run(tmp_path)
-        await factories.wait_until(lambda: bot.terminals == [("bot.activated", "only:1")])
+        started = await _run(bots={"only": bot}, actors=(doubles.RecordingActor("a", journal),))
+        await doubles.wait_until(lambda: bot.terminals == [("bot.activated", "only:1")])
         await started.stop()
         return await started.exit()
 
@@ -634,15 +518,9 @@ def test_a_stop_request_a_supervisor_fails_to_take_still_stops_the_actors_and_ex
     assert journal == ["start:a", "stop:a"]
 
 
-def test_a_supervisor_whose_stop_raises_still_lets_the_actors_stop_and_exits_0(
-    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_a_supervisor_whose_stop_raises_still_lets_the_actors_stop_and_exits_0(monkeypatch: pytest.MonkeyPatch) -> None:
     journal: list[str] = []
-    bot = factories.QuietBot()
-    _assemble(
-        monkeypatch,
-        lambda config: runtime.Assembly(bots={"only": bot}, actors=(factories.RecordingActor("a", journal),)),
-    )
+    bot = doubles.QuietBot()
 
     def stop(self: runtime.Supervisor, ctx: hsm.Context) -> collections.abc.Awaitable[None]:
         del self, ctx
@@ -655,8 +533,8 @@ def test_a_supervisor_whose_stop_raises_still_lets_the_actors_stop_and_exits_0(
     monkeypatch.setattr(runtime.Supervisor, "stop", stop)
 
     async def run() -> runtime.ExitedData:
-        started = await _run(tmp_path)
-        await factories.wait_until(lambda: bot.terminals == [("bot.activated", "only:1")])
+        started = await _run(bots={"only": bot}, actors=(doubles.RecordingActor("a", journal),))
+        await doubles.wait_until(lambda: bot.terminals == [("bot.activated", "only:1")])
         await started.stop()
         return await started.exit()
 

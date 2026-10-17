@@ -1,7 +1,8 @@
-# One image recipe for any bot factory `mosfet run` runs. The build context is the repository root, because
-# examples depend on the core package and providers by path; PROJECT names the project whose own uv.lock is
-# installed, without dev dependencies and without editable installs, so the source tree stays out of the runtime
-# image.
+# One image recipe for any bot project with a `__main__`, run as `python -m <project>`. The build context is the
+# repository root, because examples depend on the core package and providers by path; PROJECT names the project
+# whose own uv.lock is installed, without dev dependencies and without editable installs, so the source tree stays
+# out of the runtime image. The command names the project's package (default minimal_bot_example) and any flag
+# bot.process takes after it.
 #
 #   docker build --build-arg PROJECT=examples/minimal_bot -f docker/Dockerfile .
 #
@@ -11,7 +12,7 @@
 #                (sqlite_memory, llama_cpp); default 0
 #   RUNTIME_APT  Debian packages the runtime needs, for example "libgl1 libglib2.0-0" for opencv; default none
 #
-# docs/runtime.md ("Running in a container") has the layout, the fixed flags and the stop bound.
+# docs/runtime.md ("Running in a container") has the layout, the fixed MOSFET_* options and the stop bound.
 
 FROM ghcr.io/astral-sh/uv:0.9.18@sha256:5713fa8217f92b80223bc83aac7db36ec80a84437dbc0d04bbc659cae030d8c9 AS uv
 
@@ -46,14 +47,16 @@ RUN if [ -n "$RUNTIME_APT" ]; then \
     && install --directory --owner 10001 --group 10001 --mode 0700 /var/lib/mosfet /run/mosfet
 COPY --from=build /opt/mosfet/venv /opt/mosfet/venv
 ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1
+    PYTHONUNBUFFERED=1 \
+    MOSFET_READY_FILE=/run/mosfet/ready \
+    MOSFET_DATA_DIR=/var/lib/mosfet/data
 USER 10001:10001
 WORKDIR /var/lib/mosfet
 LABEL org.opencontainers.image.title="mosfet bot" \
-      org.opencontainers.image.description="A stateforward.mosfet bot factory run by mosfet run" \
+      org.opencontainers.image.description="A stateforward.mosfet bot project run with python -m" \
       org.opencontainers.image.source="https://github.com/stateforward/mosfet.py" \
       org.opencontainers.image.licenses="MIT"
 STOPSIGNAL SIGTERM
 HEALTHCHECK --interval=10s --timeout=2s --start-period=130s --retries=3 CMD ["test", "-f", "/run/mosfet/ready"]
-ENTRYPOINT ["/opt/mosfet/venv/bin/mosfet", "run", "--ready-file", "/run/mosfet/ready", "--data-dir", "/var/lib/mosfet/data"]
-CMD ["minimal_bot_example:build"]
+ENTRYPOINT ["/opt/mosfet/venv/bin/python", "-m"]
+CMD ["minimal_bot_example"]

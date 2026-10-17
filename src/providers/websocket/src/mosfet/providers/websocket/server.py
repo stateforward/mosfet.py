@@ -1,6 +1,6 @@
 """The WebSocket server remote peers connect to: a device-agnostic transport.
 
-One ``Server`` per process, a shared actor (``runtime.Assembly.actors``): it listens, accepts each
+One ``Server`` per process, a shared actor (``bot.run(actors=...)``): it listens, accepts each
 socket on ``/v1/<peer_id>`` as a ``Connection`` (which owns its own server-role yamux session), and keeps
 the route table of endpoints by peer. An endpoint (a device link) registers for one peer with
 ``attachment.attach`` carrying a ``transport.PeerAttachData`` — the peer id and the channel table its
@@ -106,7 +106,7 @@ _ReleasedEvent = hsm.Event[_AcceptedData](name="providers.websocket.server.relea
 class Server(Traced, attachment.Attachment):
     """Listens for remote peers and binds each authenticated connection to its peer's endpoint.
 
-    It belongs in ``runtime.Assembly.actors``: started before the bots, stopped after them. Stopping it
+    It belongs in ``bot.run(actors=...)``: started before the bots, stopped after them. Stopping it
     closes the listener and every open socket, and stops every connection it started.
 
     An endpoint registers one peer with ``attachment.attach`` carrying a ``transport.PeerAttachData``,

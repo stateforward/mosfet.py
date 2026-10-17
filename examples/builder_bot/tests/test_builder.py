@@ -1,8 +1,9 @@
-"""The composed builder, end to end: a person at the terminal, the bot's computer, its mind and its bench.
+"""The builder, end to end: a person at the terminal, the bot's computer, its mind and its bench.
 
-``builder_bot_example.compose`` is given a scripted processor, a loopback ``websocket.Server`` and a scripted
-sandbox host; the person sits at the real ``builder_bot_example.terminal``. The assembly is brought up the
-way ``mosfet run`` brings one up: its actors first, then the bot attaching to the process environment.
+``builder_bot_example.builder`` is given a scripted model (``testing.Scripted``), a loopback ``websocket.Server``
+and a scripted sandbox host; the person sits at the real ``builder_bot_example.terminal``. The bot runs the way
+``bot.run`` runs it, through ``testing.running``: the server first, as a shared actor, then the bot started in
+the same environment with ``bot.start``, and both stopped when the test is done.
 
 These tests pin capacities and perception: what the bot is given to perceive and what it is offered to do.
 Every choice is the scripted processor's. With a processor that chooses nothing, nothing happens.
@@ -10,6 +11,7 @@ Every choice is the scripted processor's. With a processor that chooses nothing,
 
 import asyncio
 import collections.abc
+import contextlib
 import dataclasses
 import datetime
 import functools
@@ -23,11 +25,10 @@ import hsm
 import mosfet
 import pydantic
 from builder_bot_example import terminal
-from mosfet import runtime
-from mosfet.abilities import cognition, processing, sandbox
+from mosfet.abilities import cognition, memory, processing, sandbox
 from mosfet.abilities.sandbox import host
+from mosfet.bot import testing
 from mosfet.devices import computer
-from mosfet.environment import Environment
 from mosfet.providers import websocket
 from mosfet.telemetry.hsm import Traced
 
@@ -128,63 +129,8 @@ def stimulus(call: processing.InputData) -> hsm.Event[typing.Any] | mosfet.Stimu
     return None
 
 
-def stimulus_name(call: processing.InputData) -> str | None:
-    woke = stimulus(call)
-    match woke:
-        case hsm.Event():
-            return woke.name
-        case mosfet.StimulusData():
-            return woke.event
-        case None:
-            return None
-
-
 def offered(call: processing.InputData) -> frozenset[str]:
     return frozenset(schema.name for schema in call.schemas)
-
-
-@dataclasses.dataclass(frozen=True)
-class Choice:
-    """On the first model call of a turn woken by ``stimulus`` that offers ``event``, select it with ``data``."""
-
-    stimulus: str
-    event: str
-    data: collections.abc.Mapping[str, object]
-
-
-class ScriptedProcessor(processing.Processor):
-    """The model, scripted: it keeps every call, and makes each of its ``choices`` once; otherwise it selects nothing."""
-
-    calls: list[processing.InputData]
-    _choices: tuple[Choice, ...]
-    # The positions in ``_choices`` already made.
-    _made: set[int]
-
-    def __init__(self, *choices: Choice) -> None:
-        self.calls = []
-        self._choices = choices
-        self._made = set()
-
-    @typing.override
-    async def process(
-        self, input: processing.InputData, *, drafts: processing.DraftSink | None = None
-    ) -> processing.Events:
-        del drafts
-        self.calls.append(input)
-        frame = input.input.host_input if isinstance(input.input, cognition.reasoning.ProcessorInput) else input
-        for position, choice in enumerate(self._choices):
-            if position in self._made or stimulus_name(input) != choice.stimulus or choice.event not in offered(input):
-                continue
-            self._made.add(position)
-            (target, *_) = frame.actor_events[choice.event]
-            return (processing.SelectedEvent(event=choice.event, target=target, data=choice.data),)
-        return ()
-
-    def reflected(self) -> bool:
-        return any(isinstance(call.input, cognition.reflection.SelectInput) for call in self.calls)
-
-    def woken_by(self, name: str) -> list[processing.InputData]:
-        return [call for call in self.calls if stimulus_name(call) == name]
 
 
 @dataclasses.dataclass
@@ -203,11 +149,9 @@ class Person:
 
 @dataclasses.dataclass
 class Builder:
-    """The composed builder, brought up as ``mosfet run`` does, with its scripted model and host."""
+    """The builder, running as ``bot.run`` runs it, with its scripted model and host."""
 
-    environment: Environment
-    assembly: runtime.Assembly
-    model: ScriptedProcessor
+    model: testing.Scripted
     requests: Requests
     port: int
 
@@ -234,18 +178,6 @@ class Builder:
         finally:
             await hsm.stop(person.machine)
 
-    async def stop(self) -> None:
-        """Stop as ``mosfet run`` does: each bot detaches (its bench destroys its machine), then stops; then the
-        actors stop in reverse order."""
-
-        for bot in self.assembly.bots.values():
-            _ = await bot.detach(self.environment)
-        await wait_until(lambda: bool(self.requests.named(host.DestroyEvent)))
-        for bot in self.assembly.bots.values():
-            await hsm.stop(bot)
-        for actor in reversed(self.assembly.actors):
-            await hsm.stop(actor)
-
 
 async def wait_until(condition: collections.abc.Callable[[], bool], *, timeout: float = _WAIT) -> None:
     async with asyncio.timeout(timeout):
@@ -259,40 +191,41 @@ def free_port() -> int:
         return typing.cast(tuple[str, int], probe.getsockname())[1]
 
 
-async def bring_up(tmp_path: pathlib.Path, model: ScriptedProcessor) -> Builder:
-    """Compose the builder and start it: actors in order, then the bot, whose bench then makes its machine."""
+@contextlib.asynccontextmanager
+async def bring_up(tmp_path: pathlib.Path, model: testing.Scripted) -> collections.abc.AsyncGenerator[Builder]:
+    """Run the builder for the block: the server, then the bot, whose bench then makes its machine.
+
+    When the block ends the bot is stopped with ``bot.stop`` (its bench destroys its machine), then the server.
+    """
 
     port = free_port()
     requests = Requests()
-    assembly = builder_bot_example.compose(
+    server = websocket.Server(host="127.0.0.1", port=port, verifier=TOKENS)
+    defined = builder_bot_example.builder(
         processor=model,
-        server=websocket.Server(host="127.0.0.1", port=port, verifier=TOKENS),
-        peer=PEER,
-        person_id="person-1",
+        server=server,
         host=ScriptedHost(requests),
         capacity=CAPACITY,
         spec=builder_bot_example.bench(image=builder_bot_example.DEFAULT_IMAGE, network=sandbox.Network.NONE),
-        traits=builder_bot_example.DEFAULT_TRAITS,
-        database=str(tmp_path / "memory.sqlite3"),
-        now=functools.partial(datetime.datetime.now, datetime.UTC),
+        peer=PEER,
+        person_id="person-1",
+        traits=builder_bot_example.DEFAULT_TRAITS.traits,
+        store=memory.Memory(database=str(tmp_path / "memory.sqlite3")),
+        clock=functools.partial(datetime.datetime.now, datetime.UTC),
     )
-    environment = Environment()
-    for actor in assembly.actors:
-        _ = await mosfet.started(environment, actor, typing.cast(hsm.Model, getattr(type(actor), "model")))
-    for bot in assembly.bots.values():
-        _ = await bot.attach(environment)
-    await wait_until(lambda: bool(requests.named(host.CreateEvent)))
-    # The created answer is already on its way to the bench; let it make the bench ready before anyone sits down.
-    await asyncio.sleep(0.1)
-    return Builder(environment=environment, assembly=assembly, model=model, requests=requests, port=port)
+    async with testing.running(defined, actors=(server,)):
+        await wait_until(lambda: bool(requests.named(host.CreateEvent)))
+        # The created answer is already on its way to the bench; let it make the bench ready before anyone sits.
+        await asyncio.sleep(0.1)
+        yield Builder(model=model, requests=requests, port=port)
+    assert requests.named(host.DestroyEvent), "stopping the bot destroys its bench's machine"
 
 
 def test_the_link_up_turn_offers_the_computer_and_the_bench_and_a_silent_bot_does_nothing(
     tmp_path: pathlib.Path,
 ) -> None:
-    async def run() -> tuple[list[processing.InputData], list[str], list[str], terminal.ClosedData]:
-        builder = await bring_up(tmp_path, ScriptedProcessor())
-        try:
+    async def run() -> tuple[tuple[processing.InputData, ...], list[str], list[str], terminal.ClosedData]:
+        async with bring_up(tmp_path, testing.Scripted()) as builder:
             person = await builder.sit_down()
             # The turn is over once the bot has reflected on it; anything it chose is on its way by then.
             await wait_until(lambda: builder.model.reflected())
@@ -304,8 +237,6 @@ def test_the_link_up_turn_offers_the_computer_and_the_bench_and_a_silent_bot_doe
                 [sent.name for sent in builder.requests.sent],
                 closed,
             )
-        finally:
-            await builder.stop()
 
     link_up_calls, screens, requests, closed = asyncio.run(run())
 
@@ -326,18 +257,19 @@ def test_what_the_model_chooses_reaches_the_screen_the_bench_and_the_next_turn(t
             {"kind": "field", "id": "ask", "placeholder": "What should I build?", "focused": True},
         ]
     }
-    model = ScriptedProcessor(
-        Choice(stimulus=computer.LinkUpEvent.name, event=computer.ShowEvent.name, data=shown),
-        Choice(
+    model = testing.Scripted(
+        testing.Choice(stimulus=computer.LinkUpEvent.name, event=computer.ShowEvent.name, data=shown),
+        testing.Choice(
             stimulus=computer.TextEnteredEvent.name,
             event=sandbox.RunEvent.name,
             data={"argv": ["python", "-m", "pytest", "-q"]},
         ),
     )
 
-    async def run() -> tuple[str, list[processing.InputData], list[hsm.Event[typing.Any]], list[processing.InputData]]:
-        builder = await bring_up(tmp_path, model)
-        try:
+    async def run() -> tuple[
+        str, tuple[processing.InputData, ...], list[hsm.Event[typing.Any]], tuple[processing.InputData, ...]
+    ]:
+        async with bring_up(tmp_path, model) as builder:
             person = await builder.sit_down()
             await wait_until(lambda: "ask: (What should I build?) [focused]" in "".join(person.screens()))
             screen = person.screens()[-1]
@@ -350,8 +282,6 @@ def test_what_the_model_chooses_reaches_the_screen_the_bench_and_the_next_turn(t
                 builder.requests.named(host.RunEvent),
                 model.woken_by(sandbox.RanEvent.name),
             )
-        finally:
-            await builder.stop()
 
     screen, entered_calls, runs, ran_calls = asyncio.run(run())
 

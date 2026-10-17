@@ -522,7 +522,8 @@ def test_a_start_error_is_a_bot_error_rendered_after_hsms_file_and_line(here: pa
     assert str(error).endswith("error: could not start bot `greeter`: 1 error")
 
 
-_START_EXPLANATIONS = [explanation for explanation in diagnostics.EXPLANATIONS if explanation.code.startswith("B01")]
+_START_CODES = ("B0101", "B0102", "B0103")
+_START_EXPLANATIONS = [explanation for explanation in diagnostics.EXPLANATIONS if explanation.code in _START_CODES]
 
 
 @pytest.mark.parametrize(
@@ -544,7 +545,7 @@ def test_each_start_explanation_shows_its_mistake_and_the_fix(
         asyncio.run(support.execute(explanation.right))
 
 
-@pytest.mark.parametrize("code", ["B0101", "B0102", "B0103"])
+@pytest.mark.parametrize("code", _START_CODES)
 def test_every_start_code_has_an_explanation(code: str) -> None:
     assert bot.explain(code).startswith(f"error[{code}]: ")
 

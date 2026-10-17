@@ -8,12 +8,8 @@ import typing
 
 import hsm
 import pydantic
-from pydantic.json_schema import SkipJsonSchema
 
-from . import errors
-
-# BootedData has a field named ``assembly``, which would shadow the module inside its class body.
-from .assembly import Assembly, BotName
+from .policy import BotName
 
 
 class StopData(pydantic.BaseModel):
@@ -47,43 +43,6 @@ class StopData(pydantic.BaseModel):
         if (self.reason == "signal") != (self.signal is not None):
             raise ValueError("signal is set exactly when reason is signal")
         return self
-
-
-class BootedData(pydantic.BaseModel):
-    """The factory built a valid assembly."""
-
-    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
-        frozen=True,
-        extra="forbid",
-        arbitrary_types_allowed=True,
-    )
-
-    assembly: SkipJsonSchema[pydantic.InstanceOf[Assembly]] = pydantic.Field(
-        exclude=True,
-        repr=False,
-        description="Runtime-only: the bots and shared actors the factory built.",
-    )
-
-
-class BootFailedData(pydantic.BaseModel):
-    """The process could not build what it was asked to run."""
-
-    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
-        frozen=True,
-        extra="forbid",
-        json_schema_extra={
-            "examples": [{"kind": "missing_secret", "message": "secret 'livekit_api_key' is not provided"}]
-        },
-    )
-
-    kind: errors.BootFailureKind = pydantic.Field(
-        description="Why boot failed: import, missing factory, factory raised, invalid assembly, or missing secret.",
-        examples=["missing_secret"],
-    )
-    message: str = pydantic.Field(
-        description="Explanation for an operator. Never contains a secret value the runtime resolved.",
-        examples=["secret 'livekit_api_key' is not provided"],
-    )
 
 
 class ActorsData(pydantic.BaseModel):
@@ -173,7 +132,8 @@ class ExitedData(pydantic.BaseModel):
     reason: _ExitReason = pydantic.Field(
         description=(
             "stopped: graceful stop in the grace; forced: grace expired or a second signal; "
-            + "exhausted: a bot spent its restart budget; boot_failed: the process could not be built or brought up."
+            + "exhausted: a bot spent its restart budget; boot_failed: its actors or supervisors could not be "
+            + "brought up."
         ),
         examples=["stopped"],
     )
@@ -192,8 +152,6 @@ class ExitedData(pydantic.BaseModel):
 
 
 StopEvent = hsm.Event[StopData](name="runtime.stop", schema=StopData)
-BootedEvent = hsm.Event[BootedData](name="runtime.booted", kind=hsm.CompletionEventKind, schema=BootedData)
-BootFailedEvent = hsm.Event[BootFailedData](name="runtime.boot.failed", kind=hsm.ErrorEventKind, schema=BootFailedData)
 ActorsStartedEvent = hsm.Event[ActorsData](
     name="runtime.actors.started", kind=hsm.CompletionEventKind, schema=ActorsData
 )
@@ -222,10 +180,6 @@ __all__ = [
     "ActorsFailedEvent",
     "ActorsStartedEvent",
     "ActorsStoppedEvent",
-    "BootFailedData",
-    "BootFailedEvent",
-    "BootedData",
-    "BootedEvent",
     "ExitedData",
     "StopData",
     "StopEvent",

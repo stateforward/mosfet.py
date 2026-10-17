@@ -113,10 +113,7 @@ async def _start(ctx: Environment, model: elements.Model, data: object, location
         with span.operation("bot.model.start", scope=_SCOPE, component="mosfet.Bot", stage="start") as active:
             if not isinstance(typing.cast(object, ctx), Environment):
                 raise _outside(name, ctx, location)
-            running = [(part, member) for part, member in _parts(model) if lifecycle.is_started(part)]
-            if running:
-                raise _again(name, running, location)
-            instance = _body(model, name, location)
+            instance = construct(model, location)
             _ = await mosfet.started(ctx, instance, instance.model, hsm.Config(data=data))
             try:
                 ctx.join(instance)
@@ -153,6 +150,24 @@ async def _start(ctx: Environment, model: elements.Model, data: object, location
         ",".join(_cognition(model).faculties()),
     )
     return instance
+
+
+def construct(model: elements.Model, location: diagnostics.Location) -> body.Bot:
+    """The body ``model`` defines, built around the very parts it holds and not yet started.
+
+    ``location`` is the bot file's own call that asked for it, ``bot.start``'s or ``bot.run``'s, which
+    its diagnostics point at. ``bot.run`` builds every bot this way before its process starts.
+
+    Raises:
+        StartError: B0101 if a part of ``model`` is already running, B0102 if building a part raised
+            (chained to the cause).
+    """
+
+    name = model.qualified_name[1:]
+    running = [(part, member) for part, member in _parts(model) if lifecycle.is_started(part)]
+    if running:
+        raise _again(name, running, location)
+    return _body(model, name, location)
 
 
 def _activate(reply_to: hsm.Instance) -> hsm.Event[typing.Any]:
@@ -369,4 +384,4 @@ def _raised(
     )
 
 
-__all__ = ["StartError", "start", "stop"]
+__all__ = ["StartError", "construct", "start", "stop"]

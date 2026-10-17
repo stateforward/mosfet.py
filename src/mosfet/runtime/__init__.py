@@ -1,27 +1,24 @@
-"""The ``mosfet run`` process runtime: build a bot assembly, supervise its bots, stop gracefully.
+"""The process machinery under ``bot.run``: supervise one process's bots, and stop them gracefully.
 
     from mosfet import runtime
 
-    runtime.Assembly(bots={"builder": bot}, actors=(embedding_model,))
-    runtime.Runtime(target=..., config=..., policy=..., environment=..., ready_file=None, on_exit=...)
+    runtime.Runtime(bots=..., actors=..., policy=..., environment=..., ready_file=None, on_exit=...)
+    runtime.Supervisor
+    runtime.Policy
+    runtime.Secrets
     runtime.StopEvent
 
-A factory ``build(config: runtime.Config) -> runtime.Assembly`` is the unit a process runs. See
-``docs/runtime.md`` for the lifecycle, the stop bound, and the exit codes.
+A bot file runs its bots with ``bot.run`` (``mosfet.bot``), which builds them from their models and drives
+these machines. See ``docs/runtime.md`` for the lifecycle, the stop bound, and the exit codes.
 """
 
-from .assembly import MAX_BOTS, Assembly, BotName
-from .config import Config, Secrets
-from .errors import BootError, BootFailureKind, Error, MissingSecretError, UsageError
+from .config import Secrets
+from .errors import BootFailureKind, Error, MissingSecretError, UsageError
 from .events import (
     ActorsData,
     ActorsFailedEvent,
     ActorsStartedEvent,
     ActorsStoppedEvent,
-    BootedData,
-    BootedEvent,
-    BootFailedData,
-    BootFailedEvent,
     ExitedData,
     StopData,
     StopEvent,
@@ -35,10 +32,9 @@ from .events import (
     SupervisorsFailedEvent,
     SupervisorsStartedEvent,
 )
-from .policy import MAX_RESTARTS, Policy
+from .policy import MAX_BOTS, MAX_RESTARTS, BotName, Policy
 from .runtime import Runtime
 from .supervisor import Supervisor
-from .target import Target
 
 __all__ = [
     "MAX_BOTS",
@@ -47,15 +43,8 @@ __all__ = [
     "ActorsFailedEvent",
     "ActorsStartedEvent",
     "ActorsStoppedEvent",
-    "Assembly",
-    "BootError",
-    "BootFailedData",
-    "BootFailedEvent",
     "BootFailureKind",
-    "BootedData",
-    "BootedEvent",
     "BotName",
-    "Config",
     "Error",
     "ExitedData",
     "MissingSecretError",
@@ -74,6 +63,5 @@ __all__ = [
     "SupervisorStoppedEvent",
     "SupervisorsFailedEvent",
     "SupervisorsStartedEvent",
-    "Target",
     "UsageError",
 ]
