@@ -45,8 +45,8 @@ class Assistant(mosfet.Bot):
         ...
 ```
 
-`Bot` is abstract: a concrete bot declares the abilities it composes and the devices it
-attaches. See [`examples/`](examples/README.md) for complete programs, including a phone bot
+`Bot` is concrete: it is constructed with the devices it attaches, its cognition, and the
+abilities it composes, so a subclass is optional. See [`examples/`](examples/README.md) for complete programs, including a phone bot
 that answers a real call over LiveKit.
 
 ## Pieces

@@ -1515,8 +1515,13 @@ def test_bot_snapshot_declares_owned_devices() -> None:
     asyncio.run(run())
 
 
-def test_bot_is_abstract_with_no_hard_coded_innate_abilities() -> None:
-    assert inspect.isabstract(Bot)
+def test_bot_is_concrete_with_no_hard_coded_innate_abilities() -> None:
+    """DSL-1: the body constructs as it is; a bot is defined by what it is given, not by a subclass."""
+
+    instance = Bot({}, cognition=as_cognition(IgnoreAbility()))
+
+    assert not inspect.isabstract(Bot)
+    assert type(instance) is Bot
 
 
 def test_concrete_agent_can_declare_and_instantiate_innate_ability() -> None:

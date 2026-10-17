@@ -3,7 +3,6 @@ from mosfet.abilities import memory
 from mosfet.abilities import processing
 from mosfet.abilities.communication.conversation import conversation
 
-import abc
 import asyncio
 import collections.abc
 import dataclasses
@@ -308,7 +307,7 @@ def _private_scope(parent: hsm.Context) -> hsm.Context:
     return hsm.Context(parent=parent, values=scope.mark_private(values))
 
 
-class Bot(Traced, abc.ABC):
+class Bot(Traced):
     """Interrupt-driven bot that observes and processes events while active."""
 
     _innate_abilities: typing.ClassVar[tuple[type[abilities.Ability[typing.Any, typing.Any]], ...]] = ()
@@ -353,7 +352,6 @@ class Bot(Traced, abc.ABC):
     _lifecycle_step: int
     _lifecycle_step_id: str
 
-    @abc.abstractmethod
     def __init__(
         self,
         devices: collections.abc.Mapping[str, Device],
