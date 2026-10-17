@@ -155,6 +155,64 @@ configuration that fails, is a configuration failure, `78`.
   process exit therefore takes at most `--stop-grace` plus 1.5 s, 9.5 s by default, which is under
   Docker's 10 s SIGKILL. Raising `--stop-grace` needs a matching `docker run --stop-timeout`.
 
+## Running in a container
+
+`docker/Dockerfile` is one image recipe for any factory. The build context is the repository root, and the
+`PROJECT` build argument names the project to install from its own `uv.lock`:
+
+```bash
+docker build --build-arg PROJECT=examples/minimal_bot -f docker/Dockerfile -t minimal-bot .
+```
+
+| Build argument | Default | Meaning |
+|---|---|---|
+| `PROJECT` | `examples/minimal_bot` | The project installed with `uv sync --locked --no-dev --no-editable` |
+| `NATIVE` | `0` | `1` adds a C toolchain and cmake to the build stage, for providers that compile native code (`sqlite_memory`, `llama_cpp`) |
+| `RUNTIME_APT` | empty | Debian packages the runtime needs, for example `libgl1 libglib2.0-0` for `opencv` |
+
+The build stage installs the project into `/opt/mosfet/venv` with a pinned `uv`; path dependencies are
+installed as regular packages, so the runtime image holds the virtual environment and no source tree. The
+runtime image is laid out for a read-only root:
+
+* It runs as the fixed non-root user `mosfet`, uid and gid `10001`.
+* The working directory `/var/lib/mosfet` (owned by `10001`, mode `0700`) is the data volume. The data dir
+  is `/var/lib/mosfet/data`, and the JSONL telemetry files are written next to it in the working directory,
+  where they grow until something rotates them.
+* `/run/mosfet` holds the ready file. Mount a tmpfs there (`--tmpfs
+  /run/mosfet:uid=10001,gid=10001,mode=0700`) so the file is gone on every restart. Without one, `booting`
+  still removes a ready file that a killed run left behind.
+* `PYTHONDONTWRITEBYTECODE=1` and `PYTHONUNBUFFERED=1`; the bytecode is compiled at build time.
+
+The entrypoint fixes the flags the layout depends on, in exec form, so `mosfet` is the process Docker
+signals:
+
+```
+mosfet run --ready-file /run/mosfet/ready --data-dir /var/lib/mosfet/data
+```
+
+The command supplies the target and any other flag; the default command is `minimal_bot_example:build`.
+`HEALTHCHECK` runs `test -f /run/mosfet/ready` every 10 s with a 130 s start period, the default
+`--start-timeout` plus margin. A container therefore turns healthy only once its Runtime is `running/ready`,
+and unhealthy after three failed checks once it leaves.
+
+Run it with `--init` (compose `init: true`) so Docker's bundled init is PID 1 and reaps any orphaned
+grandchild a provider leaves; `mosfet` still receives the forwarded SIGTERM. `docker stop` sends SIGTERM,
+and the process exits within `--stop-grace` plus 1.5 s, 9.5 s by default, inside Docker's default 10 s
+(compose `stop_grace_period: 10s`). Raise `--stop-grace` only together with `docker run --stop-timeout` or
+`stop_grace_period`.
+
+```bash
+docker run --init --read-only --tmpfs /run/mosfet:uid=10001,gid=10001,mode=0700 --tmpfs /tmp \
+  -v minimal-data:/var/lib/mosfet --env OPENAI_BASE_URL=... --env OPENAI_MODEL=... \
+  -v "$PWD/openai_api_key:/run/secrets/openai_api_key:ro" minimal-bot
+```
+
+Secrets come from `/run/secrets`, which `Config.secrets` reads first; the image holds none. A bind-mounted
+secret keeps its host owner and mode, so the host file must be readable by uid `10001`. `mlx-audio`
+and `mlx-vlm` are macOS-only, so a containerized factory must choose providers that are not mlx-based.
+`scripts/docker_smoke.sh` builds the minimal_bot image and checks this contract: health, uid, the read-only
+root, the data dir mode, the stop bound, exit codes `78` and `64`, and the stale ready file.
+
 ## Bot supervision (`runtime.Supervisor`)
 
 ```

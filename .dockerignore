@@ -1,0 +1,18 @@
+# The build context for docker/Dockerfile is the repository root. Only what a project install needs goes in:
+# no history, environments, caches, local state, telemetry dumps, secrets or tests.
+.git
+**/.venv
+**/__pycache__
+**/.mosfet
+**/otel-*.jsonl
+**/.env
+**/secrets/
+**/tests/
+**/.pytest_cache
+**/.ruff_cache
+dist/
+dist-native/
+web/
+benchmarks/
+.claude/
+.github/

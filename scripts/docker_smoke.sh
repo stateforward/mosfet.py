@@ -1,0 +1,145 @@
+#!/usr/bin/env bash
+# Build the generic image (docker/Dockerfile) for examples/minimal_bot and check what it promises a container:
+# it becomes healthy only while the bot is ready, runs as uid 10001 on a read-only root with a 0700 data dir,
+# stops with exit 0 inside Docker's 10 s SIGKILL, exits 78 without its secret and 64 on a bad flag, and a ready
+# file a SIGKILLed run left behind is gone before the next boot can be healthy.
+#
+# Usage: scripts/docker_smoke.sh
+#
+# Every docker command is argv form and takes only values this script made, so nothing untrusted is
+# interpolated. The secret is a placeholder written into a labeled volume, so the check needs no bind mount and
+# runs against any daemon. Every container and volume it makes is removed on exit; the image and the build cache
+# stay.
+set -euo pipefail
+
+if (( $# > 0 )); then
+  echo "Usage: scripts/docker_smoke.sh" >&2
+  exit 2
+fi
+
+cd "$(dirname "$0")/.."
+
+image="mosfet-smoke/minimal_bot:local"
+run_id="mosfet-smoke-$$"
+label="org.stateforward.mosfet.smoke=$run_id"
+secrets_volume="$run_id-secrets"
+# minimal_bot has no devices, so it reaches ready without calling this closed local port.
+endpoint=(--env OPENAI_BASE_URL=http://127.0.0.1:9/v1 --env OPENAI_MODEL=smoke)
+secrets_mount=(--mount "type=volume,source=$secrets_volume,target=/run/secrets,readonly")
+
+cleanup() {
+  docker ps --all --quiet --filter "label=$label" | while read -r container; do
+    docker rm --force --volumes "$container" >/dev/null
+  done
+  docker volume rm --force "$secrets_volume" >/dev/null 2>&1 || true
+}
+trap cleanup EXIT
+
+fail() {
+  echo "docker_smoke: $*" >&2
+  exit 1
+}
+
+# Print a container's state field, for example .State.Status or .State.ExitCode.
+state() {
+  docker inspect --format "{{$2}}" "$1"
+}
+
+# Wait at most $2 seconds for container $1 to become healthy; fail at once when it exits instead.
+wait_healthy() {
+  local waited=0
+  while [[ "$(state "$1" .State.Health.Status)" != "healthy" ]]; do
+    if [[ "$(state "$1" .State.Status)" == "exited" ]]; then
+      docker logs "$1" >&2 || true
+      fail "container exited $(state "$1" .State.ExitCode) before it became healthy"
+    fi
+    if (( waited >= $2 )); then
+      docker logs "$1" >&2 || true
+      fail "container was not healthy within $2 s"
+    fi
+    sleep 1
+    waited=$((waited + 1))
+  done
+}
+
+# Wait at most $2 seconds for container $1 to stop running.
+wait_exited() {
+  local waited=0
+  while [[ "$(state "$1" .State.Status)" != "exited" ]]; do
+    if (( waited >= $2 )); then
+      fail "container did not exit within $2 s"
+    fi
+    sleep 1
+    waited=$((waited + 1))
+  done
+}
+
+# Run a fixed command as root against the secrets volume, using the image's own shell.
+secrets() {
+  docker run --rm --label "$label" --user 0 --entrypoint sh \
+    --mount "type=volume,source=$secrets_volume,target=/secrets" "$image" -c "$1"
+}
+
+echo "docker_smoke: build $image" >&2
+docker build --build-arg PROJECT=examples/minimal_bot --file docker/Dockerfile --tag "$image" .
+
+docker volume create --label "$label" "$secrets_volume" >/dev/null
+secrets 'printf placeholder > /secrets/openai_api_key && chmod 0444 /secrets/openai_api_key'
+
+echo "docker_smoke: hardened run becomes healthy" >&2
+bot="$(docker run --detach --label "$label" --init --read-only \
+  --tmpfs /run/mosfet:uid=10001,gid=10001,mode=0700,size=64k --tmpfs /tmp:size=16m \
+  --mount type=volume,target=/var/lib/mosfet "${secrets_mount[@]}" "${endpoint[@]}" \
+  --cap-drop ALL --security-opt no-new-privileges:true "$image")"
+# Importing mosfet and the provider before the bot can be ready is not under test; on a loaded host it takes
+# over 20 s, so the bound matches the example's own start bound.
+wait_healthy "$bot" 60
+
+uid="$(docker exec "$bot" id -u)"
+[[ "$uid" == "10001" ]] || fail "the bot runs as uid $uid, not 10001"
+if docker exec "$bot" touch /smoke-probe 2>/dev/null; then
+  fail "the root filesystem is writable"
+fi
+mode="$(docker exec "$bot" stat -c %a /var/lib/mosfet/data)"
+[[ "$mode" == "700" ]] || fail "the data dir has mode $mode, not 700"
+
+echo "docker_smoke: docker stop exits 0 within 10 s" >&2
+started="$(date +%s)"
+docker stop "$bot" >/dev/null
+elapsed=$(($(date +%s) - started))
+(( elapsed < 10 )) || fail "docker stop took $elapsed s"
+code="$(state "$bot" .State.ExitCode)"
+[[ "$code" == "0" ]] || fail "docker stop exited $code, not 0"
+
+echo "docker_smoke: a missing secret exits 78, a bad flag 64" >&2
+code=0
+docker run --rm --label "$label" --init "${endpoint[@]}" "$image" >/dev/null 2>&1 || code=$?
+[[ "$code" == "78" ]] || fail "a run without its secret exited $code, not 78"
+code=0
+docker run --rm --label "$label" --init "$image" --no-such-flag minimal_bot_example:build >/dev/null 2>&1 || code=$?
+[[ "$code" == "64" ]] || fail "a run with a bad flag exited $code, not 64"
+
+# No tmpfs here: the ready file lives in the container's writable layer, which a restart keeps, so the boot's
+# own removal of a stale ready file is what is under test.
+echo "docker_smoke: a ready file left by a SIGKILLed run is removed at the next boot" >&2
+bot="$(docker run --detach --label "$label" --init "${secrets_mount[@]}" "${endpoint[@]}" "$image")"
+waited=0
+until docker exec "$bot" test -f /run/mosfet/ready; do
+  (( waited < 60 )) || fail "the bot did not become ready within 60 s"
+  sleep 1
+  waited=$((waited + 1))
+done
+docker kill --signal KILL "$bot" >/dev/null
+wait_exited "$bot" 30
+docker cp "$bot:/run/mosfet/ready" - >/dev/null || fail "the SIGKILLed run left no ready file to test with"
+# Without its secret the next boot fails (78) and never becomes ready, so any ready file left now is stale.
+secrets 'rm /secrets/openai_api_key'
+docker start "$bot" >/dev/null
+wait_exited "$bot" 60
+code="$(state "$bot" .State.ExitCode)"
+[[ "$code" == "78" ]] || fail "the restarted run exited $code, not 78"
+if docker cp "$bot:/run/mosfet/ready" - >/dev/null 2>&1; then
+  fail "the stale ready file survived the next boot"
+fi
+
+echo "docker_smoke: ok" >&2

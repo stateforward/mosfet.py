@@ -100,6 +100,8 @@ OPENAI_BASE_URL=https://api.openai.com/v1 OPENAI_MODEL=gpt-5.4-mini OPENAI_API_K
 ```
 
 [`docs/runtime.md`](docs/runtime.md) has every flag, the stop bound and the restart policy.
+[Running in a container](docs/runtime.md#running-in-a-container) covers the one image recipe,
+`docker/Dockerfile`, that runs any factory with `mosfet run`.
 
 ## Package name, event names
 
