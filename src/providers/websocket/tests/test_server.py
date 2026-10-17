@@ -13,6 +13,7 @@ import mosfet.lifecycle
 import pydantic
 import pytest
 import websockets.asyncio.client
+import websockets.asyncio.server
 import websockets.exceptions
 
 from mosfet.devices import computer, hid
@@ -22,7 +23,7 @@ from mosfet.providers import websocket
 from mosfet.start import started
 from tests import metric_reader
 from tests.devices.computer.remote import DISPLAY_CODEC, Controller, Holder, json_message, settle, start, wait_until
-from tests.websocket_fakes import Browser, FakeServe, stream_open
+from tests.websocket_fakes import Browser, FakeListener, FakeServe, stream_open
 
 PEER_ID = "studio-laptop"
 PATH = f"/v1/{PEER_ID}"
@@ -126,6 +127,26 @@ def test_model_starts_listens_or_fails() -> None:
 def test_construction_rejects_invalid_settings(build: typing.Callable[[], object], match: str) -> None:
     with pytest.raises(ValueError, match=match):
         _ = build()
+
+
+def test_a_server_given_only_its_verifier_listens_on_loopback_port_8765(monkeypatch: pytest.MonkeyPatch) -> None:
+    listened: list[tuple[object, object]] = []
+
+    async def serve(_accept: object, host: object, port: object, **_options: object) -> websocket.Listener:
+        listened.append((host, port))
+        return FakeListener()
+
+    monkeypatch.setattr(websockets.asyncio.server, "serve", serve)
+
+    async def run() -> None:
+        server = websocket.Server(verifier=TOKENS)
+        await start(Environment(), server, "server")
+        await wait_until(lambda: server.state() == LISTENING)
+        await hsm.stop(server)
+
+    asyncio.run(run())
+
+    assert listened == [("127.0.0.1", 8765)]
 
 
 def test_a_registered_peers_connection_is_bound_to_its_endpoint() -> None:

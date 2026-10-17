@@ -25,9 +25,12 @@ from mosfet.devices import computer
 from mosfet.providers import websocket
 
 tokens = websocket.HmacTokens(pydantic.SecretStr(secret))
-server = websocket.Server(host="0.0.0.0", port=8765, verifier=tokens)  # Assembly.actors
+server = websocket.Server(verifier=tokens)  # Assembly.actors
 laptop = computer.Computer(id="studio-laptop", transport=server)
 ```
+
+The server listens on loopback, `127.0.0.1:8765`, unless given `host=` and `port=`; `host="0.0.0.0"` lets
+other machines reach it. `verifier` is always required, because it holds the peers' credential.
 
 An endpoint (the computer's link) registers its peer with `attachment.attach` carrying a
 `transport.PeerAttachData` — the peer id and its channel table — and is answered `attach.complete`, or

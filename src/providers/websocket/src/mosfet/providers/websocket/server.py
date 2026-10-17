@@ -43,6 +43,8 @@ _PATH = re.compile(r"^/v1/(?P<peer_id>[^/]+)$")
 _PEER_ID: pydantic.TypeAdapter[str] = pydantic.TypeAdapter(transport.PeerId)
 _UNKNOWN_PEER = 4404
 
+_DEFAULT_HOST = "127.0.0.1"
+_DEFAULT_PORT = 8765
 _DEFAULT_START_TIMEOUT = datetime.timedelta(seconds=10)
 _DEFAULT_AUTH_TIMEOUT = datetime.timedelta(seconds=5)
 _DEFAULT_MAX_MESSAGE_BYTES = MAX_IMAGE_BYTES + 64 * 1024
@@ -135,8 +137,8 @@ class Server(Traced, attachment.Attachment):
     def __init__(
         self,
         *,
-        host: str,
-        port: int,
+        host: str = _DEFAULT_HOST,
+        port: int = _DEFAULT_PORT,
         verifier: TokenVerifier,
         ssl: ssl.SSLContext | None = None,
         start_timeout: datetime.timedelta = _DEFAULT_START_TIMEOUT,
@@ -147,6 +149,8 @@ class Server(Traced, attachment.Attachment):
     ) -> None:
         """Build an unstarted server for ``host``:``port`` (``ssl`` for ``wss``).
 
+        It listens on loopback, ``127.0.0.1:8765``, unless told otherwise; ``host="0.0.0.0"`` lets other
+        machines reach it. ``verifier`` has no default: it holds the peers' credential.
         ``auth_timeout`` bounds a connection's token, its routing, and its closing handshake.
         ``max_message_bytes`` bounds one WebSocket message and one yamux data frame. ``max_channels``
         bounds the streams one connection opens. ``serve`` starts the listener (default: ``websockets``
