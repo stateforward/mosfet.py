@@ -457,6 +457,71 @@ EXPLANATIONS: tuple[Explanation, ...] = (
         right='model = bot.define("greeter", bot.cognition(processor), bot.allow("no_devices"))',
     ),
     Explanation(
+        code="B0101",
+        level="error",
+        title="a model is started again while its parts run",
+        meaning=(
+            "`bot.start` builds one bot around the very parts a model holds. Starting a model again, or another "
+            "model that shares one of its parts, while any of those parts runs is an error; the labels name the "
+            "parts that are running."
+        ),
+        why=(
+            "A part is one real thing: a phone is held by one body, and a memory remembers for one mind. Two bots "
+            "cannot hold it at once, so each bot is defined from parts of its own, and a model starts once."
+        ),
+        wrong=(
+            'model = bot.define("greeter", bot.cognition(processor), bot.attach(phone.Phone()))\n'
+            "greeter = await bot.start(environment, model)\n"
+            "again = await bot.start(environment, model)"
+        ),
+        right=(
+            'greeter = await bot.start(environment, bot.define("greeter", bot.cognition(processor), '
+            "bot.attach(phone.Phone())))\n"
+            'helper = await bot.start(environment, bot.define("helper", bot.cognition(processor), '
+            "bot.attach(phone.Phone())))"
+        ),
+    ),
+    Explanation(
+        code="B0102",
+        level="error",
+        title="a part raised while `bot.start` built the bot",
+        meaning=(
+            "`bot.start` builds the bot's cognition, its faculties and its persona from `bot.cognition` and "
+            "`bot.traits`, then its body around every part. One of them raised: the diagnostic points at the "
+            "element that declared it, and its note is the cause, as `<Type>: <message>`."
+        ),
+        why=(
+            "A mistake is reported where it was written. A part that only fails once it is built is reported at "
+            "the element that declared it, with its cause, so it is fixed there."
+        ),
+        wrong=(
+            'model = bot.define("greeter", bot.cognition(processor), bot.attach(phone.Phone()))\n'
+            "greeter = await bot.start(environment, model)  # building its cognition raised"
+        ),
+        right=(
+            'model = bot.define("greeter", bot.cognition(processor), bot.attach(phone.Phone()))\n'
+            "greeter = await bot.start(environment, model)  # once what the cause names is fixed"
+        ),
+    ),
+    Explanation(
+        code="B0103",
+        level="error",
+        title="`bot.start` is given something that is not an `Environment`",
+        meaning="`bot.start(ctx, model)` starts the bot in `ctx`, an `Environment`: the world it perceives and acts in.",
+        why=(
+            "An environment is where a bot's stimuli come from and the scope its parts are addressed in; a plain "
+            "`hsm.Context` is neither."
+        ),
+        wrong=(
+            'model = bot.define("greeter", bot.cognition(processor), bot.attach(phone.Phone()))\n'
+            "greeter = await bot.start(hsm.Context(), model)"
+        ),
+        right=(
+            'model = bot.define("greeter", bot.cognition(processor), bot.attach(phone.Phone()))\n'
+            "greeter = await bot.start(environment, model)"
+        ),
+    ),
+    Explanation(
         code="ability_without_tools",
         level="warning",
         title="an acquired ability offers cognition nothing to select",

@@ -1,19 +1,28 @@
-"""Shared helpers for the bot DSL tests: a processor that selects nothing, and the wrong bot files.
+"""Shared helpers for the bot DSL tests: a processor that selects nothing, the wrong bot files, and
+the runner for the explanations' examples.
 
 Each file under ``wrong/`` is a deliberately wrong bot file, kept as ``.py.txt`` so the type checker
-does not reject the mistakes on purpose. :func:`load` copies one into a directory as a ``.py`` file
-and imports it there, the way the builder's bench runs what it wrote.
+does not reject the mistakes on purpose. :func:`copy` puts one into a directory as a ``.py`` file and
+:func:`run` runs it there, the way the builder's bench runs what it wrote.
 """
 
+import ast
+import asyncio
 import collections.abc
+import datetime
 import pathlib
 import shutil
 import types
 import typing
 
+import hsm
+
+import mosfet
 from mosfet import bot
-from mosfet.abilities import processing
+from mosfet.abilities import memory, processing
 from mosfet.bot import diagnostics
+from mosfet.devices import phone
+from mosfet.environment import Environment
 
 WRONG = pathlib.Path(__file__).parent / "wrong"
 GOLDEN = pathlib.Path(__file__).parent / "golden"
@@ -88,3 +97,25 @@ def apply(source: str, suggestions: collections.abc.Iterable[diagnostics.Suggest
     for start, end, replacement in edits:
         source = source[:start] + replacement + source[end:]
     return source
+
+
+_NAMESPACE_MODULES = {"bot": bot, "phone": phone, "memory": memory, "hsm": hsm, "mosfet": mosfet, "datetime": datetime}
+
+
+async def execute(source: str) -> None:
+    """Run an explanation's example (top-level ``await`` allowed), then stop whatever it started."""
+
+    environment = Environment()
+    namespace: dict[str, object] = {**_NAMESPACE_MODULES, "processor": Silent(), "environment": environment}
+    code = typing.cast(types.CodeType, compile(source, "<explanation>", "exec", flags=ast.PyCF_ALLOW_TOP_LEVEL_AWAIT))
+    try:
+        # The examples are this repository's own code, documented in docs/bot_diagnostics.md.
+        result = typing.cast(object, eval(code, namespace))
+        if asyncio.iscoroutine(result):
+            await result
+    finally:
+        for value in namespace.values():
+            if isinstance(value, mosfet.Bot):
+                await bot.stop(value)
+            elif isinstance(value, hsm.Instance) and value.take_snapshot().ID:
+                await hsm.stop(value, environment)

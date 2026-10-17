@@ -1,0 +1,14 @@
+error[B0103]: `bot.start` starts a bot in an `Environment`, not a `Context`
+  --> greeter.py:13:25
+   |
+13 |     _ = await bot.start(hsm.Context(), model)
+   |                         ^^^^^^^^^^^^^ this is a `Context`
+   |
+   = note: a bot joins an environment: the world it perceives and acts in, and the scope its parts are addressed in
+help: start it in an `Environment` (`from mosfet.environment import Environment`)
+   |
+13 |     _ = await bot.start(Environment(), model)
+   |                         ~~~~~~~~~~~~~
+   = explain: bot.explain("B0103")
+
+error: could not start bot `greeter`: 1 error

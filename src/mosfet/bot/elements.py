@@ -104,6 +104,17 @@ class CognitionElement(Member, hsm.NamespaceElement, kind=CognitionKind):
     autonomy: bool = False
     routines: object = None
 
+    def faculties(self) -> tuple[str, ...]:
+        """The faculties this cognition has, in a fixed order: the three it always has, then each flag's."""
+
+        flags = (
+            ("associative", self.associative),
+            ("consolidation", self.consolidation),
+            ("autonomy", self.autonomy),
+            ("routines", self.routines is not None),
+        )
+        return ("intuition", "reasoning", "reflection", *(name for name, given in flags if given))
+
 
 @dataclasses.dataclass(kw_only=True)
 class TimeoutsElement(Member, kind=TimeoutsKind):

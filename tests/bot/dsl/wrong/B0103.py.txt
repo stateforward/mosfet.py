@@ -1,0 +1,13 @@
+"""B0103: a bot started in something that is not an environment (the test runs ``main``)."""
+
+import hsm
+from mosfet import bot
+from mosfet.devices import phone
+
+from tests.bot.dsl import support
+
+model = bot.define("greeter", bot.cognition(support.Silent()), bot.attach(phone.Phone()))
+
+
+async def main() -> None:
+    _ = await bot.start(hsm.Context(), model)

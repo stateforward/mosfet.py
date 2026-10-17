@@ -1,10 +1,7 @@
 """``bot.define`` and ``bot.redefine``: the walk, the validator, one pass, and the errors (DSL-3, DSL-27)."""
 
-import ast
 import asyncio
-import datetime
 import pathlib
-import types
 import typing
 import warnings
 
@@ -13,7 +10,6 @@ import pytest
 
 import mosfet
 from mosfet import bot
-from mosfet.abilities import memory
 from mosfet.bot import diagnostics, elements
 from mosfet.devices import audio, phone
 from mosfet.environment import Environment
@@ -186,43 +182,29 @@ def test_no_value_from_the_bot_file_is_rendered(here: pathlib.Path) -> None:
     assert "SENTINEL" not in "".join(diagnostic.model_dump_json() for diagnostic in error.diagnostics)
 
 
-_NAMESPACE_MODULES = {"bot": bot, "phone": phone, "memory": memory, "hsm": hsm, "mosfet": mosfet, "datetime": datetime}
-
-
-async def _execute(source: str) -> None:
-    """Run an explanation's example (top-level ``await`` allowed), then stop whatever it started."""
-
-    environment = Environment()
-    namespace: dict[str, object] = {**_NAMESPACE_MODULES, "processor": support.Silent(), "environment": environment}
-    code = typing.cast(types.CodeType, compile(source, "<explanation>", "exec", flags=ast.PyCF_ALLOW_TOP_LEVEL_AWAIT))
-    try:
-        # The examples are this repository's own code, documented in docs/bot_diagnostics.md.
-        result = typing.cast(object, eval(code, namespace))
-        if asyncio.iscoroutine(result):
-            await result
-    finally:
-        for value in namespace.values():
-            if isinstance(value, hsm.Instance) and value.take_snapshot().ID:
-                await hsm.stop(value, environment)
+_DEFINE_EXPLANATIONS = [
+    explanation for explanation in diagnostics.EXPLANATIONS if not explanation.code.startswith("B01")
+]
+"""Every explanation but ``bot.start``'s (``B01xx``), whose examples ``test_start`` runs."""
 
 
 @pytest.mark.parametrize(
-    "explanation", diagnostics.EXPLANATIONS, ids=[explanation.code for explanation in diagnostics.EXPLANATIONS]
+    "explanation", _DEFINE_EXPLANATIONS, ids=[explanation.code for explanation in _DEFINE_EXPLANATIONS]
 )
 def test_each_explanation_shows_its_mistake_and_the_fix(explanation: diagnostics.Explanation) -> None:
     if explanation.level == "error":
         with pytest.raises(bot.DefinitionError) as caught:
-            asyncio.run(_execute(explanation.wrong))
+            asyncio.run(support.execute(explanation.wrong))
         found = [diagnostic.code for diagnostic in caught.value.diagnostics]
     else:
         with pytest.warns(bot.LintWarning) as warned:
-            asyncio.run(_execute(explanation.wrong))
+            asyncio.run(support.execute(explanation.wrong))
         found = [record.message.diagnostic.code for record in warned if isinstance(record.message, bot.LintWarning)]
     assert explanation.code in found
 
     with warnings.catch_warnings():
         warnings.simplefilter("error")
-        asyncio.run(_execute(explanation.right))
+        asyncio.run(support.execute(explanation.right))
 
 
 @pytest.mark.parametrize(

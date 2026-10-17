@@ -1,0 +1,13 @@
+"""B0102: a part raised while the bot was built (the test makes reasoning raise, then runs ``main``)."""
+
+from mosfet import bot
+from mosfet.devices import phone
+from mosfet.environment import Environment
+
+from tests.bot.dsl import support
+
+model = bot.define("greeter", bot.cognition(support.Silent()), bot.attach(phone.Phone()))
+
+
+async def main(environment: Environment) -> None:
+    _ = await bot.start(environment, model)

@@ -1,0 +1,17 @@
+"""B0101: one model started twice (the test runs ``main`` in an environment)."""
+
+from mosfet import bot
+from mosfet.devices import phone
+from mosfet.environment import Environment
+
+from tests.bot.dsl import support
+
+model = bot.define("greeter", bot.cognition(support.Silent()), bot.attach(phone.Phone()))
+
+
+async def main(environment: Environment) -> None:
+    greeter = await bot.start(environment, model)
+    try:
+        _ = await bot.start(environment, model)
+    finally:
+        await bot.stop(greeter)

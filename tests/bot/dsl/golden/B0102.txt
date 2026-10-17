@@ -1,0 +1,14 @@
+error[B0102]: bot `greeter` could not be built: building its cognition raised `ValueError`
+  --> greeter.py:9:31
+   |
+ 9 | model = bot.define("…", bot.cognition(support.Silent()), bot.attach(phone.Phone()))
+   |                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `ValueError` raised building what this declares
+...
+13 |     _ = await bot.start(environment, model)
+   |               ----------------------------- started here
+   |
+   = note: ValueError: this processor cannot reason
+help: fix what the cause names in this element's arguments, then start again
+   = explain: bot.explain("B0102")
+
+error: could not start bot `greeter`: 1 error

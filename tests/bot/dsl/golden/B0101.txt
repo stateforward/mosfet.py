@@ -1,0 +1,14 @@
+error[B0101]: bot `greeter` is already started
+  --> greeter.py:15:19
+   |
+ 9 | model = bot.define("…", bot.cognition(support.Silent()), bot.attach(phone.Phone()))
+   |                                                          ------------------------- `phone` is already running
+...
+15 |         _ = await bot.start(environment, model)
+   |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ started again here
+   |
+   = note: a model holds the very parts its bot file built, and they run in one bot, once per process
+help: define a second model, with new parts, for a second bot
+   = explain: bot.explain("B0101")
+
+error: could not start bot `greeter`: 1 error

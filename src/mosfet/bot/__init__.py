@@ -10,15 +10,23 @@ definition DSL (``from mosfet import bot``), so it re-exports nothing from the b
         bot.attach(phone.Phone()),
     )
 
+:func:`start` builds the body around the model's parts and brings it to life in an environment,
+and :func:`stop` deactivates and stops it::
+
+    greeter = await bot.start(Environment(), model)
+    await bot.stop(greeter)
+
 A bot file's mistakes come back as rustc-style :class:`Diagnostic`\\ s (``mosfet.bot.diagnostics``),
 all of them in one :class:`DefinitionError`; clippy-style lints are :class:`LintWarning`\\ s that
-:func:`allow` allows per bot and :func:`check` returns; and :func:`explain` says what any code means.
+:func:`allow` allows per bot and :func:`check` returns; :func:`start`'s are :class:`StartError`\\ s; and
+:func:`explain` says what any code means.
 """
 
 from .define import DefinitionError, Error, Finalizer, RedefinableBot, Validator, define, redefine
 from .diagnostics import Diagnostic, Help, Location, Span, Suggestion, explain
 from .elements import Element, Model, allow, attach, cognition, input, output, register, timeouts, traits
 from .lints import LintWarning, check
+from .start import StartError, start, stop
 
 __all__ = [
     "DefinitionError",
@@ -32,6 +40,7 @@ __all__ = [
     "Model",
     "RedefinableBot",
     "Span",
+    "StartError",
     "Suggestion",
     "Validator",
     "allow",
@@ -44,6 +53,8 @@ __all__ = [
     "output",
     "redefine",
     "register",
+    "start",
+    "stop",
     "timeouts",
     "traits",
 ]

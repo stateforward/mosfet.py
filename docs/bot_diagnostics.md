@@ -27,6 +27,9 @@ The examples assume `from mosfet import bot`, `from mosfet.devices import phone`
 - [`B0016`](#b0016) (error): a held device has no id
 - [`B0017`](#b0017) (error): `bot.define` is given something that is not a bot element
 - [`B0018`](#b0018) (error): `bot.allow` names a lint that does not exist
+- [`B0101`](#b0101) (error): a model is started again while its parts run
+- [`B0102`](#b0102) (error): a part raised while `bot.start` built the bot
+- [`B0103`](#b0103) (error): `bot.start` is given something that is not an `Environment`
 - [`ability_without_tools`](#ability_without_tools) (warning): an acquired ability offers cognition nothing to select
 - [`empty_timeouts`](#empty_timeouts) (warning): `bot.timeouts()` sets no timeout
 - [`instruction_like_traits`](#instruction_like_traits) (warning): a trait reads as an instruction
@@ -377,6 +380,73 @@ Right:
 
 ```python
 model = bot.define("greeter", bot.cognition(processor), bot.allow("no_devices"))
+```
+
+## B0101
+
+**error:** a model is started again while its parts run
+
+`bot.start` builds one bot around the very parts a model holds. Starting a model again, or another model that shares one of its parts, while any of those parts runs is an error; the labels name the parts that are running.
+
+Why: A part is one real thing: a phone is held by one body, and a memory remembers for one mind. Two bots cannot hold it at once, so each bot is defined from parts of its own, and a model starts once.
+
+Wrong:
+
+```python
+model = bot.define("greeter", bot.cognition(processor), bot.attach(phone.Phone()))
+greeter = await bot.start(environment, model)
+again = await bot.start(environment, model)
+```
+
+Right:
+
+```python
+greeter = await bot.start(environment, bot.define("greeter", bot.cognition(processor), bot.attach(phone.Phone())))
+helper = await bot.start(environment, bot.define("helper", bot.cognition(processor), bot.attach(phone.Phone())))
+```
+
+## B0102
+
+**error:** a part raised while `bot.start` built the bot
+
+`bot.start` builds the bot's cognition, its faculties and its persona from `bot.cognition` and `bot.traits`, then its body around every part. One of them raised: the diagnostic points at the element that declared it, and its note is the cause, as `<Type>: <message>`.
+
+Why: A mistake is reported where it was written. A part that only fails once it is built is reported at the element that declared it, with its cause, so it is fixed there.
+
+Wrong:
+
+```python
+model = bot.define("greeter", bot.cognition(processor), bot.attach(phone.Phone()))
+greeter = await bot.start(environment, model)  # building its cognition raised
+```
+
+Right:
+
+```python
+model = bot.define("greeter", bot.cognition(processor), bot.attach(phone.Phone()))
+greeter = await bot.start(environment, model)  # once what the cause names is fixed
+```
+
+## B0103
+
+**error:** `bot.start` is given something that is not an `Environment`
+
+`bot.start(ctx, model)` starts the bot in `ctx`, an `Environment`: the world it perceives and acts in.
+
+Why: An environment is where a bot's stimuli come from and the scope its parts are addressed in; a plain `hsm.Context` is neither.
+
+Wrong:
+
+```python
+model = bot.define("greeter", bot.cognition(processor), bot.attach(phone.Phone()))
+greeter = await bot.start(hsm.Context(), model)
+```
+
+Right:
+
+```python
+model = bot.define("greeter", bot.cognition(processor), bot.attach(phone.Phone()))
+greeter = await bot.start(environment, model)
 ```
 
 ## ability_without_tools
