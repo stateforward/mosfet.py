@@ -1,6 +1,7 @@
 """``mosfet.bot.testing``: the scripted model, a running bot for a test, and its snapshot (DSL-10)."""
 
 import asyncio
+import datetime
 import typing
 
 import hsm
@@ -8,7 +9,7 @@ import pydantic
 import pytest
 
 import mosfet
-from mosfet import bot, lifecycle
+from mosfet import abilities, bot, lifecycle
 from mosfet.abilities import cognition, processing
 from mosfet.bot import testing
 from mosfet.devices import phone
@@ -189,6 +190,61 @@ def test_running_stops_the_actors_it_started_when_the_bot_does_not_start() -> No
         asyncio.run(twice())
 
     assert not lifecycle.is_started(shared)
+
+
+_RING_AFTER = datetime.timedelta(hours=1)
+
+
+def _an_hour(ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event[typing.Any]) -> datetime.timedelta:
+    del ctx, instance, event
+    return _RING_AFTER
+
+
+class _Alarm(abilities.Ability[pydantic.BaseModel, typing.Any]):
+    """A part that rings an hour after it is attached, by ``hsm.after``."""
+
+    submodel: typing.ClassVar[hsm.Model | None] = mosfet.define(
+        "Alarm",
+        hsm.initial(hsm.target("waiting")),
+        hsm.state("waiting", hsm.transition(hsm.after(_an_hour), hsm.target("../rang"))),
+        hsm.state("rang"),
+    )
+
+
+def test_running_runs_the_bot_and_its_parts_on_the_clock_it_is_given() -> None:
+    """W7-33: the test clock brings a part's hour at once, so the part rings inside the block."""
+
+    asked: list[datetime.timedelta] = []
+
+    async def after(duration: datetime.timedelta) -> datetime.datetime:
+        asked.append(duration)
+        if duration == _RING_AFTER:
+            return datetime.datetime.now(datetime.UTC)
+        await asyncio.sleep(duration.total_seconds())
+        return datetime.datetime.now(datetime.UTC)
+
+    clock = hsm.Clock(after=after)
+    alarm = _Alarm()
+    model = bot.define(
+        "greeter",
+        bot.cognition(testing.Scripted()),
+        bot.attach(alarm),
+        bot.allow("ability_without_tools", "no_devices"),
+    )
+
+    async def run() -> tuple[hsm.Clock | None, str]:
+        async with testing.running(model, clock=clock) as running:
+            for _ in range(100):
+                if alarm.state().endswith("/rang"):
+                    break
+                await asyncio.sleep(0)
+            return running.environment.clock(), alarm.state()
+
+    given, state = asyncio.run(run())
+
+    assert given is clock
+    assert state.endswith("/behavior/rang")
+    assert _RING_AFTER in asked
 
 
 def test_running_takes_actors_that_declare_their_model() -> None:

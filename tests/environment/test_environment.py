@@ -219,6 +219,24 @@ def test_environment_from_context_reuses_the_environment_of_a_descendant_context
     asyncio.run(run())
 
 
+def test_an_environment_keeps_the_clock_it_was_given_and_every_scope_in_it_shares_it() -> None:
+    """W7-33: the clock is the environment's own, carried to the scopes under it and to a revived one."""
+
+    clock = hsm.Clock()
+
+    async def run() -> tuple[hsm.Clock | None, ...]:
+        environment = Environment(clock=clock)
+        inside = BroadcastRecorder()
+        _ = await mosfet.started(environment, inside, inside.model)
+        derived = Environment(environment.with_value("probe", "child"))
+        environment.cancel()
+        revived = Environment.from_context(inside.context())
+        assert revived is not environment
+        return environment.clock(), derived.clock(), revived.clock(), Environment().clock()
+
+    assert asyncio.run(run()) == (clock, clock, clock, None)
+
+
 def test_environment_from_context_without_a_environment_creates_one() -> None:
     context = hsm.Context()
 

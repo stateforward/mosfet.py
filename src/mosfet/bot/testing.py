@@ -5,7 +5,8 @@
   event, and otherwise selects nothing. A test pins what the bot was *offered* and what *woke* it;
   what the bot chooses is scripted only to prove a capacity, never to stand in for its judgment.
 * :func:`running` starts a bot for the length of an ``async with`` block, with the shared actors its
-  parts need, and stops it and them when the block ends, even when it raised.
+  parts need, in an environment keeping time on the test's clock when it gives one, and stops it and
+  them when the block ends, even when it raised.
 * :func:`snapshot` is the running body's own snapshot, for assertions and observation only: a
   snapshot never drives a bot or a test's progression.
 
@@ -131,10 +132,12 @@ class Run:
 
 @contextlib.asynccontextmanager
 async def running(
-    model: elements.Model, *, actors: collections.abc.Sequence[hsm.Instance] = ()
+    model: elements.Model, *, actors: collections.abc.Sequence[hsm.Instance] = (), clock: hsm.Clock | None = None
 ) -> collections.abc.AsyncGenerator[Run]:
     """Start ``model``'s bot in a new ``Environment`` for the block, after the shared ``actors`` it needs.
 
+    The environment keeps time on ``clock`` when one is given (an ``hsm.Clock``, such as a test clock
+    that brings a wait early), so the bot, every part it starts and the actors run their timers on it.
     Each actor is started in order on its class's ``model``, then the bot with ``bot.start``. When the
     block ends, even by raising, the bot is stopped with ``bot.stop``, then the actors in reverse.
 
@@ -143,7 +146,7 @@ async def running(
         bot.StartError: If the bot does not start; the actors started are stopped first.
     """
 
-    environment = Environment()
+    environment = Environment(clock=clock)
     started: list[hsm.Instance] = []
     try:
         for actor in actors:

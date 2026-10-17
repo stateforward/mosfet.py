@@ -7,6 +7,7 @@ raise out of start.
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import typing
 
@@ -182,8 +183,18 @@ async def started(
     config: hsm.Config | None = None,
     owner: Owner | None = None,
 ) -> TInstance:
-    """Start a new instance through ``hsm.started`` and register it live."""
+    """Start a new instance through ``hsm.started`` and register it live.
 
+    The instance keeps time on the clock ``config`` names, or else on the clock of the environment
+    ``ctx`` is in (``Environment(clock=)``), read here as it starts; with neither, on hsm's own.
+    """
+
+    environment = (
+        None if ctx is None or (config is not None and config.clock is not None) else Environment.reachable(ctx)
+    )
+    clock = None if environment is None else environment.clock()
+    if clock is not None:
+        config = hsm.Config(clock=clock) if config is None else dataclasses.replace(config, clock=clock)
     with span.operation(
         "bot.started",
         scope="bot.start",

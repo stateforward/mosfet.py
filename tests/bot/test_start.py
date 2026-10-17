@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import datetime
 import importlib
 import logging
 import typing
@@ -122,6 +123,85 @@ def test_register_of_a_stopped_instance_publishes_it_without_an_address(caplog: 
         asyncio.run(run())
 
     assert [record.getMessage() for record in caplog.records] == []
+
+
+_RING_AFTER = datetime.timedelta(hours=1)
+
+
+def _an_hour(ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event[typing.Any]) -> datetime.timedelta:
+    del ctx, instance, event
+    return _RING_AFTER
+
+
+class Alarm(hsm.Instance):
+    """Rings an hour after it starts, by ``hsm.after``: only a clock that brings the hour early rings it in a test."""
+
+    model: typing.ClassVar[hsm.Model] = mosfet.define(
+        "Alarm",
+        mosfet.initial(mosfet.target("waiting")),
+        mosfet.state("waiting", mosfet.transition(mosfet.after(_an_hour), mosfet.target("../rang"))),
+        mosfet.state("rang"),
+    )
+
+
+def fast() -> tuple[hsm.Clock, list[datetime.timedelta]]:
+    """A test clock that answers every wait at once, and the waits it was asked for."""
+
+    asked: list[datetime.timedelta] = []
+
+    async def after(duration: datetime.timedelta) -> datetime.datetime:
+        asked.append(duration)
+        return datetime.datetime.now(datetime.UTC)
+
+    return hsm.Clock(after=after), asked
+
+
+async def _rung(alarm: Alarm) -> None:
+    for _ in range(100):
+        if alarm.state().endswith("/rang"):
+            return
+        await asyncio.sleep(0)
+
+
+def test_started_runs_a_machine_and_what_it_starts_on_the_clock_of_its_environment() -> None:
+    """W7-33: a machine started in an environment reads its clock when it starts, and so does one it starts."""
+
+    clock, asked = fast()
+
+    async def run() -> tuple[str, str]:
+        alarm, nested = Alarm(), Alarm()
+        _ = await mosfet.started(Environment(clock=clock), alarm, Alarm.model)
+        _ = await mosfet.started(alarm.context(), nested, Alarm.model)
+        await _rung(alarm)
+        await _rung(nested)
+        return alarm.state(), nested.state()
+
+    assert asyncio.run(run()) == ("/Alarm/rang", "/Alarm/rang")
+    assert asked == [_RING_AFTER, _RING_AFTER]
+
+
+def test_a_clock_given_at_start_wins_over_the_environments() -> None:
+    environment_clock, environment_asked = fast()
+    given, given_asked = fast()
+
+    async def run() -> str:
+        alarm = Alarm()
+        _ = await mosfet.started(Environment(clock=environment_clock), alarm, Alarm.model, hsm.Config(clock=given))
+        await _rung(alarm)
+        return alarm.state()
+
+    assert asyncio.run(run()) == "/Alarm/rang"
+    assert (environment_asked, given_asked) == ([], [_RING_AFTER])
+
+
+def test_started_in_an_environment_without_a_clock_runs_on_hsms_own() -> None:
+    async def run() -> str:
+        alarm = Alarm()
+        _ = await mosfet.started(Environment(), alarm, Alarm.model)
+        await asyncio.sleep(0.01)
+        return alarm.state()
+
+    assert asyncio.run(run()) == "/Alarm/waiting"
 
 
 def test_started_without_otlp_does_not_publish_live(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -36,6 +36,11 @@ class Environment(hsm.Context):
     The addressing map propagates as a context value, so a machine started under this environment can
     broadcast *into* it without being a recipient *of* it. The scope key is not readable from
     outside this module: Environment is a scope, not a registry.
+
+    An environment may keep time on its own ``clock`` (an ``hsm.Clock``, such as a test clock): every
+    machine started in it with ``mosfet.started`` reads that clock when it starts, unless its start
+    names one, and runs its ``hsm.after`` and ``hsm.every`` timers on it. A scope under it, and one
+    revived from it, keeps the same clock.
     """
 
     _instances: weakref.WeakValueDictionary[str, hsm.Instance]
@@ -48,8 +53,15 @@ class Environment(hsm.Context):
     # a scope revived by from_context after cancellation carries it forward by assignment there,
     # the same way it carries presence and placement forward by reference.
     _id: str
+    # The clock the machines started in this environment keep time on; None is hsm's own.
+    _clock: hsm.Clock | None
 
-    def __init__(self, context: hsm.Context | None = None) -> None:
+    def __init__(self, context: hsm.Context | None = None, *, clock: hsm.Clock | None = None) -> None:
+        """An environment over ``context``'s scope, when it has one, keeping time on ``clock``.
+
+        Without ``clock``, an environment made under another keeps that one's clock.
+        """
+
         # Reuse an inherited addressing map, or seed one from a foreign mapping.
         inherited = None if context is None else context.value(hsm.Keys.Instances)
         if isinstance(inherited, weakref.WeakValueDictionary):
@@ -64,6 +76,8 @@ class Environment(hsm.Context):
         self._participants = weakref.WeakValueDictionary()
         self._placements = weakref.WeakKeyDictionary()
         self._id = uuid.uuid4().hex
+        enclosing = None if context is None else context.value(_Scope)
+        self._clock = clock if clock is not None or not isinstance(enclosing, Environment) else enclosing._clock
         parent = None if context is None or context.is_done() else context
         super().__init__(parent=parent, values={hsm.Keys.Instances: self._instances, _Scope: self})
 
@@ -108,6 +122,11 @@ class Environment(hsm.Context):
         if isinstance(scope, cls):
             return scope
         return None
+
+    def clock(self) -> hsm.Clock | None:
+        """The clock the machines started in this environment keep time on, or ``None`` for hsm's own."""
+
+        return self._clock
 
     @property
     def environment_id(self) -> str:
