@@ -98,11 +98,11 @@ def test_a_bench_beyond_the_hosts_capacity_fails_at_construction(tmp_path: pathl
 
 
 def test_the_bench_is_the_owners_fixed_policy() -> None:
-    closed = builder_bot_example.bench(image="localhost/mosfet-bench:1", network=sandbox.Network.NONE)
-    open_ = builder_bot_example.bench(image="localhost/mosfet-bench:1", network=sandbox.Network.EGRESS)
+    closed = builder_bot_example.bench(image="localhost/mosfet-bench:2", network=sandbox.Network.NONE)
+    open_ = builder_bot_example.bench(image="localhost/mosfet-bench:2", network=sandbox.Network.EGRESS)
 
     assert closed == sandbox.Spec(
-        image="localhost/mosfet-bench:1",
+        image="localhost/mosfet-bench:2",
         resources=sandbox.Resources(),
         network=sandbox.Network.NONE,
         workspace="/workspace",
@@ -110,7 +110,8 @@ def test_the_bench_is_the_owners_fixed_policy() -> None:
     )
     assert closed.env["HOME"] == "/workspace"
     assert open_.network is sandbox.Network.EGRESS
-    assert builder_bot_example.DEFAULT_IMAGE == "localhost/mosfet-bench:1"
+    # Bench image 2 has mosfet installed, so the bot can write and test bots on it (W7-14).
+    assert builder_bot_example.DEFAULT_IMAGE == "localhost/mosfet-bench:2"
     assert builder_bot_example.DEFAULT_TRAITS == persona.Traits(traits=("careful", "curious", "candid"))
 
 
@@ -137,7 +138,7 @@ def test_every_owner_setting_has_a_working_value() -> None:
     settings = builder_bot_example.Settings.model_validate(
         {
             **_REQUIRED,
-            "BUILDER_SANDBOX_IMAGE": "localhost/mosfet-bench:2",
+            "BUILDER_SANDBOX_IMAGE": "localhost/mosfet-bench:3",
             "BUILDER_SANDBOX_EGRESS_NETWORK": "builder-egress",
             "BUILDER_SANDBOX_RUNTIME": "runsc",
             "BUILDER_COMPUTER_HOST": "0.0.0.0",
@@ -148,7 +149,7 @@ def test_every_owner_setting_has_a_working_value() -> None:
         }
     )
 
-    assert settings.image == "localhost/mosfet-bench:2"
+    assert settings.image == "localhost/mosfet-bench:3"
     assert (settings.egress_network, settings.runtime) == ("builder-egress", "runsc")
     assert (settings.host, settings.port, settings.peer, settings.person_id) == ("0.0.0.0", 9000, "desk-2", "person-1")
     assert settings.traits == persona.Traits(traits=("patient", "exact"))

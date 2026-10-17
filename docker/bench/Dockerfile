@@ -1,13 +1,34 @@
 # The builder bot's bench: the one image its sandbox allows (BL-5). docker.Host makes each machine from it with
 # `sleep infinity` as uid 65532 on a read-only root, with no network unless the owner configures a bridge, so the
-# bench has only what this image brings: python, uv, git and pytest, plus the sh, timeout, mkdir, cat and base64
-# that docker.Host's exec wrappers need. Built locally into the rootless daemon and never pushed or pulled:
+# bench has only what this image brings: python with stateforward.mosfet installed (bench image 2, W7-14), uv,
+# git and pytest, plus the sh, timeout, mkdir, cat and base64 that docker.Host's exec wrappers need. So the bot
+# can write a bot file, `from mosfet import bot`, and test it with pytest, reading bot.define's diagnostics.
+# Built locally into the rootless daemon and never pushed or pulled. The build context is the repository root,
+# because mosfet is installed from its source and its uv.lock:
 #
-#   podman build --tag localhost/mosfet-bench:1 --file docker/bench/Dockerfile docker/bench
+#   podman build --tag localhost/mosfet-bench:2 --file docker/bench/Dockerfile .
 #
 # docker/bench/smoke.sh builds it and checks it against a rootless Podman socket.
 
 FROM ghcr.io/astral-sh/uv:0.9.18@sha256:5713fa8217f92b80223bc83aac7db36ec80a84437dbc0d04bbc659cae030d8c9 AS uv
+
+FROM python:3.13.16-slim-bookworm@sha256:a1165e272e578941b84abc79e4ab38a0305cd12803a5c4247979ac7655f4d641 AS build
+COPY --from=uv /uv /usr/local/bin/uv
+ENV UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    UV_PYTHON_DOWNLOADS=never \
+    UV_PYTHON=/usr/local/bin/python3.13 \
+    UV_PROJECT_ENVIRONMENT=/opt/mosfet/venv
+WORKDIR /src
+COPY . .
+# stateforward.mosfet and its locked dependencies (the root project only, none of the workspace's providers),
+# without dev dependencies and not editable, so the source tree stays out of the bench; then pytest at one exact
+# pin, with its own requirements pinned so the image rebuilds the same (the versions are the repository's
+# uv.lock ones). Compiled at build time because the root is read-only at run time.
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --locked --no-dev --no-editable \
+    && uv pip install --python /opt/mosfet/venv/bin/python --compile-bytecode \
+      pytest==9.0.3 iniconfig==2.3.0 packaging==26.2 pluggy==1.6.0 pygments==2.20.0
 
 FROM python:3.13.16-slim-bookworm@sha256:a1165e272e578941b84abc79e4ab38a0305cd12803a5c4247979ac7655f4d641
 # The workspace tmpfs is root-owned and sticky (W5-15) while uid 65532 works in it, so git would refuse a
@@ -17,11 +38,12 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/* \
     && git config --system safe.directory /workspace
 COPY --from=uv /uv /usr/local/bin/uv
-# pytest at one exact pin, with its own requirements pinned so the image rebuilds the same; the versions are the
-# repository's uv.lock ones. Compiled at build time because the root is read-only at run time.
-RUN UV_PYTHON_DOWNLOADS=never uv pip install --system --no-cache --compile-bytecode \
-      pytest==9.0.3 iniconfig==2.3.0 packaging==26.2 pluggy==1.6.0 pygments==2.20.0
+COPY --from=build /opt/mosfet/venv /opt/mosfet/venv
+# The bench's `python` is the one with mosfet: a machine runs `python -m pytest` in it.
+ENV PATH=/opt/mosfet/venv/bin:$PATH \
+    VIRTUAL_ENV=/opt/mosfet/venv
 LABEL org.opencontainers.image.title="mosfet bench" \
-      org.opencontainers.image.description="The builder bot's sandbox bench: python, uv, git and pytest" \
+      org.opencontainers.image.description="The builder bot's sandbox bench: python with mosfet, uv, git and pytest" \
+      org.opencontainers.image.version="2" \
       org.opencontainers.image.source="https://github.com/stateforward/mosfet.py" \
       org.opencontainers.image.licenses="MIT"

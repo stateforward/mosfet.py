@@ -48,11 +48,13 @@ podman machine inspect --format '{{.ConnectionInfo.PodmanSocket.Path}}'
 That path is under `/var/folders/…/T/` and can change across reboots, so it is configuration with no default.
 On Linux it is `$XDG_RUNTIME_DIR/podman/podman.sock` (`systemctl --user enable --now podman.socket`).
 
-Build the bench image into that daemon. Nothing is ever pulled for the bench. Then check it. This needs no model:
+Build bench image 2 into that daemon, from the repository root. Nothing is ever pulled for the bench. Besides
+python, uv, git and pytest it has mosfet installed, so the bot can write a bot file (`from mosfet import bot`),
+test it with pytest, and read `bot.define`'s diagnostics when it is wrong. Then check it. This needs no model:
 
 ```bash
-podman build -t localhost/mosfet-bench:1 -f docker/bench/Dockerfile docker/bench
-docker/bench/smoke.sh --socket "$BUILDER_SANDBOX_SOCKET"
+podman build -t localhost/mosfet-bench:2 -f docker/bench/Dockerfile .
+docker/bench/smoke.sh --socket "$BUILDER_SANDBOX_SOCKET" --python examples/builder_bot/.venv/bin/python
 ```
 
 ## Configure
@@ -72,7 +74,7 @@ chmod 0600 examples/builder_bot/secrets/*
 | `OPENAI_BASE_URL`, `OPENAI_MODEL` | env, required | | The local OpenAI-compatible endpoint and the model it serves |
 | `openai_api_key` | secret, required | | The endpoint's key; a placeholder for a keyless server |
 | `BUILDER_SANDBOX_SOCKET` | env, required | | The rootless Docker or Podman API socket |
-| `BUILDER_SANDBOX_IMAGE` | env | `localhost/mosfet-bench:1` | The one image the bench may use |
+| `BUILDER_SANDBOX_IMAGE` | env | `localhost/mosfet-bench:2` | The one image the bench may use |
 | `BUILDER_SANDBOX_EGRESS_NETWORK` | env | unset | The owner's egress bridge; unset, the bench has no network |
 | `BUILDER_SANDBOX_RUNTIME` | env | `runc` | `runc`, or `runsc` for gVisor |
 | `BUILDER_COMPUTER_HOST`, `BUILDER_COMPUTER_PORT` | env | `127.0.0.1`, `8765` | Where the computer is served |

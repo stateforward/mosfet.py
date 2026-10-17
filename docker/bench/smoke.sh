@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# Build the builder's bench image (docker/bench/Dockerfile) into a rootless Podman daemon and check what it
+# Build the builder's bench image 2 (docker/bench/Dockerfile) into a rootless Podman daemon and check what it
 # promises the sandbox: docker.Host's own live check passes in full on it (src/providers/docker/scripts/
-# live_check.py), and a one-off run under the sandbox's machine flags (src/providers/docker/README.md, "A machine")
-# has git and pytest, runs a test and versions a file in the workspace with no network. Manual, not CI: it needs
-# a rootless daemon, and the build pulls the pinned base images.
+# live_check.py), and one-off runs under the sandbox's machine flags (src/providers/docker/README.md, "A machine")
+# have git and pytest, run a test and version a file in the workspace with no network, import mosfet, test a bot
+# file that defines a bot, and print bot.define's diagnostics for a wrong one. Manual, not CI: it needs a rootless
+# daemon, and the build pulls the pinned base images.
 #
 # Usage: docker/bench/smoke.sh --socket PATH [--python PATH]
 #
@@ -33,7 +34,7 @@ done
 
 cd "$(dirname "$0")/../.."
 
-image="localhost/mosfet-bench:1"
+image="localhost/mosfet-bench:2"
 label="org.stateforward.mosfet.smoke=mosfet-bench-smoke-$$"
 
 podman_remote() {
@@ -53,7 +54,8 @@ fail() {
 }
 
 echo "bench_smoke: build $image" >&2
-podman_remote build --file docker/bench/Dockerfile --tag "$image" docker/bench
+# The build context is the repository root: the bench installs mosfet from its source and its uv.lock.
+podman_remote build --file docker/bench/Dockerfile --tag "$image" .
 
 echo "bench_smoke: docker.Host's live check on $image" >&2
 "$python" src/providers/docker/scripts/live_check.py --socket "$socket" --image "$image"
@@ -86,5 +88,34 @@ worked="$(podman_remote run "${sandbox_run[@]}" '
 echo "$worked"
 [[ "$worked" == *"1 passed"* ]] || fail "pytest did not report 1 passed"
 [[ "$worked" == *$'\n'"bench" ]] || fail "git log did not show the bench commit"
+
+echo "bench_smoke: the bench imports mosfet and tests a bot file" >&2
+tested="$(podman_remote run "${sandbox_run[@]}" '
+  cat > test_greeter.py <<PY
+from mosfet import bot
+from mosfet.bot import testing
+
+
+def test_the_greeter_defines():
+    model = bot.define("greeter", bot.cognition(testing.Scripted()), bot.allow("no_devices"))
+    assert [outline.name for outline in bot.describe(model).bots] == ["greeter"]
+PY
+  python -m pytest -q test_greeter.py')" || fail "a bot file test failed in a sandbox run"
+echo "$tested"
+[[ "$tested" == *"1 passed"* ]] || fail "the bot file test did not report 1 passed"
+
+echo "bench_smoke: a wrong bot file prints bot.define's diagnostics" >&2
+explained="$(podman_remote run "${sandbox_run[@]}" '
+  cat > greeter.py <<PY
+from mosfet import bot
+from mosfet.bot import testing
+
+model = bot.define("Greeter", bot.cognition(testing.Scripted()), bot.allow("no_devices"))
+PY
+  python greeter.py 2>&1; echo "exit=$?"')" || fail "the wrong bot file could not be run in a sandbox run"
+echo "$explained"
+[[ "$explained" == *"error[B0001]"* ]] || fail "the wrong bot file did not print error[B0001]"
+[[ "$explained" == *"help: "* ]] || fail "the wrong bot file printed no help"
+[[ "$explained" == *"exit=1"* ]] || fail "the wrong bot file did not exit 1"
 
 echo "bench_smoke: ok" >&2

@@ -28,8 +28,9 @@ from mosfet.devices import computer
 from mosfet.providers import docker
 from mosfet.providers import websocket
 
-DEFAULT_IMAGE: typing.Final = "localhost/mosfet-bench:1"
-"""The bench image ``docker/bench/Dockerfile`` builds into the rootless daemon; nothing is pulled."""
+DEFAULT_IMAGE: typing.Final = "localhost/mosfet-bench:2"
+"""Bench image 2, which ``docker/bench/Dockerfile`` builds into the rootless daemon; nothing is pulled. It has
+mosfet installed, so the bot can write a bot file and test it there."""
 DEFAULT_TRAITS: typing.Final = persona.Traits(traits=("careful", "curious", "candid"))
 """The traits this example's owner gives the bot; ``BUILDER_TRAITS`` gives it others."""
 MAX_OUTPUT_CHARS: typing.Final = 8_192
