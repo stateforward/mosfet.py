@@ -1,0 +1,13 @@
+warning[command_without_examples]: field `minutes` of firmware command `timer.set` has no examples
+  --> greeter.py:14:5
+   |
+14 |     minutes: int = pydantic.Field(ge=…, le=…, description="…")
+   |     ^^^^^^^ no examples
+...
+23 |     bot.state("…", bot.transition(bot.on(SetEvent), bot.target("…"))),
+   |                                   ---------------- offered to cognition here
+   |
+   = note: a tool's examples show the model choosing it what a value looks like
+   = note: allow it with `bot.allow("command_without_examples")` if this is deliberate
+help: give it examples: `pydantic.Field(description=…, examples=[…])`
+   = explain: bot.explain("command_without_examples")

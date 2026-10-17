@@ -2,7 +2,7 @@ warning[no_devices]: bot `greeter` has a cognition but nothing it can perceive o
  --> greeter.py:7:9
   |
 7 | model = bot.define("…", bot.traits("…"), bot.cognition(support.Silent()))
-  |         ^^^^^^^^^^ no device or input ability
+  |         ^^^^^^^^^^ no device, input ability or firmware
   |
   = note: a bot that perceives nothing is never woken; this is allowed, and it is what the file says
   = note: allow it with `bot.allow("no_devices")` if this is deliberate

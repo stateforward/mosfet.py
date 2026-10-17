@@ -16,7 +16,19 @@ from mosfet import bot
 from mosfet.bot import diagnostics
 from tests.bot.dsl import support
 
-FIXABLE = ["B0001", "B0003", "B0004", "B0006", "B0007", "B0017", "B0018", "empty_timeouts", "mixed", "unnamed"]
+FIXABLE = [
+    "B0001",
+    "B0003",
+    "B0004",
+    "B0006",
+    "B0007",
+    "B0014",
+    "B0017",
+    "B0018",
+    "empty_timeouts",
+    "mixed",
+    "unnamed",
+]
 """The wrong files whose every diagnostic carries a machine-applicable rewrite."""
 
 ALL = [
@@ -26,11 +38,15 @@ ALL = [
     "B0009",
     "B0010",
     "B0011",
+    "B0012",
+    "B0013",
     "B0015",
     "B0016",
     "ability_without_tools",
+    "command_without_examples",
     "instruction_like_traits",
     "no_devices",
+    "unreachable_state",
     "unused_register",
 ]
 

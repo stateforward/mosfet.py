@@ -44,6 +44,7 @@ import io
 import linecache
 import os
 import pathlib
+import sys
 import textwrap
 import tokenize
 import typing
@@ -119,6 +120,24 @@ class Location(hsm.Location):
             )
         finally:
             del frame
+
+    @classmethod
+    def at(cls, span: "Span") -> "Location":
+        """The location of ``span``: its columns back in Python's UTF-8 byte offsets, as captured ones are."""
+
+        lines = _source(span.filename)
+
+        def offset(lineno: int, col: int) -> int:
+            line = lines[lineno - 1] if 0 < lineno <= len(lines) else ""
+            return len(line[:col].encode("utf-8"))
+
+        return cls(
+            filename=span.filename,
+            lineno=span.lineno,
+            col=offset(span.lineno, span.col),
+            end_lineno=span.end_lineno,
+            end_col=offset(span.end_lineno, span.end_col),
+        )
 
 
 class Span(pydantic.BaseModel):
@@ -401,6 +420,81 @@ EXPLANATIONS: tuple[Explanation, ...] = (
         ),
     ),
     Explanation(
+        code="B0012",
+        level="error",
+        title="a firmware command's field has no description",
+        meaning=(
+            "The tool events the bot's firmware reacts to (`hsm.Event(..., kind=mosfet.event.EventKind)`) are its "
+            "commands, offered to cognition as tools. Every field of a command's schema has a description: "
+            '`pydantic.Field(description="...")`.'
+        ),
+        why=(
+            "The model choosing a tool reads its schema to know what each field means; a field without a "
+            "description is a blank on the form it fills in."
+        ),
+        wrong=(
+            "class SetData(pydantic.BaseModel):\n    minutes: int\n\n\n"
+            'SetEvent = hsm.Event(name="timer.set", kind=mosfet.event.EventKind, schema=SetData)\n'
+            'model = bot.define(\n    "timer",\n    bot.cognition(processor),\n    bot.initial(bot.target("idle")),\n'
+            '    bot.state("idle", bot.transition(bot.on(SetEvent), bot.target("../idle"))),\n)'
+        ),
+        right=(
+            "class SetData(pydantic.BaseModel):\n"
+            '    minutes: int = pydantic.Field(description="Minutes until the timer rings.", examples=[10])\n\n\n'
+            'SetEvent = hsm.Event(name="timer.set", kind=mosfet.event.EventKind, schema=SetData)\n'
+            'model = bot.define(\n    "timer",\n    bot.cognition(processor),\n    bot.initial(bot.target("idle")),\n'
+            '    bot.state("idle", bot.transition(bot.on(SetEvent), bot.target("../idle"))),\n)'
+        ),
+    ),
+    Explanation(
+        code="B0013",
+        level="error",
+        title="a firmware command has the name of an event an attached part offers",
+        meaning=(
+            "Cognition is offered the firmware's commands under the `firmware` key, beside every tool its devices "
+            "and abilities offer. A firmware command's name is none of theirs."
+        ),
+        why=(
+            "Cognition selects a tool by its name. One name offered by the firmware and by a device would leave it "
+            "unclear which of them a selection is for, so the firmware's commands are named for the bot."
+        ),
+        wrong=(
+            'class DialData(pydantic.BaseModel):\n    """Dial the saved number."""\n\n\n'
+            'DialEvent = hsm.Event(name="phone.dial", kind=mosfet.event.EventKind, schema=DialData)\n'
+            'model = bot.define(\n    "dialer",\n    bot.cognition(processor),\n    bot.attach(phone.Phone()),\n'
+            '    bot.initial(bot.target("idle")),\n'
+            '    bot.state("idle", bot.transition(bot.on(DialEvent), bot.target("../idle"))),\n)'
+        ),
+        right=(
+            'class DialData(pydantic.BaseModel):\n    """Dial the saved number."""\n\n\n'
+            'DialEvent = hsm.Event(name="dialer.dial", kind=mosfet.event.EventKind, schema=DialData)\n'
+            'model = bot.define(\n    "dialer",\n    bot.cognition(processor),\n    bot.attach(phone.Phone()),\n'
+            '    bot.initial(bot.target("idle")),\n'
+            '    bot.state("idle", bot.transition(bot.on(DialEvent), bot.target("../idle"))),\n)'
+        ),
+    ),
+    Explanation(
+        code="B0014",
+        level="error",
+        title="hsm rejects the bot's firmware",
+        meaning=(
+            "The hsm partials given to `bot.define` (`bot.state`, `bot.transition`, `bot.initial`, ...) are the "
+            "bot's firmware, one machine hsm defines. hsm found a mistake in it: the message is hsm's own, the "
+            "span is where the bot file wrote it, and the help says how the DSL writes it. hsm stops at its first "
+            "mistake, so a firmware reports one per pass."
+        ),
+        why=(
+            "The firmware is a real state machine: it starts in the state its `bot.initial` names, a target is "
+            "relative to the state its transition is in (`../<state>` is a sibling), and `bot.on`/`bot.after` go "
+            "inside a `bot.transition`."
+        ),
+        wrong='model = bot.define("ticker", bot.cognition(processor), bot.state("waiting"))',
+        right=(
+            'model = bot.define("ticker", bot.cognition(processor), bot.initial(bot.target("waiting")), '
+            'bot.state("waiting"))'
+        ),
+    ),
+    Explanation(
         code="B0015",
         level="error",
         title="an observer is given to `bot.define`",
@@ -620,6 +714,33 @@ EXPLANATIONS: tuple[Explanation, ...] = (
         ),
     ),
     Explanation(
+        code="command_without_examples",
+        level="warning",
+        title="a firmware command's field has no examples",
+        meaning=(
+            "A firmware command's field is described but has no `examples`: "
+            '`pydantic.Field(description="...", examples=[...])`.'
+        ),
+        why=(
+            "A command is offered to cognition as a tool, and a tool's examples show the model choosing it what a "
+            "value looks like."
+        ),
+        wrong=(
+            'class SetData(pydantic.BaseModel):\n    minutes: int = pydantic.Field(description="Minutes until it rings.")'
+            "\n\n\n"
+            'SetEvent = hsm.Event(name="timer.set", kind=mosfet.event.EventKind, schema=SetData)\n'
+            'model = bot.define(\n    "timer",\n    bot.cognition(processor),\n    bot.initial(bot.target("idle")),\n'
+            '    bot.state("idle", bot.transition(bot.on(SetEvent), bot.target("../idle"))),\n)'
+        ),
+        right=(
+            "class SetData(pydantic.BaseModel):\n"
+            '    minutes: int = pydantic.Field(description="Minutes until it rings.", examples=[10])\n\n\n'
+            'SetEvent = hsm.Event(name="timer.set", kind=mosfet.event.EventKind, schema=SetData)\n'
+            'model = bot.define(\n    "timer",\n    bot.cognition(processor),\n    bot.initial(bot.target("idle")),\n'
+            '    bot.state("idle", bot.transition(bot.on(SetEvent), bot.target("../idle"))),\n)'
+        ),
+    ),
+    Explanation(
         code="empty_timeouts",
         level="warning",
         title="`bot.timeouts()` sets no timeout",
@@ -665,6 +786,28 @@ EXPLANATIONS: tuple[Explanation, ...] = (
         right='model = bot.define("greeter", bot.cognition(processor), bot.attach(phone.Phone()))',
     ),
     Explanation(
+        code="unreachable_state",
+        level="warning",
+        title="a firmware state is never entered",
+        meaning=(
+            "No `bot.initial` targets the firmware state, and no transition out of a state the firmware enters "
+            "targets it, so the firmware can never be in it."
+        ),
+        why=(
+            "A state nothing enters is machinery that never runs, almost always a missing transition or a "
+            "misspelled target. Add the transition that enters it, or remove it."
+        ),
+        wrong=(
+            'model = bot.define(\n    "ticker",\n    bot.cognition(processor),\n    bot.initial(bot.target("waiting")),\n'
+            '    bot.state("waiting"),\n    bot.state("ringing"),\n)'
+        ),
+        right=(
+            'model = bot.define(\n    "ticker",\n    bot.cognition(processor),\n    bot.initial(bot.target("waiting")),\n'
+            '    bot.state("waiting", bot.transition(bot.on("ring"), bot.target("../ringing"))),\n'
+            '    bot.state("ringing"),\n)'
+        ),
+    ),
+    Explanation(
         code="unused_register",
         level="warning",
         title="a sensory register on a bot that perceives nothing",
@@ -686,7 +829,8 @@ EXPLANATIONS: tuple[Explanation, ...] = (
 """Every code and lint, in code order. A retired code keeps its entry and is never reused.
 
 The examples assume ``from mosfet import bot``, ``from mosfet.devices import phone``,
-``from mosfet.abilities import memory``, ``import hsm``, ``import mosfet``, ``import datetime``, a
+``from mosfet.abilities import memory``, ``import hsm``, ``import mosfet``, ``import datetime``,
+``import pydantic``, a
 ``processor`` (a ``processing.Processor``) and an ``environment`` (an ``Environment``); a test runs
 every one of them.
 """
@@ -738,8 +882,8 @@ def document() -> str:
         'warnings. `bot.explain("<code>")` prints any entry below.',
         "",
         "The examples assume `from mosfet import bot`, `from mosfet.devices import phone`,",
-        "`from mosfet.abilities import memory`, `import hsm`, `import mosfet`, `import datetime`, a `processor`",
-        "(a `processing.Processor`) and an `environment`.",
+        "`from mosfet.abilities import memory`, `import hsm`, `import mosfet`, `import datetime`, `import pydantic`,",
+        "a `processor` (a `processing.Processor`) and an `environment`.",
         "",
     ]
     lines.extend(
@@ -861,6 +1005,48 @@ def argument(span: Span, key: int | str) -> tuple[Span, ast.expr] | None:
         if expression is None:
             return None
     return node_span(span, expression), expression
+
+
+def definition(cls: type, name: str, near: str, label: str = "") -> Span | None:
+    """The span of the name of field ``name`` where class ``cls`` (or the base declaring it) writes it.
+
+    A class keeps the line it starts on; its file is its module's, else ``near`` (the bot file a
+    class written in it was defined in). ``None`` when no such source declares the field.
+    """
+
+    for owner in cls.__mro__:
+        if name not in typing.cast(dict[str, object], owner.__dict__.get("__annotations__", {})):
+            continue
+        first = typing.cast(object, getattr(owner, "__firstlineno__", None))
+        module = sys.modules.get(owner.__module__)
+        candidates = [typing.cast(str | None, getattr(module, "__file__", None)), near]
+        for filename in (candidate for candidate in candidates if candidate):
+            lines = _source(filename)
+            if not isinstance(first, int) or not 0 < first <= len(lines):
+                continue
+            try:
+                tree = ast.parse("".join(lines))
+            except SyntaxError:
+                continue
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.ClassDef) or node.name != owner.__name__:
+                    continue
+                if min([node.lineno, *(item.lineno for item in node.decorator_list)]) != first:
+                    continue
+                for statement in node.body:
+                    target = statement.target if isinstance(statement, ast.AnnAssign) else None
+                    if isinstance(target, ast.Name) and target.id == name:
+                        line = lines[target.lineno - 1]
+                        return Span(
+                            filename=filename,
+                            lineno=target.lineno,
+                            col=_characters(line, target.col_offset),
+                            end_lineno=target.lineno,
+                            end_col=_characters(line, target.end_col_offset or target.col_offset),
+                            label=label,
+                        )
+        return None
+    return None
 
 
 def head(span: Span, label: str) -> Span:
@@ -1186,6 +1372,7 @@ __all__ = [
     "argument",
     "call",
     "cause",
+    "definition",
     "document",
     "explain",
     "head",

@@ -9,8 +9,8 @@ code, the source span, notes on why, and a `help:` that shows the rewrite. Error
 warnings. `bot.explain("<code>")` prints any entry below.
 
 The examples assume `from mosfet import bot`, `from mosfet.devices import phone`,
-`from mosfet.abilities import memory`, `import hsm`, `import mosfet`, `import datetime`, a `processor`
-(a `processing.Processor`) and an `environment`.
+`from mosfet.abilities import memory`, `import hsm`, `import mosfet`, `import datetime`, `import pydantic`,
+a `processor` (a `processing.Processor`) and an `environment`.
 
 - [`B0001`](#b0001) (error): the bot's name is missing or not lower snake case
 - [`B0002`](#b0002) (error): the bot has no `bot.cognition`
@@ -23,6 +23,9 @@ The examples assume `from mosfet import bot`, `from mosfet.devices import phone`
 - [`B0009`](#b0009) (error): an element a bot has once is given twice
 - [`B0010`](#b0010) (error): the traits are not one to 24 short traits
 - [`B0011`](#b0011) (error): a timeout is not a positive `datetime.timedelta`
+- [`B0012`](#b0012) (error): a firmware command's field has no description
+- [`B0013`](#b0013) (error): a firmware command has the name of an event an attached part offers
+- [`B0014`](#b0014) (error): hsm rejects the bot's firmware
 - [`B0015`](#b0015) (error): an observer is given to `bot.define`
 - [`B0016`](#b0016) (error): a held device has no id
 - [`B0017`](#b0017) (error): `bot.define` is given something that is not a bot element
@@ -35,9 +38,11 @@ The examples assume `from mosfet import bot`, `from mosfet.devices import phone`
 - [`B0106`](#b0106) (error): `bot.run` is given a shared actor that is not an actor
 - [`B0107`](#b0107) (error): a process option is unknown or its value is bad
 - [`ability_without_tools`](#ability_without_tools) (warning): an acquired ability offers cognition nothing to select
+- [`command_without_examples`](#command_without_examples) (warning): a firmware command's field has no examples
 - [`empty_timeouts`](#empty_timeouts) (warning): `bot.timeouts()` sets no timeout
 - [`instruction_like_traits`](#instruction_like_traits) (warning): a trait reads as an instruction
 - [`no_devices`](#no_devices) (warning): the bot can perceive nothing
+- [`unreachable_state`](#unreachable_state) (warning): a firmware state is never entered
 - [`unused_register`](#unused_register) (warning): a sensory register on a bot that perceives nothing
 
 ## B0001
@@ -290,6 +295,108 @@ model = bot.define(
     bot.attach(phone.Phone()),
     bot.timeouts(processing=datetime.timedelta(seconds=30)),
 )
+```
+
+## B0012
+
+**error:** a firmware command's field has no description
+
+The tool events the bot's firmware reacts to (`hsm.Event(..., kind=mosfet.event.EventKind)`) are its commands, offered to cognition as tools. Every field of a command's schema has a description: `pydantic.Field(description="...")`.
+
+Why: The model choosing a tool reads its schema to know what each field means; a field without a description is a blank on the form it fills in.
+
+Wrong:
+
+```python
+class SetData(pydantic.BaseModel):
+    minutes: int
+
+
+SetEvent = hsm.Event(name="timer.set", kind=mosfet.event.EventKind, schema=SetData)
+model = bot.define(
+    "timer",
+    bot.cognition(processor),
+    bot.initial(bot.target("idle")),
+    bot.state("idle", bot.transition(bot.on(SetEvent), bot.target("../idle"))),
+)
+```
+
+Right:
+
+```python
+class SetData(pydantic.BaseModel):
+    minutes: int = pydantic.Field(description="Minutes until the timer rings.", examples=[10])
+
+
+SetEvent = hsm.Event(name="timer.set", kind=mosfet.event.EventKind, schema=SetData)
+model = bot.define(
+    "timer",
+    bot.cognition(processor),
+    bot.initial(bot.target("idle")),
+    bot.state("idle", bot.transition(bot.on(SetEvent), bot.target("../idle"))),
+)
+```
+
+## B0013
+
+**error:** a firmware command has the name of an event an attached part offers
+
+Cognition is offered the firmware's commands under the `firmware` key, beside every tool its devices and abilities offer. A firmware command's name is none of theirs.
+
+Why: Cognition selects a tool by its name. One name offered by the firmware and by a device would leave it unclear which of them a selection is for, so the firmware's commands are named for the bot.
+
+Wrong:
+
+```python
+class DialData(pydantic.BaseModel):
+    """Dial the saved number."""
+
+
+DialEvent = hsm.Event(name="phone.dial", kind=mosfet.event.EventKind, schema=DialData)
+model = bot.define(
+    "dialer",
+    bot.cognition(processor),
+    bot.attach(phone.Phone()),
+    bot.initial(bot.target("idle")),
+    bot.state("idle", bot.transition(bot.on(DialEvent), bot.target("../idle"))),
+)
+```
+
+Right:
+
+```python
+class DialData(pydantic.BaseModel):
+    """Dial the saved number."""
+
+
+DialEvent = hsm.Event(name="dialer.dial", kind=mosfet.event.EventKind, schema=DialData)
+model = bot.define(
+    "dialer",
+    bot.cognition(processor),
+    bot.attach(phone.Phone()),
+    bot.initial(bot.target("idle")),
+    bot.state("idle", bot.transition(bot.on(DialEvent), bot.target("../idle"))),
+)
+```
+
+## B0014
+
+**error:** hsm rejects the bot's firmware
+
+The hsm partials given to `bot.define` (`bot.state`, `bot.transition`, `bot.initial`, ...) are the bot's firmware, one machine hsm defines. hsm found a mistake in it: the message is hsm's own, the span is where the bot file wrote it, and the help says how the DSL writes it. hsm stops at its first mistake, so a firmware reports one per pass.
+
+Why: The firmware is a real state machine: it starts in the state its `bot.initial` names, a target is relative to the state its transition is in (`../<state>` is a sibling), and `bot.on`/`bot.after` go inside a `bot.transition`.
+
+Wrong:
+
+```python
+model = bot.define("ticker", bot.cognition(processor), bot.state("waiting"))
+```
+
+Right:
+
+```python
+model = bot.define("ticker", bot.cognition(processor), bot.initial(bot.target("waiting")), bot.state("waiting"))
 ```
 
 ## B0015
@@ -571,6 +678,46 @@ model = bot.define(
 )
 ```
 
+## command_without_examples
+
+**warning:** a firmware command's field has no examples
+
+A firmware command's field is described but has no `examples`: `pydantic.Field(description="...", examples=[...])`.
+
+Why: A command is offered to cognition as a tool, and a tool's examples show the model choosing it what a value looks like.
+
+Wrong:
+
+```python
+class SetData(pydantic.BaseModel):
+    minutes: int = pydantic.Field(description="Minutes until it rings.")
+
+
+SetEvent = hsm.Event(name="timer.set", kind=mosfet.event.EventKind, schema=SetData)
+model = bot.define(
+    "timer",
+    bot.cognition(processor),
+    bot.initial(bot.target("idle")),
+    bot.state("idle", bot.transition(bot.on(SetEvent), bot.target("../idle"))),
+)
+```
+
+Right:
+
+```python
+class SetData(pydantic.BaseModel):
+    minutes: int = pydantic.Field(description="Minutes until it rings.", examples=[10])
+
+
+SetEvent = hsm.Event(name="timer.set", kind=mosfet.event.EventKind, schema=SetData)
+model = bot.define(
+    "timer",
+    bot.cognition(processor),
+    bot.initial(bot.target("idle")),
+    bot.state("idle", bot.transition(bot.on(SetEvent), bot.target("../idle"))),
+)
+```
+
 ## empty_timeouts
 
 **warning:** `bot.timeouts()` sets no timeout
@@ -639,6 +786,38 @@ Right:
 
 ```python
 model = bot.define("greeter", bot.cognition(processor), bot.attach(phone.Phone()))
+```
+
+## unreachable_state
+
+**warning:** a firmware state is never entered
+
+No `bot.initial` targets the firmware state, and no transition out of a state the firmware enters targets it, so the firmware can never be in it.
+
+Why: A state nothing enters is machinery that never runs, almost always a missing transition or a misspelled target. Add the transition that enters it, or remove it.
+
+Wrong:
+
+```python
+model = bot.define(
+    "ticker",
+    bot.cognition(processor),
+    bot.initial(bot.target("waiting")),
+    bot.state("waiting"),
+    bot.state("ringing"),
+)
+```
+
+Right:
+
+```python
+model = bot.define(
+    "ticker",
+    bot.cognition(processor),
+    bot.initial(bot.target("waiting")),
+    bot.state("waiting", bot.transition(bot.on("ring"), bot.target("../ringing"))),
+    bot.state("ringing"),
+)
 ```
 
 ## unused_register

@@ -5,15 +5,25 @@ import subprocess
 import sys
 import warnings
 
+import hsm
+import pydantic
 import pytest
 
-from mosfet import bot
+from mosfet import bot, event
 from mosfet.abilities import memory
 from mosfet.bot import lints
 from mosfet.devices import phone
 from tests.bot.dsl import support
 
-LINTED = ["no_devices", "ability_without_tools", "instruction_like_traits", "empty_timeouts", "unused_register"]
+LINTED = [
+    "no_devices",
+    "ability_without_tools",
+    "instruction_like_traits",
+    "empty_timeouts",
+    "unused_register",
+    "unreachable_state",
+    "command_without_examples",
+]
 
 
 @pytest.fixture
@@ -221,3 +231,43 @@ def test_allow_is_given_once() -> None:
         _ = bot.define("greeter", bot.cognition(support.Silent()), bot.allow("no_devices"), bot.allow("empty_timeouts"))
 
     assert [found.code for found in caught.value.diagnostics] == ["B0009"]
+
+
+def _codes(model: bot.Model) -> list[str]:
+    return [found.code for found in bot.check(model)]
+
+
+def test_a_nested_state_its_parent_enters_is_reached_and_one_only_an_unreached_state_leaves_to_is_not() -> None:
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model = bot.define(
+            "ticker",
+            bot.cognition(support.Silent()),
+            bot.initial(bot.target("outer")),
+            bot.state("outer", bot.initial(bot.target("inner")), bot.state("inner")),
+            bot.state("orphan", bot.transition(bot.on("go"), bot.target("../stranded"))),
+            bot.state("stranded"),
+        )
+
+    found = [diagnostic for diagnostic in bot.check(model) if diagnostic.code == "unreachable_state"]
+    assert [diagnostic.message for diagnostic in found] == [
+        "firmware state `orphan` is never entered",
+        "firmware state `stranded` is never entered",
+    ]
+
+
+def test_a_firmware_is_something_the_bot_perceives_and_a_command_with_examples_is_not_linted() -> None:
+    class SetData(pydantic.BaseModel):
+        minutes: int = pydantic.Field(description="Minutes until the timer rings.", examples=[10])
+
+    command = hsm.Event[SetData](name="timer.set", kind=event.EventKind, schema=SetData)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        model = bot.define(
+            "timer",
+            bot.cognition(support.Silent()),
+            bot.initial(bot.target("idle")),
+            bot.state("idle", bot.transition(bot.on(command), bot.target("../idle"))),
+        )
+
+    assert _codes(model) == []

@@ -1,0 +1,13 @@
+warning[unreachable_state]: firmware state `ringing` is never entered
+  --> greeter.py:19:5
+   |
+19 |     bot.state("ringing"),
+   |     ^^^^^^^^^^^^^^^^^^^^ nothing enters it
+   |
+   = note: no `bot.initial` targets it and no transition out of a state the firmware enters does
+   = note: allow it with `bot.allow("unreachable_state")` if this is deliberate
+help: add a transition that enters it, such as `bot.target("../ringing")`, or remove it
+   |
+19 |     bot.state("ringing"),
+   |     ---------------------
+   = explain: bot.explain("unreachable_state")

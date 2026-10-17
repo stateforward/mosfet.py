@@ -1,0 +1,25 @@
+"""command_without_examples: a firmware command's field is described but has no examples."""
+
+import hsm
+import pydantic
+
+from mosfet import bot, event
+
+from tests.bot.dsl import support
+
+
+class SetData(pydantic.BaseModel):
+    """Start the kitchen timer."""
+
+    minutes: int = pydantic.Field(ge=1, le=240, description="Minutes until the timer rings.")
+
+
+SetEvent = hsm.Event[SetData](name="timer.set", kind=event.EventKind, schema=SetData)
+
+model = bot.define(
+    "timer",
+    bot.cognition(support.Silent()),
+    bot.initial(bot.target("idle")),
+    bot.state("idle", bot.transition(bot.on(SetEvent), bot.target("../running"))),
+    bot.state("running", bot.transition(bot.on("timer.done"), bot.target("../idle"))),
+)

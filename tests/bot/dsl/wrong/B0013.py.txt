@@ -1,0 +1,24 @@
+"""B0013: a firmware command named like an event an attached device offers."""
+
+import hsm
+import pydantic
+
+from mosfet import bot, event
+from mosfet.devices import phone
+
+from tests.bot.dsl import support
+
+
+class DialData(pydantic.BaseModel):
+    """Dial the saved number."""
+
+
+DialEvent = hsm.Event[DialData](name="phone.dial", kind=event.EventKind, schema=DialData)
+
+model = bot.define(
+    "dialer",
+    bot.cognition(support.Silent()),
+    bot.attach(phone.Phone()),
+    bot.initial(bot.target("idle")),
+    bot.state("idle", bot.transition(bot.on(DialEvent), bot.target("../idle"))),
+)

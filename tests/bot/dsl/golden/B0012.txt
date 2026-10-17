@@ -1,0 +1,14 @@
+error[B0012]: field `minutes` of firmware command `timer.set` has no description
+  --> greeter.py:14:5
+   |
+14 |     minutes: int
+   |     ^^^^^^^ no description
+...
+23 |     bot.state("…", bot.transition(bot.on(SetEvent), bot.target("…"))),
+   |                                   ---------------- offered to cognition here
+   |
+   = note: cognition is offered a firmware command as a tool, and the model choosing a tool reads what each of its fields means
+help: describe it: `minutes: ... = pydantic.Field(description="…")`
+   = explain: bot.explain("B0012")
+
+error: could not define bot `timer`: 1 error

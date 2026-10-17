@@ -14,6 +14,10 @@ in the file, rendered the way rustc renders them::
         bot.attach(computer.Computer(id="desk", transport=server)),
     )
 
+The hsm partials among the elements (``bot.state``, ``bot.transition``, ...) are the bot's one
+firmware: they compile after the walk, together, into a machine of its own
+(``mosfet.bot.firmware``), and the validator checks the commands it offers cognition.
+
 ``bot.redefine(model, *elements)`` is a new model from the old one's elements and more, as
 ``hsm.redefine`` is; the old model is unchanged. Defining starts, opens and reads nothing: it holds
 the instances the bot file constructed.
@@ -32,11 +36,11 @@ import pydantic
 
 import mosfet.device
 
-from mosfet import lifecycle, runtime
+from mosfet import event, lifecycle, runtime
 from mosfet.abilities import memory, persona, processing
 from mosfet.abilities.communication.conversation.conversation import snake_case
 
-from . import diagnostics, elements, lints
+from . import diagnostics, elements, firmware, lints
 
 _NAME: pydantic.TypeAdapter[str] = pydantic.TypeAdapter(runtime.BotName)
 
@@ -237,6 +241,63 @@ class Validator(hsm.ModelValidator):
                 )
             )
 
+    def _validate_firmware(self, model: elements.Model, member: firmware.FirmwareElement) -> None:
+        offered: dict[str, elements.AttachmentElement] = {}
+        for attached in model.members.values():
+            if not isinstance(attached, elements.AttachmentElement):
+                continue
+            for name in ("model", "firmware_model"):
+                actor_model = typing.cast(object, getattr(attached.instance, name, None))
+                if isinstance(actor_model, hsm.Model):
+                    for offering in actor_model.events.values():
+                        if offering.kind == event.EventKind:
+                            _ = offered.setdefault(offering.name, attached)
+        bot = model.name() or "bot"
+        for command in member.commands():
+            written = member.named.get(command.name)
+            use = diagnostics.Span.of(member.location if written is None else written, "offered to cognition here")
+            attached = offered.get(command.name)
+            if attached is not None:
+                model.findings.append(
+                    diagnostics.Diagnostic(
+                        code="B0013",
+                        level="error",
+                        message=f"firmware command `{command.name}` is also an event `{attached.name()}` offers",
+                        primary=use.model_copy(update={"label": "the firmware's command"}),
+                        secondary=(diagnostics.Span.of(attached.location, f"`{attached.name()}` offers it too"),),
+                        notes=(
+                            "cognition selects a tool by its name, so one name offered by two actors would be ambiguous",
+                        ),
+                        help=diagnostics.Help(
+                            message="give the firmware's command a name of its own, such as "
+                            + f"`{bot}.{command.name.rsplit('.', 1)[-1]}`"
+                        ),
+                    )
+                )
+            schema = command.schema
+            if not isinstance(schema, type) or not issubclass(schema, pydantic.BaseModel):
+                continue
+            for name, field in schema.model_fields.items():
+                if field.description:
+                    continue
+                declared = diagnostics.definition(schema, name, model.location.filename, "no description")
+                model.findings.append(
+                    diagnostics.Diagnostic(
+                        code="B0012",
+                        level="error",
+                        message=f"field `{name}` of firmware command `{command.name}` has no description",
+                        primary=use.model_copy(update={"label": f"`{schema.__name__}.{name}` has no description"})
+                        if declared is None
+                        else declared,
+                        secondary=() if declared is None else (use,),
+                        notes=(
+                            "cognition is offered a firmware command as a tool, and the model choosing a tool "
+                            + "reads what each of its fields means",
+                        ),
+                        help=diagnostics.Help(message=f'describe it: `{name}: ... = pydantic.Field(description="…")`'),
+                    )
+                )
+
     def _validate_timeouts(self, model: elements.Model, member: elements.TimeoutsElement) -> None:
         call = diagnostics.Span.of(member.location)
         for key, value in (
@@ -313,10 +374,16 @@ class RedefinableBot(hsm.RedefinableElement[elements.Model]):
         result = elements.Model(
             qualified_name=self.qualified_name, owned_elements=list(self.owned_elements), location=self.location
         )
+        partials: list[firmware.Partial] = []
         for owned in self.owned_elements:
+            if isinstance(owned, firmware.Partial):
+                partials.append(owned)
+                continue
             _ = typing.cast(elements.Element[hsm.Element], owned).redefine(result, [*stack, result])
-        # A part the walk refused is missing from the model, so a lint about what the bot lacks would
-        # only be noise until it defines.
+        # The firmware compiles after the walk, from every partial at once, as one machine.
+        _ = firmware.compile(result, partials)
+        # A part the walk or the compile refused is missing from the model, so a lint about what the
+        # bot lacks would only be noise until it defines.
         missing = any(found.level == "error" for found in result.findings)
         Validator().validate(result)
         result.findings.extend(lints.lint(result, partial=missing))
@@ -331,18 +398,23 @@ class RedefinableBot(hsm.RedefinableElement[elements.Model]):
 
 
 def _elements(given: collections.abc.Sequence[object], location: hsm.Location, first: int) -> list[hsm.Element]:
-    """``given`` as bot elements, each argument that is not one kept as a :class:`~mosfet.bot.elements.Stray`."""
+    """``given`` as bot elements: an hsm partial kept as a :class:`~mosfet.bot.firmware.Partial` of the
+    firmware, and any other argument that is not an element as a :class:`~mosfet.bot.elements.Stray`."""
 
     return [
         item
         if isinstance(item, elements.Element)
+        else firmware.Partial(partial=typing.cast(hsm.Element, item), index=first + index, location=location)
+        if firmware.partial(item)
         else elements.Stray(value=item, index=first + index, location=location)
         for index, item in enumerate(given)
     ]
 
 
-def define(name: str, *elements_: elements.Element[typing.Any]) -> elements.Model:
+def define(name: str, *elements_: hsm.Element) -> elements.Model:
     """One bot, as data: ``name`` (lower snake case) and its elements.
+
+    The hsm partials among them (``bot.state``, ``bot.transition``, ...) are the bot's one firmware.
 
     Raises:
         DefinitionError: If the bot file has any error; it carries every diagnostic found, rendered.
@@ -362,7 +434,7 @@ def define(name: str, *elements_: elements.Element[typing.Any]) -> elements.Mode
     ).redefine(elements.Model(qualified_name=""), [])
 
 
-def redefine(model: elements.Model, *elements_: elements.Element[typing.Any]) -> elements.Model:
+def redefine(model: elements.Model, *elements_: hsm.Element) -> elements.Model:
     """A new model with ``model``'s elements and ``elements_``, as ``hsm.redefine``; ``model`` is unchanged.
 
     Raises:

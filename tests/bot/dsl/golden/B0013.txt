@@ -1,0 +1,14 @@
+error[B0013]: firmware command `phone.dial` is also an event `phone` offers
+  --> greeter.py:23:38
+   |
+21 |     bot.attach(phone.Phone()),
+   |     ------------------------- `phone` offers it too
+...
+23 |     bot.state("…", bot.transition(bot.on(DialEvent), bot.target("…"))),
+   |                                   ^^^^^^^^^^^^^^^^^ the firmware's command
+   |
+   = note: cognition selects a tool by its name, so one name offered by two actors would be ambiguous
+help: give the firmware's command a name of its own, such as `dialer.dial`
+   = explain: bot.explain("B0013")
+
+error: could not define bot `dialer`: 1 error

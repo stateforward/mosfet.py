@@ -16,6 +16,7 @@ import types
 import typing
 
 import hsm
+import pydantic
 
 import mosfet
 from mosfet import bot
@@ -99,7 +100,15 @@ def apply(source: str, suggestions: collections.abc.Iterable[diagnostics.Suggest
     return source
 
 
-_NAMESPACE_MODULES = {"bot": bot, "phone": phone, "memory": memory, "hsm": hsm, "mosfet": mosfet, "datetime": datetime}
+_NAMESPACE_MODULES = {
+    "bot": bot,
+    "phone": phone,
+    "memory": memory,
+    "hsm": hsm,
+    "mosfet": mosfet,
+    "datetime": datetime,
+    "pydantic": pydantic,
+}
 
 
 async def execute(source: str) -> None:

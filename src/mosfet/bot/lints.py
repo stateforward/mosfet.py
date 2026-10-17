@@ -11,14 +11,18 @@ A new lint is a function here, added to :data:`LINTS` with its golden test and i
 
 import collections.abc
 import difflib
+import posixpath
 import re
+
+import hsm
+import pydantic
 
 from mosfet import abilities, event
 from mosfet.abilities import memory
 
 import mosfet.device
 
-from . import diagnostics, elements
+from . import diagnostics, elements, firmware
 
 _OPENINGS = ("always", "never", "you must", "reply", "respond", "do not", "don't", "dont")
 _SECOND_PERSON = frozenset({"you", "your", "yours", "yourself", "you're", "youre"})
@@ -39,6 +43,7 @@ def _warning(
     message: str,
     primary: diagnostics.Span,
     *,
+    secondary: tuple[diagnostics.Span, ...] = (),
     notes: tuple[str, ...] = (),
     help: diagnostics.Help | None = None,
 ) -> diagnostics.Diagnostic:
@@ -47,6 +52,7 @@ def _warning(
         level="warning",
         message=message,
         primary=primary,
+        secondary=secondary,
         notes=(*notes, f'allow it with `bot.allow("{lint}")` if this is deliberate'),
         help=help,
     )
@@ -67,7 +73,7 @@ def _senses(model: elements.Model) -> list[elements.AttachmentElement]:
 
 
 def _removal(
-    model: elements.Model, member: elements.Member, applicability: diagnostics.Applicability
+    model: elements.Model, member: hsm.Element, applicability: diagnostics.Applicability
 ) -> diagnostics.Suggestion | None:
     """Deleting ``member``'s element from the ``bot.define`` call, when it was written there."""
 
@@ -80,14 +86,14 @@ def _removal(
 def no_devices(model: elements.Model) -> list[diagnostics.Diagnostic]:
     """A bot with a cognition but nothing it can perceive or act through, so nothing can wake it."""
 
-    if not _members(model, elements.CognitionElement) or _senses(model):
+    if not _members(model, elements.CognitionElement) or _senses(model) or _members(model, firmware.FirmwareElement):
         return []
     call = diagnostics.Span.of(model.location)
     return [
         _warning(
             "no_devices",
             f"bot `{model.qualified_name[1:]}` has a cognition but nothing it can perceive or act through",
-            diagnostics.head(call, "no device or input ability"),
+            diagnostics.head(call, "no device, input ability or firmware"),
             notes=("a bot that perceives nothing is never woken; this is allowed, and it is what the file says",),
             help=diagnostics.Help(
                 message="attach something it can perceive, for example a computer a person can type into",
@@ -199,12 +205,111 @@ def unused_register(model: elements.Model) -> list[diagnostics.Diagnostic]:
     ]
 
 
+def _entered(compiled: hsm.Model) -> set[str]:
+    """Every vertex of ``compiled`` that its initial and its transitions can enter, from the top.
+
+    Entering a vertex enters its ancestors, and entering a state follows its own initial; a
+    transition out of anything entered enters its target. Iterated to a fixed point, bounded by the
+    model's transitions.
+    """
+
+    transitions = [member for member in compiled.members.values() if isinstance(member, hsm.TransitionElement)]
+    entered: set[str] = set()
+
+    def enter(name: str) -> None:
+        pending = [name]
+        while pending:
+            vertex = pending.pop()
+            if not vertex or vertex in entered:
+                continue
+            entered.add(vertex)
+            parent = posixpath.dirname(vertex)
+            while parent.startswith(compiled.qualified_name) and parent not in entered:
+                entered.add(parent)
+                parent = posixpath.dirname(parent)
+            found = compiled.members.get(vertex)
+            if isinstance(found, hsm.StateElement) and found.initial:
+                pending.append(found.initial)
+
+    enter(compiled.qualified_name)
+    changed = True
+    while changed:
+        before = len(entered)
+        for transition in transitions:
+            if transition.source in entered and transition.target:
+                enter(transition.target)
+        changed = len(entered) != before
+    return entered
+
+
+def unreachable_state(model: elements.Model) -> list[diagnostics.Diagnostic]:
+    """A firmware state that neither an initial nor any transition can ever enter."""
+
+    found: list[diagnostics.Diagnostic] = []
+    for member in _members(model, firmware.FirmwareElement):
+        compiled = member.model
+        entered = _entered(compiled)
+        for vertex in compiled.members.values():
+            if not isinstance(vertex, hsm.StateElement) or vertex is compiled or vertex.qualified_name in entered:
+                continue
+            name = vertex.qualified_name[len(compiled.qualified_name) + 1 :]
+            primary = diagnostics.Span.of(vertex.location, "nothing enters it")
+            found.append(
+                _warning(
+                    "unreachable_state",
+                    f"firmware state `{name}` is never entered",
+                    primary,
+                    notes=("no `bot.initial` targets it and no transition out of a state the firmware enters does",),
+                    help=diagnostics.Help(
+                        message=f'add a transition that enters it, such as `bot.target("../{posixpath.basename(name)}")`, '
+                        + "or remove it",
+                        suggestion=_removal(model, vertex, "maybe-incorrect"),
+                    ),
+                )
+            )
+    return found
+
+
+def command_without_examples(model: elements.Model) -> list[diagnostics.Diagnostic]:
+    """A firmware command's field that is described but has no examples."""
+
+    found: list[diagnostics.Diagnostic] = []
+    for member in _members(model, firmware.FirmwareElement):
+        for command in member.commands():
+            schema = command.schema
+            if not isinstance(schema, type) or not issubclass(schema, pydantic.BaseModel):
+                continue
+            written = member.named.get(command.name)
+            use = diagnostics.Span.of(member.location if written is None else written, "offered to cognition here")
+            for name, field in schema.model_fields.items():
+                if not field.description or field.examples:
+                    continue
+                declared = diagnostics.definition(schema, name, model.location.filename, "no examples")
+                found.append(
+                    _warning(
+                        "command_without_examples",
+                        f"field `{name}` of firmware command `{command.name}` has no examples",
+                        use.model_copy(update={"label": f"`{schema.__name__}.{name}` has no examples"})
+                        if declared is None
+                        else declared,
+                        secondary=() if declared is None else (use,),
+                        notes=("a tool's examples show the model choosing it what a value looks like",),
+                        help=diagnostics.Help(
+                            message="give it examples: `pydantic.Field(description=…, examples=[…])`"
+                        ),
+                    )
+                )
+    return found
+
+
 LINTS: dict[str, collections.abc.Callable[[elements.Model], list[diagnostics.Diagnostic]]] = {
     "no_devices": no_devices,
     "ability_without_tools": ability_without_tools,
     "instruction_like_traits": instruction_like_traits,
     "empty_timeouts": empty_timeouts,
     "unused_register": unused_register,
+    "unreachable_state": unreachable_state,
+    "command_without_examples": command_without_examples,
 }
 """Every lint by name, each on by default."""
 
@@ -252,9 +357,11 @@ __all__ = [
     "ability_without_tools",
     "allowed",
     "check",
+    "command_without_examples",
     "empty_timeouts",
     "instruction_like_traits",
     "lint",
     "no_devices",
+    "unreachable_state",
     "unused_register",
 ]

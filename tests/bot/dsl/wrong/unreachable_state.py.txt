@@ -1,0 +1,20 @@
+"""unreachable_state: a firmware state no transition and no initial reaches."""
+
+import datetime
+
+from mosfet import bot
+
+from tests.bot.dsl import support
+
+
+def _minute(ctx: object, instance: object, event: object) -> datetime.timedelta:
+    return datetime.timedelta(minutes=1)
+
+
+model = bot.define(
+    "ticker",
+    bot.cognition(support.Silent()),
+    bot.initial(bot.target("waiting")),
+    bot.state("waiting", bot.transition(bot.after(_minute), bot.target("../waiting"))),
+    bot.state("ringing"),
+)

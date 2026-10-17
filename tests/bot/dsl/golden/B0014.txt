@@ -1,0 +1,14 @@
+error[B0014]: hsm rejects the bot's firmware: initial state is required for state machine
+  --> greeter.py:17:5
+   |
+17 |     bot.state("waiting", bot.transition(bot.after(_minute), bot.target("../waiting"))),
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the bot's firmware
+   |
+   = note: the hsm partials given to `bot.define` are the bot's firmware, one machine hsm defines
+help: a firmware starts in the state its `bot.initial(bot.target("<state>"))` names
+   |
+17 |     bot.initial(bot.target("waiting")), bot.state("waiting", bot.transition(bot.after(_minute), bot.target("../waiting"))),
+   |     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+   = explain: bot.explain("B0014")
+
+error: could not define bot `ticker`: 1 error
