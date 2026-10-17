@@ -67,15 +67,22 @@ class Requests:
 class ScriptedHost(Traced):
     """An example-local sandbox host: it announces ``serving`` when started and answers every request at once.
 
-    A create makes ``machine-1``; a run exits 0 printing ``STDOUT``; a write is written and a read finds nothing;
-    sweep and destroy succeed. Each request is kept in ``requests``, which the test owns; no one reads the host.
+    A create makes ``machine-1``; a run is answered by ``run`` when one is given, and otherwise exits 0 printing
+    ``STDOUT``; a write is written and a read finds nothing; sweep and destroy succeed. Each request is kept in
+    ``requests`` before it is answered, which the test owns; no one reads the host.
     """
 
     _requests: Requests
+    _run: collections.abc.Callable[[host.HostRunData], sandbox.RanData] | None
 
-    def __init__(self, requests: Requests) -> None:
+    def __init__(
+        self,
+        requests: Requests,
+        run: collections.abc.Callable[[host.HostRunData], sandbox.RanData] | None = None,
+    ) -> None:
         super().__init__()
         self._requests = requests
+        self._run = run
 
     @staticmethod
     def _serving(ctx: hsm.Context, instance: "ScriptedHost", event: hsm.Event[typing.Any]) -> None:
@@ -90,6 +97,8 @@ class ScriptedHost(Traced):
                 answer: hsm.Event[typing.Any] = host.CreatedEvent.with_data(
                     host.CreatedData(machine=host.Machine(id="machine-1"))
                 )
+            case host.HostRunData() as run if instance._run is not None:
+                answer = host.RanEvent.with_data(instance._run(run))
             case host.HostRunData():
                 answer = host.RanEvent.with_data(
                     sandbox.RanData(
@@ -151,7 +160,7 @@ class Person:
 class Builder:
     """The builder, running as ``bot.run`` runs it, with its scripted model and host."""
 
-    model: testing.Scripted
+    model: processing.Processor
     requests: Requests
     port: int
 
@@ -192,19 +201,27 @@ def free_port() -> int:
 
 
 @contextlib.asynccontextmanager
-async def bring_up(tmp_path: pathlib.Path, model: testing.Scripted) -> collections.abc.AsyncGenerator[Builder]:
+async def bring_up(
+    tmp_path: pathlib.Path,
+    model: processing.Processor,
+    *,
+    requests: Requests | None = None,
+    run: collections.abc.Callable[[host.HostRunData], sandbox.RanData] | None = None,
+) -> collections.abc.AsyncGenerator[Builder]:
     """Run the builder for the block: the server, then the bot, whose bench then makes its machine.
 
-    When the block ends the bot is stopped with ``bot.stop`` (its bench destroys its machine), then the server.
+    ``requests`` records what the scripted host is sent (a fresh record when omitted), and ``run`` answers its
+    runs (see ``ScriptedHost``). When the block ends the bot is stopped with ``bot.stop`` (its bench destroys its
+    machine), then the server.
     """
 
     port = free_port()
-    requests = Requests()
+    requests = Requests() if requests is None else requests
     server = websocket.Server(host="127.0.0.1", port=port, verifier=TOKENS)
     defined = builder_bot_example.builder(
         processor=model,
         server=server,
-        host=ScriptedHost(requests),
+        host=ScriptedHost(requests, run),
         capacity=CAPACITY,
         spec=builder_bot_example.bench(image=builder_bot_example.DEFAULT_IMAGE, network=sandbox.Network.NONE),
         peer=PEER,
@@ -224,15 +241,17 @@ async def bring_up(tmp_path: pathlib.Path, model: testing.Scripted) -> collectio
 def test_the_link_up_turn_offers_the_computer_and_the_bench_and_a_silent_bot_does_nothing(
     tmp_path: pathlib.Path,
 ) -> None:
+    model = testing.Scripted()
+
     async def run() -> tuple[tuple[processing.InputData, ...], list[str], list[str], terminal.ClosedData]:
-        async with bring_up(tmp_path, testing.Scripted()) as builder:
+        async with bring_up(tmp_path, model) as builder:
             person = await builder.sit_down()
             # The turn is over once the bot has reflected on it; anything it chose is on its way by then.
-            await wait_until(lambda: builder.model.reflected())
+            await wait_until(lambda: model.reflected())
             await asyncio.sleep(0.2)
             closed = await builder.stand_up(person)
             return (
-                builder.model.woken_by(computer.LinkUpEvent.name),
+                model.woken_by(computer.LinkUpEvent.name),
                 person.screens(),
                 [sent.name for sent in builder.requests.sent],
                 closed,

@@ -153,4 +153,6 @@ uv run --project examples/builder_bot python -m pytest examples/builder_bot/test
 child process. `test_terminal.py` runs the terminal against a real loopback server and computer. `test_builder.py`
 runs the bot with `testing.running`, a scripted model (`testing.Scripted`) and a scripted sandbox host. The
 terminal connects, and the model's choices reach the screen, the bench and the next turn. A model that chooses
-nothing changes nothing.
+nothing changes nothing. `test_writes_bots.py` proves the bot can fix a bot file it wrote from `bot.define`'s
+diagnostics alone: the scripted host runs the real `bot.define` on the written file, and the rewrite made by
+applying only the `help:` in the run's stderr defines clean.
