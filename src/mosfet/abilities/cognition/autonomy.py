@@ -2834,6 +2834,7 @@ class Autonomy(ability.Ability[types.TurnData, types.CompletionData]):
         self,
         *,
         id: ability.AbilityId | None = None,
+        clock: hsm.Clock | None = None,
         memory: memory.MemoryStore | None = None,
         seeded_behaviors: tuple[seed.Seed, ...] = (),
     ) -> None:
@@ -2853,7 +2854,7 @@ class Autonomy(ability.Ability[types.TurnData, types.CompletionData]):
         warmup budget plus one second for lifecycle settlement; detach is bounded to one second.
         """
 
-        super().__init__(id=id)
+        super().__init__(id=id, clock=clock)
         self._memory = memory
         self._behaviors = ()
         self._seeded_behaviors = tuple(seeded_behaviors)

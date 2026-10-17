@@ -90,7 +90,7 @@ def compose(
     spec: sandbox.Spec,
     traits: persona.Traits,
     database: str,
-    clock: collections.abc.Callable[[], datetime.datetime],
+    now: collections.abc.Callable[[], datetime.datetime],
 ) -> runtime.Assembly:
     """Assemble the builder from constructed collaborators; nothing is started here.
 
@@ -98,7 +98,7 @@ def compose(
     whose remote machine the server knows as ``peer``; ``person_id`` is who uses it, when the owner knows.
     ``host`` is an unstarted sandbox host the bench owns from here on, declaring ``capacity``; ``spec`` is the
     owner's bench on it.
-    ``traits`` are the owner's seed of who the bot is, and ``database`` is where its memory is kept. ``clock``
+    ``traits`` are the owner's seed of who the bot is, and ``database`` is where its memory is kept. ``now``
     is the UTC wall time the routines the bot authors are scheduled by.
 
     Raises:
@@ -114,7 +114,7 @@ def compose(
         intuition=cognition.Intuition(processor=processor),
         reasoning=cognition.Reasoning(processor=processor),
         reflection=cognition.Reflection(processor=processor, memory=store, persona=self_knowledge),
-        routines=cognition.Routines(memory=store, clock=clock),
+        routines=cognition.Routines(memory=store, now=now),
         memory=store,
         associative=memory.Associative(memory=store),
         consolidation=memory.Consolidation(memory=store, processor=processor),
@@ -228,7 +228,7 @@ def build(config: runtime.Config) -> runtime.Assembly:
         spec=bench(image=image, network=network),
         traits=traits,
         database=str(config.data_dir / "memory.sqlite3"),
-        clock=functools.partial(datetime.datetime.now, datetime.UTC),
+        now=functools.partial(datetime.datetime.now, datetime.UTC),
     )
     _LOG.info(
         "builder wired: model=%s bench_image=%s network=%s runtime=%s computer=ws://%s:%d/v1/%s",

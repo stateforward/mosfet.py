@@ -38,6 +38,31 @@ class _HasModel(typing.Protocol):
     model: hsm.Model | None
 
 
+@typing.runtime_checkable
+class _Clocked(typing.Protocol):
+    """A part built to keep time on a clock of its own: ``Device(clock=)`` and ``Ability(clock=)``."""
+
+    def own_clock(self) -> hsm.Clock | None: ...
+
+
+def _clock(ctx: hsm.Context | None, instance: hsm.Instance) -> hsm.Clock | None:
+    """The clock ``instance`` keeps time on when its start names none, or ``None`` for hsm's own.
+
+    That is the part's own clock, else the clock of the machine whose context ``ctx`` is (so a
+    device's firmware, and what any machine starts in its own context, follow it), else the clock
+    of the environment ``ctx`` is in. An owner keeping hsm's own time has no clock to pass on.
+    """
+
+    own = instance.own_clock() if isinstance(instance, _Clocked) else None
+    if own is not None or ctx is None:
+        return own
+    owner = ctx.value(hsm.Keys.HSM)
+    if isinstance(owner, hsm.HSM) and not isinstance(owner.clock(), hsm.DefaultClock):
+        return owner.clock()
+    environment = Environment.reachable(ctx)
+    return None if environment is None else environment.clock()
+
+
 class Live(typing.TypedDict):
     name: str
     component: str
@@ -185,14 +210,13 @@ async def started(
 ) -> TInstance:
     """Start a new instance through ``hsm.started`` and register it live.
 
-    The instance keeps time on the clock ``config`` names, or else on the clock of the environment
-    ``ctx`` is in (``Environment(clock=)``), read here as it starts; with neither, on hsm's own.
+    The instance keeps time on the first clock of: the one ``config`` names; its own, when it is a
+    part built with one (``Device(clock=)``, ``Ability(clock=)``); the clock of the machine whose
+    context ``ctx`` is; and the clock of the environment ``ctx`` is in (``Environment(clock=)``).
+    Each is read here, as it starts. With none, it keeps hsm's own time.
     """
 
-    environment = (
-        None if ctx is None or (config is not None and config.clock is not None) else Environment.reachable(ctx)
-    )
-    clock = None if environment is None else environment.clock()
+    clock = None if config is not None and config.clock is not None else _clock(ctx, instance)
     if clock is not None:
         config = hsm.Config(clock=clock) if config is None else dataclasses.replace(config, clock=clock)
     with span.operation(

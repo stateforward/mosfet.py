@@ -191,9 +191,10 @@ wait, a behavior dispatches a request to another machine (an ability or device) 
 waiting and dispatches back; the behavior transitions on that reply event, with an
 `hsm.after` transition as an optional timeout.
 
-`cognition.Routines` (memory, wall clock, optional HSM timer clock injected; compose it as
-`Cognition(routines=...)`) starts nothing on its own attach: memory is a peer another owner
-attaches, so Routines reads the inventory only when Cognition sends it
+`cognition.Routines` (memory and the wall clock `now` injected, and an optional `hsm` `clock`
+that it and every routine it starts wait on; compose it as `Cognition(routines=...)`) starts
+nothing on its own attach: memory is a peer another owner attaches, so Routines reads the
+inventory only when Cognition sends it
 `bot.ability.routines.reconcile`. Cognition sends it once its children (memory among them) are
 attached, which starts every ACTIVE persistent routine a restart left behind, and again
 whenever Reflection settles a turn; each time Routines stops broken or removed routines,

@@ -96,8 +96,8 @@ class Speaker(Device):
     Like a real one, the speaker drains a bounded buffer in real time. A commanded chunk of linear PCM
     (``audio/pcm``, s16le, with a rate and channel count) is cut into slices of at most ``frame``, and
     each slice is one ``environment.sound`` broadcast at the moment it starts playing. The next slice
-    is due when the last one has played, measured against a schedule kept on the injected ``clock``,
-    so timer jitter never accumulates and playout is never ahead of schedule.
+    is due when the last one has played, measured against a schedule kept on the injected
+    ``monotonic`` clock, so timer jitter never accumulates and playout is never ahead of schedule.
 
     A speaker attached by several controllers plays one stream per controller on one timeline, in
     arrival order, the way an audio server keeps per-client streams. What it says back goes only to
@@ -121,7 +121,7 @@ class Speaker(Device):
     _amplitude_db: float | None
     _frame_seconds: float
     _max_buffered_seconds: float
-    _clock: collections.abc.Callable[[], float]
+    _monotonic: collections.abc.Callable[[], float]
     # Durable playout state, owned by this machine: the buffer, the slice now playing, when it is due to
     # end, how much is queued, and a counter that tells chunks apart. Cleared when the speaker is detached.
     _queue: collections.deque[_Slice]
@@ -134,23 +134,25 @@ class Speaker(Device):
         self,
         *,
         id: DeviceId | None = None,
+        clock: hsm.Clock | None = None,
         peripherals: collections.abc.Iterable[Device] = (),
         placement: space.Placement | None = None,
         amplitude_db: float | None = None,
         frame: datetime.timedelta = _DEFAULT_FRAME,
         max_buffered: datetime.timedelta = _DEFAULT_MAX_BUFFERED,
-        clock: collections.abc.Callable[[], float] = time.monotonic,
+        monotonic: collections.abc.Callable[[], float] = time.monotonic,
     ) -> None:
         """Build a speaker.
 
         Args:
             id: The id the bot holding this speaker knows it by; ``"speaker"`` when omitted.
+            clock: The ``hsm.Clock`` it keeps time on (see ``mosfet.device.Device``).
             peripherals: Devices this speaker powers.
             placement: Where this transducer is in the environment, if known.
             amplitude_db: How loud it plays at the reference distance; ``None`` carries everywhere.
             frame: The longest slice broadcast as one ``environment.sound``.
             max_buffered: The most playout the buffer holds; a chunk past it is dropped whole.
-            clock: Monotonic seconds the playout schedule is kept against.
+            monotonic: Monotonic seconds the playout schedule is kept against.
 
         Raises:
             ValueError: ``frame`` is not positive, ``max_buffered`` is shorter than ``frame``, or ``id`` is
@@ -161,14 +163,14 @@ class Speaker(Device):
             raise ValueError(f"Speaker frame must be positive, got {frame}.")
         if max_buffered < frame:
             raise ValueError(f"Speaker max_buffered must hold at least one frame, got {max_buffered}.")
-        super().__init__(id=id, peripherals=peripherals, placement=placement)
+        super().__init__(id=id, clock=clock, peripherals=peripherals, placement=placement)
         # How loud this transducer plays, measured at the reference distance. A handset earpiece
         # and a room speaker are different hardware; without a value the sound carries everywhere,
         # which is what keeps geometry opt-in.
         self._amplitude_db = amplitude_db
         self._frame_seconds = frame.total_seconds()
         self._max_buffered_seconds = max_buffered.total_seconds()
-        self._clock = clock
+        self._monotonic = monotonic
         self._queue = collections.deque()
         self._current = None
         self._next_at = 0.0
@@ -236,7 +238,7 @@ class Speaker(Device):
         """Time left on the schedule until the slice now playing has played; zero when already due."""
 
         del ctx, event
-        return datetime.timedelta(seconds=max(0.0, instance._next_at - instance._clock()))
+        return datetime.timedelta(seconds=max(0.0, instance._next_at - instance._monotonic()))
 
     @staticmethod
     def _report_flushed(
@@ -262,10 +264,10 @@ class Speaker(Device):
 
     @staticmethod
     def _start_schedule(ctx: hsm.Context, instance: "Speaker", event: hsm.Event[typing.Any]) -> None:
-        """A silent speaker starts playing now: the schedule restarts at the clock."""
+        """A silent speaker starts playing now: the schedule restarts at the monotonic clock."""
 
         del ctx, event
-        instance._next_at = instance._clock()
+        instance._next_at = instance._monotonic()
 
     @staticmethod
     def _enqueue(ctx: hsm.Context, instance: "Speaker", event: hsm.Event[typing.Any]) -> None:

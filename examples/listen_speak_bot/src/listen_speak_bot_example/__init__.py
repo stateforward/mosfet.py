@@ -679,7 +679,7 @@ def compose_cognition(
         reasoning=cognition.Reasoning(processor=deliberate),
         reflection=cognition.Reflection(processor=deliberate, memory=store, persona=self_knowledge),
         # Persistent routines the bot authors keep running here; their schedules read UTC wall time.
-        routines=cognition.Routines(memory=store, clock=functools.partial(datetime.datetime.now, datetime.UTC)),
+        routines=cognition.Routines(memory=store, now=functools.partial(datetime.datetime.now, datetime.UTC)),
         memory=store,
         associative=memory.Associative(memory=store),
         # While the bot rests, its deliberate model consolidates what it remembers.

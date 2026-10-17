@@ -114,12 +114,14 @@ class Computer(mosfet.device.Device):
         mouthpiece: Mouthpiece | None = None,
         peripherals: collections.abc.Iterable[mosfet.device.Device] = (),
         placement: space.Placement | None = None,
+        clock: hsm.Clock | None = None,
     ) -> None:
         """Build a computer the bot holding it knows as ``id``, its remote machine reached through ``transport``.
 
         The transport knows the remote machine as ``peer_id`` (a ``computer.PeerId``), ``id`` by default. ``transport`` is an address the
         computer's link registers with; the computer neither starts nor stops it. The default
-        mouthpiece hears at the computer's ``placement``.
+        mouthpiece hears at the computer's ``placement``. ``clock`` is the computer's own ``hsm.Clock``
+        (see ``mosfet.device.Device``).
 
         Raises:
             ValueError: If ``link_timeout`` is not positive, or ``id``, ``peer_id`` or ``person_id`` is
@@ -140,7 +142,9 @@ class Computer(mosfet.device.Device):
             # The mouthpiece sits with the computer, as a handset's mouthpiece sits with the handset.
             mouthpiece=mouthpiece if mouthpiece is not None else Mouthpiece(placement=placement),
         )
-        super().__init__(id=id, peripherals=(*_wiring_order(ports), *tuple(peripherals)), placement=placement)
+        super().__init__(
+            id=id, peripherals=(*_wiring_order(ports), *tuple(peripherals)), placement=placement, clock=clock
+        )
         self._ports = ports
         self._link = Link(
             transport=transport,

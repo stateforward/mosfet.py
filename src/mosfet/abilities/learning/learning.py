@@ -1673,12 +1673,13 @@ class Learning(ability.Ability[InputData, OutputData]):
         self,
         *,
         id: ability.AbilityId | None = None,
+        clock: hsm.Clock | None = None,
         decoder: decoding.Decoder[InputData, DecodedData],
         processor: processing.Processor | revision.ProcessorFactory,
         memory: memory.Memory,
         stm_memory: stm.StmMemory | None = None,
     ) -> None:
-        super().__init__(id=id)
+        super().__init__(id=id, clock=clock)
         leaf = processor() if not isinstance(processor, processing.Processor) else processor
         self._decoder = decoder
         self._select_processing = processing.Processing(

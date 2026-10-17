@@ -299,36 +299,36 @@ class Matcher(identification.Identifier):
     """The store-backed ``Identifier``: one ``MatchPolicy`` over one ``Store``.
 
     Store calls block, so each runs in ``asyncio.to_thread``; a call its caller abandons still
-    completes. ``clock`` is the timezone-aware UTC wall clock that stamps ``seen_at`` (it is
+    completes. ``now`` is the timezone-aware UTC wall clock that stamps ``seen_at`` (it is
     persisted, so it is never the event loop's clock). Store errors propagate unchanged.
     """
 
     _store: Store
     _policy: identification.MatchPolicy
-    _clock: collections.abc.Callable[[], datetime.datetime]
+    _now: collections.abc.Callable[[], datetime.datetime]
 
     def __init__(
         self,
         *,
         store: Store,
         policy: identification.MatchPolicy,
-        clock: collections.abc.Callable[[], datetime.datetime] = _utc_now,
+        now: collections.abc.Callable[[], datetime.datetime] = _utc_now,
     ) -> None:
         self._store = store
         self._policy = policy
-        self._clock = clock
+        self._now = now
 
     @typing.override
     async def identify(
         self, kind: identification.Kind, prints: tuple[identification.Print, ...]
     ) -> tuple[identification.Recognition | None, ...]:
-        return await asyncio.to_thread(self._store.identify, kind, prints, self._policy, at=self._clock())
+        return await asyncio.to_thread(self._store.identify, kind, prints, self._policy, at=self._now())
 
     @typing.override
     async def enroll(
         self, kind: identification.Kind, id: identification.Id | None, print: identification.Print, own: bool
     ) -> identification.Recognition:
-        return await asyncio.to_thread(self._store.enroll, kind, id, print, own, self._policy, at=self._clock())
+        return await asyncio.to_thread(self._store.enroll, kind, id, print, own, self._policy, at=self._now())
 
     @typing.override
     async def forget(self, kind: identification.Kind, id: identification.Id) -> bool:

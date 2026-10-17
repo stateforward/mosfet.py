@@ -564,7 +564,7 @@ class Registry(ability.Ability[IdentifyData, IdentifiedData]):
     _prune_every: datetime.timedelta
     _timeout: datetime.timedelta
     _prune_timeout: datetime.timedelta
-    _clock: collections.abc.Callable[[], datetime.datetime]
+    _now: collections.abc.Callable[[], datetime.datetime]
     # Durable machine data: the retention deadline (re-armed when a prune ends) and the address of
     # the one request in flight (cleared on every reply), so a busy timeout can still reply.
     _next_prune_at: datetime.datetime
@@ -580,6 +580,7 @@ class Registry(ability.Ability[IdentifyData, IdentifiedData]):
         self,
         *,
         id: ability.AbilityId | None = None,
+        clock: hsm.Clock | None = None,
         identifier: Identifier,
         kind: Kind,
         max_unlinked_age: datetime.timedelta,
@@ -587,9 +588,9 @@ class Registry(ability.Ability[IdentifyData, IdentifiedData]):
         prune_every: datetime.timedelta = _DEFAULT_PRUNE_EVERY,
         timeout: datetime.timedelta = _DEFAULT_TIMEOUT,
         prune_timeout: datetime.timedelta = _DEFAULT_PRUNE_TIMEOUT,
-        clock: collections.abc.Callable[[], datetime.datetime] = _utc_now,
+        now: collections.abc.Callable[[], datetime.datetime] = _utc_now,
     ) -> None:
-        """Serve ``identifier`` for ``kind``; ``clock`` is the timezone-aware UTC wall clock retention reads.
+        """Serve ``identifier`` for ``kind``; ``now`` is the timezone-aware UTC wall clock retention reads.
 
         Raises:
             ValueError: If a duration is not positive or ``max_ids`` is negative.
@@ -600,7 +601,7 @@ class Registry(ability.Ability[IdentifyData, IdentifiedData]):
             raise ValueError("Registry durations must be positive.")
         if max_ids < 0:
             raise ValueError("Registry max_ids cannot be negative.")
-        super().__init__(id=id)
+        super().__init__(id=id, clock=clock)
         self._identifier = identifier
         self._kind = kind
         self._max_unlinked_age = max_unlinked_age
@@ -608,8 +609,8 @@ class Registry(ability.Ability[IdentifyData, IdentifiedData]):
         self._prune_every = prune_every
         self._timeout = timeout
         self._prune_timeout = prune_timeout
-        self._clock = clock
-        self._next_prune_at = clock() + prune_every
+        self._now = now
+        self._next_prune_at = now() + prune_every
         self._in_flight = None
 
     # --- replies -------------------------------------------------------------------------------
@@ -657,14 +658,14 @@ class Registry(ability.Ability[IdentifyData, IdentifiedData]):
         """Entering service: the first prune is due one ``prune_every`` from now."""
 
         del ctx, event
-        instance._next_prune_at = instance._clock() + instance._prune_every
+        instance._next_prune_at = instance._now() + instance._prune_every
 
     @staticmethod
     def _remaining(ctx: hsm.Context, instance: "Registry", event: hsm.Event[typing.Any]) -> datetime.timedelta:
         """Only the time left to the durable deadline, so re-entering idle never restarts it."""
 
         del ctx, event
-        return max(datetime.timedelta(0), instance._next_prune_at - instance._clock())
+        return max(datetime.timedelta(0), instance._next_prune_at - instance._now())
 
     @staticmethod
     def _admitting(
@@ -795,7 +796,7 @@ class Registry(ability.Ability[IdentifyData, IdentifiedData]):
     @staticmethod
     def _is_prune_due(ctx: hsm.Context, instance: "Registry", event: hsm.Event[typing.Any]) -> bool:
         del ctx, event
-        return instance._clock() >= instance._next_prune_at
+        return instance._now() >= instance._next_prune_at
 
     # --- pruning -------------------------------------------------------------------------------
 
@@ -815,7 +816,7 @@ class Registry(ability.Ability[IdentifyData, IdentifiedData]):
             try:
                 removed = await instance._identifier.prune(
                     instance._kind,
-                    unseen_before=instance._clock() - instance._max_unlinked_age,
+                    unseen_before=instance._now() - instance._max_unlinked_age,
                     max_ids=instance._max_ids,
                 )
             except StoreError as error:
@@ -861,7 +862,7 @@ class Registry(ability.Ability[IdentifyData, IdentifiedData]):
         """Leaving pruning, however it ended: the next prune is one ``prune_every`` from now."""
 
         del ctx, event
-        instance._next_prune_at = instance._clock() + instance._prune_every
+        instance._next_prune_at = instance._now() + instance._prune_every
 
     @staticmethod
     def _abandon(ctx: hsm.Context, instance: "Registry", event: hsm.Event[typing.Any]) -> None:

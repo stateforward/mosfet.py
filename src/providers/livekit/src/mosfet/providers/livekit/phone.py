@@ -2688,6 +2688,7 @@ class Phone(phone.Phone):
         self,
         *,
         id: mosfet.device.DeviceId | None = None,
+        clock: hsm.Clock | None = None,
         url: str | None = None,
         token: str | None = None,
         track_name: str = "bot-audio",
@@ -2702,6 +2703,7 @@ class Phone(phone.Phone):
     ) -> None:
         super().__init__(
             id=id,
+            clock=clock,
             microphone=microphone,
             speaker=speaker,
             peripherals=peripherals,

@@ -113,7 +113,7 @@ async def room(
     speaker = (
         audio.Speaker(frame=frame, max_buffered=max_buffered)
         if time is None
-        else audio.Speaker(frame=frame, max_buffered=max_buffered, clock=time.clock)
+        else audio.Speaker(frame=frame, max_buffered=max_buffered, monotonic=time.clock)
     )
     config = (
         hsm.Config(id="room-speaker")

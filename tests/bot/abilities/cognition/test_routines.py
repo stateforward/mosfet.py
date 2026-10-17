@@ -85,7 +85,7 @@ async def _attach(
 ) -> tuple[cognition.Routines, _Owner]:
     """Attach Routines to a Cognition stand-in that asks for the first reconcile, as Cognition does."""
 
-    routines = cognition.Routines(memory=store, clock=lambda: _START, timers=timers)
+    routines = cognition.Routines(memory=store, now=lambda: _START, clock=timers)
     owner = _Owner()
     _ = await mosfet.started(ctx, owner, typing.cast(hsm.Model, owner.model))
     _ = await routines.attach(

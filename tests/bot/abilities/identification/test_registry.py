@@ -246,7 +246,7 @@ async def _harness(
         prune_every=prune_every,
         timeout=timeout,
         prune_timeout=prune_timeout,
-        clock=time.wall,
+        now=time.wall,
     )
     model = registry.model
     assert model is not None

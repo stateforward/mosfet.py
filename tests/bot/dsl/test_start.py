@@ -289,7 +289,7 @@ def test_routines_run_on_the_wall_clock_cognition_was_given(built: Built) -> Non
     asyncio.run(run())
 
     ((_, given),) = [entry for entry in built if entry[0] == "Routines"]
-    assert given["clock"] is _clock
+    assert given["now"] is _clock
 
 
 def test_without_memory_the_bot_gets_a_fresh_in_memory_store(built: Built) -> None:

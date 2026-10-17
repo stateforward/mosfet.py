@@ -284,7 +284,7 @@ class Associative(ability.Ability[payload.CueData, payload.AssociationsData]):
     _count_tokens: collections.abc.Callable[[str], int]
     _weights: payload.Weights
     _search: payload.SearchData
-    _clock: collections.abc.Callable[[], datetime.datetime]
+    _now: collections.abc.Callable[[], datetime.datetime]
     _timeout: datetime.timedelta
     # Durable machine data: the request being served.
     _in_flight: _InFlight | None
@@ -299,26 +299,27 @@ class Associative(ability.Ability[payload.CueData, payload.AssociationsData]):
         self,
         *,
         id: ability.AbilityId | None = None,
+        clock: hsm.Clock | None = None,
         memory: memory.Memory,
         budget_tokens: int = 1024,
         count_tokens: collections.abc.Callable[[str], int] = payload.approximate_tokens,
         weights: payload.Weights = payload.Weights(),
         search: payload.SearchData = payload.SearchData(cue=()),
-        clock: collections.abc.Callable[[], datetime.datetime] | None = None,
+        now: collections.abc.Callable[[], datetime.datetime] | None = None,
         timeout: datetime.timedelta = _DEFAULT_TIMEOUT,
     ) -> None:
         if budget_tokens <= 0:
             raise ValueError("Associative budget_tokens must be positive.")
         if timeout <= datetime.timedelta(0):
             raise ValueError("Associative timeout must be positive.")
-        super().__init__(id=id)
+        super().__init__(id=id, clock=clock)
         self._attachment_group = attachment.Group()
         self._memory = memory
         self._budget_tokens = budget_tokens
         self._count_tokens = count_tokens
         self._weights = weights
         self._search = search
-        self._clock = clock if clock is not None else (lambda: datetime.datetime.now(datetime.UTC))
+        self._now = now if now is not None else (lambda: datetime.datetime.now(datetime.UTC))
         self._timeout = timeout
         self._in_flight = None
 
@@ -553,7 +554,7 @@ class Associative(ability.Ability[payload.CueData, payload.AssociationsData]):
                     weights=instance._weights,
                     budget_tokens=instance._budget_tokens,
                     count_tokens=instance._count_tokens,
-                    now=instance._clock(),
+                    now=instance._now(),
                 )
                 active.set_attribute("bot.memory.candidates", len(found.candidates))
                 active.set_attribute("bot.memory.items", len(surfaced.items))
@@ -591,7 +592,7 @@ class Associative(ability.Ability[payload.CueData, payload.AssociationsData]):
                 )
                 if isinstance(found, payload.FoundData):
                     active.set_attribute("bot.memory.candidates", len(found.candidates))
-                    ranked = _ranked(found, weights=instance._weights, now=instance._clock())
+                    ranked = _ranked(found, weights=instance._weights, now=instance._now())
                     node_ids = tuple(candidate.node.node_id for candidate in ranked[: data.limit])
                     if not node_ids:
                         reply = RecollectedEvent.with_data(payload.RecollectionData(about=data.about))

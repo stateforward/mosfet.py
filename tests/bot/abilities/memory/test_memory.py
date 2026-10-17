@@ -270,7 +270,7 @@ async def _harness(
     embedder: embedding.Embedder | None = None,
     *,
     index: memory.Index | None = None,
-    clock: collections.abc.Callable[[], datetime.datetime] | None = None,
+    now: collections.abc.Callable[[], datetime.datetime] | None = None,
     started: tuple[hsm.Instance, ...] = (),
     embed_timeout: datetime.timedelta = datetime.timedelta(seconds=2),
     operation_timeout: datetime.timedelta = datetime.timedelta(seconds=3),
@@ -285,7 +285,7 @@ async def _harness(
         engine=engine,
         embedder=embedder,
         index=index,
-        clock=clock,
+        now=now,
         embed_timeout=embed_timeout,
         operation_timeout=operation_timeout,
     )
@@ -332,7 +332,7 @@ def test_remember_orders_same_microsecond_episodes_by_sequence() -> None:
     instant = datetime.datetime(2026, 10, 14, 12, 0, tzinfo=datetime.UTC)
 
     async def scenario() -> list[str]:
-        harness = await _harness(clock=lambda: instant)
+        harness = await _harness(now=lambda: instant)
         await harness.attached()
         for turn in ("third-by-uuid", "first-by-uuid", "second-by-uuid"):
             _ = await harness.ask(memory.RememberEvent, _episode(turn, turn_id=turn))
@@ -501,7 +501,7 @@ def test_fetch_reinforces_in_the_same_read() -> None:
     instant = datetime.datetime(2026, 10, 14, 12, 0, tzinfo=datetime.UTC)
 
     async def scenario() -> memory.Episode:
-        harness = await _harness(clock=lambda: instant)
+        harness = await _harness(now=lambda: instant)
         await harness.attached()
         kept = await harness.ask(memory.RememberEvent, _episode())
         assert isinstance(kept.data, memory.RememberedData)

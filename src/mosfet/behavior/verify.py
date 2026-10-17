@@ -32,11 +32,11 @@ from mosfet.telemetry import span
 from mosfet.telemetry.hsm import Traced
 
 
-# Fixed wall time a routine's dry-run tick reads unless the caller injects a clock.
+# Fixed wall time a routine's dry-run tick reads unless the caller injects its own ``now``.
 _VERIFY_NOW = datetime.datetime(2026, 1, 5, 8, 0, tzinfo=datetime.UTC)
 
 
-def _verify_clock() -> datetime.datetime:
+def _verify_now() -> datetime.datetime:
     return _VERIFY_NOW
 
 
@@ -127,18 +127,18 @@ class _FirstScheduleWaitFires(hsm.Clock):
     _armed: bool
     _fired: bool
     _waits: list[asyncio.Future[datetime.datetime]]
-    _wall_clock: schedule.WallClock
+    _now: schedule.WallClock
 
-    def __init__(self, *, clock: schedule.WallClock) -> None:
+    def __init__(self, *, now: schedule.WallClock) -> None:
         self._armed = False
         self._fired = False
         self._waits = []
-        self._wall_clock = clock
+        self._now = now
         super().__init__(after=self._wait)
 
     def _fire(self, waiter: asyncio.Future[datetime.datetime]) -> None:
         self._fired = True
-        waiter.set_result(self._wall_clock())
+        waiter.set_result(self._now())
 
     def _wait(self, duration: datetime.timedelta) -> asyncio.Future[datetime.datetime]:
         del duration
@@ -278,13 +278,13 @@ async def _apply_once(
 async def _tick_once(
     program: str,
     *,
-    clock: schedule.WallClock,
+    now: schedule.WallClock,
     timeout: float,
 ) -> events.TickData:
     """Dry-run one routine tick: start it on a timer that fires once, wait for its tick terminal."""
 
-    behavior = compiler.build(program, clock=clock)
-    timers = _FirstScheduleWaitFires(clock=clock)
+    behavior = compiler.build(program, now=now)
+    timers = _FirstScheduleWaitFires(now=now)
     owner = _TickOwner(timers=timers)
     ctx = hsm.Context()
     _ = await mosfet.started(ctx, owner, _TickOwner.tick_model(behavior.failed_event))
@@ -413,13 +413,13 @@ def verify_apply(
     source: str | None = None,
     target: str | None = None,
     min_every: datetime.timedelta = instance.ROUTINE_MIN_EVERY,
-    clock: schedule.WallClock = _verify_clock,
+    now: schedule.WallClock = _verify_now,
 ) -> diagnostic.Checked[instance.Instance]:
     """Parse/build, then dry-run apply; return structured diagnostics on failure.
 
     Optional ``event_id`` / ``source`` / ``target`` stamp the behavior input event the
     same way Autonomy does for a live turn event (not metadata). A persistent routine is
-    instead started on a timer that fires its first schedule at once (``clock`` is the wall
+    instead started on a timer that fires its first schedule at once (``now`` is the wall
     clock its tick reads; ``min_every`` the shortest interval it may use), and the
     selections its tick emits are checked; ``input_data`` does not apply to it.
     """
@@ -437,7 +437,7 @@ def verify_apply(
         return checked
 
     if checked.value.lifetime == instance.LIFETIME_PERSISTENT:
-        return _verify_tick(program, checked=checked, clock=clock, timeout=timeout)
+        return _verify_tick(program, checked=checked, now=now, timeout=timeout)
 
     # metadata is telemetry pass-through into apply_once only — never selection binding.
     meta = dict(metadata or {})
@@ -496,13 +496,13 @@ def _verify_tick(
     program: str,
     *,
     checked: diagnostic.Checked[instance.Instance],
-    clock: schedule.WallClock,
+    now: schedule.WallClock,
     timeout: float,
 ) -> diagnostic.Checked[instance.Instance]:
     try:
         tick = typing.cast(
             events.TickData,
-            _run_coroutine(_tick_once(program, clock=clock, timeout=timeout)),
+            _run_coroutine(_tick_once(program, now=now, timeout=timeout)),
         )
     except Exception as error:
         message = str(error) or "persistent routine did not emit a tick for its first schedule."

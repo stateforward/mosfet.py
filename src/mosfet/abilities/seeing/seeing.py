@@ -410,7 +410,7 @@ class _MeasuredData(pydantic.BaseModel):
 
     source: str = pydantic.Field(min_length=1, description="Transducer the view came off.")
     visual: VisualData = pydantic.Field(description="The measured stimulus.")
-    received_at: datetime.datetime = pydantic.Field(description="When the view arrived, on Seeing's clock.")
+    received_at: datetime.datetime = pydantic.Field(description="When the view arrived, on Seeing's wall clock.")
     measurement: vision.change.Measurement = pydantic.Field(description="What the change measure answered.")
 
 
@@ -592,7 +592,7 @@ class Seeing(ability.Ability[VisualData, cognition.InputData]):
     _measure_timeout: datetime.timedelta
     _settle_after: datetime.timedelta
     _max_view_age: datetime.timedelta
-    _clock: collections.abc.Callable[[], datetime.datetime]
+    _now: collections.abc.Callable[[], datetime.datetime]
     _object_detection: vision.detection.ObjectDetection | None
     _face_detection: vision.faces.FaceDetection | None
     _registry: identification.Registry | None
@@ -612,6 +612,7 @@ class Seeing(ability.Ability[VisualData, cognition.InputData]):
         self,
         *,
         id: ability.AbilityId | None = None,
+        clock: hsm.Clock | None = None,
         change: vision.change.ChangeMeasure,
         object_detector: vision.detection.ObjectDetector | None = None,
         face_detector: vision.faces.FaceDetector | None = None,
@@ -624,7 +625,7 @@ class Seeing(ability.Ability[VisualData, cognition.InputData]):
         max_view_age: datetime.timedelta = _DEFAULT_MAX_VIEW_AGE,
         stage_timeout: datetime.timedelta = _DEFAULT_STAGE_TIMEOUT,
         restart_timeout: datetime.timedelta = _DEFAULT_RESTART_TIMEOUT,
-        clock: collections.abc.Callable[[], datetime.datetime] | None = None,
+        now: collections.abc.Callable[[], datetime.datetime] | None = None,
     ) -> None:
         """See through ``change``, the one measure of how much a view changed; there is no fallback.
 
@@ -632,7 +633,7 @@ class Seeing(ability.Ability[VisualData, cognition.InputData]):
         each wrapped in the typed stage this eye owns. ``faces`` is an unstarted face ``identification.Registry``
         (constructed with ``kind="face"``) that this eye owns from here on: its composite group
         starts it and attaches it for the eye's attached lifetime. The composition root may keep it
-        to send it ``identification.ForgetEvent``. ``clock`` is the timezone-aware clock view ages are
+        to send it ``identification.ForgetEvent``. ``now`` is the timezone-aware clock view ages are
         read from (UTC wall clock by default). The actors ``change.attachments`` names are attached
         for Seeing's attached lifetime.
 
@@ -659,7 +660,7 @@ class Seeing(ability.Ability[VisualData, cognition.InputData]):
             raise ValueError("Seeing measure_every cannot be longer than settle_after.")
         if faces is not None and face_detector is None:
             raise ValueError("Seeing faces needs a face_detector: a registry identifies the prints it detects.")
-        super().__init__(id=id)
+        super().__init__(id=id, clock=clock)
         self._change = change
         self._change_threshold = change_threshold
         self._measure_every = measure_every
@@ -668,7 +669,7 @@ class Seeing(ability.Ability[VisualData, cognition.InputData]):
         self._max_view_age = max_view_age
         self._stage_timeout = stage_timeout
         self._restart_timeout = restart_timeout
-        self._clock = _utc_now if clock is None else clock
+        self._now = _utc_now if now is None else now
         self._object_detection = (
             None if object_detector is None else vision.detection.ObjectDetection(classifier=object_detector)
         )
@@ -716,7 +717,7 @@ class Seeing(ability.Ability[VisualData, cognition.InputData]):
         visual = event.data
         assert isinstance(visual, VisualData)
         media_type = visual.image.media_type
-        now = instance._clock()
+        now = instance._now()
         for source, view in tuple(instance._views.items()):
             if not Seeing._is_fresh(instance, view, now):
                 Seeing._forget_source(instance, source)
@@ -769,7 +770,7 @@ class Seeing(ability.Ability[VisualData, cognition.InputData]):
     @staticmethod
     def _has_unmeasured_view(ctx: hsm.Context, instance: "Seeing", event: hsm.Event[typing.Any]) -> bool:
         del ctx, event
-        now = instance._clock()
+        now = instance._now()
         return any(not view.measured and Seeing._is_fresh(instance, view, now) for view in instance._views.values())
 
     @staticmethod
@@ -778,7 +779,7 @@ class Seeing(ability.Ability[VisualData, cognition.InputData]):
 
         del event
         instance._look_pending = False
-        now = instance._clock()
+        now = instance._now()
         fresh = sorted(
             (view for view in instance._views.values() if Seeing._is_fresh(instance, view, now)),
             key=lambda view: view.received_at,
@@ -820,7 +821,7 @@ class Seeing(ability.Ability[VisualData, cognition.InputData]):
         # The pick happens before the first await, so it sees exactly the views the next choice saw:
         # unmeasured fresh views, least recently measured source first (never measured first), ties
         # broken by the oldest arrival. That is a round robin across sources.
-        now = instance._clock()
+        now = instance._now()
         candidates = [
             (source, view)
             for source, view in instance._views.items()
@@ -934,7 +935,7 @@ class Seeing(ability.Ability[VisualData, cognition.InputData]):
             kind=measured.visual.kind,
             participants=measured.visual.participants,
             change=change,
-            age_ms=_age_ms(instance._clock(), measured.received_at),
+            age_ms=_age_ms(instance._now(), measured.received_at),
         )
         _ = hsm.dispatch(
             ctx,

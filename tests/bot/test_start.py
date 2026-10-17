@@ -10,6 +10,8 @@ import hsm
 import pytest
 
 import mosfet
+import mosfet.abilities
+import mosfet.device
 from mosfet.environment import Environment
 from mosfet.start import live_payload
 
@@ -202,6 +204,93 @@ def test_started_in_an_environment_without_a_clock_runs_on_hsms_own() -> None:
         return alarm.state()
 
     assert asyncio.run(run()) == "/Alarm/waiting"
+
+
+def real() -> hsm.Clock:
+    """A test clock of its own identity that waits each wait out in real time."""
+
+    async def after(duration: datetime.timedelta) -> datetime.datetime:
+        await asyncio.sleep(duration.total_seconds())
+        return datetime.datetime.now(datetime.UTC)
+
+    return hsm.Clock(after=after)
+
+
+def test_a_parts_own_clock_wins_over_the_environments() -> None:
+    """W7-33a: a device or ability built with a clock keeps time on it in an environment with another."""
+
+    environment_clock, own = real(), real()
+
+    async def run() -> tuple[hsm.Clock, hsm.Clock, hsm.Clock]:
+        environment = Environment(clock=environment_clock)
+        device, ability = mosfet.device.Device(clock=own), _Bell(clock=own)
+        sibling = mosfet.device.Device(id="sibling")
+        for part in (device, ability, sibling):
+            assert part.model is not None
+            _ = await mosfet.started(environment, part, part.model)
+        clocks = device.clock(), ability.clock(), sibling.clock()
+        for part in (device, ability, sibling):
+            await hsm.stop(part)
+        return clocks
+
+    assert asyncio.run(run()) == (own, own, environment_clock)
+
+
+def test_a_clock_given_at_start_wins_over_the_parts_own() -> None:
+    own, given = real(), real()
+
+    async def run() -> hsm.Clock:
+        device = mosfet.device.Device(clock=own)
+        assert device.model is not None
+        _ = await mosfet.started(Environment(), device, device.model, hsm.Config(clock=given))
+        clock = device.clock()
+        await hsm.stop(device)
+        return clock
+
+    assert asyncio.run(run()) is given
+
+
+def test_a_machine_started_in_another_keeps_time_on_the_clock_of_the_one_it_was_started_in() -> None:
+    """W7-33a: what a machine starts under its context follows its clock before the environment's."""
+
+    owner_clock, owner_asked = fast()
+    environment_clock, environment_asked = fast()
+
+    async def run() -> tuple[str, bool]:
+        environment = Environment(clock=environment_clock)
+        alarm, nested = Alarm(), Alarm()
+        _ = await mosfet.started(environment, alarm, Alarm.model, hsm.Config(clock=owner_clock))
+        _ = await mosfet.started(alarm.context(), nested, Alarm.model)
+        await _rung(nested)
+        return nested.state(), nested.clock() is owner_clock
+
+    assert asyncio.run(run()) == ("/Alarm/rang", True)
+    assert (owner_asked, environment_asked) == ([_RING_AFTER, _RING_AFTER], [])
+
+
+def test_a_machine_started_in_one_on_hsms_own_clock_keeps_the_environments() -> None:
+    """An owner that keeps hsm's own time has no clock to pass on, so the environment's is read."""
+
+    environment_clock, asked = fast()
+
+    async def run() -> str:
+        environment = Environment(clock=environment_clock)
+        alarm, nested = Alarm(), Alarm()
+        _ = await hsm.started(environment, alarm, Alarm.model)
+        _ = await mosfet.started(alarm.context(), nested, Alarm.model)
+        await _rung(nested)
+        return nested.state()
+
+    assert asyncio.run(run()) == "/Alarm/rang"
+    assert asked == [_RING_AFTER]
+
+
+class _Bell(mosfet.abilities.Ability[typing.Any, typing.Any]):
+    """An ability with nothing to do: it shows the clock an ability keeps time on."""
+
+    submodel: typing.ClassVar[hsm.Model | None] = mosfet.define(
+        "Bell", hsm.initial(hsm.target("quiet")), hsm.state("quiet")
+    )
 
 
 def test_started_without_otlp_does_not_publish_live(monkeypatch: pytest.MonkeyPatch) -> None:

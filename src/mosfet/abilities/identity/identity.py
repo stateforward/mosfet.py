@@ -264,10 +264,11 @@ class Identity(ability.Ability[SoundData, cognition.InputData]):
         self,
         *,
         id: ability.AbilityId | None = None,
+        clock: hsm.Clock | None = None,
         recognizer: recognition.NameRecognizer,
         memory: memory.MemoryStore | None = None,
     ) -> None:
-        super().__init__(id=id)
+        super().__init__(id=id, clock=clock)
         self._recognizer = recognizer
         # Not owned: the bot's memory is attached elsewhere (Ability attachment is exclusive), so
         # identity is a peer that reaches it by message rather than taking its lifecycle.

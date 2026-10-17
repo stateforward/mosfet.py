@@ -102,6 +102,7 @@ class Listening(ability.Ability[SoundData, cognition.InputData]):
         self,
         *,
         id: ability.AbilityId | None = None,
+        clock: hsm.Clock | None = None,
         voice_activity_classifier: voice.detection.VoiceActivityClassifier | None = None,
         transcription: streaming.SessionFactory | None = None,
         sound_classifier: sound.classification.SoundClassifier | None = None,
@@ -143,7 +144,7 @@ class Listening(ability.Ability[SoundData, cognition.InputData]):
                 non-positive ``overlap_min_voiced``).
         """
 
-        super().__init__(id=id)
+        super().__init__(id=id, clock=clock)
         if (voice_activity_classifier is None) == (transcription is None):
             raise ValueError("exactly one of voice_activity_classifier and transcription is required.")
         self._sensitivity = sensitivity.Sensitivity()

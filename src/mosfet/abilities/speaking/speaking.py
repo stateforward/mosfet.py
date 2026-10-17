@@ -844,7 +844,7 @@ class Speaking(ability.Ability[InputData, OutputData]):
     _stop_timeout: datetime.timedelta
     _draft_timeout: datetime.timedelta
     _voicing_timeout: datetime.timedelta
-    _clock: collections.abc.Callable[[], float]
+    _monotonic: collections.abc.Callable[[], float]
     # Durable: the utterance being spoken (None while idle), and a counter that tells utterances apart.
     _utterance: _Utterance | None
     _sequence: int
@@ -857,6 +857,7 @@ class Speaking(ability.Ability[InputData, OutputData]):
         self,
         *,
         id: ability.AbilityId | None = None,
+        clock: hsm.Clock | None = None,
         encoder: vocal.speech.SpeechEncoder | collections.abc.Callable[[str, str | None], vocal.speech.SpeechEncoder],
         speaker: audio.Speaker,
         listening: collections.abc.Sequence[hsm.Instance] = (),
@@ -867,7 +868,7 @@ class Speaking(ability.Ability[InputData, OutputData]):
         stop_timeout: datetime.timedelta = _STOP_TIMEOUT,
         draft_timeout: datetime.timedelta = _DRAFT_TIMEOUT,
         voicing_timeout: datetime.timedelta = _VOICING_TIMEOUT,
-        clock: collections.abc.Callable[[], float] = time.monotonic,
+        monotonic: collections.abc.Callable[[], float] = time.monotonic,
     ) -> None:
         """Build a Speaking ability.
 
@@ -888,13 +889,13 @@ class Speaking(ability.Ability[InputData, OutputData]):
                 the response (Communication's ``response_idle_timeout``) must be longer.
             voicing_timeout: The longest speech asked for before Speaking has its voice is held; then it fails
                 ``unavailable``, and so does speech asked for after it, until a voice comes.
-            clock: Monotonic seconds the first-audio latency and the encoding duration are measured on.
+            monotonic: Monotonic seconds the first-audio latency and the encoding duration are measured on.
 
         Raises:
             ValueError: A duration is not positive, or ``enroll_seconds`` is under 1.5 seconds.
         """
 
-        super().__init__(id=id)
+        super().__init__(id=id, clock=clock)
         if lookahead <= datetime.timedelta(0):
             raise ValueError(f"Speaking lookahead must be positive, got {lookahead}.")
         if encode_idle_timeout <= datetime.timedelta(0):
@@ -918,7 +919,7 @@ class Speaking(ability.Ability[InputData, OutputData]):
         self._stop_timeout = stop_timeout
         self._draft_timeout = draft_timeout
         self._voicing_timeout = voicing_timeout
-        self._clock = clock
+        self._monotonic = monotonic
         self._encoder, self._make_encoder, self._piece_bytes, self._enroll_bytes = None, None, 0, 0
         if isinstance(encoder, vocal.speech.SpeechEncoder):
             Speaking._voice_with(self, encoder)
@@ -1229,7 +1230,7 @@ class Speaking(ability.Ability[InputData, OutputData]):
             id=event.id or uuid.uuid4().hex,
             requester=Speaking._requester(instance, event),
             metadata=dict(event.metadata),
-            started_at=instance._clock(),
+            started_at=instance._monotonic(),
             pipe=pipe,
             stream=Speaking._voiced_encoder(instance).encode(pipe),
             drafted=isinstance(data, DraftData),
@@ -1413,7 +1414,7 @@ class Speaking(ability.Ability[InputData, OutputData]):
         utterance.commanded += data.seconds
         if not utterance.first_audio:
             utterance.first_audio = True
-            _FIRST_AUDIO.record(max(0.0, instance._clock() - utterance.started_at))
+            _FIRST_AUDIO.record(max(0.0, instance._monotonic() - utterance.started_at))
         enroll = utterance.enroll
         if enroll is not None and len(enroll) < instance._enroll_bytes:
             enroll.extend(data.audio[: instance._enroll_bytes - len(enroll)])
@@ -1561,7 +1562,7 @@ class Speaking(ability.Ability[InputData, OutputData]):
             finally:
                 # Measured however the close went: a close that raises still ends the span and is still counted.
                 _ENCODING.record(
-                    max(0.0, instance._clock() - utterance.started_at), {"outcome": utterance.encoding_outcome}
+                    max(0.0, instance._monotonic() - utterance.started_at), {"outcome": utterance.encoding_outcome}
                 )
                 if utterance.failure is not None:
                     span.record_failure(active, utterance.failure)

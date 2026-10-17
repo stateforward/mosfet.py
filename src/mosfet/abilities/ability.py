@@ -268,6 +268,8 @@ class Ability(Traced, attachment.Attachment, typing.Generic[TInput, TOutput]):
     _attachment_request_id: str
     # Construction-time and never rewritten: the body-local id the owning bot knows this ability by.
     _identity: str
+    # Construction-time and never rewritten: the clock this ability was built to keep time on.
+    _own_clock: hsm.Clock | None
     _composite_attachment_lifecycle: typing.ClassVar[bool] = False
     # Cognitive effort rating: stages declare ceilings; the frame builder drops abilities
     # beyond them (see Effort). Default XS: every cognition tier offers the ability.
@@ -1011,8 +1013,12 @@ class Ability(Traced, attachment.Attachment, typing.Generic[TInput, TOutput]):
             detached_notifications=cls.detached_notifications,
         )
 
-    def __init__(self, *, id: AbilityId | None = None) -> None:
+    def __init__(self, *, id: AbilityId | None = None, clock: hsm.Clock | None = None) -> None:
         """Build an unstarted ability, known to the bot it belongs to as ``id`` (its kind when omitted).
+
+        ``clock`` is the ``hsm.Clock`` it keeps time on (its ``hsm.after`` and ``hsm.every`` timers,
+        and what it starts in its own context); when omitted, the clock of whatever starts it, else
+        its environment's (see :meth:`own_clock`).
 
         Raises:
             ValueError: If ``id`` (or the kind it defaults to) is not a valid :data:`AbilityId`
@@ -1021,6 +1027,7 @@ class Ability(Traced, attachment.Attachment, typing.Generic[TInput, TOutput]):
 
         super().__init__()
         self._identity = _ABILITY_ID.validate_python(_kind(self) if id is None else id)
+        self._own_clock = clock
         self._attachments = []
         self._attachment_timeout = datetime.timedelta(seconds=30)
         self._attachment_request_id = ""
@@ -1034,6 +1041,16 @@ class Ability(Traced, attachment.Attachment, typing.Generic[TInput, TOutput]):
         """
 
         return self._identity
+
+    def own_clock(self) -> hsm.Clock | None:
+        """The clock this ability was built to keep time on, or ``None`` when it was built without one.
+
+        Like :meth:`identity`, it is fixed at construction and building the ability starts nothing.
+        ``mosfet.started`` reads it as the ability starts: a clock the start names wins over it, and
+        it wins over the clock of whatever starts the ability and over its environment's.
+        """
+
+        return self._own_clock
 
     @typing.override
     def attach(

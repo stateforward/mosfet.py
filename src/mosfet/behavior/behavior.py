@@ -327,7 +327,7 @@ class Behavior(abilities.Ability[object, object]):
     output_event: typing.ClassVar[hsm.Event[object]]
     failed_event: typing.ClassVar[hsm.Event[ability.FailureData]]
     _spec: source.Source
-    _clock: schedule.WallClock | None
+    _now: schedule.WallClock | None
     _callback_runtime: runtime.CallbackRuntime
     _guard_evaluator: _GuardEvaluator
     _callback_executor: _CallbackExecutor
@@ -543,12 +543,12 @@ class Behavior(abilities.Ability[object, object]):
         """Host effect of a schedule's timer: stamp the tick and hand it to the routine's transition."""
 
         def fire(ctx: hsm.Context, instance: Behavior, event: hsm.Event[object]) -> None:
-            clock = instance._clock
-            if clock is None:
+            now = instance._now
+            if now is None:
                 _dispatch_callback_failure(ctx, instance, event, f"{instance._spec.name} has no injected clock.")
                 return
             try:
-                fired_at = clock()
+                fired_at = now()
                 tick = events.TickData(
                     name=instance._spec.name,
                     trigger=trigger,
@@ -580,25 +580,36 @@ class Behavior(abilities.Ability[object, object]):
 
         def delay(ctx: hsm.Context, instance: Behavior, event: hsm.Event[object]) -> datetime.timedelta:
             del ctx, event
-            clock = instance._clock
-            # start() refuses a persistent routine without a clock; a negative delay ends the loop.
-            if clock is None:
+            now = instance._now
+            # start() refuses a persistent routine without a wall clock; a negative delay ends the loop.
+            if now is None:
                 return datetime.timedelta(seconds=-1)
-            return at.delay_from(clock())
+            return at.delay_from(now())
 
         delay.__name__ = "_behavior_at_delay"
         return delay
 
     def __init__(
-        self, *, id: ability.AbilityId | None = None, spec: source.Source, clock: schedule.WallClock | None = None
+        self,
+        *,
+        id: ability.AbilityId | None = None,
+        spec: source.Source,
+        now: schedule.WallClock | None = None,
+        clock: hsm.Clock | None = None,
     ) -> None:
-        super().__init__(id=id)
+        """A behavior compiled from ``spec``; ``now`` is the timezone-aware wall clock its schedules read.
+
+        ``clock`` is the ``hsm.Clock`` its timers wait on (see ``Ability``); ``now`` is only read for
+        the time of day, and a persistent routine refuses to start without it.
+        """
+
+        super().__init__(id=id, clock=clock)
         callback_runtime = runtime.CallbackRuntime(
             source=spec.source,
             declared_events=spec.declared_event_specs(failed_event=typing.cast(hsm.Event[object], self.failed_event)),
         )
         self._spec = spec
-        self._clock = clock
+        self._now = now
         self._callback_runtime = callback_runtime
         self._guard_evaluator = _GuardEvaluator(callback_runtime=callback_runtime, owner=self)
         self._callback_executor = _CallbackExecutor(callback_runtime=callback_runtime, owner=self)
@@ -606,9 +617,9 @@ class Behavior(abilities.Ability[object, object]):
     @typing.override
     async def start(self, ctx: hsm.Context, data: object = None) -> typing.Self:
         if self._spec.lifetime == LIFETIME_PERSISTENT:
-            if self._clock is None:
+            if self._now is None:
                 raise ValueError(f"persistent routine {self._spec.name} needs an injected wall clock.")
-            now = self._clock()
+            now = self._now()
             if now.tzinfo is None or now.utcoffset() is None:
                 raise ValueError(f"persistent routine {self._spec.name} needs a timezone-aware wall clock.")
         await self._callback_runtime.warm()

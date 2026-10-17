@@ -38,9 +38,10 @@ class Environment(hsm.Context):
     outside this module: Environment is a scope, not a registry.
 
     An environment may keep time on its own ``clock`` (an ``hsm.Clock``, such as a test clock): every
-    machine started in it with ``mosfet.started`` reads that clock when it starts, unless its start
-    names one, and runs its ``hsm.after`` and ``hsm.every`` timers on it. A scope under it, and one
-    revived from it, keeps the same clock.
+    machine started in it with ``mosfet.started`` reads that clock when it starts and runs its
+    ``hsm.after`` and ``hsm.every`` timers on it, unless its start names one, it was built with its
+    own (``Device(clock=)``, ``Ability(clock=)``), or the machine it is started in keeps its own. A
+    scope under it, and one revived from it, keeps the same clock.
     """
 
     _instances: weakref.WeakValueDictionary[str, hsm.Instance]

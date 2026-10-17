@@ -271,7 +271,7 @@ def _mind(declared: elements.CognitionElement, traits: elements.TraitsElement | 
     processor = typing.cast(processing.Processor, declared.processor)
     given = typing.cast(memory.Memory | None, declared.memory)
     store = memory.Memory() if given is None else given
-    clock = typing.cast(schedule.WallClock | None, declared.routines)
+    now = typing.cast(schedule.WallClock | None, declared.routines)
     self_knowledge = (
         None
         if traits is None
@@ -282,7 +282,7 @@ def _mind(declared: elements.CognitionElement, traits: elements.TraitsElement | 
         reasoning=cognition.Reasoning(processor=processor),
         reflection=cognition.Reflection(processor=processor, memory=store, persona=self_knowledge),
         autonomy=cognition.Autonomy(memory=store) if declared.autonomy else None,
-        routines=None if clock is None else cognition.Routines(memory=store, clock=clock),
+        routines=None if now is None else cognition.Routines(memory=store, now=now),
         memory=store,
         associative=memory.Associative(memory=store) if declared.associative else None,
         consolidation=memory.Consolidation(memory=store, processor=processor) if declared.consolidation else None,

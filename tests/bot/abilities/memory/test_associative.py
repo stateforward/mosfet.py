@@ -169,11 +169,11 @@ async def _harness(
     store = memory.Memory(
         engine=memory.store.open_sqlite_engine(),
         embedder=embedder,
-        clock=lambda: next(stamps),
+        now=lambda: next(stamps),
         embed_timeout=datetime.timedelta(seconds=5),
         operation_timeout=datetime.timedelta(seconds=10),
     )
-    associative = memory.Associative(memory=store, budget_tokens=budget_tokens, clock=lambda: _NOW, timeout=timeout)
+    associative = memory.Associative(memory=store, budget_tokens=budget_tokens, now=lambda: _NOW, timeout=timeout)
     return Harness(ctx=ctx, memory=store, associative=associative, owner=owner, memory_owner=memory_owner)
 
 

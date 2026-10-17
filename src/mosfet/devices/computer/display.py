@@ -45,10 +45,11 @@ class Display(Device):
         self,
         *,
         id: DeviceId | None = None,
+        clock: hsm.Clock | None = None,
         peripherals: collections.abc.Iterable[Device] = (),
         placement: space.Placement | None = None,
     ) -> None:
-        super().__init__(id=id, peripherals=peripherals, placement=placement)
+        super().__init__(id=id, clock=clock, peripherals=peripherals, placement=placement)
         self._stream = None
 
     @staticmethod

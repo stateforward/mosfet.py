@@ -215,6 +215,7 @@ class Consolidation(ability.Ability[payload.RestData, payload.UnitOutcomeData]):
         self,
         *,
         id: ability.AbilityId | None = None,
+        clock: hsm.Clock | None = None,
         memory: memory.Memory,
         processor: processing.Processor,
         instructions: str | None = None,
@@ -224,7 +225,7 @@ class Consolidation(ability.Ability[payload.RestData, payload.UnitOutcomeData]):
     ) -> None:
         if timeout <= datetime.timedelta(0):
             raise ValueError("Consolidation timeout must be positive.")
-        super().__init__(id=id)
+        super().__init__(id=id, clock=clock)
         self._memory = memory
         self._processing = processing.Processing(
             processor=processor, instructions=INSTRUCTIONS if instructions is None else instructions

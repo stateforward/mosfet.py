@@ -48,7 +48,7 @@ class Fixture:
 def _fixture(*, max_ids: int = 100, policy: identification.MatchPolicy = _POLICY) -> Fixture:
     clock = Clock()
     store = identification.InProcessStore(max_ids=max_ids)
-    return Fixture(store=store, matcher=identification.Matcher(store=store, policy=policy, clock=clock), clock=clock)
+    return Fixture(store=store, matcher=identification.Matcher(store=store, policy=policy, now=clock), clock=clock)
 
 
 def _identify(

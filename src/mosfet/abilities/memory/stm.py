@@ -429,27 +429,28 @@ class StmMemory(store.MemoryStore):
     _attachment_group: attachment.Group | None
     _capacity: int
     _recency_window: datetime.timedelta
-    _clock: collections.abc.Callable[[], datetime.datetime]
+    _now: collections.abc.Callable[[], datetime.datetime]
 
     def __init__(
         self,
         *,
         id: ability.AbilityId | None = None,
+        clock: hsm.Clock | None = None,
         engine: typing.Any | None = None,
         connection: typing.Any | None = None,
         database: str = ":memory:",
         capacity: int = _DEFAULT_CAPACITY,
         recency_window: datetime.timedelta | None = None,
-        clock: collections.abc.Callable[[], datetime.datetime] | None = None,
+        now: collections.abc.Callable[[], datetime.datetime] | None = None,
     ) -> None:
-        super().__init__(id=id, engine=engine, connection=connection, database=database)
+        super().__init__(id=id, clock=clock, engine=engine, connection=connection, database=database)
         if capacity <= 0:
             raise ValueError("capacity must be positive.")
         if recency_window is not None and recency_window <= datetime.timedelta():
             raise ValueError("recency_window must be positive.")
         self._capacity = capacity
         self._recency_window = recency_window if recency_window is not None else _DEFAULT_RECENCY_WINDOW
-        self._clock = clock if clock is not None else (lambda: datetime.datetime.now(datetime.timezone.utc))
+        self._now = now if now is not None else (lambda: datetime.datetime.now(datetime.timezone.utc))
         self._attachment_group = attachment.Group()
 
     @classmethod
@@ -466,7 +467,7 @@ class StmMemory(store.MemoryStore):
             event_id=data.event_id,
             source=data.source,
             target=data.target,
-            created_at=_utc_text(self._clock()),
+            created_at=_utc_text(self._now()),
         )
         evict_clause = delete(schema.stm_memory_table).where(
             schema.stm_memory_table.c.stm_id.not_in(
@@ -481,12 +482,12 @@ class StmMemory(store.MemoryStore):
         access_clause = (
             update(schema.stm_memory_table)
             .where(schema.stm_memory_table.c.stm_id.in_(data.stm_ids))
-            .values(last_accessed_at=_utc_text(self._clock()))
+            .values(last_accessed_at=_utc_text(self._now()))
         )
         _ = self._execute(store.InputData(statements=store.compile_statements(access_clause)))
 
     def _recent(self, data: RecentData) -> RecentOutputData:
-        cutoff = _utc_text(self._clock() - self._recency_window)
+        cutoff = _utc_text(self._now() - self._recency_window)
         effective = _effective_time(schema.stm_memory_table)
         clause = select(
             schema.stm_memory_table.c.stm_id,

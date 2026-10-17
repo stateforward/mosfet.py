@@ -247,6 +247,47 @@ def test_running_runs_the_bot_and_its_parts_on_the_clock_it_is_given() -> None:
     assert _RING_AFTER in asked
 
 
+def test_a_part_built_with_its_own_clock_keeps_time_on_it_while_its_siblings_keep_the_environments() -> None:
+    """W7-33a: a part's own clock wins over the environment's, for that part only."""
+
+    def recording() -> tuple[hsm.Clock, list[datetime.timedelta]]:
+        asked: list[datetime.timedelta] = []
+
+        async def after(duration: datetime.timedelta) -> datetime.datetime:
+            asked.append(duration)
+            if duration != _RING_AFTER:
+                await asyncio.sleep(duration.total_seconds())
+            return datetime.datetime.now(datetime.UTC)
+
+        return hsm.Clock(after=after), asked
+
+    environment_clock, environment_asked = recording()
+    own, own_asked = recording()
+    near, far = _Alarm(id="near", clock=own), _Alarm(id="far")
+    model = bot.define(
+        "greeter",
+        bot.cognition(testing.Scripted()),
+        bot.attach(near),
+        bot.attach(far),
+        bot.allow("ability_without_tools", "no_devices"),
+    )
+
+    async def run() -> tuple[str, str]:
+        async with testing.running(model, clock=environment_clock):
+            for _ in range(100):
+                if near.state().endswith("/rang") and far.state().endswith("/rang"):
+                    break
+                await asyncio.sleep(0)
+            return near.state(), far.state()
+
+    states = asyncio.run(run())
+
+    assert all(state.endswith("/behavior/rang") for state in states)
+    # Each clock is asked for one hour, the alarm keeping time on it; the near alarm's other waits
+    # (its attach bound) are on its own clock too.
+    assert (own_asked.count(_RING_AFTER), environment_asked.count(_RING_AFTER)) == (1, 1)
+
+
 def test_running_takes_actors_that_declare_their_model() -> None:
     async def run() -> None:
         async with testing.running(_greeter(), actors=(hsm.Instance(),)):

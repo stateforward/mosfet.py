@@ -14,18 +14,18 @@ from . import schedule
 from . import source
 
 
-def build(program: str, *, clock: schedule.WallClock | None = None) -> behavior.Behavior:
+def build(program: str, *, now: schedule.WallClock | None = None) -> behavior.Behavior:
     """Compile Starlark behavior source into an executable HSM-backed behavior.
 
     Behaviors may only dispatch and process modeled events; they have no ability bindings.
-    ``clock`` is the timezone-aware wall clock a persistent routine's schedules read; a
+    ``now`` is the timezone-aware wall clock a persistent routine's schedules read; a
     persistent routine refuses to start without one, and turn behaviors never read it.
     """
 
-    return _build_program(program.strip(), clock=clock)
+    return _build_program(program.strip(), now=now)
 
 
-def _build_program(program: str, *, clock: schedule.WallClock | None) -> behavior.Behavior:
+def _build_program(program: str, *, now: schedule.WallClock | None) -> behavior.Behavior:
     if not program:
         raise ValueError("Behavior source must be non-empty starlark.")
     spec = source.parse_source(program)
@@ -57,7 +57,7 @@ def _build_program(program: str, *, clock: schedule.WallClock | None) -> behavio
         {},
         lambda namespace_dict: namespace_dict.update(namespace),
     )
-    return typing.cast(behavior.Behavior, behavior_type(spec=spec, clock=clock))
+    return typing.cast(behavior.Behavior, behavior_type(spec=spec, now=now))
 
 
 __all__ = ["build"]

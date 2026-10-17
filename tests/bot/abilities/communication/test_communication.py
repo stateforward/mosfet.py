@@ -83,7 +83,7 @@ def _speaking(
 ) -> speaking.Speaking:
     return speaking.Speaking(
         encoder=encoder or Script(),
-        speaker=speaker or audio.Speaker(frame=datetime.timedelta(milliseconds=10), clock=_instant()),
+        speaker=speaker or audio.Speaker(frame=datetime.timedelta(milliseconds=10), monotonic=_instant()),
         conversation=conversation,
         encode_idle_timeout=encode_idle_timeout,
     )
@@ -295,7 +295,7 @@ def test_communication_respond_without_id_mints_unique_operation_identity(monkey
 
         speaker = RecordingSpeaking(
             encoder=Script(),
-            speaker=audio.Speaker(frame=datetime.timedelta(milliseconds=10), clock=_instant()),
+            speaker=audio.Speaker(frame=datetime.timedelta(milliseconds=10), monotonic=_instant()),
         )
         comm = communication.Communication(active_conversation=_conversation(), speaking=speaker)
         collector = await _owned(ctx, speaker, comm)
@@ -372,7 +372,7 @@ def test_communication_gives_up_on_a_response_after_its_idle_timeout_of_silence_
         # Speaking itself would wait far longer than the test for an encoding that never starts.
         speaker = RecordingSpeaking(
             encoder=Script(stall=True),
-            speaker=audio.Speaker(frame=datetime.timedelta(milliseconds=10), clock=_instant()),
+            speaker=audio.Speaker(frame=datetime.timedelta(milliseconds=10), monotonic=_instant()),
             encode_idle_timeout=datetime.timedelta(seconds=60),
         )
         comm = communication.Communication(
@@ -452,7 +452,7 @@ class ForwardRecordingSpeaking(speaking.Speaking):
     def __init__(self, encoder: Script) -> None:
         super().__init__(
             encoder=encoder,
-            speaker=audio.Speaker(frame=datetime.timedelta(milliseconds=10), clock=_instant()),
+            speaker=audio.Speaker(frame=datetime.timedelta(milliseconds=10), monotonic=_instant()),
         )
         self.forwarded: list[hsm.Event[typing.Any]] = []
 

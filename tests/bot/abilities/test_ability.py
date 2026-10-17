@@ -1637,3 +1637,26 @@ def test_ability_id_must_be_an_ability_id(bad: str) -> None:
         _ = DetachedReplyingAbility(id=bad)
     with pytest.raises(pydantic.ValidationError):
         _ = ability_ids.validate_python(bad)
+
+
+def test_ability_clock_is_the_one_it_was_built_with() -> None:
+    """W7-33a: an ability may be built with a clock of its own, and keeps time on it once started."""
+
+    async def after(duration: datetime.timedelta) -> datetime.datetime:
+        await asyncio.sleep(duration.total_seconds())
+        return datetime.datetime.now(datetime.UTC)
+
+    own, environment_clock = hsm.Clock(after=after), hsm.Clock(after=after)
+
+    async def run() -> hsm.Clock:
+        ability = DetachedReplyingAbility(clock=own)
+        model = DetachedReplyingAbility.model
+        assert model is not None
+        _ = await mosfet.started(environment.Environment(clock=environment_clock), ability, model)
+        clock = ability.clock()
+        await hsm.stop(ability)
+        return clock
+
+    assert DetachedReplyingAbility(clock=own).own_clock() is own
+    assert DetachedReplyingAbility().own_clock() is None
+    assert asyncio.run(run()) is own

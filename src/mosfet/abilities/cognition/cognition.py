@@ -2061,6 +2061,7 @@ class Cognition(ability.Ability[InputData, OutputData]):
         self,
         *,
         id: ability.AbilityId | None = None,
+        clock: hsm.Clock | None = None,
         intuition: intuition.Intuition,
         reasoning: reasoning.Reasoning,
         reflection: reflection.Reflection,
@@ -2075,7 +2076,7 @@ class Cognition(ability.Ability[InputData, OutputData]):
         child_operation_timeout: datetime.timedelta | None = None,
         cancel_teardown_timeout: datetime.timedelta | None = None,
     ) -> None:
-        super().__init__(id=id)
+        super().__init__(id=id, clock=clock)
         if child_operation_timeout is not None and child_operation_timeout <= datetime.timedelta():
             raise ValueError("child_operation_timeout must be positive.")
         if cancel_teardown_timeout is not None and cancel_teardown_timeout <= datetime.timedelta():

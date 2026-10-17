@@ -1354,6 +1354,7 @@ class Phone(mosfet.device.Device):
         self,
         *,
         id: mosfet.device.DeviceId | None = None,
+        clock: hsm.Clock | None = None,
         microphone: audio.Microphone | None = None,
         speaker: audio.Speaker | None = None,
         display: Display | None = None,
@@ -1392,6 +1393,7 @@ class Phone(mosfet.device.Device):
         # it carries no placement of its own.
         super().__init__(
             id=id,
+            clock=clock,
             peripherals=(resolved_microphone, resolved_speaker, resolved_display, *tuple(peripherals)),
             placement=placement,
         )

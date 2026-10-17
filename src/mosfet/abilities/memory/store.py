@@ -460,11 +460,12 @@ class MemoryStore(ability.Ability[InputData, OutputData]):
         self,
         *,
         id: ability.AbilityId | None = None,
+        clock: hsm.Clock | None = None,
         engine: Engine | None = None,
         connection: typing.Any | None = None,
         database: str = ":memory:",
     ) -> None:
-        super().__init__(id=id)
+        super().__init__(id=id, clock=clock)
         if engine is not None and (connection is not None or database != ":memory:"):
             raise ValueError("MemoryStore takes either engine or database/connection, not both.")
         self._engine = None

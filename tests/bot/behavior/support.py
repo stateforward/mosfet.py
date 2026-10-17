@@ -101,6 +101,9 @@ behavior = hsm.define(
 """.strip()
 
 
+_NO_WAIT = datetime.timedelta(0)
+
+
 class ManualTimers(hsm.Clock):
     """HSM timer clock whose waits resolve only when a test fires them."""
 
@@ -115,24 +118,32 @@ class ManualTimers(hsm.Clock):
         self.pending.append((duration, waiter))
         return waiter
 
-    async def next_wait(self, *, timeout: float = 10.0) -> datetime.timedelta:
-        """The duration of the oldest wait not yet fired, once one exists."""
+    async def next_wait(
+        self, *, timeout: float = 10.0, longer_than: datetime.timedelta = _NO_WAIT
+    ) -> datetime.timedelta:
+        """The duration of the oldest wait not yet fired and longer than ``longer_than``, once one exists."""
 
         deadline = asyncio.get_running_loop().time() + timeout
         while True:
             for duration, waiter in self.pending:
-                if not waiter.done():
+                if not waiter.done() and duration > longer_than:
                     return duration
             if asyncio.get_running_loop().time() > deadline:
                 raise TimeoutError("no timer wait became pending")
             await asyncio.sleep(0.01)
 
-    async def fire(self, at: datetime.datetime, *, timeout: float = 10.0) -> datetime.timedelta:
-        """Fire the oldest pending wait as of wall time ``at``; return the duration it waited for."""
+    async def fire(
+        self,
+        at: datetime.datetime,
+        *,
+        timeout: float = 10.0,
+        longer_than: datetime.timedelta = _NO_WAIT,
+    ) -> datetime.timedelta:
+        """Fire the oldest pending wait longer than ``longer_than`` as of wall time ``at``; return its duration."""
 
-        duration = await self.next_wait(timeout=timeout)
+        duration = await self.next_wait(timeout=timeout, longer_than=longer_than)
         for waited, waiter in self.pending:
-            if not waiter.done():
+            if not waiter.done() and waited > longer_than:
                 waiter.set_result(at)
                 break
         return duration

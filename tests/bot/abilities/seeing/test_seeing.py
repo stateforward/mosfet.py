@@ -481,7 +481,7 @@ async def _harness(
     measure_timeout: datetime.timedelta = _MEASURE_TIMEOUT,
     settle_after: datetime.timedelta = _SETTLE_AFTER,
     max_view_age: datetime.timedelta = _MAX_VIEW_AGE,
-    clock: ManualClock | None = None,
+    now: ManualClock | None = None,
     object_detector: vision.detection.ObjectDetector | None = None,
     face_detector: vision.faces.FaceDetector | None = None,
     faces: identification.Registry | None = None,
@@ -502,7 +502,7 @@ async def _harness(
         measure_timeout=measure_timeout,
         settle_after=settle_after,
         max_view_age=max_view_age,
-        clock=clock,
+        now=now,
         object_detector=object_detector,
         face_detector=face_detector,
         faces=faces,
@@ -627,7 +627,7 @@ def test_construction_requires_a_change_measure_and_valid_settings() -> None:
 
 def test_a_sources_first_view_is_handed_on_as_a_change_sight_under_fresh_ids() -> None:
     async def run() -> tuple[Harness, list[tuple[float, hsm.Event[typing.Any], seeing.SightData]]]:
-        harness = await _harness(clock=ManualClock())
+        harness = await _harness(now=ManualClock())
         await harness.frame("camera-1", _jpeg("a"), event_id="visual-1", participants=(_PERSON,))
         await harness.owner.until(lambda: len(harness.sights()) == 1)
         await harness.frame("camera-1", _jpeg("b"), event_id="visual-2", participants=(_PERSON, _OTHER))
@@ -874,7 +874,7 @@ def test_salient_frames_within_settle_after_give_one_sight_now_and_one_after_it(
 def test_a_look_hands_on_every_fresh_view_newest_first_under_fresh_ids() -> None:
     async def run() -> tuple[Harness, list[tuple[float, hsm.Event[typing.Any], seeing.SightData]]]:
         clock = ManualClock()
-        harness = await _harness(FakeChange(fail=True), clock=clock)
+        harness = await _harness(FakeChange(fail=True), now=clock)
         await harness.frame("camera-a", _jpeg("a"), participants=(_PERSON,))
         await harness.until_calls(1)
         clock.now = _T0 + 100 * _MS
@@ -925,7 +925,7 @@ def test_a_look_leaves_the_last_handed_on_signature_alone() -> None:
 def test_a_look_with_nothing_or_only_stale_views_in_view_sees_nothing() -> None:
     async def run() -> list[tuple[float, hsm.Event[typing.Any], seeing.SightData]]:
         clock = ManualClock()
-        harness = await _harness(FakeChange(fail=True), clock=clock, max_view_age=datetime.timedelta(seconds=1))
+        harness = await _harness(FakeChange(fail=True), now=clock, max_view_age=datetime.timedelta(seconds=1))
         await harness.look("empty")
         await harness.owner.until(lambda: len(harness.sights()) == 1)
         await harness.frame("camera-1", _jpeg("a"))
@@ -1074,7 +1074,7 @@ def test_a_stale_view_is_expired_when_the_next_frame_arrives(
 ) -> None:
     async def run() -> list[tuple[float, hsm.Event[typing.Any], seeing.SightData]]:
         clock = ManualClock()
-        harness = await _harness(FakeChange(fail=True), clock=clock, max_view_age=datetime.timedelta(seconds=1))
+        harness = await _harness(FakeChange(fail=True), now=clock, max_view_age=datetime.timedelta(seconds=1))
         await harness.frame("camera-a", _jpeg("a"))
         await harness.until_calls(1)
         clock.now = _T0 + datetime.timedelta(seconds=2)

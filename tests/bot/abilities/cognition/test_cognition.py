@@ -3609,11 +3609,16 @@ async def _until_routines(condition: collections.abc.Callable[[], bool], *, time
         await asyncio.sleep(0.01)
 
 
+# Routines keeps time on the routines' clock too, and its own bounds (the attach and the memory
+# reply) are shorter than any schedule may be, so a wait past the shortest schedule is a routine's.
+_SCHEDULE_FLOOR = behavior_instance.ROUTINE_MIN_EVERY - datetime.timedelta(seconds=1)
+
+
 def _open_routine_waits(timers: object) -> list[datetime.timedelta]:
     from tests.bot.behavior.support import ManualTimers
 
     assert isinstance(timers, ManualTimers)
-    return [duration for duration, waiter in timers.pending if not waiter.done()]
+    return [duration for duration, waiter in timers.pending if not waiter.done() and duration > _SCHEDULE_FLOOR]
 
 
 def test_cognition_reconciles_routines_after_reflection_settles() -> None:
@@ -3627,7 +3632,7 @@ def test_cognition_reconciles_routines_after_reflection_settles() -> None:
             intuition=intuition,
             reasoning=reasoning,
             reflection=cognition.Reflection(processor=FixedProcessor(empty_output()), memory=store),
-            routines=cognition.Routines(memory=store, clock=lambda: _ROUTINE_START, timers=timers),
+            routines=cognition.Routines(memory=store, now=lambda: _ROUTINE_START, clock=timers),
             memory=store,
         )
         ctx = await start_cognition_ability_for_test(ability)
@@ -3692,7 +3697,7 @@ def test_cognition_hands_routine_ticks_to_the_body_as_observed_input(tmp_path: p
             intuition=intuition,
             reasoning=reasoning,
             reflection=cognition.Reflection(processor=FixedProcessor(empty_output()), memory=store),
-            routines=cognition.Routines(memory=store, clock=lambda: _ROUTINE_START, timers=timers),
+            routines=cognition.Routines(memory=store, now=lambda: _ROUTINE_START, clock=timers),
             memory=store,
         )
         body = _RoutineTickBody()
@@ -3701,7 +3706,7 @@ def test_cognition_hands_routine_ticks_to_the_body_as_observed_input(tmp_path: p
         await ability.attach(ctx, attachment.AttachEvent.with_data_and_id(attachment.AttachData(actor=body), "attach"))
         try:
             await _until_routines(lambda: bool(_open_routine_waits(timers)))
-            _ = await timers.fire(_ROUTINE_START)
+            _ = await timers.fire(_ROUTINE_START, longer_than=_SCHEDULE_FLOOR)
             await _until_routines(lambda: bool(body.handoffs))
             return body.handoffs[0], hsm.id(ability)
         finally:

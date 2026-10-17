@@ -4,8 +4,8 @@ A routine is a behavior whose inventory ``lifetime`` is ``persistent`` (see
 ``mosfet.behavior``). On every ``ReconcileEvent`` Routines asks the injected MemoryStore, by
 message, for every ACTIVE persistent row, builds each one with the injected wall clock, and
 starts it under its own lifetime context with itself as the attachment owner, so the routine's
-schedules run until it is stopped. Nothing is replayed after a restart: intervals restart from
-start and ``at()`` schedules wait for their next occurrence.
+schedules run, on Routines' own ``hsm`` clock, until it is stopped. Nothing is replayed after a
+restart: intervals restart from start and ``at()`` schedules wait for their next occurrence.
 
 The owner says when the inventory is reachable. Memory is a peer state machine attached by
 another owner, so Routines does not read it on its own attach; Cognition dispatches
@@ -124,8 +124,7 @@ class Routines(ability.Ability[ReconcileData, behavior.TickData]):
     output_event: typing.ClassVar[hsm.Event[typing.Any]] = behavior.TickEvent
 
     _memory: memory.MemoryStore
-    _clock: schedule.WallClock
-    _timers: hsm.Clock | None
+    _now: schedule.WallClock
     _running: dict[str, _Running]
     _stopping: list[behavior.Behavior]
 
@@ -148,13 +147,14 @@ class Routines(ability.Ability[ReconcileData, behavior.TickData]):
             stage="start",
         ):
             # Parsing runs an isolated Starlark worker process: keep it off the event loop.
-            routine = await asyncio.to_thread(behavior.build, row.source, clock=instance._clock)
+            routine = await asyncio.to_thread(behavior.build, row.source, now=instance._now)
             model = routine.model
             assert model is not None
             lifetime = instance.context()
             # Parent under Routines' own lifetime context, not this reconcile activity's
-            # (HSM-CONTEXT-001): the routine outlives the activity that starts it.
-            _ = await mosfet.started(lifetime, routine, model, hsm.Config(clock=instance._timers))
+            # (HSM-CONTEXT-001): the routine outlives the activity that starts it, and keeps time
+            # on Routines' clock, the clock of the machine it is started in.
+            _ = await mosfet.started(lifetime, routine, model)
             try:
                 _ = await routine.attach(
                     lifetime,
@@ -345,20 +345,19 @@ class Routines(ability.Ability[ReconcileData, behavior.TickData]):
         *,
         id: ability.AbilityId | None = None,
         memory: memory.MemoryStore,
-        clock: schedule.WallClock,
-        timers: hsm.Clock | None = None,
+        now: schedule.WallClock,
+        clock: hsm.Clock | None = None,
     ) -> None:
         """Construct Routines over an injected behavior inventory and clocks.
 
-        ``memory`` holds the behavior inventory; ``clock`` is the timezone-aware wall clock every
-        routine's schedules read; ``timers`` is the HSM timer clock routines wait on (``None``
-        uses the HSM default, real time).
+        ``memory`` holds the behavior inventory; ``now`` is the timezone-aware wall clock every
+        routine's schedules read; ``clock`` is the ``hsm`` clock Routines and every routine it
+        starts wait on (when omitted, the clock of whatever starts Routines, else its environment's).
         """
 
-        super().__init__(id=id)
+        super().__init__(id=id, clock=clock)
         self._memory = memory
-        self._clock = clock
-        self._timers = timers
+        self._now = now
         self._running = {}
         self._stopping = []
 

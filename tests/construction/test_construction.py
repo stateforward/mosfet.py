@@ -117,7 +117,7 @@ _CASES: dict[str, collections.abc.Callable[[pathlib.Path], object]] = {
     "cognition.Reflection": lambda tmp: cognition.Reflection(processor=_Processor(), memory=memory.Memory()),
     "cognition.Cognition": lambda tmp: _cognition(),
     "autonomy.Autonomy": lambda tmp: autonomy.Autonomy(),
-    "routines.Routines": lambda tmp: routines.Routines(memory=memory.Memory(), clock=_clock),
+    "routines.Routines": lambda tmp: routines.Routines(memory=memory.Memory(), now=_clock),
     "persona.Persona": lambda tmp: persona.Persona(traits=persona.Traits(traits=("curious",))),
     "speaking.Speaking": lambda tmp: _speaking(),
     "communication.Communication": lambda tmp: communication.Communication(

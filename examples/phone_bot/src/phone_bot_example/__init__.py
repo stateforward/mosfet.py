@@ -464,7 +464,7 @@ def _phone_cognition(
         reasoning=cognition.Reasoning(processor=deliberate),
         reflection=cognition.Reflection(processor=reflection_processor, memory=store),
         # Persistent routines the bot authors keep running here; their schedules read UTC wall time.
-        routines=cognition.Routines(memory=store, clock=functools.partial(datetime.datetime.now, datetime.UTC)),
+        routines=cognition.Routines(memory=store, now=functools.partial(datetime.datetime.now, datetime.UTC)),
         memory=store,
         associative=memory.Associative(memory=store),
         # While the bot rests, its reflection model consolidates what it remembers.
@@ -530,11 +530,13 @@ class ExampleConversation(abilities.Conversation):
         self,
         *,
         id: ability.AbilityId | None = None,
+        clock: hsm.Clock | None = None,
         turn_detector: turn_detector.TurnDetector,
         encoder: abilities.VoiceEncoder | None = None,
     ) -> None:
         super().__init__(
             id=id,
+            clock=clock,
             turn_detector=turn_detector,
             encoder=encoder if encoder is not None else HostOwnedVoiceEncoder(),
         )

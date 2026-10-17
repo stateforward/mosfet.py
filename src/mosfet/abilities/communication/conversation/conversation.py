@@ -941,6 +941,7 @@ class Conversation(ability.Ability[TurnData, Messages]):
         self,
         *,
         id: ability.AbilityId | None = None,
+        clock: hsm.Clock | None = None,
         turn_detector: turn_detector.TurnDetector | None = None,
         turn_detector_factory: TurnDetectorFactory | None = None,
         typing: language.TextGeneration | None = None,
@@ -963,7 +964,7 @@ class Conversation(ability.Ability[TurnData, Messages]):
             self._turn_detector_factory = _default_turn_detector
         self._encoding = encoding_module.Encoding(encoder=encoder) if encoder is not None else encoding
         self._typing = typing
-        super().__init__(id=id)
+        super().__init__(id=id, clock=clock)
         self._detectors = {}
         self._relationships = []
         self._history = []

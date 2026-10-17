@@ -1914,3 +1914,54 @@ def test_device_start_rejects_a_cycle_in_its_peripherals() -> None:
             _ = await mosfet.started(environment, first, require_model(first.model))
 
     asyncio.run(run())
+
+
+def _real_clock() -> hsm.Clock:
+    """A clock of its own identity that waits each wait out in real time."""
+
+    async def after(duration: datetime.timedelta) -> datetime.datetime:
+        await asyncio.sleep(duration.total_seconds())
+        return datetime.datetime.now(datetime.UTC)
+
+    return hsm.Clock(after=after)
+
+
+def test_device_clock_is_the_one_it_was_built_with() -> None:
+    """W7-33a: a device may be built with a clock of its own; without one it has none."""
+
+    clock = _real_clock()
+
+    assert Device(clock=clock).own_clock() is clock
+    assert Device().own_clock() is None
+
+
+def test_device_firmware_and_peripherals_keep_time_on_the_devices_clock() -> None:
+    """W7-33a: a device's firmware and the peripherals it powers follow its clock, unless built with their own."""
+
+    environment_clock, own, peripheral_own = _real_clock(), _real_clock(), _real_clock()
+
+    async def run() -> tuple[hsm.Clock, hsm.Clock, hsm.Clock, hsm.Clock | None]:
+        follower, keeper = Device(id="follower"), Device(id="keeper", clock=peripheral_own)
+        device = Device(clock=own, peripherals=(follower, keeper))
+        _ = await mosfet.started(Environment(clock=environment_clock), device, require_model(device.model))
+        await wait_until(lambda: device.state() == "/Device/detached")
+        firmware = device_firmware(device)
+        clocks = device.clock(), follower.clock(), keeper.clock(), None if firmware is None else firmware.clock()
+        await hsm.stop(device)
+        return clocks
+
+    assert asyncio.run(run()) == (own, own, peripheral_own, own)
+
+
+def test_device_without_a_clock_powers_its_peripherals_on_the_environments() -> None:
+    environment_clock = _real_clock()
+
+    async def run() -> tuple[hsm.Clock, hsm.Clock]:
+        peripheral = Device(id="peripheral")
+        device = Device(peripherals=(peripheral,))
+        _ = await mosfet.started(Environment(clock=environment_clock), device, require_model(device.model))
+        clocks = device.clock(), peripheral.clock()
+        await hsm.stop(device)
+        return clocks
+
+    assert asyncio.run(run()) == (environment_clock, environment_clock)

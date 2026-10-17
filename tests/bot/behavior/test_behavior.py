@@ -1190,12 +1190,12 @@ class _TickRecorder(hsm.Instance):
 async def _start_routine(
     program: str,
     *,
-    clock: "collections.abc.Callable[[], datetime.datetime]",
+    now: "collections.abc.Callable[[], datetime.datetime]",
     timers: hsm.Clock,
 ) -> tuple[behavior.Behavior, _TickRecorder, hsm.Context]:
     from mosfet.protocols import attachment
 
-    routine = behavior.build(program, clock=clock)
+    routine = behavior.build(program, now=now)
     recorder = _TickRecorder()
     ctx = hsm.Context()
     _ = await mosfet.started(ctx, recorder, typing.cast(hsm.Model, recorder.model))
@@ -1228,7 +1228,7 @@ def test_persistent_every_routine_ticks_repeatedly_on_its_interval() -> None:
 
     async def run() -> tuple[list[datetime.timedelta], list[behavior.TickData], list[hsm.Event[typing.Any]]]:
         routine, recorder, ctx = await _start_routine(
-            routine_source(schedule="hsm.every(seconds = 90)"), clock=lambda: now[0], timers=timers
+            routine_source(schedule="hsm.every(seconds = 90)"), now=lambda: now[0], timers=timers
         )
         waits: list[datetime.timedelta] = []
         try:
@@ -1279,7 +1279,7 @@ def test_persistent_at_routine_waits_for_next_weekday_occurrence_across_dst() ->
 
     async def run() -> tuple[list[datetime.timedelta], list[behavior.TickData]]:
         routine, recorder, ctx = await _start_routine(
-            routine_source(schedule=schedule), clock=lambda: now[0], timers=timers
+            routine_source(schedule=schedule), now=lambda: now[0], timers=timers
         )
         try:
             first_wait = await timers.next_wait()

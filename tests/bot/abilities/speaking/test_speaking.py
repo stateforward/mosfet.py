@@ -136,13 +136,13 @@ class RecordingSpeaker(audio.Speaker):
     def __init__(
         self,
         *,
-        clock: collections.abc.Callable[[], float],
+        monotonic: collections.abc.Callable[[], float],
         max_buffered: datetime.timedelta | None = None,
     ) -> None:
         super().__init__(
             frame=datetime.timedelta(milliseconds=10),
             max_buffered=max_buffered or datetime.timedelta(seconds=30),
-            clock=clock,
+            monotonic=monotonic,
         )
         self.frames: list[hsm.Event[audio.OutputData]] = []
 
@@ -318,7 +318,7 @@ class Stage:
 async def stage(
     encoder: Script | None = None,
     *,
-    clock: collections.abc.Callable[[], float] | None = None,
+    monotonic: collections.abc.Callable[[], float] | None = None,
     conversation_targets: collections.abc.Sequence[ability.Ability[typing.Any, typing.Any]] = (),
     lookahead: datetime.timedelta = LOOKAHEAD,
     encode_idle_timeout: datetime.timedelta = ENCODE_IDLE_TIMEOUT,
@@ -330,7 +330,7 @@ async def stage(
     factory: collections.abc.Callable[[str, str | None], vocal.speech.SpeechEncoder] | None = None,
 ) -> Stage:
     environment = Environment()
-    mouth = mouth or RecordingSpeaker(clock=clock or instant())
+    mouth = mouth or RecordingSpeaker(monotonic=monotonic or instant())
     script = encoder or Script()
     requester, ear, room = Collector(), Collector(), SoundListener()
     for actor in (requester, ear, room):
@@ -647,7 +647,9 @@ def test_the_stream_is_closed_when_the_utterance_stops_streaming() -> None:
 def test_the_next_chunk_is_pulled_only_once_the_mouth_has_played_down_to_the_lookahead() -> None:
     async def run() -> tuple[int, int, int]:
         # A real clock: 100 ms per chunk against a 50 ms lookahead.
-        voice = await stage(Script(chunk_ms=100), clock=time.monotonic, lookahead=datetime.timedelta(milliseconds=50))
+        voice = await stage(
+            Script(chunk_ms=100), monotonic=time.monotonic, lookahead=datetime.timedelta(milliseconds=50)
+        )
         await voice.say("one two three four")
         await wait_until(lambda: bool(voice.speaker.frames))
         await asyncio.sleep(0.03)
@@ -716,7 +718,7 @@ def test_audio_the_mouth_drops_never_ends_the_utterance_completed(finished_spans
     more is commanded after the drop."""
 
     async def run() -> tuple[Stage, list[speaking.OutputData]]:
-        mouth = RecordingSpeaker(clock=instant(), max_buffered=datetime.timedelta(milliseconds=50))
+        mouth = RecordingSpeaker(monotonic=instant(), max_buffered=datetime.timedelta(milliseconds=50))
         voice = await stage(Script(chunk_ms=100), mouth=mouth)
         await voice.say("Too big to buffer.")
         await wait_until(lambda: bool(voice.outputs()))
@@ -799,7 +801,7 @@ def test_a_mouth_that_stops_reporting_ends_the_utterance_unspoken(
         environment = Environment()
         requester = Collector()
         _ = await mosfet.started(environment, requester, requester.model)
-        voice = speaking.Speaking(encoder=Script(), speaker=Mute(clock=instant()))
+        voice = speaking.Speaking(encoder=Script(), speaker=Mute(monotonic=instant()))
         await start_ability_tree(environment, voice)
         await wait_until(lambda: (voice.state() or "").endswith("/wired/voiced/idle"))
         _ = await hsm.dispatch(
@@ -828,7 +830,7 @@ def test_stop_flushes_the_mouth_and_ends_stopped_with_only_what_was_played() -> 
         """A real speaker that also notes every flush it was commanded with."""
 
         def __init__(self) -> None:
-            super().__init__(clock=time.monotonic)
+            super().__init__(monotonic=time.monotonic)
             self.flushes: list[hsm.Event[typing.Any]] = []
 
         @typing.override
@@ -898,7 +900,7 @@ def test_stop_closes_the_pipe_and_the_stream_in_flight_and_ignores_a_stop_for_an
 def test_a_stop_with_whole_text_alignment_says_nothing_was_said() -> None:
     async def run() -> list[speaking.OutputData]:
         # A real clock: 200 ms per word, and the text is said only once its last chunk plays.
-        voice = await stage(Script(chunk_ms=200, whole=True), mouth=RecordingSpeaker(clock=time.monotonic))
+        voice = await stage(Script(chunk_ms=200, whole=True), mouth=RecordingSpeaker(monotonic=time.monotonic))
         await voice.say("First. Then more.")
         await wait_until(lambda: any(item.spoken_seconds > 0.0 for item in voice.progress()))
         await voice.stop()
@@ -931,7 +933,7 @@ def test_a_stop_flushes_the_mouth_at_once_even_while_the_provider_takes_its_time
 
     class Flushes(RecordingSpeaker):
         def __init__(self) -> None:
-            super().__init__(clock=time.monotonic)
+            super().__init__(monotonic=time.monotonic)
             self.flushed_at: list[float] = []
 
         @typing.override
@@ -972,7 +974,7 @@ def test_a_stop_the_mouth_never_settles_ends_stopped_at_stop_timeout() -> None:
             return super().dispatch(ctx, event)
 
     async def run() -> tuple[list[speaking.OutputData], float]:
-        voice = await stage(mouth=Mute(clock=instant()), stop_timeout=datetime.timedelta(milliseconds=50))
+        voice = await stage(mouth=Mute(monotonic=instant()), stop_timeout=datetime.timedelta(milliseconds=50))
         await voice.say("Nobody hears this.")
         await wait_until(lambda: bool(voice.speaker.frames))
         await voice.stop()
@@ -1665,7 +1667,7 @@ def test_with_whole_text_alignment_no_part_of_a_reply_is_said_until_its_last_chu
     before that chunk plays leaves every part of the run unspoken, and once it plays every part is said."""
 
     async def run() -> tuple[list[speaking.OutputData], list[speaking.OutputData]]:
-        stopped = await stage(Script(chunk_ms=200, whole=True), mouth=RecordingSpeaker(clock=time.monotonic))
+        stopped = await stage(Script(chunk_ms=200, whole=True), mouth=RecordingSpeaker(monotonic=time.monotonic))
         await stopped.say(vocal.speech.Part(words="Oh, ", expression=LAUGH), "you got me. ", "Again.")
         await wait_until(lambda: any(item.spoken_seconds > 0.0 for item in stopped.progress()))
         await stopped.stop()

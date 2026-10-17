@@ -342,7 +342,7 @@ class Memory(store.MemoryStore):
 
     ``embedder=None`` is a real capacity, "this bot cannot embed": no vectors are written, the
     nearest search lane is skipped, and backfill does nothing. ``index=None`` uses
-    ``ExactIndex``. ``clock`` stamps episodes and reviews (UTC; default: the system clock).
+    ``ExactIndex``. ``now`` stamps episodes and reviews (UTC; default: the system clock).
     ``embed_timeout`` bounds one embedding request in Memory's ``Embedding`` child, which answers
     every request it is sent (``TIMEOUT`` when it is slow); ``operation_timeout`` bounds one SQL
     step. Neither wait holds another request: a request waiting on its embed is not in a step.
@@ -365,7 +365,7 @@ class Memory(store.MemoryStore):
     _embedding: embedding.Embedding | None
     _capacity: embedding.Capacity | None
     _index: index.Index
-    _clock: collections.abc.Callable[[], datetime.datetime]
+    _now: collections.abc.Callable[[], datetime.datetime]
     _operation_timeout: datetime.timedelta
     # The one database worker, created by start and shut down by stop. A restart's new worker first
     # waits for the previous one to drain, so a job left running by a timeout, a detach or a stop can
@@ -389,22 +389,23 @@ class Memory(store.MemoryStore):
         self,
         *,
         id: ability.AbilityId | None = None,
+        clock: hsm.Clock | None = None,
         engine: Engine | None = None,
         database: str = ":memory:",
         embedder: embedding.Embedder | None = None,
         index: index.Index | None = None,
-        clock: collections.abc.Callable[[], datetime.datetime] | None = None,
+        now: collections.abc.Callable[[], datetime.datetime] | None = None,
         embed_timeout: datetime.timedelta = _DEFAULT_EMBED_TIMEOUT,
         operation_timeout: datetime.timedelta = _DEFAULT_OPERATION_TIMEOUT,
     ) -> None:
         if embed_timeout <= datetime.timedelta(0) or operation_timeout <= datetime.timedelta(0):
             raise ValueError("Memory timeouts must be positive.")
-        super().__init__(id=id, engine=engine, database=database)
+        super().__init__(id=id, clock=clock, engine=engine, database=database)
         self._embedding = None if embedder is None else embedding.Embedding(embedder=embedder, timeout=embed_timeout)
         self._capacity = None if embedder is None else embedder.capacity
         self._attachment_group = attachment.Group() if self._embedding is None else attachment.Group(self._embedding)
         self._index = ExactIndex() if index is None else index
-        self._clock = clock if clock is not None else (lambda: datetime.datetime.now(datetime.UTC))
+        self._now = now if now is not None else (lambda: datetime.datetime.now(datetime.UTC))
         self._operation_timeout = operation_timeout
         self._worker = None
         self._jobs = set()
@@ -839,7 +840,7 @@ class Memory(store.MemoryStore):
             capacity.space,
             [(seq, kind)],
             pass_id=None,
-            at=instance._clock(),
+            at=instance._now(),
         )
         _INDEXED.add(
             1,
@@ -887,7 +888,7 @@ class Memory(store.MemoryStore):
             output = await Memory._run(instance, instance._execute, data)
             Memory._done(ctx, instance, in_flight, OutputEvent.with_data(output))
         elif isinstance(data, payload.EpisodeData):
-            seq, node_id, persons = await Memory._run(instance, graph.write_episode, engine, data, at=instance._clock())
+            seq, node_id, persons = await Memory._run(instance, graph.write_episode, engine, data, at=instance._now())
             _NODES.add(1, {"bot.memory.node.kind": payload.NodeKind.EPISODE.value})
             if persons:
                 _NODES.add(persons, {"bot.memory.node.kind": payload.NodeKind.PERSON.value})
@@ -922,7 +923,7 @@ class Memory(store.MemoryStore):
                 return
             await Memory._search(ctx, instance, in_flight, data, None, active)
         elif isinstance(data, payload.FetchData):
-            fetched = await Memory._run(instance, graph.fetch, engine, data, space=space, at=instance._clock())
+            fetched = await Memory._run(instance, graph.fetch, engine, data, space=space, at=instance._now())
             Memory._done(ctx, instance, in_flight, FetchedEvent.with_data(fetched))
         elif isinstance(data, payload.RecentData):
             episodes = await Memory._run(instance, graph.recent, engine, data, space=space)
@@ -958,9 +959,7 @@ class Memory(store.MemoryStore):
             assert isinstance(data, payload.ReleaseData)
             lease_state = instance._lease
             assert lease_state is not None, "admission guards check the lease"
-            await Memory._run(
-                instance, graph.release, engine, lease_state, reviewed=data.reviewed, at=instance._clock()
-            )
+            await Memory._run(instance, graph.release, engine, lease_state, reviewed=data.reviewed, at=instance._now())
             Memory._done(
                 ctx,
                 instance,
@@ -1094,7 +1093,7 @@ class Memory(store.MemoryStore):
             lease_state,
             space=None if capacity is None else capacity.space,
             merged_vectors=list(merged),
-            at=instance._clock(),
+            at=instance._now(),
         )
         for kind, change in changes.items():
             _NODES.add(change, {"bot.memory.node.kind": kind.value})
@@ -1190,7 +1189,7 @@ class Memory(store.MemoryStore):
             transient = embedding.FailureKind.TIMEOUT if failure.kind in graph.PERMANENT_FAILURES else failure.kind
             attempts.extend((seq, transient) for seq in resume.batch)
         await Memory._run(
-            instance, graph.record_attempts, engine, space, attempts, pass_id=resume.pass_id, at=instance._clock()
+            instance, graph.record_attempts, engine, space, attempts, pass_id=resume.pass_id, at=instance._now()
         )
         unindexable = sum(kind in graph.PERMANENT_FAILURES for _, kind in attempts)
         for _, kind in attempts:

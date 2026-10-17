@@ -213,6 +213,7 @@ class Inception(ability.Ability[None, voice.VoiceData]):
         self,
         *,
         id: ability.AbilityId | None = None,
+        clock: hsm.Clock | None = None,
         traits: persona.Traits,
         languages: tuple[speech.Locale, ...],
         speaking: speaking.Speaking,
@@ -231,7 +232,7 @@ class Inception(ability.Ability[None, voice.VoiceData]):
             raise ValueError(f"Inception retry_after must be positive, got {retry_after}.")
         if inception_timeout <= datetime.timedelta(0):
             raise ValueError(f"Inception inception_timeout must be positive, got {inception_timeout}.")
-        super().__init__(id=id)
+        super().__init__(id=id, clock=clock)
         self._traits = traits
         self._languages = pydantic.TypeAdapter(tuple[speech.Locale, ...]).validate_python(languages)
         # Peers: Speaking and memory are attached by their own owners and reached only by message.

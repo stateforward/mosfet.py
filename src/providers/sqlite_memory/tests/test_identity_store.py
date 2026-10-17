@@ -118,7 +118,7 @@ def store_factory(request: pytest.FixtureRequest, tmp_path: pathlib.Path) -> col
 
 def _fixture(make: StoreFactory, *, policy: identification.MatchPolicy = _POLICY) -> Fixture:
     clock = Clock()
-    return Fixture(matcher=identification.Matcher(store=make(), policy=policy, clock=clock), clock=clock)
+    return Fixture(matcher=identification.Matcher(store=make(), policy=policy, now=clock), clock=clock)
 
 
 # --- the store contract, once for both stores ---------------------------------------------------

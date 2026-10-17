@@ -200,9 +200,10 @@ class Encoding(ability.Ability[ability.TInput, ability.TOutput]):
         self,
         *,
         id: ability.AbilityId | None = None,
+        clock: hsm.Clock | None = None,
         encoder: Encoder[ability.TInput, ability.TOutput],
     ) -> None:
-        super().__init__(id=id)
+        super().__init__(id=id, clock=clock)
         self.encoder = encoder
 
     def _apply(self, ctx: hsm.Context, input: ability.TInput) -> collections.abc.Awaitable[ability.TOutput]:

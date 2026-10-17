@@ -151,7 +151,7 @@ def test_verify_apply_dry_runs_one_tick_of_a_persistent_routine() -> None:
         calls.append(now)
         return now
 
-    checked = verify.verify_apply(routine_source(schedule=_WEEKDAY_AT), input_data={"ignored": True}, clock=clock)
+    checked = verify.verify_apply(routine_source(schedule=_WEEKDAY_AT), input_data={"ignored": True}, now=clock)
 
     assert checked.ok, checked.report.render()
     assert checked.value is not None

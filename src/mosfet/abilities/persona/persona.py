@@ -237,9 +237,14 @@ class Persona(ability.Ability[ReviseData, OutputData]):
     _description: Description | None
 
     def __init__(
-        self, *, id: ability.AbilityId | None = None, traits: Traits, memory: memory.MemoryStore | None = None
+        self,
+        *,
+        id: ability.AbilityId | None = None,
+        clock: hsm.Clock | None = None,
+        traits: Traits,
+        memory: memory.MemoryStore | None = None,
     ) -> None:
-        super().__init__(id=id)
+        super().__init__(id=id, clock=clock)
         self._traits = traits
         # Not owned: the bot's memory is attached elsewhere (Ability attachment is exclusive), so
         # persona is a peer that reaches it by message rather than taking its lifecycle.

@@ -345,6 +345,7 @@ class Sandbox(ability.Ability[command.RunData, cognition.InputData]):
         self,
         *,
         id: ability.AbilityId | None = None,
+        clock: hsm.Clock | None = None,
         host: hsm.Instance,
         capacity: Capacity,
         spec: Spec,
@@ -404,7 +405,7 @@ class Sandbox(ability.Ability[command.RunData, cognition.InputData]):
             raise ValueError(
                 f"Sandbox max_output_chars must lie in {command.MIN_OUTPUT_CHARS}..{command.MAX_OUTPUT_CHARS}."
             )
-        super().__init__(id=id)
+        super().__init__(id=id, clock=clock)
         self._host = host
         self._host_model = model
         self._capacity = capacity

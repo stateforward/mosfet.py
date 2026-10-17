@@ -156,9 +156,10 @@ class Decoding(ability.Ability[ability.TInput, ability.TOutput]):
         self,
         *,
         id: ability.AbilityId | None = None,
+        clock: hsm.Clock | None = None,
         decoder: Decoder[ability.TInput, ability.TOutput],
     ) -> None:
-        super().__init__(id=id)
+        super().__init__(id=id, clock=clock)
         self.decoder = decoder
 
     def _apply(self, ctx: hsm.Context, input: ability.TInput) -> collections.abc.Awaitable[ability.TOutput]:

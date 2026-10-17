@@ -274,7 +274,7 @@ async def bring_up(tmp_path: pathlib.Path, model: ScriptedProcessor) -> Builder:
         spec=builder_bot_example.bench(image=builder_bot_example.DEFAULT_IMAGE, network=sandbox.Network.NONE),
         traits=builder_bot_example.DEFAULT_TRAITS,
         database=str(tmp_path / "memory.sqlite3"),
-        clock=functools.partial(datetime.datetime.now, datetime.UTC),
+        now=functools.partial(datetime.datetime.now, datetime.UTC),
     )
     environment = Environment()
     for actor in assembly.actors:

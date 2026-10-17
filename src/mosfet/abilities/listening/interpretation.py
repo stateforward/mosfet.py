@@ -1035,6 +1035,7 @@ class Interpretation(ability.Ability[sensitivity.OutputData, cognition.InputData
         self,
         *,
         id: ability.AbilityId | None = None,
+        clock: hsm.Clock | None = None,
         voice_activity_classifier: voice.detection.VoiceActivityClassifier,
         sound_classifier: sound.classification.SoundClassifier | None = None,
         speech_decoder: speech.SpeechDecoder | None = None,
@@ -1066,7 +1067,7 @@ class Interpretation(ability.Ability[sensitivity.OutputData, cognition.InputData
                 ``affect_classifier`` is given without ``speech_decoder``.
         """
 
-        super().__init__(id=id)
+        super().__init__(id=id, clock=clock)
         if product_threshold_db < 0.0:
             raise ValueError("product_threshold_db must not be negative.")
         if recognize_timeout <= datetime.timedelta(0):

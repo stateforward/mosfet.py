@@ -67,7 +67,7 @@ def _compose(tmp_path: pathlib.Path, *, capacity: sandbox.Capacity, spec: sandbo
         spec=spec,
         traits=builder_bot_example.DEFAULT_TRAITS,
         database=str(tmp_path / "memory.sqlite3"),
-        clock=functools.partial(datetime.datetime.now, datetime.UTC),
+        now=functools.partial(datetime.datetime.now, datetime.UTC),
     )
 
 

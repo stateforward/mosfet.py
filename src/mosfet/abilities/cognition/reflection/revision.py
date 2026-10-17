@@ -1411,10 +1411,11 @@ class Revision(processing.Processing):
         self,
         *,
         id: ability.AbilityId | None = None,
+        clock: hsm.Clock | None = None,
         processor: processing.Processor | ProcessorFactory,
         memory: memory.MemoryStore,
     ) -> None:
-        super(processing.Processing, self).__init__(id=id)
+        super(processing.Processing, self).__init__(id=id, clock=clock)
         leaf = processor() if not isinstance(processor, processing.Processor) else processor
         self._change_processing = processing.Processing(processor=leaf, instructions=type(self).instructions)
         self._memory = memory

@@ -153,6 +153,8 @@ class Device(Traced, attachment.Attachment):
     _attachment_request_id: str
     # Construction-time and never rewritten: the body-local id a holder knows this device by.
     _identity: str
+    # Construction-time and never rewritten: the clock this device was built to keep time on.
+    _own_clock: hsm.Clock | None
 
     def __init__(
         self,
@@ -160,6 +162,7 @@ class Device(Traced, attachment.Attachment):
         id: DeviceId | None = None,
         peripherals: collections.abc.Iterable["Device"] = (),
         placement: space.Placement | None = None,
+        clock: hsm.Clock | None = None,
     ) -> None:
         """Build an unstarted device.
 
@@ -167,6 +170,9 @@ class Device(Traced, attachment.Attachment):
             id: The id the bot holding this device knows it by (:data:`DeviceId`); its kind when omitted.
             peripherals: Devices this device owns and powers.
             placement: Where this device is in the environment, if known.
+            clock: The ``hsm.Clock`` this device, its firmware and the peripherals it powers keep
+                time on (their ``hsm.after`` and ``hsm.every`` timers); when omitted, the clock of
+                whatever starts it, else its environment's (see :meth:`own_clock`).
 
         Raises:
             ValueError: If ``id`` (or the kind it defaults to) is not a valid :data:`DeviceId`
@@ -176,6 +182,7 @@ class Device(Traced, attachment.Attachment):
 
         super().__init__()
         self._identity = _DEVICE_ID.validate_python(_kind(self) if id is None else id)
+        self._own_clock = clock
         # Where this device is, and how quiet a sound can get before it stops hearing. No class
         # default: a device cannot know where the robot holding it stands, and defaulting would
         # silently co-locate every device at the origin — perfect cross-talk with no error.
@@ -212,6 +219,17 @@ class Device(Traced, attachment.Attachment):
         """
 
         return self._identity
+
+    def own_clock(self) -> hsm.Clock | None:
+        """The clock this device was built to keep time on, or ``None`` when it was built without one.
+
+        Like :meth:`identity`, it is fixed at construction and building the device starts nothing.
+        ``mosfet.started`` reads it as the device starts: a clock the start names wins over it, and
+        it wins over the clock of whatever starts the device and over its environment's. The device's
+        firmware and the peripherals it powers keep time on the device's clock unless built with their own.
+        """
+
+        return self._own_clock
 
     @staticmethod
     def device_tree(*roots: "Device") -> tuple["Device", ...]:
@@ -257,6 +275,10 @@ class Device(Traced, attachment.Attachment):
         scope = Environment.from_context(ctx)
         owner_model = data if isinstance(data, hsm.Model) else type(self).model
         owner_name = owner_model.qualified_name if owner_model is not None else None
+        # Peripherals start before this device, so not in its context: name its clock for each one
+        # built without its own, the way a handset's transducers run off the handset's own crystal.
+        clock = self.clock()
+        follows = None if isinstance(clock, hsm.DefaultClock) else hsm.Config(clock=clock)
         used_names: set[str] = set()
         for peripheral in Device._powered_peripherals(self):
             base_model = type(peripheral).model
@@ -279,7 +301,8 @@ class Device(Traced, attachment.Attachment):
                     raise RuntimeError(f"{message_start}; a device cannot power a peripheral from a different scope.")
                 _ = mosfet.register(peripheral, model, owner=owner_name)
                 continue
-            _ = await mosfet.started(scope, peripheral, model, owner=owner_name)
+            config = follows if peripheral.own_clock() is None else None
+            _ = await mosfet.started(scope, peripheral, model, config, owner=owner_name)
         instance = await super().start(scope, data)
         # Presence is a property of being started in an environment, not of being owned by a bot.
         # Whoever puts a device into the scope takes it out: start joins, stop leaves, and both

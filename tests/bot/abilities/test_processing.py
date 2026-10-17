@@ -2206,7 +2206,7 @@ def test_a_drafted_response_is_heard_before_the_processor_has_finished_writing_i
     class Mouth(audio.Speaker):
         def __init__(self) -> None:
             ticks = iter(range(0, 10**9, 1_000))
-            super().__init__(frame=datetime.timedelta(milliseconds=10), clock=lambda: float(next(ticks)))
+            super().__init__(frame=datetime.timedelta(milliseconds=10), monotonic=lambda: float(next(ticks)))
             self.frames: list[audio.OutputData] = []
 
         @typing.override

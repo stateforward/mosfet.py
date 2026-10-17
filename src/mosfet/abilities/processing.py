@@ -2551,9 +2551,14 @@ class Processing(ability.Ability[InputData, CompletionData]):
     )
 
     def __init__(
-        self, *, id: ability.AbilityId | None = None, processor: Processor, instructions: str | None = None
+        self,
+        *,
+        id: ability.AbilityId | None = None,
+        clock: hsm.Clock | None = None,
+        processor: Processor,
+        instructions: str | None = None,
     ) -> None:
-        super().__init__(id=id)
+        super().__init__(id=id, clock=clock)
         resolved = type(self).instructions if instructions is None else instructions
         if instructions is not None and not instructions.strip():
             raise ValueError("instructions must not be blank when provided.")

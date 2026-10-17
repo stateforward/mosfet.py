@@ -1294,11 +1294,12 @@ class Reflection(processing.Processing):
         self,
         *,
         id: ability.AbilityId | None = None,
+        clock: hsm.Clock | None = None,
         processor: processing.Processor | ProcessorFactory,
         memory: memory.MemoryStore,
         persona: self_knowledge.Persona | None = None,
     ) -> None:
-        super(processing.Processing, self).__init__(id=id)
+        super(processing.Processing, self).__init__(id=id, clock=clock)
         leaf = processor() if not isinstance(processor, processing.Processor) else processor
         # Shared transport; each phase stamps its own system policy on apply.
         self._select_processing = processing.Processing(

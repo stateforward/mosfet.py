@@ -111,7 +111,7 @@ def test_register_bounds_capacity_to_newest_entries() -> None:
             _advance(clock, 1.0)
         assert _sources(await peer.recent(limit=16)) == ["four", "three"]
 
-    _run(memory.StmMemory(capacity=2, clock=clock), scenario)
+    _run(memory.StmMemory(capacity=2, now=clock), scenario)
 
 
 def test_register_recent_orders_newest_first_and_filters_by_name() -> None:
@@ -131,7 +131,7 @@ def test_register_recent_orders_newest_first_and_filters_by_name() -> None:
         assert _sources(sounds) == ["ring-3", "knock-1", "ring-1"]
         assert sounds[0].stimulus_name == "environment.sound"
 
-    _run(memory.StmMemory(clock=clock), scenario)
+    _run(memory.StmMemory(now=clock), scenario)
 
 
 def test_register_recency_window_excludes_stale_observations() -> None:
@@ -149,7 +149,7 @@ def test_register_recency_window_excludes_stale_observations() -> None:
         await peer.record(_notable_event("third"))
         assert _sources(await peer.recent(limit=16)) == ["third", "second"]
 
-    _run(memory.StmMemory(recency_window=datetime.timedelta(minutes=10), clock=clock), scenario)
+    _run(memory.StmMemory(recency_window=datetime.timedelta(minutes=10), now=clock), scenario)
 
 
 def test_event_record_projection_keeps_bounded_scalars_only() -> None:
@@ -240,7 +240,7 @@ def test_register_reinforcement_extends_retention_beyond_arrival() -> None:
         # entry (accessed just before the last churn) survives; the untouched churn entry dies.
         assert _sources(await peer.recent(limit=16)) == ["latest", "used"]
 
-    _run(memory.StmMemory(capacity=2, recency_window=datetime.timedelta(hours=24), clock=clock), scenario)
+    _run(memory.StmMemory(capacity=2, recency_window=datetime.timedelta(hours=24), now=clock), scenario)
 
 
 def test_register_reinforced_entry_stays_visible_to_effective_recency() -> None:
@@ -261,7 +261,7 @@ def test_register_reinforced_entry_stays_visible_to_effective_recency() -> None:
         assert recent[0].last_accessed_at is not None
         assert recent[0].stm_id == entry_id
 
-    _run(memory.StmMemory(recency_window=datetime.timedelta(minutes=10), clock=clock), scenario)
+    _run(memory.StmMemory(recency_window=datetime.timedelta(minutes=10), now=clock), scenario)
 
 
 def test_register_reinforce_rejects_empty_ids() -> None:

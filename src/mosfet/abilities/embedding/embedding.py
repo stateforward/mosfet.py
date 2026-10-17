@@ -195,6 +195,7 @@ class Embedding(ability.Ability[payload.InputData, payload.OutputData]):
         self,
         *,
         id: ability.AbilityId | None = None,
+        clock: hsm.Clock | None = None,
         embedder: embedder.Embedder,
         timeout: datetime.timedelta = _DEFAULT_TIMEOUT,
         queue_limit: int = _DEFAULT_QUEUE_LIMIT,
@@ -209,7 +210,7 @@ class Embedding(ability.Ability[payload.InputData, payload.OutputData]):
             raise ValueError("Embedding timeout must be positive.")
         if queue_limit < 0:
             raise ValueError("Embedding queue_limit cannot be negative.")
-        super().__init__(id=id)
+        super().__init__(id=id, clock=clock)
         self._embedder = embedder
         self._capacity = embedder.capacity
         self._timeout = timeout
