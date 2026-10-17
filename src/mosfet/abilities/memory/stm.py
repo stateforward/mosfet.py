@@ -411,6 +411,11 @@ class StmMemory(store.MemoryStore):
     The inherited statement-transaction request stays available for maintenance. Requests
     are applied one at a time; the rest wait. A detach enters the register's own
     ``detaching`` state, so whatever still waits there is answered unavailable or counted.
+
+    Construction opens nothing (DSL-29). The register opens its database in its ``opening`` state,
+    the first time it attaches. A database that cannot be opened fails the attach
+    (``attachment.FailureKind.INITIALIZATION``), and one that does not open within the attach
+    timeout fails it as ``TIMEOUT``; either way the register is ``degraded``.
     """
 
     input_data_type: typing.ClassVar[type[object] | tuple[type[object], ...] | None] = store.InputData
@@ -607,11 +612,29 @@ class StmMemory(store.MemoryStore):
 
     submodel: typing.ClassVar[hsm.Model | None] = mosfet.define(
         "StmMemory",
-        hsm.initial(hsm.target("/StmMemory/initializing")),
+        hsm.initial(hsm.target("/StmMemory/opening")),
+        hsm.state(
+            "opening",
+            hsm.defer(attachment.AttachEvent, attachment.DetachEvent, *_REQUESTS, *_NOTIFICATIONS),
+            hsm.activity(store.MemoryStore._open_activity),
+            hsm.transition(hsm.on(store.MemoryStore._opened_event), hsm.target("/StmMemory/initializing")),
+            hsm.transition(hsm.on(store.MemoryStore._open_failed_event), hsm.effect(store.MemoryStore._refuse_attach)),
+            hsm.transition(
+                hsm.on(ability.Ability._composite_attachment_terminal_event),
+                hsm.guard(ability.Ability._is_composite_detached_terminal),
+                hsm.effect(ability.Ability._deliver_composite_attachment_terminal),
+                hsm.target("/StmMemory/degraded"),
+            ),
+            hsm.transition(
+                hsm.after(attachment.Attachment._attachment_timeout_delay),
+                hsm.effect(attachment.Attachment._timeout_attachment, store.MemoryStore._count_open_timeout),
+                hsm.target("/StmMemory/degraded"),
+            ),
+        ),
         hsm.state(
             "initializing",
             hsm.defer(attachment.AttachEvent, attachment.DetachEvent, *_REQUESTS, *_NOTIFICATIONS),
-            hsm.activity(ability.Ability._attach_composite_group),
+            hsm.activity(store.MemoryStore._attach_opened),
             hsm.transition(
                 hsm.on(ability.Ability._composite_attachment_terminal_event),
                 hsm.guard(ability.Ability._is_composite_attach_complete),

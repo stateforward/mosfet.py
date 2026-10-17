@@ -78,7 +78,8 @@ def test_a_full_config_assembles_one_builder_and_its_websocket_server(tmp_path: 
     assert isinstance(assembly.bots["builder"], builder_bot_example.BuilderBot)
     (server,) = assembly.actors
     assert isinstance(server, websocket.Server)
-    assert (tmp_path / "memory.sqlite3").is_file()
+    # Assembling constructs, and constructing opens nothing: the store opens its database on start (DSL-29).
+    assert not (tmp_path / "memory.sqlite3").exists()
 
 
 @pytest.mark.parametrize("unset", ["OPENAI_BASE_URL", "OPENAI_MODEL", "BUILDER_SANDBOX_SOCKET"])

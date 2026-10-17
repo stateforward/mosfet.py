@@ -447,3 +447,43 @@ def test_the_register_owns_a_detaching_state() -> None:
     assert model is not None
     assert "/StmMemoryLifecycle/attached/behavior/detaching" in model.members
     assert "/StmMemoryLifecycle/attached/behavior/degraded" in model.members
+
+
+def test_the_register_opens_its_database_on_attach_not_on_construction(tmp_path: pathlib.Path) -> None:
+    path = tmp_path / "register.db"
+    register = memory.StmMemory(database=str(path))
+    constructed = path.exists()
+
+    async def scenario(peer: _Peer) -> None:
+        await peer.record(_notable_event("opened"))
+        assert _sources(await peer.recent(limit=1)) == ["opened"]
+
+    _run(register, scenario)
+    assert constructed is False
+    assert path.exists()
+
+
+def test_a_register_that_cannot_open_its_database_fails_its_attach(tmp_path: pathlib.Path) -> None:
+    import contextlib
+    import sqlite3
+
+    path = tmp_path / "unversioned.db"
+    with contextlib.closing(sqlite3.connect(path)) as connection, connection:
+        _ = connection.execute(f"CREATE TABLE {memory.MEMORY_TABLE} (memory_id TEXT PRIMARY KEY)")
+
+    async def scenario() -> tuple[list[hsm.Event[typing.Any]], str]:
+        ctx = shared_hsm_context()
+        owner = _Recorder()
+        _ = await mosfet.started(ctx, owner, _Recorder.model)
+        register = memory.StmMemory(database=str(path))
+        _ = await register.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)))
+        await owner.until(lambda: any(e.name == attachment.AttachFailedEvent.name for e in owner.events))
+        state = register.state()
+        await register.stop(ctx)
+        return [e for e in owner.events if e.name == attachment.AttachFailedEvent.name], state
+
+    (failed,), state = asyncio.run(scenario())
+    assert isinstance(failed.data, attachment.FailedData)
+    assert failed.data.kind is attachment.FailureKind.INITIALIZATION
+    assert "MigrationError" in failed.data.message
+    assert state == "/StmMemoryLifecycle/attached/behavior/degraded"

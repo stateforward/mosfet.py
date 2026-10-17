@@ -7,6 +7,12 @@ partial durable effects.
 Domain code should build SQLAlchemy Core clauses against ``schema.memory_table`` and
 compile them with ``compile_statement`` / ``compile_statements``. The ability executes
 crude ``Statement(sql, parameters)`` batches only.
+
+Constructing a store does no I/O (DSL-29): it records the engine, database path or connection it
+was given. The store opens and migrates its database in its own ``opening`` state, the first time
+its behavior starts, and keeps that database for its lifetime; requests sent before it is open
+wait. Telemetry: ``bot.memory.store.open.count`` counts opens by ``bot.ability.name`` (the store
+class, a closed set from code) and ``bot.outcome`` {ok, failed, timeout}.
 """
 
 from __future__ import annotations
@@ -17,6 +23,7 @@ import collections.abc
 import dataclasses
 import datetime
 import importlib.resources
+import logging
 import sqlite3
 import typing
 import uuid
@@ -36,9 +43,18 @@ from sqlalchemy import Select
 from sqlalchemy import select
 from sqlalchemy.sql import ClauseElement
 from sqlalchemy.sql import ColumnElement
+from opentelemetry import metrics
 
+from mosfet.protocols import attachment
 
 from . import schema
+
+_LOG = logging.getLogger(__name__)
+_OPENS = metrics.get_meter("bot.abilities.memory").create_counter(
+    "bot.memory.store.open.count",
+    unit="{open}",
+    description="Memory store database opens, by store class and outcome (ok, failed, timeout).",
+)
 
 ParameterValue: typing.TypeAlias = str | int | float | bool | bytes | None
 
@@ -364,6 +380,34 @@ def open_sqlite_engine(
     return engine
 
 
+class _OpenedData(pydantic.BaseModel):
+    """The store's database is open; ``entered`` is the event that started the store's behavior."""
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(frozen=True, arbitrary_types_allowed=True)
+
+    entered: hsm.Event[typing.Any] = pydantic.Field(description="The event the opening state was entered with.")
+
+
+class _OpenFailedData(pydantic.BaseModel):
+    """The store could not open or migrate its database."""
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(frozen=True, arbitrary_types_allowed=True)
+
+    entered: hsm.Event[typing.Any] = pydantic.Field(description="The event the opening state was entered with.")
+    message: str = pydantic.Field(description="Why the database could not be opened: the error type and message.")
+
+
+_OpenedEvent = hsm.Event[_OpenedData](
+    name="bot.ability.memory.store.opened",
+    kind=hsm.CompletionEventKind,
+    schema=_OpenedData,
+)
+_OpenFailedEvent = hsm.Event[_OpenFailedData](
+    name="bot.ability.memory.store.open.failed",
+    kind=hsm.ErrorEventKind,
+    schema=_OpenFailedData,
+)
+
 _MemoryStoreApplyCompletedEvent = hsm.Event[OutputData](
     name="bot.ability.memory.store.apply.completed",
     kind=hsm.CompletionEventKind,
@@ -377,7 +421,18 @@ _MemoryStoreApplyFailedEvent = hsm.Event[ability.FailureData](
 
 
 class MemoryStore(ability.Ability[InputData, OutputData]):
-    """Ability that executes compiled SQL statements as one transaction per apply."""
+    """Ability that executes compiled SQL statements as one transaction per apply.
+
+    Construction only records ``engine``, or ``database`` and ``connection``; nothing is opened.
+    The store's behavior starts in ``opening``: it opens the database (an injected ``engine`` is
+    migrated, otherwise a private SQLite engine is opened and migrated) and goes on to ``idle``.
+    The open is bounded by the attach timeout. A store that cannot open its database, or does not
+    within that bound, is ``degraded`` and answers every request failed. The open database is
+    kept for the store's lifetime, so a store that detaches and attaches again opens nothing new.
+
+    Raises:
+        ValueError: if both ``engine`` and ``database``/``connection`` are given.
+    """
 
     input_data_type: typing.ClassVar[type[object] | tuple[type[object], ...] | None] = InputData
     output_data_type: typing.ClassVar[type[object] | tuple[type[object], ...] | None] = OutputData
@@ -390,9 +445,16 @@ class MemoryStore(ability.Ability[InputData, OutputData]):
         schema=OutputData,
     )
 
-    _engine: Engine
+    # The open database: None until the opening state has opened it, then kept for the lifetime.
+    _engine: Engine | None
+    # What construction was given; read only by the opening state.
+    _injected: Engine | None
+    _database: str
+    _connection: typing.Any | None
     _apply_completed_event: typing.ClassVar[hsm.Event[OutputData]] = _MemoryStoreApplyCompletedEvent
     _apply_failed_event: typing.ClassVar[hsm.Event[ability.FailureData]] = _MemoryStoreApplyFailedEvent
+    _opened_event: typing.ClassVar[hsm.Event[_OpenedData]] = _OpenedEvent
+    _open_failed_event: typing.ClassVar[hsm.Event[_OpenFailedData]] = _OpenFailedEvent
 
     def __init__(
         self,
@@ -402,13 +464,37 @@ class MemoryStore(ability.Ability[InputData, OutputData]):
         database: str = ":memory:",
     ) -> None:
         super().__init__()
-        if engine is not None:
-            if connection is not None or database != ":memory:":
-                raise ValueError("MemoryStore takes either engine or database/connection, not both.")
-            migrate(engine)
-            self._engine = engine
-            return
-        self._engine = open_sqlite_engine(database=database, connection=connection)
+        if engine is not None and (connection is not None or database != ":memory:"):
+            raise ValueError("MemoryStore takes either engine or database/connection, not both.")
+        self._engine = None
+        self._injected = engine
+        self._database = database
+        self._connection = connection
+
+    def _connect(self) -> Engine:
+        """Open and migrate this store's database (performs database I/O; blocking).
+
+        Raises:
+            MigrationError: the database matches no known schema revision.
+        """
+
+        if self._injected is not None:
+            migrate(self._injected)
+            return self._injected
+        return open_sqlite_engine(database=self._database, connection=self._connection)
+
+    async def _open_engine(self) -> Engine:
+        """Open and migrate the database for the opening state; here on the event loop, as this store runs SQL."""
+
+        return self._connect()
+
+    def _opened_engine(self) -> Engine:
+        """The open database; only states after ``opening`` run statements, so it is always open there."""
+
+        engine = self._engine
+        if engine is None:
+            raise RuntimeError(f"{type(self).__name__} has not opened its database.")
+        return engine
 
     def _execute(self, data: InputData) -> OutputData:
         """Run one SQL transaction on this store's engine and return per-statement results.
@@ -418,7 +504,77 @@ class MemoryStore(ability.Ability[InputData, OutputData]):
         and awaits the correlated reply).
         """
 
-        return _execute_transaction(self._engine, data.statements)
+        return _execute_transaction(self._opened_engine(), data.statements)
+
+    @staticmethod
+    def _count_open(instance: "MemoryStore", outcome: typing.Literal["ok", "failed", "timeout"]) -> None:
+        _OPENS.add(1, {"bot.ability.name": type(instance).__name__, "bot.outcome": outcome})
+
+    @staticmethod
+    async def _open_activity(ctx: hsm.Context, instance: "MemoryStore", event: hsm.Event[typing.Any]) -> None:
+        """Open the database and report opened or failed; the entering event rides along on the report."""
+
+        try:
+            # Opened once: a store that is already open keeps the database it has.
+            if instance._engine is None:
+                instance._engine = await instance._open_engine()
+        except Exception as error:
+            # Boundary: an unopenable database is the store's typed open failure, never a raise.
+            message = f"{type(instance).__name__} could not open its database: {type(error).__name__}: {error}"
+            _LOG.warning("memory store could not open its database: %s", type(error).__name__)
+            MemoryStore._count_open(instance, "failed")
+            _ = hsm.dispatch(
+                ctx, instance, instance._open_failed_event.with_data(_OpenFailedData(entered=event, message=message))
+            )
+            return
+        MemoryStore._count_open(instance, "ok")
+        _ = hsm.dispatch(ctx, instance, instance._opened_event.with_data(_OpenedData(entered=event)))
+
+    @staticmethod
+    def _count_open_timeout(ctx: hsm.Context, instance: "MemoryStore", event: hsm.Event[typing.Any]) -> None:
+        del ctx, event
+        _LOG.warning("memory store did not open its database within its attach timeout")
+        MemoryStore._count_open(instance, "timeout")
+
+    @staticmethod
+    def _refuse_attach(ctx: hsm.Context, instance: "MemoryStore", event: hsm.Event[typing.Any]) -> None:
+        """Fail the attach a composite store was opening for: the owner is told it cannot attach."""
+
+        failed = event.data
+        assert isinstance(failed, _OpenFailedData)
+        request = failed.entered.data
+        assert isinstance(request, attachment.AttachData)
+        instance._dispatch_composite_attachment_failure(
+            ctx,
+            instance,
+            request,
+            failed.entered,
+            attachment.FailedData(
+                actor=request.actor, kind=attachment.FailureKind.INITIALIZATION, message=failed.message
+            ),
+        )
+
+    @staticmethod
+    async def _attach_opened(ctx: hsm.Context, instance: "MemoryStore", event: hsm.Event[typing.Any]) -> None:
+        """A composite store's group attach, run once its database is open, for the attach it opened for."""
+
+        opened = event.data
+        assert isinstance(opened, _OpenedData)
+        await ability.Ability._attach_composite_group(ctx, instance, opened.entered)
+
+    @staticmethod
+    def _refuse_unopened(ctx: hsm.Context, instance: "MemoryStore", event: hsm.Event[typing.Any]) -> None:
+        """Answer a request to a store whose database never opened."""
+
+        failure = ability.FailureData(message=f"unavailable: {type(instance).__name__} could not open its database.")
+        terminal = dataclasses.replace(
+            instance.failed_event.with_data(failure),
+            id=event.id or None,
+            metadata=dict(event.metadata),
+            source=hsm.id(instance),
+            target=MemoryStore._requester(instance, event),
+        )
+        _ = hsm.dispatch(ctx, instance, ability.TerminalErrorEvent.with_data(terminal))
 
     @staticmethod
     def _requester(instance: "MemoryStore", event: hsm.Event[typing.Any]) -> str:
@@ -502,7 +658,19 @@ class MemoryStore(ability.Ability[InputData, OutputData]):
 
     submodel: typing.ClassVar[hsm.Model | None] = mosfet.define(
         "MemoryStore",
-        hsm.initial(hsm.target("/MemoryStore/idle")),
+        hsm.initial(hsm.target("/MemoryStore/opening")),
+        hsm.state(
+            "opening",
+            hsm.defer(input_event),
+            hsm.activity(_open_activity),
+            hsm.transition(hsm.on(_OpenedEvent), hsm.target("/MemoryStore/idle")),
+            hsm.transition(hsm.on(_OpenFailedEvent), hsm.target("/MemoryStore/degraded")),
+            hsm.transition(
+                hsm.after(attachment.Attachment._attachment_timeout_delay),
+                hsm.effect(_count_open_timeout),
+                hsm.target("/MemoryStore/degraded"),
+            ),
+        ),
         hsm.state(
             "idle",
             hsm.transition(
@@ -527,6 +695,10 @@ class MemoryStore(ability.Ability[InputData, OutputData]):
                 hsm.effect(_dispatch_failure),
                 hsm.target("/MemoryStore/idle"),
             ),
+        ),
+        hsm.state(
+            "degraded",
+            hsm.transition(hsm.on(input_event), hsm.effect(_refuse_unopened)),
         ),
     )
 

@@ -5,10 +5,13 @@ from __future__ import annotations
 import asyncio
 import collections
 import collections.abc
+import contextlib
 import dataclasses
 import datetime
 import logging
 import math
+import pathlib
+import sqlite3
 import threading
 import typing
 import uuid
@@ -1085,7 +1088,7 @@ def test_an_embedding_child_that_cannot_attach_fails_closed() -> None:
 
 
 def test_memory_serves_again_after_stop_and_reattach() -> None:
-    """Stopping keeps the one database worker: a restarted Memory serves on it again."""
+    """Stopping shuts the database worker down; a restarted Memory serves on a new one, from the same database."""
 
     async def scenario() -> tuple[str, str]:
         harness = await _harness()
@@ -1111,7 +1114,7 @@ def test_memory_serves_again_after_stop_and_reattach() -> None:
 def test_the_lifecycle_declares_the_composite_states_of_memory() -> None:
     model = memory.Memory.model
     assert model is not None
-    for state in ("initializing", "serving/idle", "serving/busy", "detaching", "degraded"):
+    for state in ("opening", "initializing", "serving/idle", "serving/busy", "detaching", "degraded"):
         assert f"/MemoryLifecycle/attached/behavior/{state}" in model.members
 
 
@@ -1132,3 +1135,143 @@ def test_constructor_requires_positive_timeouts() -> None:
         _ = memory.Memory(embed_timeout=datetime.timedelta(0))
     with pytest.raises(ValueError, match="positive"):
         _ = memory.Memory(operation_timeout=datetime.timedelta(0))
+
+
+# --- opening (DSL-29) ---------------------------------------------------------------------------
+
+
+def _unversioned_database(tmp_path: pathlib.Path) -> str:
+    """A file holding a memory table but no version table: the migrations refuse to touch it."""
+
+    path = tmp_path / "unversioned.db"
+    with contextlib.closing(sqlite3.connect(path)) as connection, connection:
+        _ = connection.execute(f"CREATE TABLE {memory.MEMORY_TABLE} (memory_id TEXT PRIMARY KEY)")
+    return str(path)
+
+
+class GatedOpenMemory(memory.Memory):
+    """A Memory whose database open waits for the test to release it."""
+
+    release: asyncio.Event
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.release = asyncio.Event()
+
+    @typing.override
+    async def _open_engine(self) -> Engine:
+        _ = await self.release.wait()
+        return await super()._open_engine()
+
+
+async def _owned(store: memory.Memory) -> Harness:
+    """A harness around a Memory the test constructed itself (its own database, or an open double)."""
+
+    ctx = environment.Environment()
+    owner = Owner()
+    _ = await mosfet.started(ctx, owner, Owner.model)
+    return Harness(ctx=ctx, memory=store, owner=owner, engine=memory.store.open_sqlite_engine())
+
+
+def test_memory_opens_its_database_on_attach_not_on_construction(tmp_path: pathlib.Path) -> None:
+    path = tmp_path / "memory.db"
+
+    async def scenario() -> tuple[bool, bool, str]:
+        harness = await _owned(memory.Memory(database=str(path)))
+        constructed = path.exists()
+        _ = await mosfet.started(harness.ctx, harness.memory, typing.cast(hsm.Model, harness.memory.model))
+        started = path.exists()
+        await harness.attached()
+        remembered = await harness.ask(memory.RememberEvent, _episode())
+        await harness.memory.stop(harness.ctx)
+        return constructed, started, remembered.name
+
+    constructed, started, remembered = _run(scenario)
+    assert (constructed, started) == (False, False)
+    assert path.exists()
+    assert remembered == memory.RememberedEvent.name
+
+
+def test_a_database_memory_cannot_open_fails_its_attach_and_it_serves_nothing(tmp_path: pathlib.Path) -> None:
+    database = _unversioned_database(tmp_path)
+
+    async def scenario() -> tuple[attachment.FailedData, str, hsm.Event[typing.Any]]:
+        harness = await _owned(memory.Memory(database=database))
+        await harness.attach()
+        await harness.owner.until(lambda: bool(harness.owner.named(attachment.AttachFailedEvent)))
+        (failed,) = harness.owner.named(attachment.AttachFailedEvent)
+        assert isinstance(failed.data, attachment.FailedData)
+        await harness.send(memory.RecentEvent, memory.RecentData(limit=1), "refused")
+        reply = await harness.reply("refused")
+        state = harness.memory.state()
+        await harness.memory.stop(harness.ctx)
+        return failed.data, state, reply
+
+    failure, state, reply = _run(scenario)
+    assert failure.kind is attachment.FailureKind.INITIALIZATION
+    assert "MigrationError" in failure.message
+    assert state == "/MemoryLifecycle/attached/behavior/degraded"
+    assert isinstance(reply.data, memory.FailureData) and reply.data.kind is memory.FailureKind.UNAVAILABLE
+
+
+def test_requests_sent_while_opening_are_answered_once_open() -> None:
+    async def scenario() -> tuple[str, str]:
+        store = GatedOpenMemory()
+        harness = await _owned(store)
+        await harness.attach()
+        await asyncio.sleep(0.05)
+        state = store.state()
+        await harness.send(memory.RecentEvent, memory.RecentData(limit=1), "early")
+        store.release.set()
+        reply = await harness.reply("early")
+        await store.stop(harness.ctx)
+        return state, reply.name
+
+    state, reply = _run(scenario)
+    assert state == "/GatedOpenMemoryLifecycle/attached/behavior/opening"
+    assert reply == memory.RecentOutputEvent.name
+
+
+def test_a_database_that_does_not_open_within_the_attach_timeout_fails_the_attach() -> None:
+    async def scenario() -> tuple[attachment.FailedData, str]:
+        store = GatedOpenMemory()
+        harness = await _owned(store)
+        _ = await store.attach(
+            harness.ctx,
+            attachment.AttachEvent.with_data_and_id(
+                attachment.AttachData(actor=harness.owner, timeout=datetime.timedelta(milliseconds=50)), "attach"
+            ),
+        )
+        await harness.owner.until(lambda: bool(harness.owner.named(attachment.AttachFailedEvent)))
+        (failed,) = harness.owner.named(attachment.AttachFailedEvent)
+        assert isinstance(failed.data, attachment.FailedData)
+        state = store.state()
+        await store.stop(harness.ctx)
+        return failed.data, state
+
+    failure, state = _run(scenario)
+    assert failure.kind is attachment.FailureKind.TIMEOUT
+    assert state == "/GatedOpenMemoryLifecycle/attached/behavior/degraded"
+
+
+def _memory_threads() -> set[threading.Thread]:
+    return {thread for thread in threading.enumerate() if thread.name.startswith("memory_")}
+
+
+def test_the_database_worker_lives_from_start_to_stop() -> None:
+    """DSL-29b: no worker thread before start; the one start made exits after stop."""
+
+    async def scenario() -> tuple[set[threading.Thread], set[threading.Thread]]:
+        existing = _memory_threads()
+        harness = await _harness()
+        await harness.attached()
+        _ = await harness.ask(memory.RememberEvent, _episode())
+        workers = _memory_threads() - existing
+        await harness.memory.stop(harness.ctx)
+        for worker in workers:
+            await asyncio.to_thread(worker.join, 5)
+        return workers, {worker for worker in workers if worker.is_alive()}
+
+    workers, alive = _run(scenario)
+    assert len(workers) == 1
+    assert alive == set()

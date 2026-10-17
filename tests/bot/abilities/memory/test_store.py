@@ -3,6 +3,7 @@
 from mosfet.abilities import memory
 
 import asyncio
+import collections.abc
 import datetime
 import pathlib
 import typing
@@ -12,6 +13,7 @@ import mosfet
 import pytest
 from sqlalchemy.engine import Engine
 
+from tests import metric_reader
 from tests.bot.abilities.memory.memory_fixtures import execute_on
 from tests.bot.abilities.support import dispatch_ability_for_test, shared_hsm_context, start_abilities_for_test
 
@@ -379,3 +381,104 @@ def test_open_sqlite_engine_runs_the_connect_hook_before_migrating() -> None:
     engine = store_module.open_sqlite_engine(on_connect=on_connect)
     engine.dispose()
     assert seen == [[]]
+
+
+def _unversioned_database(tmp_path: pathlib.Path) -> str:
+    """A file holding a memory table but no version table: these migrations refuse to touch it."""
+
+    import contextlib
+    import sqlite3
+
+    path = tmp_path / "unversioned.db"
+    with contextlib.closing(sqlite3.connect(path)) as connection, connection:
+        _ = connection.execute(f"CREATE TABLE {memory.MEMORY_TABLE} (memory_id TEXT PRIMARY KEY)")
+    return str(path)
+
+
+def _opens(points: collections.abc.Sequence[metric_reader.Point]) -> dict[object, float]:
+    return {
+        point.attributes["bot.outcome"]: point.value
+        for point in points
+        if point.attributes.get("bot.ability.name") == "MemoryStore"
+    }
+
+
+def test_a_store_opens_its_database_when_its_behavior_starts_not_when_constructed(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """DSL-29a: construction records the path; the opening state creates and migrates the file."""
+
+    path = tmp_path / "store.db"
+
+    async def run(reader: metric_reader.Reader) -> tuple[bool, tuple[str, ...], dict[object, float]]:
+        store = memory.MemoryStore(database=str(path))
+        constructed = path.exists()
+        before = _opens(reader.points("bot.memory.store.open.count"))
+        ctx = shared_hsm_context()
+        await start_abilities_for_test(ctx, store)
+        output = await memory.transact(
+            ctx,
+            store,
+            memory.InputData(
+                statements=(_insert_content(content="opened", query_tags="o"), _select_by_query_tags(query_tags="o"))
+            ),
+        )
+        after = _opens(reader.points("bot.memory.store.open.count"))
+        await store.stop(ctx)
+        return constructed, output.contents(statement_index=1), {k: v - before.get(k, 0.0) for k, v in after.items()}
+
+    with metric_reader.recording(tmp_path, monkeypatch) as reader:
+        constructed, contents, opens = asyncio.run(run(reader))
+
+    assert constructed is False
+    assert path.exists()
+    assert contents == ("opened",)
+    assert opens == {"ok": 1.0}
+
+
+def test_a_store_that_cannot_open_its_database_answers_every_request_failed(tmp_path: pathlib.Path) -> None:
+    """An unversioned database is refused when the store opens it, never when the store is constructed."""
+
+    database = _unversioned_database(tmp_path)
+
+    async def run() -> str:
+        store = memory.MemoryStore(database=database)
+        ctx = shared_hsm_context()
+        await start_abilities_for_test(ctx, store)
+        with pytest.raises(memory.RequestError, match="could not open its database"):
+            _ = await memory.transact(ctx, store, memory.InputData(statements=(_select_by_query_tags(query_tags="x"),)))
+        state = store.state()
+        await store.stop(ctx)
+        return state
+
+    assert asyncio.run(run()) == "/MemoryStoreLifecycle/attached/behavior/degraded"
+
+
+class _NeverOpens(memory.MemoryStore):
+    """A store whose database open never finishes, so only the attach timeout ends the opening state."""
+
+    @typing.override
+    async def _open_engine(self) -> Engine:
+        _ = await asyncio.Event().wait()
+        raise AssertionError("never opened")
+
+
+def test_a_store_that_does_not_open_within_its_attach_timeout_is_degraded() -> None:
+    async def run() -> tuple[str, str]:
+        store = _NeverOpens()
+        ctx = shared_hsm_context()
+        await start_abilities_for_test(ctx, store, timeout=datetime.timedelta(milliseconds=50))
+        request = asyncio.ensure_future(
+            memory.transact(ctx, store, memory.InputData(statements=(_select_by_query_tags(query_tags="w"),)))
+        )
+        await asyncio.sleep(0.01)
+        waiting = store.state()
+        with pytest.raises(memory.RequestError, match="could not open its database"):
+            _ = await request
+        state = store.state()
+        await store.stop(ctx)
+        return waiting, state
+
+    waiting, state = asyncio.run(run())
+    assert waiting == "/_NeverOpensLifecycle/attached/behavior/opening"
+    assert state == "/_NeverOpensLifecycle/attached/behavior/degraded"

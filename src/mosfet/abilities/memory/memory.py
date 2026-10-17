@@ -21,9 +21,13 @@ needs vectors (remember, search with a cue, backfill, consolidate with merges) s
 Memory's own ``Embedding`` child by message and Memory goes back to serving the next request; the
 embed's reply, correlated by the embed's id, queues that request's next SQL step like any other
 request. Replies can therefore arrive out of request order: a request waiting on its embed is
-answered after later requests that need none. All SQL runs on one database worker thread owned by
-this Memory for its whole lifetime, so transactions never interleave and the event loop never
-blocks on SQL.
+answered after later requests that need none. All SQL, the database's open and migration
+included, runs on one database worker thread, so transactions never interleave and the event loop
+never blocks on SQL. Construction opens nothing and starts nothing (DSL-29): ``start`` creates the
+worker and ``stop`` shuts it down, and Memory opens its database on the worker in its ``opening``
+state, before it attaches its ``Embedding`` child. A database that cannot be opened fails the attach
+(``attachment.FailureKind.INITIALIZATION``), and one that does not open within the attach timeout
+fails it as ``TIMEOUT``; either way Memory is ``degraded`` and answers every request unavailable.
 
 Embedding failures never lose an episode: a node that cannot be embedded is kept unindexed and the
 attempt is recorded (``bot_memory_index_attempt``); backfill retries only transient failures, at
@@ -343,9 +347,11 @@ class Memory(store.MemoryStore):
     every request it is sent (``TIMEOUT`` when it is slow); ``operation_timeout`` bounds one SQL
     step. Neither wait holds another request: a request waiting on its embed is not in a step.
 
+    Construction records the database and allocates nothing else: the worker exists from ``start``
+    to ``stop``, and the database is opened when Memory first attaches (see the module docstring).
+
     Raises:
         ValueError: if a timeout is not positive.
-        store.MigrationError: if the database matches no known schema revision.
     """
 
     default_scope: typing.ClassVar[str] = "memory"
@@ -361,9 +367,10 @@ class Memory(store.MemoryStore):
     _index: index.Index
     _clock: collections.abc.Callable[[], datetime.datetime]
     _operation_timeout: datetime.timedelta
-    # One database worker for this object's whole lifetime (never shut down by stop), so a job
-    # left running by a timeout or a detach can never overlap a later one on the same connection.
-    _worker: concurrent.futures.ThreadPoolExecutor
+    # The one database worker, created by start and shut down by stop. A restart's new worker first
+    # waits for the previous one to drain, so a job left running by a timeout, a detach or a stop can
+    # never overlap a later one on the same connection.
+    _worker: concurrent.futures.ThreadPoolExecutor | None
     # Durable machine data: the request in its SQL step, the requests waiting on an embed (by
     # the embed's id; the reply's id selects one), and the unit leased for consolidation.
     _in_flight: _InFlight | None
@@ -396,10 +403,38 @@ class Memory(store.MemoryStore):
         self._index = ExactIndex() if index is None else index
         self._clock = clock if clock is not None else (lambda: datetime.datetime.now(datetime.UTC))
         self._operation_timeout = operation_timeout
-        self._worker = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="memory")
+        self._worker = None
         self._in_flight = None
         self._waiting = {}
         self._lease = None
+
+    @typing.override
+    async def start(self, ctx: hsm.Context, data: object = None) -> typing.Self:
+        """Give Memory its database worker, then start it.
+
+        A worker left by an earlier start is drained first, on the new worker, so its last job
+        finishes before any job of this start runs.
+        """
+
+        previous = self._worker
+        self._worker = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="memory")
+        if previous is not None:
+            _ = self._worker.submit(previous.shutdown, wait=True)
+        return await super().start(ctx, data)
+
+    @typing.override
+    async def stop(self, ctx: hsm.Context) -> None:
+        """Stop, then let the database worker exit: queued jobs are cancelled, a running one finishes."""
+
+        await super().stop(ctx)
+        if self._worker is not None:
+            self._worker.shutdown(wait=False, cancel_futures=True)
+
+    @typing.override
+    async def _open_engine(self) -> Engine:
+        """Open the database on the worker, so the event loop never blocks on the open or the migration."""
+
+        return await Memory._run(self, self._connect)
 
     # --- replies -------------------------------------------------------------------------------
 
@@ -720,8 +755,11 @@ class Memory(store.MemoryStore):
     ) -> T:
         """Run one blocking database job on this Memory's worker, in submission order."""
 
+        worker = instance._worker
+        if worker is None:
+            raise RuntimeError("Memory runs database jobs only while started.")
         bound = span.bind(job)
-        return await asyncio.wrap_future(instance._worker.submit(bound, *args, **kwargs))
+        return await asyncio.wrap_future(worker.submit(bound, *args, **kwargs))
 
     @staticmethod
     def _done(
@@ -773,7 +811,7 @@ class Memory(store.MemoryStore):
         await Memory._run(
             instance,
             graph.record_attempts,
-            instance._engine,
+            instance._opened_engine(),
             capacity.space,
             [(seq, kind)],
             pass_id=None,
@@ -818,7 +856,7 @@ class Memory(store.MemoryStore):
     ) -> None:
         """A request's first step: everything up to its embed, or the whole request when it needs none."""
 
-        engine = instance._engine
+        engine = instance._opened_engine()
         capacity = instance._capacity
         space = None if capacity is None else capacity.space
         if isinstance(data, store.InputData):
@@ -924,7 +962,7 @@ class Memory(store.MemoryStore):
                 await Memory._run(
                     instance,
                     graph.write_vectors,
-                    instance._engine,
+                    instance._opened_engine(),
                     instance._index,
                     capacity.space,
                     [(resume.seq, embedded.vectors[0])],
@@ -999,7 +1037,7 @@ class Memory(store.MemoryStore):
         found = await Memory._run(
             instance,
             graph.search,
-            instance._engine,
+            instance._opened_engine(),
             instance._index,
             data,
             space=None if capacity is None else capacity.space,
@@ -1026,7 +1064,7 @@ class Memory(store.MemoryStore):
         outcome, changes = await Memory._run(
             instance,
             graph.commit,
-            instance._engine,
+            instance._opened_engine(),
             instance._index,
             data,
             lease_state,
@@ -1054,7 +1092,7 @@ class Memory(store.MemoryStore):
                 BackfilledEvent.with_data(payload.BackfilledData(indexed=0, unindexable=0, remaining=False)),
             )
             return
-        engine = instance._engine
+        engine = instance._opened_engine()
         candidates = await Memory._run(
             instance, graph.backfill_candidates, engine, capacity.space, pass_id=data.pass_id, limit=data.limit
         )
@@ -1105,7 +1143,7 @@ class Memory(store.MemoryStore):
 
         capacity = instance._capacity
         assert capacity is not None
-        engine = instance._engine
+        engine = instance._opened_engine()
         space = capacity.space
         attempts = list(resume.attempts)
         indexed = 0
@@ -1163,11 +1201,29 @@ class Memory(store.MemoryStore):
 
     submodel: typing.ClassVar[hsm.Model | None] = mosfet.define(
         "Memory",
-        hsm.initial(hsm.target("/Memory/initializing")),
+        hsm.initial(hsm.target("/Memory/opening")),
+        hsm.state(
+            "opening",
+            hsm.defer(attachment.AttachEvent, attachment.DetachEvent, *REQUESTS),
+            hsm.activity(store.MemoryStore._open_activity),
+            hsm.transition(hsm.on(store.MemoryStore._opened_event), hsm.target("/Memory/initializing")),
+            hsm.transition(hsm.on(store.MemoryStore._open_failed_event), hsm.effect(store.MemoryStore._refuse_attach)),
+            hsm.transition(
+                hsm.on(ability.Ability._composite_attachment_terminal_event),
+                hsm.guard(ability.Ability._is_composite_detached_terminal),
+                hsm.effect(ability.Ability._deliver_composite_attachment_terminal),
+                hsm.target("/Memory/degraded"),
+            ),
+            hsm.transition(
+                hsm.after(attachment.Attachment._attachment_timeout_delay),
+                hsm.effect(attachment.Attachment._timeout_attachment, store.MemoryStore._count_open_timeout),
+                hsm.target("/Memory/degraded"),
+            ),
+        ),
         hsm.state(
             "initializing",
             hsm.defer(attachment.AttachEvent, attachment.DetachEvent, *REQUESTS),
-            hsm.activity(ability.Ability._attach_composite_group),
+            hsm.activity(store.MemoryStore._attach_opened),
             hsm.transition(
                 hsm.on(ability.Ability._composite_attachment_terminal_event),
                 hsm.guard(ability.Ability._is_composite_attach_complete),
