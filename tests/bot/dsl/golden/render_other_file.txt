@@ -1,0 +1,16 @@
+error[B0003]: device id `desk` is used twice
+  --> greeter.py:14:9
+   |
+14 |         bot.attach(phone.Phone(id="desk")), bot.traits("…", …),
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ used again here
+  ::: parts.py:1:8
+   |
+ 1 | DESK = computer.Computer(id="desk")
+   |        ---------------------------- first used here
+   |
+   = note: a bot keys its devices by `id`
+help: give the second device its own id
+   |
+14 |         bot.attach(phone.Phone(id="phone")), bot.traits("…", …),
+   |                                   ~~~~~~~
+   = explain: bot.explain("B0003")
