@@ -2,8 +2,11 @@
 
 A perceiving ability (Listening for voices, Seeing for faces) owns one ``Registry`` per kind. The
 registry is the HSM wrapper around an injected ``Identifier``: it serves ``IdentifyEvent``,
-``EnrollEvent`` and ``ForgetEvent`` one at a time, replies to each request's source under the
-request's id, and prunes ids that were never linked to a person on its own timer. Unknown prints
+``EnrollEvent``, ``ForgetEvent`` and ``LinkEvent`` one at a time, replies to each request's source
+under the request's id, and prunes ids that are not linked to a person on its own timer. A link
+mark (``LinkEvent``) only says whether an id belongs to some person, so retention keeps its print;
+who that person is lives in memory, never here. An own id belongs to the bot itself, so a link mark
+on it is a ``CONFLICT``. Unknown prints
 are enrolled automatically: identifying a print either matches an existing id or mints a new one.
 An enrollment either names the id it refines (declared) or, for the bot's own print, names none:
 the print then refines the nearest own id of its kind or mints a new own id, and never matches an
@@ -14,16 +17,18 @@ and no failure message carries a payload. Telemetry (every attribute is a closed
 ids are never attributes):
 
 * ``bot.identification.count`` — ``bot.identification.kind`` {voice, face} × ``bot.outcome``
-  {recognized, minted, failed, skipped} × ``bot.failure.kind`` (``FailureKind`` or ``none``): one
-  point per print identified or enrolled, one per failed request, one per print an identifier could
-  not identify (``failed`` with ``none``), and, from the ear, one per voice segment its classifier
-  gave no voiceprint (``skipped`` with ``none``, voice only). An enrolled print's point also carries
-  ``bot.identification.mode`` {declared, own_matched, own_minted}: at most 23 series.
+  {recognized, minted, failed, skipped, linked, unlinked} × ``bot.failure.kind`` (``FailureKind``
+  or ``none``): one point per print identified or enrolled, one per link mark set (``linked``) or
+  cleared (``unlinked``), one per failed request, one per print an identifier could not identify
+  (``failed`` with ``none``), and, from the ear, one per voice segment its classifier gave no
+  voiceprint (``skipped`` with ``none``, voice only). An enrolled print's point also carries
+  ``bot.identification.mode`` {declared, own_matched, own_minted}: at most 31 series (7 plain, 8
+  enrolled, 4 link marks, and 12 failures across the six failure kinds).
 * ``bot.identification.pruned`` — ids pruned by retention, by kind: 2 series.
 * ``bot.identification.prune.failed`` — prunes that failed or timed out, by kind ×
   ``bot.failure.kind`` (``FailureKind``): at most 8 series.
 * ``bot.identification.forgotten`` — ids erased by a ``ForgetEvent``, by kind: 2 series.
-* Spans ``bot.identification.{identify,enroll,forget,prune}`` record a failure with the same
+* Spans ``bot.identification.{identify,enroll,forget,link,prune}`` record a failure with the same
   ``FailureKind`` string the reply carries; an enrollment's span carries its ``bot.identification.mode``.
 """
 
@@ -256,6 +261,10 @@ class FailureKind(enum.StrEnum):
     """The store (or remote identifier) failed; a store transaction rolled back."""
     TIMEOUT = "timeout"
     """The request did not complete within the registry's timeout."""
+    NOT_FOUND = "not_found"
+    """A link mark named an id the registry's kind does not have."""
+    CONFLICT = "conflict"
+    """A link mark named an own id: it is the bot's own, so it belongs to the bot and to no other person."""
 
 
 class FailureData(ability.FailureData):
@@ -332,6 +341,18 @@ class Identifier(abc.ABC):
 
         Raises:
             StoreError: ``STORE_FAILED`` for a failed store.
+        """
+
+    @abc.abstractmethod
+    async def link(self, kind: Kind, id: Id, linked: bool) -> None:
+        """Mark whether ``id`` belongs to a person; a linked id is never pruned.
+
+        Setting a mark that is already set changes nothing. The mark never changes the print,
+        ``seen_at`` or ``seen_count``.
+
+        Raises:
+            StoreError: ``NOT_FOUND`` when ``kind`` has no ``id``; ``CONFLICT`` when ``id`` is own,
+                since an own id is the bot's; ``STORE_FAILED`` for a failed store.
         """
 
     @abc.abstractmethod
@@ -470,19 +491,59 @@ class ForgottenData(pydantic.BaseModel):
     forgotten: bool = pydantic.Field(description="True when the id existed and was erased.", examples=[True])
 
 
+class LinkData(pydantic.BaseModel):
+    """Mark whether an id belongs to a person, so retention keeps (or may again prune) its print.
+
+    The mark carries no person: memory holds which person an id's ref belongs to. An own id is the
+    bot's, so a mark on it is refused as a ``CONFLICT``.
+    """
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
+        frozen=True,
+        extra="forbid",
+        json_schema_extra={
+            "description": "Mark whether an identity id belongs to a person; a linked id is never pruned.",
+            "examples": [{"id": "3f2a9c", "linked": True}, {"id": "3f2a9c", "linked": False}],
+        },
+    )
+
+    id: Id = pydantic.Field(description="The id to mark; it must exist and must not be own.", examples=["3f2a9c"])
+    linked: bool = pydantic.Field(
+        description="True when the id now belongs to a person; false when it no longer does.", examples=[True]
+    )
+
+
+class LinkedData(pydantic.BaseModel):
+    """The answer to a ``LinkEvent``: the id's mark as it now stands."""
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
+        frozen=True,
+        extra="forbid",
+        json_schema_extra={
+            "description": "The id's link mark as it now stands.",
+            "examples": [{"id": "3f2a9c", "linked": True}],
+        },
+    )
+
+    id: Id = pydantic.Field(description="The id the request named.", examples=["3f2a9c"])
+    linked: bool = pydantic.Field(description="Whether the id is now marked as a person's.", examples=[True])
+
+
 IdentifyEvent = hsm.Event[IdentifyData](name="bot.ability.identification.identify", schema=IdentifyData)
 IdentifiedEvent = hsm.Event[IdentifiedData](name="bot.ability.identification.identified", schema=IdentifiedData)
 EnrollEvent = hsm.Event[EnrollData](name="bot.ability.identification.enroll", schema=EnrollData)
 EnrolledEvent = hsm.Event[Recognition](name="bot.ability.identification.enrolled", schema=Recognition)
 ForgetEvent = hsm.Event[ForgetData](name="bot.ability.identification.forget", schema=ForgetData)
 ForgottenEvent = hsm.Event[ForgottenData](name="bot.ability.identification.forgotten", schema=ForgottenData)
+LinkEvent = hsm.Event[LinkData](name="bot.ability.identification.link", schema=LinkData)
+LinkedEvent = hsm.Event[LinkedData](name="bot.ability.identification.linked", schema=LinkedData)
 FailedEvent = hsm.Event[FailureData](name="bot.ability.identification.failed", schema=FailureData)
 
 # The requests a ``Registry`` answers, each with one reply or one ``FailedEvent`` under its id.
-_REQUESTS: typing.Final[tuple[hsm.Event[typing.Any], ...]] = (IdentifyEvent, EnrollEvent, ForgetEvent)
+_REQUESTS: typing.Final[tuple[hsm.Event[typing.Any], ...]] = (IdentifyEvent, EnrollEvent, ForgetEvent, LinkEvent)
 
-_Operation: typing.TypeAlias = typing.Literal["identify", "enroll", "forget"]
-_Reply: typing.TypeAlias = IdentifiedData | Recognition | ForgottenData
+_Operation: typing.TypeAlias = typing.Literal["identify", "enroll", "forget", "link"]
+_Reply: typing.TypeAlias = IdentifiedData | Recognition | ForgottenData | LinkedData
 
 
 class _DoneData(pydantic.BaseModel):
@@ -521,6 +582,7 @@ _REQUEST_DATA: typing.Final[dict[_Operation, type[pydantic.BaseModel]]] = {
     "identify": IdentifyData,
     "enroll": EnrollData,
     "forget": ForgetData,
+    "link": LinkData,
 }
 
 
@@ -537,10 +599,10 @@ class _InFlight:
 class Registry(ability.Ability[IdentifyData, IdentifiedData]):
     """The HSM wrapper around one ``Identifier`` for one ``kind``, owned by the perceiving ability.
 
-    Requests (``IdentifyEvent``, ``EnrollEvent``, ``ForgetEvent``) are served one at a time and
-    answered with one reply, or one ``FailedEvent``, sent to the request's source under its id.
-    A request that does not finish within ``timeout`` fails with ``TIMEOUT``. Every
-    ``prune_every`` the registry prunes ids of its kind never linked to a person and last seen
+    Requests (``IdentifyEvent``, ``EnrollEvent``, ``ForgetEvent``, ``LinkEvent``) are served one at
+    a time and answered with one reply, or one ``FailedEvent``, sent to the request's source under
+    its id. A request that does not finish within ``timeout`` fails with ``TIMEOUT``. Every
+    ``prune_every`` the registry prunes ids of its kind not linked to a person and last seen
     more than ``max_unlinked_age`` ago, then the least recently seen until at most ``max_ids``
     remain; the deadline is durable, so steady request traffic never starves it, and one prune is
     bounded by ``prune_timeout``. A detached registry answers every request ``UNAVAILABLE``, the
@@ -722,10 +784,13 @@ class Registry(ability.Ability[IdentifyData, IdentifiedData]):
                         else:
                             mode = "own_matched" if reply.recognized else "own_minted"
                         active.set_attribute("bot.identification.mode", mode)
-                    else:
-                        assert isinstance(data, ForgetData)
+                    elif isinstance(data, ForgetData):
                         forgotten = await instance._identifier.forget(kind, data.id)
                         reply = ForgottenData(id=data.id, forgotten=forgotten)
+                    else:
+                        assert isinstance(data, LinkData)
+                        await instance._identifier.link(kind, data.id, data.linked)
+                        reply = LinkedData(id=data.id, linked=data.linked)
                 except StoreError as error:
                     failure = FailureData(kind=error.kind, message=str(error))
                 except Exception as error:
@@ -761,11 +826,22 @@ class Registry(ability.Ability[IdentifyData, IdentifiedData]):
         elif isinstance(reply, Recognition):
             Registry._send(ctx, instance, in_flight, EnrolledEvent.with_data(reply))
             recognitions = (reply,)
-        else:
+        elif isinstance(reply, ForgottenData):
             Registry._send(ctx, instance, in_flight, ForgottenEvent.with_data(reply))
             recognitions = ()
             if reply.forgotten:
                 _FORGOTTEN.add(1, {"bot.identification.kind": kind})
+        else:
+            Registry._send(ctx, instance, in_flight, LinkedEvent.with_data(reply))
+            recognitions = ()
+            _COUNT.add(
+                1,
+                {
+                    "bot.identification.kind": kind,
+                    "bot.outcome": "linked" if reply.linked else "unlinked",
+                    "bot.failure.kind": "none",
+                },
+            )
         for recognition in recognitions:
             outcome = "failed" if recognition is None else "recognized" if recognition.recognized else "minted"
             attributes = {"bot.identification.kind": kind, "bot.outcome": outcome, "bot.failure.kind": "none"}
@@ -901,6 +977,11 @@ class Registry(ability.Ability[IdentifyData, IdentifiedData]):
                     hsm.effect(_admitting("forget")),
                     hsm.target("/IdentificationRegistry/serving/busy"),
                 ),
+                hsm.transition(
+                    hsm.on(LinkEvent),
+                    hsm.effect(_admitting("link")),
+                    hsm.target("/IdentificationRegistry/serving/busy"),
+                ),
                 hsm.transition(hsm.after(_remaining), hsm.target("/IdentificationRegistry/serving/pruning")),
             ),
             hsm.state(
@@ -970,6 +1051,10 @@ __all__ = [
     "IdentifyData",
     "IdentifyEvent",
     "Kind",
+    "LinkData",
+    "LinkEvent",
+    "LinkedData",
+    "LinkedEvent",
     "Match",
     "MatchPolicy",
     "Mint",

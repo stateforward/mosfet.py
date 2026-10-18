@@ -191,7 +191,8 @@ index_attempt_table = Table(
 # One identity of one kind. ``seq`` is SQLite's never-reused row number and the rowid of the
 # identity's print in its model's provider vector table; ``id`` is the public id (minted or
 # declared). ``seen_count`` is the running-mean weight of the print, capped by the match policy.
-# ``linked`` stays 0 until a person link is written; own and linked ids are never pruned. Times
+# ``linked`` is 1 while a registry's link mark says the id belongs to a person (memory holds which
+# person); own and linked ids are never pruned. Times
 # are fixed-width UTC ISO text at microsecond resolution, so text order is chronological order.
 identity_table = Table(
     IDENTITY_TABLE,

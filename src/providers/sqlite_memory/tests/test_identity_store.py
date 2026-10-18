@@ -94,6 +94,9 @@ class Fixture:
     def prune(self, *, age: datetime.timedelta, max_ids: int = 100, kind: identification.Kind = "voice") -> int:
         return asyncio.run(self.matcher.prune(kind, unseen_before=self.clock() - age, max_ids=max_ids))
 
+    def link(self, id: str, linked: bool, *, kind: identification.Kind = "voice") -> None:
+        asyncio.run(self.matcher.link(kind, id, linked))
+
 
 StoreFactory: typing.TypeAlias = collections.abc.Callable[[], identification.Store]
 
@@ -354,7 +357,79 @@ def test_contract_an_enrollment_without_an_id_that_is_not_own_is_invalid_input(s
     assert after.recognized is False
 
 
+def test_contract_a_linked_id_is_kept_through_retention_and_the_cap_until_unlinked(
+    store_factory: StoreFactory,
+) -> None:
+    fixture = _fixture(store_factory)
+    (known,) = fixture.identify(_angle(0))
+    (stranger,) = fixture.identify(_angle(90))
+    fixture.link(known.id, True)
+    fixture.link(known.id, True)
+    fixture.clock.advance(datetime.timedelta(days=40))
+
+    kept = fixture.prune(age=datetime.timedelta(days=30), max_ids=0)
+    (again,) = fixture.identify(_angle(0))
+    fixture.link(known.id, False)
+    fixture.clock.advance(datetime.timedelta(days=40))
+    removed = fixture.prune(age=datetime.timedelta(days=30))
+    (after,) = fixture.identify(_angle(0))
+
+    assert kept == 1
+    assert (again.id, again.recognized) == (known.id, True)
+    assert fixture.forget(stranger.id) is False
+    assert removed == 1
+    assert after.recognized is False
+    assert after.id != known.id
+
+
+def test_contract_a_link_mark_on_an_own_id_is_a_conflict_and_on_an_unknown_id_not_found(
+    store_factory: StoreFactory,
+) -> None:
+    fixture = _fixture(store_factory)
+    own = fixture.enroll(None, _angle(0), own=True)
+    (voice,) = fixture.identify(_angle(90))
+    cases: list[tuple[identification.Kind, str, bool]] = [
+        ("voice", own.id, True),
+        ("voice", own.id, False),
+        ("voice", "nobody", True),
+        ("face", voice.id, True),
+    ]
+
+    refused: list[identification.FailureKind] = []
+    for kind, id, linked in cases:
+        with pytest.raises(identification.StoreError) as raised:
+            fixture.link(id, linked, kind=kind)
+        refused.append(raised.value.kind)
+
+    assert refused == [
+        identification.FailureKind.CONFLICT,
+        identification.FailureKind.CONFLICT,
+        identification.FailureKind.NOT_FOUND,
+        identification.FailureKind.NOT_FOUND,
+    ]
+
+
 # --- what only the database store has -----------------------------------------------------------
+
+
+def test_a_link_mark_writes_the_linked_column_and_nothing_else(tmp_path: pathlib.Path) -> None:
+    engine = _engine(tmp_path)
+    store = sqlite_memory.IdentityStore(engine=engine)
+    later = _START + datetime.timedelta(hours=1)
+    (voice,) = store.identify("voice", (_angle(0),), _POLICY, at=_START)
+    query = text("SELECT linked, seen_at, seen_count FROM bot_identity WHERE id = :id")
+
+    store.link("voice", voice.id, True)
+    with engine.connect() as connection:
+        linked = connection.execute(query, {"id": voice.id}).one()
+    (_,) = store.identify("voice", (_angle(0),), _POLICY, at=later)
+    store.link("voice", voice.id, False)
+    with engine.connect() as connection:
+        unlinked = connection.execute(query, {"id": voice.id}).one()
+    engine.dispose()
+
+    assert tuple(linked) == (1, "2026-10-15T12:00:00.000000+00:00", 1)
+    assert tuple(unlinked) == (0, "2026-10-15T13:00:00.000000+00:00", 2)
 
 
 def test_the_baseline_creates_bot_identity_with_a_never_reused_seq(tmp_path: pathlib.Path) -> None:

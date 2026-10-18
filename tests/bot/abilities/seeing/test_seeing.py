@@ -207,6 +207,10 @@ class FakeIdentifier(identification.Identifier):
         return False
 
     @typing.override
+    async def link(self, kind: identification.Kind, id: identification.Id, linked: bool) -> None:
+        del kind, id, linked
+
+    @typing.override
     async def prune(self, kind: identification.Kind, *, unseen_before: datetime.datetime, max_ids: int) -> int:
         del kind, unseen_before, max_ids
         return 0

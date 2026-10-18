@@ -31,6 +31,9 @@ _START = datetime.datetime(2026, 10, 15, 12, 0, tzinfo=datetime.UTC)
 _WAIT = 2.0
 _VECTOR = (0.6180339887, 0.7861513778)
 _PRINT = identification.Print(vector=_VECTOR, model="voice-model")
+# Orthogonal to ``_PRINT``: similarity 0, so the two are never one voice.
+_FAR = identification.Print(vector=(-_VECTOR[1], _VECTOR[0]), model="voice-model")
+_POLICY = identification.MatchPolicy(threshold=0.50, margin=0.05, refine_threshold=0.65)
 _MINUTE = datetime.timedelta(minutes=1)
 
 
@@ -91,6 +94,7 @@ class FakeIdentifier(identification.Identifier):
     time: FakeTime
     calls: list[Call]
     prunes: list[tuple[datetime.datetime, datetime.datetime, int]]
+    links: list[tuple[identification.Id, bool]]
     gated: set[str]
     errors: dict[str, BaseException]
     recognitions: tuple[identification.Recognition | None, ...] | None
@@ -100,6 +104,7 @@ class FakeIdentifier(identification.Identifier):
         self.time = time
         self.calls = []
         self.prunes = []
+        self.links = []
         self.gated = set()
         self.errors = {}
         self.recognitions = None
@@ -144,6 +149,11 @@ class FakeIdentifier(identification.Identifier):
         return id == "known"
 
     @typing.override
+    async def link(self, kind: identification.Kind, id: identification.Id, linked: bool) -> None:
+        await self._call("link")
+        self.links.append((id, linked))
+
+    @typing.override
     async def prune(self, kind: identification.Kind, *, unseen_before: datetime.datetime, max_ids: int) -> int:
         self.prunes.append((self.time.now, unseen_before, max_ids))
         await self._call("prune")
@@ -180,6 +190,7 @@ class Recorder(hsm.Instance):
                 identification.IdentifiedEvent,
                 identification.EnrolledEvent,
                 identification.ForgottenEvent,
+                identification.LinkedEvent,
                 identification.FailedEvent,
             )
         }
@@ -193,11 +204,11 @@ class Recorder(hsm.Instance):
 
 
 @dataclasses.dataclass
-class Harness:
+class Harness[I: identification.Identifier]:
     ctx: environment.Environment
     registry: identification.Registry
     owner: Recorder
-    identifier: FakeIdentifier
+    identifier: I
     time: FakeTime
 
     async def send(self, request: hsm.Event[typing.Any], request_id: str, data: object) -> None:
@@ -232,12 +243,53 @@ async def _harness(
     prune_every: datetime.timedelta = 10 * _MINUTE,
     timeout: datetime.timedelta = datetime.timedelta(seconds=10),
     prune_timeout: datetime.timedelta = datetime.timedelta(seconds=30),
-) -> Harness:
+) -> Harness[FakeIdentifier]:
     time = FakeTime()
+    return await _start(
+        FakeIdentifier(time),
+        time,
+        kind=kind,
+        attach=attach,
+        max_unlinked_age=max_unlinked_age,
+        max_ids=max_ids,
+        prune_every=prune_every,
+        timeout=timeout,
+        prune_timeout=prune_timeout,
+    )
+
+
+async def _matched(*, prune_every: datetime.timedelta) -> Harness[identification.Matcher]:
+    """A started registry over a real ``Matcher`` and ``InProcessStore``, both on the fake time."""
+
+    time = FakeTime()
+    return await _start(
+        identification.Matcher(store=identification.InProcessStore(max_ids=16), policy=_POLICY, now=time.wall),
+        time,
+        kind="voice",
+        attach=True,
+        max_unlinked_age=datetime.timedelta(days=30),
+        max_ids=500,
+        prune_every=prune_every,
+        timeout=datetime.timedelta(seconds=10),
+        prune_timeout=datetime.timedelta(seconds=30),
+    )
+
+
+async def _start[I: identification.Identifier](
+    identifier: I,
+    time: FakeTime,
+    *,
+    kind: identification.Kind,
+    attach: bool,
+    max_unlinked_age: datetime.timedelta,
+    max_ids: int,
+    prune_every: datetime.timedelta,
+    timeout: datetime.timedelta,
+    prune_timeout: datetime.timedelta,
+) -> Harness[I]:
     ctx = environment.Environment()
     owner = Recorder()
     _ = await mosfet.started(ctx, owner, Recorder.model)
-    identifier = FakeIdentifier(time)
     registry = identification.Registry(
         identifier=identifier,
         kind=kind,
@@ -417,12 +469,13 @@ def test_a_detached_registry_answers_every_request_unavailable_at_once() -> None
             identification.EnrollEvent, "enroll", identification.EnrollData(id="tts:warm", print=_PRINT, own=True)
         )
         await harness.send(identification.ForgetEvent, "forget", identification.ForgetData(id="known"))
-        await harness.owner.until(lambda: len(harness.owner.replies()) == 3)
+        await harness.send(identification.LinkEvent, "link", identification.LinkData(id="known", linked=True))
+        await harness.owner.until(lambda: len(harness.owner.replies()) == 4)
         return harness.owner.replies(), len(harness.identifier.calls)
 
     replies, calls = asyncio.run(run())
 
-    assert [event.id for event in replies] == ["identify", "enroll", "forget"]
+    assert [event.id for event in replies] == ["identify", "enroll", "forget", "link"]
     for event in replies:
         failure = _failure(event)
         assert failure.kind is identification.FailureKind.UNAVAILABLE
@@ -467,6 +520,62 @@ def test_a_registry_detached_while_busy_answers_its_in_flight_request_unavailabl
     assert failure.kind is identification.FailureKind.UNAVAILABLE
     assert failure.message == "identification registry is detached"
     assert calls == 2
+
+
+def _recognitions(event: hsm.Event[typing.Any]) -> tuple[identification.Recognition | None, ...]:
+    data = event.data
+    assert isinstance(data, identification.IdentifiedData)
+    return data.recognitions
+
+
+def test_a_link_mark_keeps_an_id_through_retention_until_it_is_unlinked() -> None:
+    async def run() -> None:
+        harness = await _matched(prune_every=datetime.timedelta(days=31))
+        await harness.identify("first", _PRINT, _FAR)
+        known, stranger = _recognitions(await harness.reply("first"))
+        assert known is not None and stranger is not None
+        await harness.send(identification.LinkEvent, "link", identification.LinkData(id=known.id, linked=True))
+        assert (await harness.reply("link")).data == identification.LinkedData(id=known.id, linked=True)
+
+        # One prune at day 31: the stranger is older than 30 days and unlinked; the linked id is kept.
+        await harness.time.advance(datetime.timedelta(days=31))
+        await harness.identify("again", _PRINT, _FAR)
+        again, newcomer = _recognitions(await harness.reply("again"))
+        assert again is not None and newcomer is not None
+        assert (again.id, again.recognized) == (known.id, True)
+        assert newcomer.recognized is False
+        assert newcomer.id != stranger.id
+
+        await harness.send(identification.LinkEvent, "unlink", identification.LinkData(id=known.id, linked=False))
+        assert (await harness.reply("unlink")).data == identification.LinkedData(id=known.id, linked=False)
+        # The next prune, at day 62, removes the unlinked id last seen at day 31.
+        await harness.time.advance(datetime.timedelta(days=31))
+        await harness.identify("after", _PRINT)
+        (after,) = _recognitions(await harness.reply("after"))
+        assert after is not None
+        assert after.recognized is False
+        assert after.id != known.id
+
+    asyncio.run(run())
+
+
+def test_a_link_mark_on_an_own_id_is_a_conflict_and_on_an_unknown_id_not_found() -> None:
+    async def run() -> list[identification.FailureData]:
+        harness = await _matched(prune_every=10 * _MINUTE)
+        await harness.send(
+            identification.EnrollEvent, "own", identification.EnrollData(id=None, print=_PRINT, own=True)
+        )
+        own = (await harness.reply("own")).data
+        assert isinstance(own, identification.Recognition)
+        await harness.send(identification.LinkEvent, "self", identification.LinkData(id=own.id, linked=True))
+        await harness.send(identification.LinkEvent, "nobody", identification.LinkData(id="nobody", linked=True))
+        return [_failure(await harness.reply("self")), _failure(await harness.reply("nobody"))]
+
+    conflict, missing = asyncio.run(run())
+
+    assert conflict.kind is identification.FailureKind.CONFLICT
+    assert missing.kind is identification.FailureKind.NOT_FOUND
+    assert str(_VECTOR[0]) not in conflict.message + missing.message
 
 
 def test_pruning_runs_every_prune_every_with_the_retention_cutoff() -> None:
@@ -698,3 +807,40 @@ def test_enroll_telemetry_names_whether_the_id_was_declared_matched_or_minted(
         if recorded.name == "bot.identification.enroll"
     ]
     assert modes == ["declared", "own_minted", "own_matched"]
+
+
+def test_link_marks_are_counted_linked_or_unlinked_and_spanned_without_the_id(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, finished_spans: InMemorySpanExporter
+) -> None:
+    async def run(
+        reader: metric_reader.Reader,
+    ) -> tuple[dict[tuple[tuple[str, object], ...], float], list[tuple[identification.Id, bool]]]:
+        before = reader.points("bot.identification.count")
+        harness = await _harness(kind="face")
+        await harness.send(identification.LinkEvent, "link", identification.LinkData(id="3f2a9c", linked=True))
+        _ = await harness.reply("link")
+        await harness.send(identification.LinkEvent, "unlink", identification.LinkData(id="3f2a9c", linked=False))
+        _ = await harness.reply("unlink")
+        harness.identifier.errors["link"] = identification.StoreError(
+            identification.FailureKind.NOT_FOUND, "no such identity"
+        )
+        await harness.send(identification.LinkEvent, "missing", identification.LinkData(id="gone", linked=True))
+        _ = await harness.reply("missing")
+        return _delta(before, reader.points("bot.identification.count")), harness.identifier.links
+
+    with metric_reader.recording(tmp_path, monkeypatch) as reader:
+        delta, links = asyncio.run(run(reader))
+
+    face = ("bot.identification.kind", "face")
+    none = ("bot.failure.kind", "none")
+    assert links == [("3f2a9c", True), ("3f2a9c", False)]
+    assert delta == {
+        (none, face, ("bot.outcome", "linked")): 1,
+        (none, face, ("bot.outcome", "unlinked")): 1,
+        (("bot.failure.kind", "not_found"), face, ("bot.outcome", "failed")): 1,
+    }
+    spans = [recorded for recorded in finished_spans.get_finished_spans() if recorded.name == "bot.identification.link"]
+    assert len(spans) == 3
+    for recorded in spans:
+        assert "3f2a9c" not in {str(value) for value in dict(recorded.attributes or {}).values()}
+    assert [dict(recorded.attributes or {}).get("bot.failure.kind") for recorded in spans] == [None, None, "not_found"]

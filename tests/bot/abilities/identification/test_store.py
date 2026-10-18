@@ -76,6 +76,10 @@ def _prune(
     return asyncio.run(fixture.matcher.prune(kind, unseen_before=fixture.clock() - age, max_ids=max_ids))
 
 
+def _link(fixture: Fixture, id: str, linked: bool, *, kind: identification.Kind = "voice") -> None:
+    asyncio.run(fixture.matcher.link(kind, id, linked))
+
+
 def test_a_new_print_is_minted_and_a_near_print_is_recognized() -> None:
     fixture = _fixture()
 
@@ -346,6 +350,83 @@ def test_minting_at_the_hard_cap_of_own_ids_fails_store_failed() -> None:
         _ = _identify(fixture, _angle(90))
 
     assert raised.value.kind is identification.FailureKind.STORE_FAILED
+
+
+def test_a_linked_id_is_kept_through_retention_until_it_is_unlinked() -> None:
+    fixture = _fixture()
+    (known,) = _identify(fixture, _angle(0))
+    (stranger,) = _identify(fixture, _angle(90))
+    _link(fixture, known.id, True)
+    _link(fixture, known.id, True)
+    fixture.clock.advance(datetime.timedelta(days=40))
+
+    kept = _prune(fixture, age=datetime.timedelta(days=30), max_ids=0)
+    (again,) = _identify(fixture, _angle(0))
+    _link(fixture, known.id, False)
+    fixture.clock.advance(datetime.timedelta(days=40))
+    removed = _prune(fixture, age=datetime.timedelta(days=30))
+    (after,) = _identify(fixture, _angle(0))
+
+    # The first prune removed only the stranger: the linked id survived both its age and the cap.
+    assert kept == 1
+    assert (again.id, again.recognized) == (known.id, True)
+    assert asyncio.run(fixture.matcher.forget("voice", stranger.id)) is False
+    assert removed == 1
+    assert after.recognized is False
+    assert after.id != known.id
+
+
+def test_an_own_id_refuses_a_link_mark_as_a_conflict_and_an_unknown_id_is_not_found() -> None:
+    fixture = _fixture()
+    own = _enroll(fixture, None, _angle(0), own=True)
+    (voice,) = _identify(fixture, _angle(90))
+
+    refused: list[identification.FailureKind] = []
+    for kind, id, linked in (
+        ("voice", own.id, True),
+        ("voice", own.id, False),
+        ("voice", "nobody", True),
+        ("face", voice.id, True),
+    ):
+        with pytest.raises(identification.StoreError) as raised:
+            _link(fixture, id, linked, kind=typing.cast(identification.Kind, kind))
+        refused.append(raised.value.kind)
+
+    assert refused == [
+        identification.FailureKind.CONFLICT,
+        identification.FailureKind.CONFLICT,
+        identification.FailureKind.NOT_FOUND,
+        identification.FailureKind.NOT_FOUND,
+    ]
+
+
+def test_minting_at_the_hard_cap_never_evicts_a_linked_id() -> None:
+    fixture = _fixture(max_ids=2)
+    (linked,) = _identify(fixture, _angle(0))
+    _link(fixture, linked.id, True)
+    fixture.clock.advance(datetime.timedelta(minutes=1))
+    (newer,) = _identify(fixture, _angle(90))
+    fixture.clock.advance(datetime.timedelta(minutes=1))
+
+    (third,) = _identify(fixture, _angle(180))
+    (back,) = _identify(fixture, _angle(0))
+
+    assert third.recognized is False
+    assert (back.id, back.recognized) == (linked.id, True)
+    assert asyncio.run(fixture.matcher.forget("voice", newer.id)) is False
+
+
+def test_minting_at_the_hard_cap_of_own_and_linked_ids_fails_store_failed() -> None:
+    fixture = _fixture(max_ids=2)
+    _ = _enroll(fixture, "tts:warm", _angle(0), own=True)
+    (linked,) = _identify(fixture, _angle(90))
+    _link(fixture, linked.id, True)
+
+    with pytest.raises(identification.StoreError) as raised:
+        _ = _identify(fixture, _angle(180))
+
+    assert raised.value.kind is identification.FailureKind.STORE_FAILED
+    assert "0.0" not in str(raised.value)
 
 
 def test_the_store_rejects_a_non_positive_cap() -> None:

@@ -92,9 +92,9 @@ def _delete(connection: Connection, rows: collections.abc.Sequence[sqlalchemy.Ro
 class IdentityStore(identification.Store):
     """Identities and their prints in the memory database, one ``BEGIN IMMEDIATE`` transaction per call.
 
-    It has no hard cap: retention (``prune``) bounds it. It never prunes ``own`` or ``linked`` ids,
-    and ``forget`` deletes only the identity row and its print; memory nodes that carry the
-    identity's ref stay.
+    It has no hard cap: retention (``prune``) bounds it. It never prunes ``own`` or ``linked`` ids;
+    ``link`` writes the row's ``linked`` column and nothing else. ``forget`` deletes only the
+    identity row and its print; memory nodes that carry the identity's ref stay.
     """
 
     _engine: Engine
@@ -324,6 +324,26 @@ class IdentityStore(identification.Store):
             return _delete(connection, rows) > 0
 
         return self._transaction(work)
+
+    @typing.override
+    def link(self, kind: identification.Kind, id: identification.Id, linked: bool) -> None:
+        def work(connection: Connection) -> None:
+            row = connection.execute(
+                sqlalchemy.select(_IDENTITIES.c.seq, _IDENTITIES.c.own).where(
+                    _IDENTITIES.c.kind == kind, _IDENTITIES.c.id == id
+                )
+            ).first()
+            if row is None:
+                raise identification.StoreError(identification.FailureKind.NOT_FOUND, f"no {kind} identity has that id")
+            if bool(row[1]):
+                raise identification.StoreError(
+                    identification.FailureKind.CONFLICT, f"that {kind} identity is the bot's own"
+                )
+            _ = connection.execute(
+                sqlalchemy.update(_IDENTITIES).where(_IDENTITIES.c.seq == int(row[0])).values(linked=int(linked))
+            )
+
+        self._transaction(work)
 
     @typing.override
     def prune(self, kind: identification.Kind, *, unseen_before: datetime.datetime, max_ids: int) -> int:

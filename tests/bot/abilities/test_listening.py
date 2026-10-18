@@ -277,6 +277,10 @@ class SilentIdentifier(identification.Identifier):
         return False
 
     @override
+    async def link(self, kind: identification.Kind, id: str, linked: bool) -> None:
+        del kind, id, linked
+
+    @override
     async def prune(self, kind: identification.Kind, *, unseen_before: datetime.datetime, max_ids: int) -> int:
         del kind, unseen_before, max_ids
         return 0

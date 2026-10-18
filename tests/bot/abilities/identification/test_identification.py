@@ -178,6 +178,8 @@ def test_events_are_named_in_the_identification_domain_and_never_model_tools() -
         (identification.EnrolledEvent, "bot.ability.identification.enrolled"),
         (identification.ForgetEvent, "bot.ability.identification.forget"),
         (identification.ForgottenEvent, "bot.ability.identification.forgotten"),
+        (identification.LinkEvent, "bot.ability.identification.link"),
+        (identification.LinkedEvent, "bot.ability.identification.linked"),
         (identification.FailedEvent, "bot.ability.identification.failed"),
     ]
 
@@ -189,7 +191,24 @@ def test_events_are_named_in_the_identification_domain_and_never_model_tools() -
         identification.IdentifyEvent,
         identification.EnrollEvent,
         identification.ForgetEvent,
+        identification.LinkEvent,
     )
+
+
+def test_a_link_names_one_valid_id_and_whether_it_is_linked() -> None:
+    link = identification.LinkData(id="3f2a9c", linked=True)
+
+    assert identification.LinkedData(id=link.id, linked=link.linked) == identification.LinkedData(
+        id="3f2a9c", linked=True
+    )
+    with pytest.raises(pydantic.ValidationError):
+        _ = identification.LinkData.model_validate({"id": "Upper", "linked": True})
+    with pytest.raises(pydantic.ValidationError):
+        _ = identification.LinkData.model_validate({"id": "3f2a9c"})
+    with pytest.raises(pydantic.ValidationError):
+        _ = identification.LinkData.model_validate({"id": "3f2a9c", "linked": True, "person": "gabe"})
+    assert identification.LinkData.model_config.get("frozen") is True
+    assert identification.LinkedData.model_config.get("frozen") is True
 
 
 def test_failure_kinds_reuse_the_shared_failure_strings() -> None:
@@ -198,6 +217,8 @@ def test_failure_kinds_reuse_the_shared_failure_strings() -> None:
         "unavailable",
         "store_failed",
         "timeout",
+        "not_found",
+        "conflict",
     }
     failure = identification.FailureData(kind=identification.FailureKind.TIMEOUT, message="late")
     assert isinstance(failure, ability.FailureData)

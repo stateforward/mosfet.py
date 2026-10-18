@@ -25,7 +25,7 @@ class Store(abc.ABC):
     ``Refine`` and the enroll upsert change its vector and its capped ``seen_count`` weight. An
     enrollment without an id decides among the own ids of its kind and model alone. Each
     model has one recorded dimension count, and a print of other dimensions is ``INVALID_INPUT``.
-    Ids marked ``own``, or linked to a person, are never pruned. Every failure raises
+    Ids marked ``own``, or linked to a person (``link``), are never pruned. Every failure raises
     ``identification.StoreError``, and its message never carries a print or a vector.
     """
 
@@ -77,6 +77,15 @@ class Store(abc.ABC):
         """
 
     @abc.abstractmethod
+    def link(self, kind: identification.Kind, id: identification.Id, linked: bool) -> None:
+        """Set or clear ``id``'s person link mark; its print, ``seen_at`` and ``seen_count`` stay as they are.
+
+        Raises:
+            identification.StoreError: ``NOT_FOUND`` when ``kind`` has no ``id``, ``CONFLICT`` when
+                ``id`` is own, else ``STORE_FAILED``.
+        """
+
+    @abc.abstractmethod
     def prune(self, kind: identification.Kind, *, unseen_before: datetime.datetime, max_ids: int) -> int:
         """Delete unlinked, non-own ids last seen before ``unseen_before``, then the least recently seen
         of them until at most ``max_ids`` ids of ``kind`` remain; how many were deleted.
@@ -106,6 +115,7 @@ class _Entry:
     model: str
     vector: tuple[float, ...]
     own: bool
+    linked: bool
     created_at: datetime.datetime
     seen_at: datetime.datetime
     seen_count: int
@@ -115,9 +125,9 @@ class InProcessStore(Store):
     """A bounded store in process memory, for tests and compositions without a database.
 
     ``max_ids`` is a hard bound per kind: minting or enrolling a new id at the bound first evicts
-    the least recently seen non-own id of that kind, and fails ``STORE_FAILED`` when every id is
-    own. It has no person links (nothing writes them yet). One lock serializes every call, so
-    registries sharing it, and calls a registry abandoned on a timeout, never overlap.
+    the least recently seen id of that kind that is neither own nor linked, and fails
+    ``STORE_FAILED`` when every id is own or linked. One lock serializes every call, so registries
+    sharing it, and calls a registry abandoned on a timeout, never overlap.
     """
 
     _max_ids: int
@@ -170,15 +180,24 @@ class InProcessStore(Store):
                 decision = identification.decide(neighbors, policy)
                 if isinstance(decision, identification.Mint):
                     if len(ids) >= self._max_ids:
-                        evictable = [(entry.seen_at, id) for id, entry in ids.items() if not entry.own]
+                        evictable = [
+                            (entry.seen_at, id) for id, entry in ids.items() if not entry.own and not entry.linked
+                        ]
                         if not evictable:
                             raise identification.StoreError(
-                                identification.FailureKind.STORE_FAILED, "the in-process store is full of own ids"
+                                identification.FailureKind.STORE_FAILED,
+                                "the in-process store is full of own and linked ids",
                             )
                         del ids[min(evictable)[1]]
                     minted = uuid.uuid4().hex
                     ids[minted] = _Entry(
-                        model=print.model, vector=print.vector, own=False, created_at=at, seen_at=at, seen_count=1
+                        model=print.model,
+                        vector=print.vector,
+                        own=False,
+                        linked=False,
+                        created_at=at,
+                        seen_at=at,
+                        seen_count=1,
                     )
                     recognitions.append(
                         identification.Recognition(
@@ -248,14 +267,25 @@ class InProcessStore(Store):
             entry = ids.get(id)
             if entry is None:
                 if len(ids) >= self._max_ids:
-                    evictable = [(stored.seen_at, stored_id) for stored_id, stored in ids.items() if not stored.own]
+                    evictable = [
+                        (stored.seen_at, stored_id)
+                        for stored_id, stored in ids.items()
+                        if not stored.own and not stored.linked
+                    ]
                     if not evictable:
                         raise identification.StoreError(
-                            identification.FailureKind.STORE_FAILED, "the in-process store is full of own ids"
+                            identification.FailureKind.STORE_FAILED,
+                            "the in-process store is full of own and linked ids",
                         )
                     del ids[min(evictable)[1]]
                 ids[id] = _Entry(
-                    model=print.model, vector=print.vector, own=own, created_at=at, seen_at=at, seen_count=1
+                    model=print.model,
+                    vector=print.vector,
+                    own=own,
+                    linked=False,
+                    created_at=at,
+                    seen_at=at,
+                    seen_count=1,
                 )
                 recognition = identification.Recognition(id=id, recognized=False, similarity=minted_similarity, own=own)
             else:
@@ -283,13 +313,27 @@ class InProcessStore(Store):
             return self._ids.get(kind, {}).pop(id, None) is not None
 
     @typing.override
+    def link(self, kind: identification.Kind, id: identification.Id, linked: bool) -> None:
+        with self._lock:
+            ids = self._ids.get(kind, {})
+            entry = ids.get(id)
+            if entry is None:
+                raise identification.StoreError(identification.FailureKind.NOT_FOUND, f"no {kind} identity has that id")
+            if entry.own:
+                raise identification.StoreError(
+                    identification.FailureKind.CONFLICT, f"that {kind} identity is the bot's own"
+                )
+            ids[id] = dataclasses.replace(entry, linked=linked)
+
+    @typing.override
     def prune(self, kind: identification.Kind, *, unseen_before: datetime.datetime, max_ids: int) -> int:
         with self._lock:
             ids = self._ids.get(kind, {})
             before = len(ids)
-            for id in [id for id, entry in ids.items() if not entry.own and entry.seen_at < unseen_before]:
-                del ids[id]
-            evictable = sorted((entry.seen_at, id) for id, entry in ids.items() if not entry.own)
+            prunable = {id: entry for id, entry in ids.items() if not entry.own and not entry.linked}
+            for id in [id for id, entry in prunable.items() if entry.seen_at < unseen_before]:
+                del ids[id], prunable[id]
+            evictable = sorted((entry.seen_at, id) for id, entry in prunable.items())
             for _, id in evictable[: max(0, len(ids) - max_ids)]:
                 del ids[id]
             return before - len(ids)
@@ -333,6 +377,10 @@ class Matcher(identification.Identifier):
     @typing.override
     async def forget(self, kind: identification.Kind, id: identification.Id) -> bool:
         return await asyncio.to_thread(self._store.forget, kind, id)
+
+    @typing.override
+    async def link(self, kind: identification.Kind, id: identification.Id, linked: bool) -> None:
+        await asyncio.to_thread(self._store.link, kind, id, linked)
 
     @typing.override
     async def prune(self, kind: identification.Kind, *, unseen_before: datetime.datetime, max_ids: int) -> int:
