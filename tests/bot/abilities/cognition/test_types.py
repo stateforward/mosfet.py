@@ -108,3 +108,16 @@ def test_body_attention_policy_fails_closed_on_empty_candidates_and_clear_withou
         )
         is None
     )
+
+
+def test_a_rejected_selection_is_repaired_from_its_redacted_key_appended_to_the_next_request() -> None:
+    key = types.selection_rejection_key("Processing selected invalid event data: value: string_type, input_value=7")
+    request = processing.InputData(input="x", instructions="World.")
+
+    repaired = types.with_selection_feedback(request, types.selection_rejection_message(key))
+
+    assert key == "Processing selected invalid event data: value: string_type"
+    instructions = repaired.instructions or ""
+    assert instructions.startswith("World.\n\nThe previous event selection was rejected during dispatch.")
+    assert f"Selection rejected: {key}\n----- END UNTRUSTED VALIDATOR DIAGNOSTIC -----" in instructions
+    assert types.MAX_SELECTION_REPAIRS == 2

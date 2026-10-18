@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from mosfet.abilities import processing
+from mosfet.abilities import processing, sandbox
 from mosfet.abilities.language import text
 from mosfet.environment import SoundData
 from mosfet.media import Image, ImageCapacity
@@ -517,7 +517,7 @@ class _BookData(pydantic.BaseModel):
 _BookEvent = hsm.Event[_BookData](name="tests.openai_compat.book", kind=processing.EventKind, schema=_BookData)
 
 
-def _dispatched(args: dict[str, object]) -> processing.Events:
+def _dispatched(args: dict[str, object], *offered: processing.Event[typing.Any]) -> processing.Events:
     generator = RecordingGenerator(
         content="",
         tool_calls=(text.TextToolCall(id="tc1", name=processing.DISPATCH_TOOL_NAME, args=args),),
@@ -526,7 +526,7 @@ def _dispatched(args: dict[str, object]) -> processing.Events:
         Processor(generator=generator).process(
             processing.InputData(
                 input="book it",
-                schemas=(_AnswerCallEvent, _BookEvent),
+                schemas=(_AnswerCallEvent, _BookEvent, *offered),
                 instructions="Select events from schemas.",
             )
         )
@@ -595,25 +595,52 @@ def test_processor_rejects_an_answered_event_the_turn_does_not_offer_as_a_select
 def test_processor_decodes_a_json_string_only_once() -> None:
     events = [{"event": "phone.answer_call", "data": {"call_id": "c1"}}]
 
-    with pytest.raises(ProcessingError, match="did not decode to an array or object"):
+    with pytest.raises(processing.SelectionRejectionError, match="did not decode to an array or object"):
         _ = _dispatched({"events": json.dumps(json.dumps(events))})
 
 
-def test_processor_failure_names_the_decode_cause_without_the_values() -> None:
-    truncated = json.dumps([{"event": "phone.answer_call", "data": {"call_id": "secret-c1"}}])[:-2]
+def test_processor_rejects_events_that_do_not_decode_as_a_selection_naming_the_cause_without_the_values() -> None:
+    # Live (builder check round 2, E2): writing code, the model dropped one "}" closing an item, so the server
+    # sent events as the string that did not parse; the turn failed with no repair.
+    item = {"event": sandbox.WriteEvent.name, "data": {"path": "/workspace/fib.py", "text": "secret = 1\n"}}
+    malformed = json.dumps([item]).removesuffix("}]") + "]"
 
-    with pytest.raises(ProcessingError) as raised:
-        _ = _dispatched({"events": truncated})
+    with pytest.raises(processing.SelectionRejectionError) as rejected:
+        _ = _dispatched({"events": malformed}, sandbox.WriteEvent)
 
-    message = str(raised.value)
-    assert "JSONDecodeError: Expecting" in message
-    assert "secret-c1" not in message
+    assert rejected.value.normalized.startswith("Processing selected events that did not decode: JSONDecodeError: ")
+    assert "secret" not in str(rejected.value)
+    assert "secret" not in rejected.value.normalized
 
 
-def test_processor_failure_names_the_validation_cause_without_the_values() -> None:
-    with pytest.raises(ProcessingError) as raised:
+def test_processor_rejects_an_item_with_an_extra_data_key_as_a_selection_naming_the_key() -> None:
+    # Live (builder check round 2, E2): the model put the selection's reason inside a write's data.
+    data = {"path": "/workspace/fib.py", "text": "secret = 1\n", "reason": "secret-reason"}
+
+    with pytest.raises(processing.SelectionRejectionError) as rejected:
+        _ = _dispatched({"events": [{"event": sandbox.WriteEvent.name, "data": data}]}, sandbox.WriteEvent)
+
+    assert rejected.value.normalized == (
+        f"Processing selected invalid event data for event: {sandbox.WriteEvent.name}:"
+        + " object value included additional keys: reason."
+    )
+    assert "secret" not in str(rejected.value)
+
+
+def test_processor_rejects_an_item_missing_keys_as_a_selection_naming_the_keys_without_the_values() -> None:
+    with pytest.raises(processing.SelectionRejectionError) as rejected:
         _ = _dispatched({"events": [{"event": _BookEvent.name, "data": {"note": "secret-note"}}]})
 
-    message = str(raised.value)
-    assert "object value is missing required keys" in message
-    assert "secret-note" not in message
+    assert rejected.value.normalized == (
+        f"Processing selected invalid event data for event: {_BookEvent.name}:"
+        + " object value is missing required keys: attendees, slot."
+    )
+    assert "secret-note" not in str(rejected.value)
+
+
+def test_processor_rejects_items_that_are_not_event_selections_as_a_selection() -> None:
+    with pytest.raises(processing.SelectionRejectionError) as rejected:
+        _ = _dispatched({"events": [{"data": {"call_id": "secret-c1"}}]})
+
+    assert rejected.value.normalized.startswith("Processing selected events that are not event selections: ")
+    assert "secret-c1" not in str(rejected.value)

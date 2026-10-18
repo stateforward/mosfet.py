@@ -14,10 +14,12 @@ import typing
 import hsm
 import mosfet
 import pydantic
+import pytest
 from mosfet import event
 
 from tests.bot.abilities.support import dispatch_ability_for_test, shared_hsm_context, start_abilities_for_test
 from tests.bot.abilities.cognition.metadata_contract import assert_metadata_is_not_coordination
+from tests.hsm_model import choice_transitions, transition_map
 
 
 def test_reasoning_never_uses_metadata_for_coordination() -> None:
@@ -303,3 +305,150 @@ def test_reasoning_offers_only_what_its_own_effort_ceiling_admits() -> None:
     for offered in (frame, host.host_input):
         assert "deliberate" not in offered.actors
         assert _DeliberateEvent.name not in {schema.name for schema in offered.schemas}
+
+
+class _ReceivedData(pydantic.BaseModel):
+    value: str
+
+
+_ReceivedEvent = hsm.Event[_ReceivedData](name="tests.reasoning.receive", kind=event.EventKind, schema=_ReceivedData)
+
+
+class _ReceivingActor(hsm.Instance):
+    """A target within reasoning's ceiling that keeps what it was sent."""
+
+    effort: typing.ClassVar[ability.Effort] = ability.Effort.S
+    received: list[hsm.Event[typing.Any]]
+
+    @staticmethod
+    def _keep(ctx: hsm.Context, instance: "_ReceivingActor", event: hsm.Event[typing.Any]) -> None:
+        del ctx
+        instance.received.append(event)
+
+    model: typing.ClassVar[hsm.Model | None] = mosfet.define(
+        "ReasoningReceivingActor",
+        hsm.initial(hsm.target("/ReasoningReceivingActor/active")),
+        hsm.state("active", hsm.transition(hsm.on(_ReceivedEvent), hsm.effect(_keep))),
+    )
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.received = []
+
+
+# Live (builder check round 2, E2): the server sent the model's dispatch as a string that did not parse.
+_UNDECODABLE = processing.SelectionRejectionError(
+    "Processing selected events that did not decode: JSONDecodeError: Expecting ',' delimiter: line 1 column 9."
+)
+
+
+class _AnsweringProcessor(processing.Processor):
+    """Answers each call with the next of ``answers``: a selection rejection to raise, or events to return."""
+
+    calls: list[processing.InputData]
+    answers: tuple[processing.SelectionRejectionError | processing.Events, ...]
+
+    def __init__(self, *answers: processing.SelectionRejectionError | processing.Events) -> None:
+        self.calls = []
+        self.answers = answers
+
+    @typing.override
+    async def process(
+        self, input: processing.InputData, *, drafts: processing.DraftSink | None = None
+    ) -> processing.Events:
+        self.calls.append(input)
+        answer = self.answers[min(len(self.calls), len(self.answers)) - 1]
+        if isinstance(answer, processing.SelectionRejectionError):
+            raise answer
+        return answer
+
+
+_RECEIVE = (processing.SelectedEvent(event=_ReceivedEvent.name, target="receiver", data={"value": "fixed"}),)
+
+
+def _reason_with(processor: processing.Processor) -> tuple[cognition.types.CompletionData, _ReceivingActor]:
+    async def run() -> tuple[cognition.types.CompletionData, _ReceivingActor]:
+        ctx = shared_hsm_context()
+        receiver = _ReceivingActor()
+        assert receiver.model is not None
+        _ = await mosfet.started(ctx, receiver, receiver.model)
+        stimulus = SoundEvent.with_data(SoundData(audio=b"ring", kind="phone.ringing"))
+        turn_input = cognition.InputData(stimulus=stimulus, actors={"receiver": receiver})
+        reasoning = cognition.Reasoning(processor=processor)
+        await start_abilities_for_test(ctx, reasoning)
+        output = await dispatch_ability_for_test(
+            reasoning,
+            ctx,
+            cognition.reasoning.InputData(
+                turn=cognition.types.TurnData(input=turn_input, operation_id="repair-turn", generation="token"),
+                processing_input=cognition.input.build_processing_input(turn_input),
+            ),
+            timeout=1.0,
+        )
+        return typing.cast(cognition.types.CompletionData, typing.cast(object, output)), receiver
+
+    return asyncio.run(run())
+
+
+def test_reasoning_models_selection_repair_as_a_bounded_choice() -> None:
+    model = typing.cast(hsm.Model, reasoning_module.Reasoning.submodel)
+
+    assert "/Reasoning/routing_rejection" in model.members
+    assert transition_map(model)["/Reasoning/applying"]["bot.ability.reasoning.selection.rejected"]
+    routes = choice_transitions(model, "/Reasoning/routing_rejection")
+    assert len(routes) == 3
+    assert routes[-1].guard is None
+
+
+def test_reasoning_asks_again_when_its_selection_is_rejected_and_dispatches_the_repair() -> None:
+    """Live check round 2 (E2): a dispatch that did not decode failed reasoning's turn, with no repair.
+
+    Only intuition had the bounded selection repair. Reasoning now asks its model again with the diagnostic.
+    """
+
+    processor = _AnsweringProcessor(_UNDECODABLE, _RECEIVE)
+
+    output, receiver = _reason_with(processor)
+
+    assert len(processor.calls) == 2
+    first, second = (call.instructions or "" for call in processor.calls)
+    assert "The previous event selection was rejected" not in first
+    assert "The previous event selection was rejected" in second
+    assert "Processing selected events that did not decode: JSONDecodeError" in second
+    assert output.output == (
+        cognition.types.EventData(event=_ReceivedEvent.name, target="receiver", data={"value": "fixed"}),
+    )
+    assert [received.data for received in receiver.received] == [_ReceivedData(value="fixed")]
+
+
+def test_reasoning_asks_again_when_dispatch_rejects_its_selection() -> None:
+    invalid = (processing.SelectedEvent(event=_ReceivedEvent.name, target="receiver", data={"value": 7}),)
+    processor = _AnsweringProcessor(invalid, _RECEIVE)
+
+    output, receiver = _reason_with(processor)
+
+    assert len(processor.calls) == 2
+    assert "Input should be a valid string" in (processor.calls[1].instructions or "")
+    assert [received.data for received in receiver.received] == [_ReceivedData(value="fixed")]
+    assert output.output is not None
+
+
+def test_reasoning_stops_on_the_same_selection_rejection_twice() -> None:
+    processor = _AnsweringProcessor(_UNDECODABLE, _UNDECODABLE, _RECEIVE)
+
+    with pytest.raises(RuntimeError, match="Selection rejected"):
+        _ = _reason_with(processor)
+
+    assert len(processor.calls) == 2
+
+
+def test_reasoning_bounds_its_selection_repairs() -> None:
+    processor = _AnsweringProcessor(
+        *(processing.SelectionRejectionError(f"Processing selected unavailable event: tests.{n}.") for n in range(4)),
+        _RECEIVE,
+    )
+
+    with pytest.raises(RuntimeError, match="Selection rejected"):
+        _ = _reason_with(processor)
+
+    assert len(processor.calls) == 3

@@ -61,8 +61,12 @@ chunk), so their owner makes the processor with `Processor(..., stream=False)`: 
 Local models often send a nested array or object as a JSON string, for example `{"events": "[{...}]"}`. Tool call
 arguments, and every `dispatch` value whose schema takes only an array or object (the `events` array, its items, and
 each event's data down through nested fields), are decoded from such a string once; a string field stays as sent.
-A response that still fails raises `ProcessingError` (or `TextGenerationError`) naming the cause's type and message,
-never the values the model sent.
+A `dispatch` the model may repair raises `processing.SelectionRejectionError`, so the cognition stage asks its model
+again with the diagnostic: a string that still does not decode (the server sends `events` as a string exactly when
+the model's JSON did not parse), items that are not event selections, an event the turn does not offer, and data that
+fails its event's branch schema (the diagnostic names the event and the failing keys, for example
+`object value included additional keys: reason`). Any other response that fails raises `ProcessingError` (or
+`TextGenerationError`). Every diagnostic names the cause's type and message, never the values the model sent.
 
 A user message may carry ordered content parts: `text.TextPart` and `text.ImagePart` (a typed `mosfet.media.Image`).
 Chat Completions receives them as `text` and `image_url` parts and the Responses API as `input_text` and `input_image`

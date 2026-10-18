@@ -1248,6 +1248,18 @@ class FailureData(ability.FailureData):
     input: InputData = pydantic.Field(description="Exact typed processing request that failed.")
 
 
+class SelectionRejectionData(FailureData):
+    """The request failed because its selection was rejected (:class:`SelectionRejectionError`).
+
+    A well-formed answer its owner's model may repair: the owner may ask again with the diagnostic.
+    """
+
+    normalized: str = pydantic.Field(
+        min_length=1,
+        description="The rejection's stable key (SelectionRejectionError.normalized): no rejected value.",
+    )
+
+
 _MISSING = object()
 
 
@@ -2414,10 +2426,15 @@ class Processing(ability.Ability[InputData, CompletionData]):
                 output = OutputData(events=coerced)
             applied = _AppliedEventData(input=input, output=output)
         except Exception as error:
+            failure = (
+                SelectionRejectionData(message=str(error), normalized=error.normalized, input=input)
+                if isinstance(error, SelectionRejectionError)
+                else FailureData(message=str(error), input=input)
+            )
             _ = instance.dispatch(
                 ctx,
                 dataclasses.replace(
-                    _FailedEvent.with_data(FailureData(message=str(error), input=input)),
+                    _FailedEvent.with_data(failure),
                     id=event.id or None,
                     source=event.source,
                     target=event.target,
@@ -2458,10 +2475,15 @@ class Processing(ability.Ability[InputData, CompletionData]):
                     metadata=dict(event.metadata),
                 )
         except Exception as error:
+            failure = (
+                SelectionRejectionData(message=str(error), normalized=error.normalized, input=data.input)
+                if isinstance(error, SelectionRejectionError)
+                else FailureData(message=str(error), input=data.input)
+            )
             _ = instance.dispatch(
                 ctx,
                 dataclasses.replace(
-                    _FailedEvent.with_data(FailureData(message=str(error), input=data.input)),
+                    _FailedEvent.with_data(failure),
                     id=event.id or None,
                     source=event.source,
                     target=event.target,
@@ -2600,6 +2622,7 @@ __all__ = [
     "Processor",
     "Processing",
     "Result",
+    "SelectionRejectionData",
     "SelectionRejectionError",
     "SchemaPatch",
     "SelectedEvent",

@@ -23,6 +23,7 @@ import uuid
 import hsm
 import pytest
 from tests.type_helpers import model_view
+from tests.hsm_model import choice_transitions, transition_map
 from tests.bot.abilities.support import start_abilities_for_test
 from tests.bot.abilities.cognition.metadata_contract import assert_metadata_is_not_coordination
 
@@ -1489,3 +1490,70 @@ def test_reflection_select_instructions_name_the_revision_capacity_only() -> Non
     assert persona.ReviseEvent.name in instructions
     assert "at most once" in instructions
     assert "when bot.ability.persona.revise is offered you may" in instructions
+
+
+class RejectedThenProcessor(processing.Processor):
+    """Select step whose first ``rejections`` answers are refused by the provider, then selects nothing."""
+
+    inputs: list[processing.InputData]
+    rejections: tuple[processing.SelectionRejectionError, ...]
+
+    def __init__(self, *rejections: processing.SelectionRejectionError) -> None:
+        self.inputs = []
+        self.rejections = rejections
+
+    @typing.override
+    async def process(
+        self, input: processing.InputData, *, drafts: processing.DraftSink | None = None
+    ) -> processing.Events:
+        self.inputs.append(input)
+        if len(self.inputs) <= len(self.rejections):
+            raise self.rejections[len(self.inputs) - 1]
+        return ()
+
+
+# Live (builder check round 2, E2): reflection selected an invented event, and with no repair it simply failed.
+_INVENTED = processing.SelectionRejectionError("Processing selected unavailable event: action:speech.say.")
+
+
+def test_reflection_asks_again_when_its_selection_is_rejected() -> None:
+    processor = RejectedThenProcessor(_INVENTED)
+
+    _, lifecycle = asyncio.run(_reflect(processor, with_persona=False))
+
+    assert [event.name for event in lifecycle] == [cognition.Reflection.output_event.name]
+    assert len(processor.inputs) == 2
+    first, second = (frame.instructions or "" for frame in processor.inputs)
+    assert "The previous event selection was rejected" not in first
+    assert "Processing selected unavailable event: action:speech.say." in second
+    assert second.startswith(reflection_impl.SELECT_INSTRUCTIONS.strip())
+
+
+def test_reflection_stops_on_the_same_selection_rejection_twice() -> None:
+    processor = RejectedThenProcessor(_INVENTED, _INVENTED)
+
+    _, lifecycle = asyncio.run(_reflect(processor, with_persona=False))
+
+    assert [event.name for event in lifecycle] == [cognition.Reflection.failed_event.name]
+    assert len(processor.inputs) == 2
+
+
+def test_reflection_bounds_its_selection_repairs() -> None:
+    processor = RejectedThenProcessor(
+        *(processing.SelectionRejectionError(f"Processing selected unavailable event: tests.{n}.") for n in range(3))
+    )
+
+    _, lifecycle = asyncio.run(_reflect(processor, with_persona=False))
+
+    assert [event.name for event in lifecycle] == [cognition.Reflection.failed_event.name]
+    assert len(processor.inputs) == 3
+
+
+def test_reflection_models_select_repair_as_a_bounded_choice() -> None:
+    model = require_model(reflection_impl.Reflection.submodel)
+
+    assert "/Reflection/routing_rejection" in model.members
+    assert transition_map(model)["/Reflection/processing"]["bot.ability.reflection.selection.rejected"]
+    routes = choice_transitions(model, "/Reflection/routing_rejection")
+    assert len(routes) == 3
+    assert routes[-1].guard is None

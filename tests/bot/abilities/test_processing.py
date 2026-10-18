@@ -547,6 +547,36 @@ def test_processing_directed_failure_returns_to_terminal_operation() -> None:
     assert terminal.data.message == "child failed"
 
 
+class _RejectingProcessor(processing.Processor):
+    @typing.override
+    async def process(
+        self, input: processing.InputData, *, drafts: processing.DraftSink | None = None
+    ) -> processing.Events:
+        del input
+        raise processing.SelectionRejectionError("Processing selected unavailable event: action:speech.say.")
+
+
+def test_processing_fails_a_rejected_selection_as_a_selection_rejection_its_owner_may_repair() -> None:
+    # Live (builder check round 2, E2): reflection's select step chose an invented event; its owner saw only a
+    # failure message, so it could not ask its model again.
+    async def run() -> hsm.Event[typing.Any]:
+        processing_ability = processing.Processing(processor=_RejectingProcessor())
+        ctx = shared_hsm_context()
+        await start_abilities_for_test(ctx, processing_ability)
+        return await ability.run_terminal_operation(
+            ctx,
+            child=processing_ability,
+            request=processing_ability.input_event.with_data_and_id(processing.InputData(input="x"), "rejected"),
+            terminals=(processing_ability.output_event, processing_ability.failed_event),
+            timeout=datetime.timedelta(seconds=1),
+        )
+
+    terminal = asyncio.run(run())
+
+    assert isinstance(terminal.data, processing.SelectionRejectionData)
+    assert terminal.data.normalized == "Processing selected unavailable event: action:speech.say."
+
+
 def test_processing_concurrent_directed_operations_do_not_cross_complete() -> None:
     async def run() -> tuple[hsm.Event[typing.Any], hsm.Event[typing.Any]]:
         processing_ability, processor = delayed_recording()

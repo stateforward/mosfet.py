@@ -257,6 +257,41 @@ _ReasoningStageFailedEvent = hsm.Event[_ReasoningStageFailedData](
 )
 
 
+class _SelectionRejectedData(pydantic.BaseModel):
+    """Private retry context: the model's selection for this turn was rejected before delivery.
+
+    ``message`` is the redacted diagnostic the model repairs from; the raw exception never crosses the HSM
+    boundary, because Pydantic may include the rejected value in it.
+    """
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
+        arbitrary_types_allowed=True,
+        frozen=True,
+    )
+
+    request: InputData = pydantic.Field(description="The reasoning request being repaired.")
+    capability: _ReasoningCapability
+    message: str = pydantic.Field(min_length=1, description="Redacted rejection diagnostic for model repair.")
+    normalized: str = pydantic.Field(
+        min_length=1, description="Stable rejection key used to detect the same rejection twice running."
+    )
+    previous_normalized: str | None = pydantic.Field(
+        default=None, min_length=1, description="The key of the rejection just before this one, when any."
+    )
+    attempt: int = pydantic.Field(
+        ge=0,
+        le=types.MAX_SELECTION_REPAIRS,
+        description="Zero-based bounded invocation attempt that produced this rejection.",
+    )
+
+
+_SelectionRejectedEvent = hsm.Event[_SelectionRejectedData](
+    name="bot.ability.reasoning.selection.rejected",
+    kind=hsm.ErrorEventKind,
+    schema=_SelectionRejectedData,
+)
+
+
 ReasoningProcessor: typing.TypeAlias = processing.Processor
 
 
@@ -279,7 +314,9 @@ def _selections_from_output(output: types.OutputData) -> processing.Events:
 class Reasoning(processing.Processing):
     """Slow cognitive ability: inject a ``processing.Processor`` and apply it to the deliberate frame.
 
-    Chart phases: initializing → idle → applying → idle.
+    Chart phases: initializing → idle → applying → idle. A rejected selection (one the processor refuses, or
+    one dispatch refuses) passes through ``routing_rejection``: the model is asked again with the diagnostic,
+    at most ``types.MAX_SELECTION_REPAIRS`` times, and the same rejection twice running fails the turn.
     Turn payload rides private completion events (HSM-COMPLETION-001).
     What memory surfaced for the turn arrives on the host frame as ``recalled`` and is passed on
     to the processor unchanged; Reasoning neither reads nor writes memory itself.
@@ -349,7 +386,7 @@ class Reasoning(processing.Processing):
             data.capability
             if isinstance(
                 data,
-                _ReasonedEventData | _ReasoningStageFailedData,
+                _ReasonedEventData | _ReasoningStageFailedData | _SelectionRejectedData,
             )
             else None
         )
@@ -371,6 +408,23 @@ class Reasoning(processing.Processing):
     def _has_stage_failure(ctx: hsm.Context, instance: "Reasoning", event: hsm.Event[typing.Any]) -> bool:
         del ctx
         return isinstance(event.data, _ReasoningStageFailedData) and Reasoning._matches_operation(instance, event)
+
+    @staticmethod
+    def _has_selection_rejection(ctx: hsm.Context, instance: "Reasoning", event: hsm.Event[typing.Any]) -> bool:
+        del ctx
+        return isinstance(event.data, _SelectionRejectedData) and Reasoning._matches_operation(instance, event)
+
+    @staticmethod
+    def _is_same_selection_rejection(ctx: hsm.Context, instance: "Reasoning", event: hsm.Event[typing.Any]) -> bool:
+        del ctx, instance
+        data = event.data
+        return isinstance(data, _SelectionRejectedData) and data.previous_normalized == data.normalized
+
+    @staticmethod
+    def _can_repair_selection(ctx: hsm.Context, instance: "Reasoning", event: hsm.Event[typing.Any]) -> bool:
+        del ctx, instance
+        data = event.data
+        return isinstance(data, _SelectionRejectedData) and data.attempt < types.MAX_SELECTION_REPAIRS
 
     @staticmethod
     async def _start_operation(
@@ -466,6 +520,19 @@ class Reasoning(processing.Processing):
         )
 
     @staticmethod
+    def _fail_selection_rejection(ctx: hsm.Context, instance: "Reasoning", event: hsm.Event[typing.Any]) -> None:
+        data = event.data
+        assert isinstance(data, _SelectionRejectedData)
+        Reasoning._dispatch_failure(
+            ctx,
+            instance,
+            operation_id=event.id or None,
+            metadata=dict(event.metadata),
+            failure=types.FailureData(message=data.message, turn=data.request.turn),
+            target=data.capability.reply_to,
+        )
+
+    @staticmethod
     async def _reason_activity(ctx: hsm.Context, instance: "Reasoning", event: hsm.Event[typing.Any]) -> None:
         with span.operation(
             "bot.reasoning.stage",
@@ -473,13 +540,22 @@ class Reasoning(processing.Processing):
             component="cognition.reasoning",
             stage="reasoning_reason",
             context=telemetry.event_context(event),
-        ):
-            operation_id = event.id if event.id else uuid.uuid4().hex
-            capability = await Reasoning._start_operation(
-                instance,
-                operation_id,
-                reply_to=event.source if event.target == hsm.id(instance) and event.source else None,
-            )
+        ) as active:
+            # A repair re-enters applying with the rejection, which carries the request and the live capability.
+            retry = event.data if isinstance(event.data, _SelectionRejectedData) else None
+            attempt = retry.attempt + 1 if retry is not None else 0
+            previous_normalized = retry.normalized if retry is not None else None
+            if retry is not None:
+                capability = retry.capability
+                operation_id = capability.operation_id
+            else:
+                operation_id = event.id if event.id else uuid.uuid4().hex
+                capability = await Reasoning._start_operation(
+                    instance,
+                    operation_id,
+                    reply_to=event.source if event.target == hsm.id(instance) and event.source else None,
+                )
+            active.set_attribute("bot.selection.attempt", attempt)
             metadata = dict(event.metadata)
 
             def dispatch_stage(event_type: hsm.Event[typing.Any], data: object) -> None:
@@ -495,7 +571,22 @@ class Reasoning(processing.Processing):
                     ),
                 )
 
-            request = Reasoning._input_from_event(event)
+            def reject(error: processing.SelectionRejectionError) -> None:
+                active.set_attribute("bot.selection.rejected", True)
+                normalized = types.selection_rejection_key(error.normalized)
+                dispatch_stage(
+                    _SelectionRejectedEvent,
+                    _SelectionRejectedData(
+                        request=request,
+                        capability=capability,
+                        message=types.selection_rejection_message(error.normalized),
+                        normalized=normalized,
+                        previous_normalized=previous_normalized,
+                        attempt=attempt,
+                    ),
+                )
+
+            request = retry.request if retry is not None else Reasoning._input_from_event(event)
             try:
                 # The host's frame narrowed to this stage's effort ceiling. Narrowing reads live
                 # actor snapshots, so a frame that cannot be read fails the turn.
@@ -515,6 +606,8 @@ class Reasoning(processing.Processing):
                         recalled=host_input.recalled,
                     ),
                 )
+                if retry is not None:
+                    child_input = types.with_selection_feedback(child_input, retry.message)
                 # Reasoning's selections are dispatched as returned, so what it is still writing may be drafted to
                 # its targets as it streams; the drafts carry this operation's id, as the selection will.
                 drafts = (
@@ -526,6 +619,10 @@ class Reasoning(processing.Processing):
                 )
                 raw = await instance._processor.process(child_input, drafts=drafts)
                 reasoned = Reasoning._coerce_reasoned(raw)
+            except processing.SelectionRejectionError as error:
+                # The processor refused the selection (it did not decode, or fails its schema): the model's to repair.
+                reject(error)
+                return
             except Exception as error:
                 dispatch_stage(
                     _ReasoningStageFailedEvent,
@@ -549,6 +646,10 @@ class Reasoning(processing.Processing):
                         metadata=_public_metadata(metadata),
                         dispatch_trust=processing.DispatchTrust.MODEL,
                     )
+                except processing.SelectionRejectionError as error:
+                    # Every selection is validated before any is delivered, so a rejection delivered nothing.
+                    reject(error)
+                    return
                 except Exception as error:
                     dispatch_stage(
                         _ReasoningStageFailedEvent,
@@ -652,6 +753,27 @@ class Reasoning(processing.Processing):
                 hsm.on(_ReasoningStageFailedEvent),
                 hsm.guard(_has_stage_failure),
                 hsm.effect(_fail_from_stage),
+                hsm.target("/Reasoning/idle"),
+            ),
+            hsm.transition(
+                hsm.on(_SelectionRejectedEvent),
+                hsm.guard(_has_selection_rejection),
+                hsm.target("/Reasoning/routing_rejection"),
+            ),
+        ),
+        hsm.choice(
+            "routing_rejection",
+            hsm.transition(
+                hsm.guard(_is_same_selection_rejection),
+                hsm.effect(_fail_selection_rejection),
+                hsm.target("/Reasoning/idle"),
+            ),
+            hsm.transition(
+                hsm.guard(_can_repair_selection),
+                hsm.target("/Reasoning/applying"),
+            ),
+            hsm.transition(
+                hsm.effect(_fail_selection_rejection),
                 hsm.target("/Reasoning/idle"),
             ),
         ),

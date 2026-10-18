@@ -264,6 +264,39 @@ _StageFailedEvent = hsm.Event[_StageFailedData](
     kind=hsm.ErrorEventKind,
     schema=_StageFailedData,
 )
+
+
+class _SelectRejectedData(pydantic.BaseModel):
+    """Private retry context: the select step's selection was rejected before Reflection could use it.
+
+    ``message`` is the redacted diagnostic the model repairs from; ``loaded`` is the select context asked again.
+    """
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
+        arbitrary_types_allowed=True,
+        frozen=True,
+    )
+
+    loaded: _LoadedEventData
+    message: str = pydantic.Field(min_length=1, description="Redacted rejection diagnostic for model repair.")
+    normalized: str = pydantic.Field(
+        min_length=1, description="Stable rejection key used to detect the same rejection twice running."
+    )
+    previous_normalized: str | None = pydantic.Field(
+        default=None, min_length=1, description="The key of the rejection just before this one, when any."
+    )
+    attempt: int = pydantic.Field(
+        ge=0,
+        le=types.MAX_SELECTION_REPAIRS,
+        description="Zero-based bounded select attempt that produced this rejection.",
+    )
+
+
+_SelectRejectedEvent = hsm.Event[_SelectRejectedData](
+    name="bot.ability.reflection.selection.rejected",
+    kind=hsm.ErrorEventKind,
+    schema=_SelectRejectedData,
+)
 _SelectHopTimedOutEvent = hsm.Event[object](
     name="bot.ability.reflection.select.hop.timed_out",
     kind=hsm.ErrorEventKind,
@@ -344,7 +377,12 @@ async def _apply_break(ctx: hsm.Context, data: BreakData, *, store: memory.Memor
 
 class Reflection(processing.Processing):
     _attachment_group: attachment.Group | None
-    """Post-output ability: load inventory → select → revise or break."""
+    """Post-output ability: load inventory → select → revise or break.
+
+    A select step whose selection is rejected passes through ``routing_rejection``: the model is asked again
+    with the diagnostic, at most ``types.MAX_SELECTION_REPAIRS`` times, and the same rejection twice running
+    fails the reflection.
+    """
 
     instructions: typing.ClassVar[str] = SELECT_INSTRUCTIONS
     select_instructions: typing.ClassVar[str] = SELECT_INSTRUCTIONS
@@ -391,6 +429,8 @@ class Reflection(processing.Processing):
             _LoadedEventData | _AppliedEventData | _SelectedEventData | _StageFailedData,
         ):
             return data.operation_id, data.generation
+        if isinstance(data, _SelectRejectedData):
+            return data.loaded.operation_id, data.loaded.generation
         return None
 
     @staticmethod
@@ -566,6 +606,35 @@ class Reflection(processing.Processing):
         return isinstance(event.data, _StageFailedData) and Reflection._matches_operation(instance, event)
 
     @staticmethod
+    def _has_select_rejection(ctx: hsm.Context, instance: "Reflection", event: hsm.Event[typing.Any]) -> bool:
+        del ctx
+        return isinstance(event.data, _SelectRejectedData) and Reflection._matches_operation(instance, event)
+
+    @staticmethod
+    def _is_same_select_rejection(ctx: hsm.Context, instance: "Reflection", event: hsm.Event[typing.Any]) -> bool:
+        del ctx, instance
+        data = event.data
+        return isinstance(data, _SelectRejectedData) and data.previous_normalized == data.normalized
+
+    @staticmethod
+    def _can_repair_select(ctx: hsm.Context, instance: "Reflection", event: hsm.Event[typing.Any]) -> bool:
+        del ctx, instance
+        data = event.data
+        return isinstance(data, _SelectRejectedData) and data.attempt < types.MAX_SELECTION_REPAIRS
+
+    @staticmethod
+    def _fail_select_rejection(ctx: hsm.Context, instance: "Reflection", event: hsm.Event[typing.Any]) -> None:
+        data = event.data
+        assert isinstance(data, _SelectRejectedData)
+        processing.dispatch_terminal_failure(
+            ctx,
+            instance,
+            operation_id=data.loaded.operation_id,
+            metadata=dict(event.metadata),
+            failure=ability.FailureData(message=data.message),
+        )
+
+    @staticmethod
     def _fail_from_stage(ctx: hsm.Context, instance: "Reflection", event: hsm.Event[typing.Any]) -> None:
         data = event.data
         assert isinstance(data, _StageFailedData)
@@ -668,8 +737,11 @@ class Reflection(processing.Processing):
 
     @staticmethod
     async def _dispatch_select(ctx: hsm.Context, instance: "Reflection", event: hsm.Event[typing.Any]) -> None:
-        data = event.data
+        # A repair re-enters processing with the rejection, which carries the select context it asks again.
+        retry = event.data if isinstance(event.data, _SelectRejectedData) else None
+        data = retry.loaded if retry is not None else event.data
         assert isinstance(data, _LoadedEventData)
+        attempt = retry.attempt + 1 if retry is not None else 0
         turn = data.turn
         operation_id = data.operation_id
         select_input = processing.InputData(
@@ -685,6 +757,8 @@ class Reflection(processing.Processing):
             schemas=instance._events,
             actors={},
         )
+        if retry is not None:
+            select_input = types.with_selection_feedback(select_input, retry.message)
         hop_id = Reflection._child_id(instance, _SELECT_ID_SUFFIX)
         input_event = dataclasses.replace(
             instance._select_processing.input_event.with_data_and_id(
@@ -721,6 +795,30 @@ class Reflection(processing.Processing):
             )
             return
         processing.finish_operation(ctx, instance, hop_id)
+        rejection = terminal.data
+        if isinstance(rejection, processing.SelectionRejectionData):
+            # The select step's selection was refused (an event it was not offered, or one that did not decode):
+            # the model's to repair.
+            _ = hsm.dispatch(
+                ctx,
+                instance,
+                dataclasses.replace(
+                    _SelectRejectedEvent.with_data(
+                        _SelectRejectedData(
+                            loaded=data,
+                            message=types.selection_rejection_message(rejection.normalized),
+                            normalized=types.selection_rejection_key(rejection.normalized),
+                            previous_normalized=retry.normalized if retry is not None else None,
+                            attempt=attempt,
+                        )
+                    ),
+                    id=operation_id,
+                    source=hsm.id(instance),
+                    target=hsm.id(instance),
+                    metadata=dict(event.metadata),
+                ),
+            )
+            return
         _ = hsm.dispatch(
             ctx,
             instance,
@@ -1162,6 +1260,27 @@ class Reflection(processing.Processing):
                 hsm.guard(_is_select_hop_timeout),
                 hsm.effect(_cancel_select_timeout),
                 hsm.target("/Reflection/timing_out"),
+            ),
+            hsm.transition(
+                hsm.on(_SelectRejectedEvent),
+                hsm.guard(_has_select_rejection),
+                hsm.target("/Reflection/routing_rejection"),
+            ),
+        ),
+        hsm.choice(
+            "routing_rejection",
+            hsm.transition(
+                hsm.guard(_is_same_select_rejection),
+                hsm.effect(_fail_select_rejection),
+                hsm.target("/Reflection/idle"),
+            ),
+            hsm.transition(
+                hsm.guard(_can_repair_select),
+                hsm.target("/Reflection/processing"),
+            ),
+            hsm.transition(
+                hsm.effect(_fail_select_rejection),
+                hsm.target("/Reflection/idle"),
             ),
         ),
         hsm.state(

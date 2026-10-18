@@ -301,8 +301,20 @@ def _validate_event_payload(
     *,
     patch: processing.SchemaPatch | None = None,
 ) -> None:
+    """Validate one selection's data against its event's branch schema.
+
+    Raises:
+        processing.SelectionRejectionError: The data fails the branch schema: a well-formed answer the model may
+            repair. The diagnostic names the event and the failing keys, never a value.
+    """
+
     schema = _event_payload_schema(event, patch=patch)
-    _validate_structured_json(dict(data), schema, root_schema=schema)
+    try:
+        _validate_structured_json(dict(data), schema, root_schema=schema)
+    except _StructuredOutputValidationError as error:
+        raise processing.SelectionRejectionError(
+            f"Processing selected invalid event data for event: {event.name}: {error}."
+        ) from error
 
 
 def _decoded_json_strings(
@@ -373,25 +385,38 @@ def _decoded_dispatch_args(
     *,
     patch: processing.SchemaPatch | None = None,
 ) -> dict[str, object]:
-    """Decode JSON strings in ``dispatch`` args: the events array, its items, and each offered event's data."""
+    """Decode JSON strings in ``dispatch`` args: the events array, its items, and each offered event's data.
 
-    decoded = typing.cast(
-        dict[str, object], _decoded_json_strings(args, _DISPATCH_ARGS_SCHEMA, root_schema=_DISPATCH_ARGS_SCHEMA)
-    )
-    events = decoded.get("events")
-    if not isinstance(events, list):
-        return decoded
-    by_name = {event.name: event for event in offered}
-    for item in typing.cast(list[object], events):
-        if not isinstance(item, dict):
-            continue
-        selection = typing.cast(dict[str, object], item)
-        event_name = selection.get("event")
-        event = by_name.get(event_name) if isinstance(event_name, str) else None
-        if event is None or "data" not in selection:
-            continue
-        schema = _event_payload_schema(event, patch=patch)
-        selection["data"] = _decoded_json_strings(selection["data"], schema, root_schema=schema)
+    Raises:
+        processing.SelectionRejectionError: A string that does not decode, or decodes to anything but the array
+            or object expected. The server sends ``events`` as a string exactly when the model's JSON did not
+            parse, so this is the model's to repair; the diagnostic names the decode error, never the text.
+    """
+
+    try:
+        decoded = typing.cast(
+            dict[str, object], _decoded_json_strings(args, _DISPATCH_ARGS_SCHEMA, root_schema=_DISPATCH_ARGS_SCHEMA)
+        )
+        events = decoded.get("events")
+        if not isinstance(events, list):
+            return decoded
+        by_name = {event.name: event for event in offered}
+        for item in typing.cast(list[object], events):
+            if not isinstance(item, dict):
+                continue
+            selection = typing.cast(dict[str, object], item)
+            event_name = selection.get("event")
+            event = by_name.get(event_name) if isinstance(event_name, str) else None
+            if event is None or "data" not in selection:
+                continue
+            schema = _event_payload_schema(event, patch=patch)
+            selection["data"] = _decoded_json_strings(selection["data"], schema, root_schema=schema)
+    except _StructuredOutputValidationError as error:
+        cause = error.__cause__
+        detail = _cause(cause) if isinstance(cause, json.JSONDecodeError) else str(error)
+        raise processing.SelectionRejectionError(
+            f"Processing selected events that did not decode: {detail}."
+        ) from error
     return decoded
 
 
@@ -422,7 +447,10 @@ def _events_from_dispatch_tool_calls(
                 targets_by_event=targets_by_event,
             )
         except ValueError as error:
-            raise _StructuredOutputValidationError(_cause(error)) from error
+            # Items that are not event selections match no offered branch: the model's to repair.
+            raise processing.SelectionRejectionError(
+                f"Processing selected events that are not event selections: {_cause(error)}"
+            ) from error
         for selection in selections:
             event = by_name[selection.event]
             payload = dict(typing.cast(collections.abc.Mapping[str, object], selection.data or {}))
@@ -627,11 +655,11 @@ def _validate_structured_object(
 
     missing = required - value_keys
     if missing:
-        raise _StructuredOutputValidationError("object value is missing required keys")
+        raise _StructuredOutputValidationError(f"object value is missing required keys: {', '.join(sorted(missing))}")
     if schema.get("additionalProperties") is False:
         extra = value_keys - set(properties)
         if extra:
-            raise _StructuredOutputValidationError("object value included additional keys")
+            raise _StructuredOutputValidationError(f"object value included additional keys: {', '.join(sorted(extra))}")
 
     string_keyed_value = {str(key): item for key, item in value_mapping.items()}
     for property_name, property_schema in properties.items():
