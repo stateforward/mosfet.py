@@ -44,6 +44,9 @@ docstring-code-format = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+  "live: runs Willy against the lab model server (CT 108); also needs WILLY_LIVE=1, so skipped by default",
+]
 
 [tool.basedpyright]
 include = ["src", "tests"]

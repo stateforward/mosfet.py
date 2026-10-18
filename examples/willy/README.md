@@ -158,3 +158,29 @@ memory and people, and fakes at the provider seams only: the speech server's wir
 `httpx.MockTransport`. They pin what Willy perceives and what it can do (a stranger is `known=false` and linking
 is offered; a link makes a declared child's voice hers; two voices in one turn are two sources; its own voice is
 `you`; forgetting a person erases their print), never what it chooses.
+
+## Live check
+
+`tests/test_live.py` runs Willy against the lab model server itself, CT 108 at the addresses in `.env.example`:
+
+```sh
+cd examples/willy && set -a && . ./.env.example && set +a && WILLY_LIVE=1 uv run pytest -m live tests/test_live.py -q
+```
+
+It has two gates, and both must hold: it is marked `live`, so `-m "not live"` (CI, and the command above under
+Tests) deselects it, and it is skipped unless `WILLY_LIVE=1`. With `WILLY_LIVE=1` nothing is skipped: a missing
+`WILLY_*` setting fails naming it, and a lab service that does not answer fails naming its unit, so a down server
+never passes. It assumes `mosfet-llm` and the speech and embedding units are up; if anygame holds the lab's GPUs,
+the runbook (`lab-ct108.md`) says how to stop and start the units.
+
+The test writes its own `bot.define` of Willy's shape on the real parts and the lab's models, with one room served
+on loopback and `willy_example.room` as its far side; the far side's sound card is a scripted microphone and
+speaker, and the strangers' speech is made by the lab's speech engine at test time, in two catalog voices that are
+not Willy's. Step by step, each bounded: the lab answers (L1, 10 s); Willy is born with a voice that memory keeps
+(L2, 300 s); a stranger's voice reaches it unknown, with linking offered (L3); a link the test makes, standing in
+for a selection, makes that voice known by the next utterance (L4); two voices in one utterance are two sources
+(L5); its own voice, echoed through the room's microphone, is `you` (L6, 90 s); and forgetting the person erases
+the print (L7); 60 s each unless given. It asserts perception and capacity only. Whatever Willy chose on each
+turn (whether it asked who the stranger was, what it said, the tools it called) is recorded, never asserted:
+printed as it happens, kept in `live-report.jsonl`, with OTEL JSONL, in the test's data directory. It takes about
+fifteen minutes, most of it Willy's birth on the 27B model, which thinks by default.
