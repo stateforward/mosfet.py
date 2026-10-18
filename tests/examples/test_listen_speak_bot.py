@@ -1,20 +1,17 @@
-from mosfet import abilities
-from mosfet.abilities import cognition
-from mosfet.abilities import encoding
-from mosfet.abilities import identification
-from mosfet.abilities import listening
-from mosfet.abilities import memory
-from mosfet.abilities import persona
-from mosfet.abilities import processing
-from mosfet.abilities import speaking
-from mosfet.abilities import vocal
-from mosfet.abilities.hearing import voice
-from mosfet.devices import audio
-from mosfet.environment import Environment, SoundData, SoundEvent
-from mosfet.protocols import attachment
-from mosfet.providers import openai_compat
-from mosfet.providers import pyannote
+"""listen_speak_bot: the owner's ``Settings``, its bot file, its encoders, and one observed run of a bot it defines.
 
+Every bot here is a small ``bot.define`` of listen_speak's shape, written in the test that runs it, on a scripted
+model (``testing.Scripted``) and fakes at the provider seams only: a fixed voice-activity classifier and a recorded
+PyAnnote inference on the local path, and on the lab path a scripted speech server behind
+``speech_server.Transcription``'s ``connect`` and the voiceprint server behind ``httpx.MockTransport``. Sound
+reaches the bot as ``environment.sound``, as ``hear`` plays it.
+
+These tests pin perception and capacity: what the bot hears, who it is shown is speaking, what it is offered, and
+that what it selects is said. They never pin a choice. A respond is scripted only to prove that the capacity works;
+with a model that chooses nothing, nothing is said, and the run is ``incomplete``, which is the bot's to decide.
+"""
+
+import ast
 import asyncio
 import collections.abc
 import dataclasses
@@ -22,23 +19,44 @@ import datetime
 import importlib.util
 import io
 import json
+import os
 import pathlib
 import shutil
 import subprocess
+import sys
 import threading
 import types
 import typing
 import wave
-from typing import ClassVar, Protocol, TypeVar, override
 
 import hsm
 import httpx
 import mosfet
 import openai
+import pydantic
 import pytest
+from mosfet import bot
+from mosfet.abilities import (
+    cognition,
+    communication,
+    encoding,
+    identification,
+    listening,
+    memory,
+    processing,
+    speaking,
+    vocal,
+)
+from mosfet.abilities.communication import conversation
+from mosfet.abilities.hearing import voice
+from mosfet.bot import testing
+from mosfet.environment import SoundData, SoundEvent
+from mosfet.providers import openai_compat
+from mosfet.providers import pyannote
+from mosfet.providers import speech_server
+from mosfet.providers.speech_server import transcription
 
 from tests.bot.abilities.vocal.speech import contract
-from tests.bot.lifecycle_replies import started_replies
 
 if typing.TYPE_CHECKING:
     import listen_speak_bot_example as example
@@ -47,875 +65,718 @@ else:
         "listen_speak_bot_example",
         reason="listen_speak_bot example package not installed (run via the examples/listen_speak_bot project env)",
     )
-ListenSpeakBot = example.ListenSpeakBot
 
-
-def _voice_registry() -> identification.Registry:
-    return identification.Registry(
-        identifier=identification.Matcher(
-            store=identification.InProcessStore(max_ids=8),
-            policy=identification.MatchPolicy(threshold=0.50, margin=0.05, refine_threshold=0.65),
-        ),
-        kind="voice",
-        max_unlinked_age=datetime.timedelta(days=1),
-        max_ids=8,
-    )
-
-
-class _FixedVoiceActivityClassifier(voice.detection.VoiceActivityClassifier):
-    @override
-    async def classify(self, input: bytes) -> voice.detection.ApplyData:
-        if input == b"speech":
-            return voice.detection.ApplyData(
-                segments=(
-                    voice.detection.VoiceDetectionSegment(
-                        start_seconds=0.0,
-                        end_seconds=0.1,
-                        confidence=0.9,
-                    ),
-                )
-            )
-        return voice.detection.ApplyData(segments=())
-
-
-class _CloseTrackingDecoder:
-    instances: ClassVar[list["_CloseTrackingDecoder"]] = []
-
-    def __init__(self, **kwargs: object) -> None:
-        del kwargs
-        self.closed = False
-        self.instances.append(self)
-
-    async def decode(self, input: bytes) -> bytes:
-        return input
-
-    async def aclose(self) -> None:
-        self.closed = True
-
-
-class _CloseTrackingVoiceActivityClassifier(_FixedVoiceActivityClassifier):
-    instances: ClassVar[list["_CloseTrackingVoiceActivityClassifier"]] = []
-
-    def __init__(self, **kwargs: object) -> None:
-        del kwargs
-        self.closed = False
-        self.instances.append(self)
-
-    async def aclose(self) -> None:
-        self.closed = True
-
-
-class _RecordingListening(listening.Listening):
-    handoffs: list[cognition.InputData]
-
-    def __init__(
-        self,
-        *,
-        voice_activity_classifier: voice.detection.VoiceActivityClassifier,
-        voice_classifier: abilities.Classifier[
-            voice.identification.InputData,
-            voice.identification.OutputData,
-        ],
-        registry: identification.Registry,
-    ) -> None:
-        super().__init__(
-            voice_activity_classifier=voice_activity_classifier,
-            voice_classifier=voice_classifier,
-            registry=registry,
-        )
-        self.handoffs = []
-
-    @override
-    def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[bool]:
-        if event.name == self.output_event.name and isinstance(event.data, cognition.InputData):
-            self.handoffs.append(event.data)
-        return super().dispatch(ctx, event)
-
-
-class _RecordingInference:
-    def __init__(self) -> None:
-        self.calls: list[pathlib.Path] = []
-
-    def __call__(self, audio: pathlib.Path) -> object:
-        with wave.open(str(audio), "rb") as stream:
-            assert stream.getframerate() == 16_000
-            assert stream.getnchannels() == 1
-            assert stream.getsampwidth() == 2
-        self.calls.append(audio)
-        return [0.12, -0.08, 0.31]
+_KEY = "gemini-key-5d1a"
+_WAIT = 10.0
+_RATE_HZ = 16_000
+# Starting the child imports mosfet and the providers before the bot file runs; that is not under test.
+_RUN_BOUND = 60.0
 
 
 def _repo_root() -> pathlib.Path:
     return pathlib.Path(__file__).resolve().parents[2]
 
 
-_EventData = TypeVar("_EventData")
+def _example_root() -> pathlib.Path:
+    return _repo_root() / "examples" / "listen_speak_bot"
 
 
-class _WaitableBot(Protocol):
-    async def wait_for_conversation_processing(self) -> None: ...
+# --- The owner's settings ---------------------------------------------------------------------------------------
 
 
-def _routed_event(
-    event: hsm.Event[_EventData],
-    *,
-    source: str,
-    target: str,
-) -> hsm.Event[_EventData]:
-    return dataclasses.replace(event, source=source, target=target)
+def test_the_gemini_key_alone_takes_every_default() -> None:
+    settings = example.Settings.model_validate({"BOT_GEMINI_API_KEY": _KEY})
+
+    assert settings.gemini_api_key.get_secret_value() == _KEY
+    assert settings.gemini_model == example.DEFAULT_GEMINI_MODEL == "gemini-3.5-flash"
+    assert settings.vad_model == example.DEFAULT_SILERO_VAD_MODEL == "mlx-community/silero-vad"
+    assert settings.stt_model is None
+    assert (
+        settings.voice_identity_model
+        == example.DEFAULT_PYANNOTE_VOICE_IDENTITY_MODEL
+        == "pyannote/wespeaker-voxceleb-resnet34-LM"
+    )
+    # Off the lab: Silero hears, PyAnnote knows voices apart, and macOS say speaks.
+    assert (settings.stream_url, settings.voiceprint_url, settings.tts_url) == (None, None, None)
 
 
-async def _assert_not_ready(body: _WaitableBot) -> None:
-    with pytest.raises(asyncio.TimeoutError):
-        await asyncio.wait_for(body.wait_for_conversation_processing(), timeout=0.01)
+@pytest.mark.parametrize(
+    ("variable", "field", "value"),
+    [
+        ("BOT_GEMINI_API_KEY", "gemini_api_key", _KEY),
+        ("GEMINI_API_KEY", "gemini_api_key", _KEY),
+        ("GOOGLE_API_KEY", "gemini_api_key", _KEY),
+        ("BOT_GEMINI_MODEL", "gemini_model", "gemini-test"),
+        ("GEMINI_MODEL", "gemini_model", "gemini-test"),
+        ("BOT_SILERO_VAD_MODEL", "vad_model", "local/silero-test"),
+        ("BOT_VAD_MODEL", "vad_model", "local/silero-test"),
+        ("SILERO_VAD_MODEL", "vad_model", "local/silero-test"),
+        ("BOT_STT_MODEL", "stt_model", "local/whisper-test"),
+        ("BOT_WHISPER_MODEL", "stt_model", "local/whisper-test"),
+        ("STT_MODEL", "stt_model", "local/whisper-test"),
+        ("WHISPER_MODEL", "stt_model", "local/whisper-test"),
+        ("BOT_PYANNOTE_VOICE_IDENTITY_MODEL", "voice_identity_model", "local/test-speaker-model"),
+        ("PYANNOTE_VOICE_IDENTITY_MODEL", "voice_identity_model", "local/test-speaker-model"),
+    ],
+)
+def test_every_setting_reads_each_of_its_variables(variable: str, field: str, value: str) -> None:
+    given = {"GEMINI_API_KEY": "another-key"} if field != "gemini_api_key" else {}
+    settings = example.Settings.model_validate({**given, variable: value})
+
+    read = getattr(settings, field)
+    assert (read.get_secret_value() if isinstance(read, pydantic.SecretStr) else read) == value
 
 
-async def _assert_ready(body: _WaitableBot) -> None:
-    await asyncio.wait_for(body.wait_for_conversation_processing(), timeout=0.1)
+def test_the_lab_wiring_is_read_from_the_environment() -> None:
+    settings = example.Settings.model_validate(
+        {
+            "BOT_GEMINI_API_KEY": _KEY,
+            "BOT_SPEECH_SERVER_STREAM_URL": "ws://lab.test:8001",
+            "BOT_SPEECH_SERVER_URL": "http://lab.test:8003",
+            "BOT_SPEECH_SERVER_TTS_URL": "http://lab.test:8002",
+        }
+    )
 
-
-def _empty_cognition(mouth: speaking.Speaking) -> cognition.Cognition:
-    """A cognition that never answers and gives no voice: the mouth keeps the voice it was built with."""
-
-    del mouth
-    processor = _Hanging()
-    return cognition.Cognition(
-        intuition=cognition.Intuition(processor=processor),
-        reasoning=cognition.Reasoning(processor=processor),
-        reflection=cognition.Reflection(processor=processor, memory=memory.Memory()),
+    assert (settings.stream_url, settings.voiceprint_url, settings.tts_url) == (
+        "ws://lab.test:8001",
+        "http://lab.test:8003",
+        "http://lab.test:8002",
     )
 
 
-def _test_bot(
-    tmp_path: pathlib.Path,
-    *,
-    inference: pyannote.SpeakerEmbeddingInference | None = None,
-    load_inference: pyannote.SpeakerEmbeddingInferenceLoader | None = None,
-) -> example.ListenSpeakBot:
-    return ListenSpeakBot(
-        reply_wav=tmp_path / "reply.wav",
-        cognition=_empty_cognition,
-        voice_activity_classifier=_FixedVoiceActivityClassifier(),
-        voice_identification_inference=inference,
-        voice_identification_loader=load_inference,
+def test_an_empty_variable_is_unset() -> None:
+    settings = example.Settings.model_validate(
+        {"BOT_GEMINI_API_KEY": _KEY, "BOT_GEMINI_MODEL": "", "BOT_SPEECH_SERVER_TTS_URL": ""}
     )
 
+    assert (settings.gemini_model, settings.tts_url) == (example.DEFAULT_GEMINI_MODEL, None)
 
-class _HandoffProbeBot(ListenSpeakBot):
-    _handoff_waiter: asyncio.Future[cognition.InputData] | None = None
 
-    def prepare_handoff_waiter(self) -> asyncio.Future[cognition.InputData]:
-        self._handoff_waiter = asyncio.get_running_loop().create_future()
-        return self._handoff_waiter
+def test_a_missing_key_is_named_and_no_value_is_shown() -> None:
+    with pytest.raises(pydantic.ValidationError) as missing:
+        _ = example.Settings.model_validate({"BOT_GEMINI_MODEL": "gemini-secret-model"})
 
-    @override
-    def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[bool]:
-        if (
-            event.name == cognition.InputEvent.name
-            and isinstance(event.data, cognition.InputData)
-            and event.source == hsm.id(self.listening())
-            and self._handoff_waiter is not None
-            and not self._handoff_waiter.done()
-        ):
-            self._handoff_waiter.set_result(event.data)
-        return super().dispatch(ctx, event)
+    assert "BOT_GEMINI_API_KEY" in str(missing.value)
+    assert "gemini-secret-model" not in str(missing.value)
 
 
-def _spoken(text: str) -> speaking.OutputData:
-    return speaking.OutputData(text=text, spoken=text, outcome="completed", sample_rate_hz=22_050, channels=1)
+def test_the_env_file_reader_takes_simple_assignments(tmp_path: pathlib.Path) -> None:
+    path = tmp_path / ".env"
+    _ = path.write_text("# a comment\nBOT_GEMINI_API_KEY='quoted'\n\nBOT_GEMINI_MODEL = gemini-test\nnoise\n")
 
+    assert example.load_env(path) == {"BOT_GEMINI_API_KEY": "quoted", "BOT_GEMINI_MODEL": "gemini-test"}
+    assert example.load_env(tmp_path / "absent.env") == {}
 
-class _FakeRunEncoder:
-    calls: list[str]
-    audio: bytes | None
 
-    def __init__(self, *, calls: tuple[str, ...], audio: bytes | None) -> None:
-        self.calls = list(calls)
-        self.audio = audio
+# --- The bot file ---------------------------------------------------------------------------------------------
 
 
-class _FakeRunBot:
-    _encoder: _FakeRunEncoder
+def _environ() -> dict[str, str]:
+    """This process's environment for the child, without its telemetry, model and speech variables."""
 
-    configured_response_selections: ClassVar[int] = 1
-    configured_response_execution_failed: ClassVar[bool] = False
-    configured_encoder_calls: ClassVar[tuple[str, ...]] = ("reply",)
-    configured_encoder_audio: ClassVar[bytes | None] = b"reply-audio"
+    environ = {
+        name: value
+        for name, value in os.environ.items()
+        if not name.startswith(("OTEL_", "BOT_", "GEMINI_", "GOOGLE_", "VA_", "MOSFET_"))
+    }
+    _ = environ.pop("PYTHONPATH", None)
+    environ["BOT_OTEL_DISABLED"] = "1"
+    return environ
 
-    def __init__(self, **kwargs: object) -> None:
-        del kwargs
-        self._encoder = _FakeRunEncoder(
-            calls=self.configured_encoder_calls,
-            audio=self.configured_encoder_audio,
-        )
 
-    async def attach(self, environment: Environment) -> None:
-        del environment
-
-    async def dispatch(self, context: hsm.Context, event: hsm.Event) -> bool:
-        del context, event
-        return False
-
-    async def wait_for_conversation_processing(self) -> None:
-        return
-
-    def response_selection_count(self) -> int:
-        return self.configured_response_selections
-
-    def listening_handoffs(self) -> tuple[object, ...]:
-        return ()
-
-    def completed(self) -> tuple[object, ...]:
-        return ()
-
-    def conversation_failures(self) -> tuple[object, ...]:
-        return ()
-
-    def failures(self) -> tuple[object, ...]:
-        return ()
-
-    def response_execution_failed(self) -> bool:
-        return self.configured_response_execution_failed
-
-    async def detach(self, environment: Environment) -> None:
-        del environment
-
-    def encoder(self) -> _FakeRunEncoder:
-        return self._encoder
-
-
-def _run_with_public_seams(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: pathlib.Path,
-    *,
-    response_selections: int,
-    response_execution_failed: bool = False,
-    encoder_calls: tuple[str, ...] = ("reply",),
-    encoder_audio: bytes | None = b"reply-audio",
-) -> dict[str, object]:
-    import listen_speak_bot_example as example
-
-    _FakeRunBot.configured_response_selections = response_selections
-    _FakeRunBot.configured_response_execution_failed = response_execution_failed
-    _FakeRunBot.configured_encoder_calls = encoder_calls
-    _FakeRunBot.configured_encoder_audio = encoder_audio
-    monkeypatch.setattr(example, "ListenSpeakBot", _FakeRunBot)
-
-    def fake_which(name: str) -> str:
-        return name
-
-    monkeypatch.setattr(shutil, "which", fake_which)
-
-    def fake_subprocess_run(
-        args: list[str],
-        **kwargs: object,
-    ) -> subprocess.CompletedProcess[str]:
-        del kwargs
-        if args[0] == "afconvert":
-            _ = pathlib.Path(args[-1]).write_bytes(b"heard")
-        return subprocess.CompletedProcess(args, 0)
-
-    monkeypatch.setattr(subprocess, "run", fake_subprocess_run)
-    from listen_speak_bot_example import AppConfig, CognitionConfig, run
-
-    config = AppConfig(cognition=CognitionConfig(api_key="gemini", intuition_api_key="mercury"))
-    return asyncio.run(run(assets_dir=tmp_path, config=config))
-
-
-def test_listen_speak_bot_owns_speaker(tmp_path: pathlib.Path) -> None:
-    body = ListenSpeakBot(
-        reply_wav=tmp_path / "reply.wav",
-        cognition=_empty_cognition,
-        voice_activity_classifier=_FixedVoiceActivityClassifier(),
-        voice_identity_model_id="local/test-speaker-model",
-        voice_identification_inference=_RecordingInference(),
-    )
-
-    assert isinstance(body.speaker(), audio.Speaker)
-
-
-def test_environment_sound_reaches_listening_after_attach(tmp_path: pathlib.Path) -> None:
-    async def run() -> None:
-        body = _HandoffProbeBot(
-            reply_wav=tmp_path / "reply.wav",
-            cognition=_empty_cognition,
-            voice_activity_classifier=_FixedVoiceActivityClassifier(),
-            voice_identification_inference=_RecordingInference(),
-        )
-        environment = Environment()
-        waiter = body.prepare_handoff_waiter()
-        try:
-            _ = await body.attach(environment)
-            await body.dispatch(
-                environment,
-                SoundEvent.with_data(
-                    SoundData(
-                        audio=b"speech",
-                        media_type="audio/pcm",
-                        sample_rate_hz=16_000,
-                        channels=1,
-                    )
-                ),
-            )
-            await body.dispatch(
-                environment,
-                SoundEvent.with_data(
-                    SoundData(
-                        audio=b"silence",
-                        media_type="audio/pcm",
-                        sample_rate_hz=16_000,
-                        channels=1,
-                    )
-                ),
-            )
-            handoff = await asyncio.wait_for(waiter, timeout=1.0)
-            assert isinstance(handoff.stimulus, hsm.Event)
-        finally:
-            _ = await body.detach(environment)
-
-    asyncio.run(run())
-
-
-def test_listen_speak_run_progress_waits_for_correlated_speaking_terminal(tmp_path: pathlib.Path) -> None:
-    import mosfet
-    from mosfet.abilities import speaking
-    from mosfet.abilities.communication import communication, conversation
-
-    async def run() -> None:
-        body = _test_bot(tmp_path)
-        environment = Environment()
-        _ = await body.attach(environment)
-        turn_id = "conversation-turn"
-        history = conversation.OutputEvent.with_data(conversation.Messages())
-        await body.dispatch(
-            environment,
-            _routed_event(
-                cognition.InputEvent.with_data_and_id(cognition.InputData(stimulus=history), turn_id),
-                source=hsm.id(body.listening()),
-                target=hsm.id(body),
-            ),
-        )
-        await body.dispatch(
-            environment,
-            _routed_event(
-                mosfet.ProcessingCompletedEvent.with_data_and_id(
-                    mosfet.ProcessingCompletedEventData(
-                        output=(
-                            cognition.EventData(
-                                event=communication.RespondEvent.name,
-                                target="communication",
-                                data=communication.RespondData(parts=(vocal.speech.Part(words="I am well."),)),
-                            ),
-                        ),
-                        focus_candidates=(),
-                    ),
-                    turn_id,
-                ),
-                source="cognition",
-                target=hsm.id(body),
-            ),
-        )
-
-        await _assert_not_ready(body)
-
-        await body.dispatch(
-            environment,
-            _routed_event(
-                speaking.OutputEvent.with_data_and_id(_spoken("I am well."), "stale-operation"),
-                source=hsm.id(body.speaking()),
-                target=hsm.id(body),
-            ),
-        )
-        await _assert_not_ready(body)
-
-        await body.dispatch(
-            environment,
-            _routed_event(
-                speaking.OutputEvent.with_data_and_id(_spoken("I am well."), f"{turn_id}:intuition"),
-                source=hsm.id(body.speaking()),
-                target=hsm.id(body),
-            ),
-        )
-        await _assert_ready(body)
-        _ = await body.detach(environment)
-
-    asyncio.run(run())
-
-
-def test_listen_speak_run_progress_requires_one_terminal_per_response_selection(tmp_path: pathlib.Path) -> None:
-    import mosfet
-    from mosfet.abilities import speaking
-    from mosfet.abilities.communication import communication, conversation
-
-    async def run() -> None:
-        body = _test_bot(tmp_path)
-        environment = Environment()
-        _ = await body.attach(environment)
-        turn_id = "conversation-turn"
-        history = conversation.OutputEvent.with_data(conversation.Messages())
-        await body.dispatch(
-            environment,
-            _routed_event(
-                cognition.InputEvent.with_data_and_id(cognition.InputData(stimulus=history), turn_id),
-                source=hsm.id(body.listening()),
-                target=hsm.id(body),
-            ),
-        )
-        await body.dispatch(
-            environment,
-            _routed_event(
-                mosfet.ProcessingCompletedEvent.with_data_and_id(
-                    mosfet.ProcessingCompletedEventData(
-                        output=(
-                            cognition.EventData(
-                                event=communication.RespondEvent.name,
-                                target="communication",
-                                data=communication.RespondData(parts=(vocal.speech.Part(words="Reply A."),)),
-                            ),
-                            cognition.EventData(
-                                event=communication.RespondEvent.name,
-                                target="communication",
-                                data=communication.RespondData(parts=(vocal.speech.Part(words="Reply B."),)),
-                            ),
-                        ),
-                        focus_candidates=(),
-                    ),
-                    turn_id,
-                ),
-                source="cognition",
-                target=hsm.id(body),
-            ),
-        )
-
-        await body.dispatch(
-            environment,
-            _routed_event(
-                speaking.OutputEvent.with_data_and_id(
-                    _spoken("Reply A."),
-                    "different-response-operation-a",
-                ),
-                source=hsm.id(body.speaking()),
-                target=hsm.id(body),
-            ),
-        )
-        await _assert_not_ready(body)
-
-        await body.dispatch(
-            environment,
-            _routed_event(
-                speaking.OutputEvent.with_data_and_id(
-                    _spoken("Reply B."),
-                    "different-response-operation-b",
-                ),
-                source=hsm.id(body.speaking()),
-                target=hsm.id(body),
-            ),
-        )
-        await _assert_not_ready(body)
-
-        await body.dispatch(
-            environment,
-            _routed_event(
-                speaking.OutputEvent.with_data_and_id(_spoken("Reply A."), turn_id),
-                source=hsm.id(body.speaking()),
-                target=hsm.id(body),
-            ),
-        )
-        await _assert_ready(body)
-        assert body.response_selection_count() == 1
-        _ = await body.detach(environment)
-
-    asyncio.run(run())
-
-
-def test_listen_speak_run_progress_waits_for_earlier_response_before_later_no_response(tmp_path: pathlib.Path) -> None:
-    import mosfet
-    from mosfet.abilities import speaking
-    from mosfet.abilities.communication import communication, conversation
-
-    async def run() -> None:
-        body = _test_bot(tmp_path)
-        environment = Environment()
-        _ = await body.attach(environment)
-        history = conversation.OutputEvent.with_data(conversation.Messages())
-        await body.dispatch(
-            environment,
-            _routed_event(
-                cognition.InputEvent.with_data_and_id(cognition.InputData(stimulus=history), "turn-a"),
-                source=hsm.id(body.listening()),
-                target=hsm.id(body),
-            ),
-        )
-        await body.dispatch(
-            environment,
-            _routed_event(
-                mosfet.ProcessingCompletedEvent.with_data_and_id(
-                    mosfet.ProcessingCompletedEventData(
-                        output=(
-                            cognition.EventData(
-                                event=communication.RespondEvent.name,
-                                target="communication",
-                                data=communication.RespondData(parts=(vocal.speech.Part(words="Reply A."),)),
-                            ),
-                        ),
-                        focus_candidates=(),
-                    ),
-                    "turn-a",
-                ),
-                source="cognition",
-                target=hsm.id(body),
-            ),
-        )
-        await body.dispatch(
-            environment,
-            _routed_event(
-                cognition.InputEvent.with_data_and_id(cognition.InputData(stimulus=history), "turn-b"),
-                source=hsm.id(body.listening()),
-                target=hsm.id(body),
-            ),
-        )
-        await body.dispatch(
-            environment,
-            _routed_event(
-                mosfet.ProcessingCompletedEvent.with_data_and_id(
-                    mosfet.ProcessingCompletedEventData(output=(), focus_candidates=()),
-                    "turn-b",
-                ),
-                source="cognition",
-                target=hsm.id(body),
-            ),
-        )
-
-        await _assert_not_ready(body)
-
-        await body.dispatch(
-            environment,
-            _routed_event(
-                speaking.OutputEvent.with_data_and_id(_spoken("Reply A."), "response-a"),
-                source=hsm.id(body.speaking()),
-                target=hsm.id(body),
-            ),
-        )
-        await _assert_not_ready(body)
-
-        await body.dispatch(
-            environment,
-            _routed_event(
-                speaking.OutputEvent.with_data_and_id(_spoken("Reply A."), "turn-a"),
-                source=hsm.id(body.speaking()),
-                target=hsm.id(body),
-            ),
-        )
-        await _assert_ready(body)
-        _ = await body.detach(environment)
-
-    asyncio.run(run())
-
-
-def test_listen_speak_run_progress_reports_processing_failure(tmp_path: pathlib.Path) -> None:
-    import mosfet
-    from mosfet.abilities.communication import conversation
-
-    async def run() -> None:
-        body = _test_bot(tmp_path)
-        environment = Environment()
-        _ = await body.attach(environment)
-        turn_id = "conversation-turn"
-        history = conversation.OutputEvent.with_data(conversation.Messages())
-        await body.dispatch(
-            environment,
-            _routed_event(
-                cognition.InputEvent.with_data_and_id(cognition.InputData(stimulus=history), turn_id),
-                source=hsm.id(body.listening()),
-                target=hsm.id(body),
-            ),
-        )
-        await body.dispatch(
-            environment,
-            _routed_event(
-                mosfet.ProcessingFailedEvent.with_data_and_id(
-                    mosfet.ProcessingFailedEventData(message="processing failed"),
-                    turn_id,
-                ),
-                source="cognition",
-                target=hsm.id(body),
-            ),
-        )
-        await _assert_ready(body)
-        _ = await body.detach(environment)
-
-    asyncio.run(run())
-
-
-def test_listen_speak_run_progress_accepts_no_response_completion(tmp_path: pathlib.Path) -> None:
-    import mosfet
-    from mosfet.abilities.communication import conversation
-
-    async def run() -> None:
-        body = _test_bot(tmp_path)
-        environment = Environment()
-        _ = await body.attach(environment)
-        turn_id = "conversation-turn"
-        history = conversation.OutputEvent.with_data(conversation.Messages())
-        await body.dispatch(
-            environment,
-            _routed_event(
-                cognition.InputEvent.with_data_and_id(cognition.InputData(stimulus=history), turn_id),
-                source=hsm.id(body.listening()),
-                target=hsm.id(body),
-            ),
-        )
-        await body.dispatch(
-            environment,
-            _routed_event(
-                mosfet.ProcessingCompletedEvent.with_data_and_id(
-                    mosfet.ProcessingCompletedEventData(output=(), focus_candidates=()),
-                    turn_id,
-                ),
-                source="cognition",
-                target=hsm.id(body),
-            ),
-        )
-        await _assert_ready(body)
-        _ = await body.detach(environment)
-
-    asyncio.run(run())
-
-
-def test_listen_speak_run_progress_reports_conversation_failure(tmp_path: pathlib.Path) -> None:
-    from mosfet.abilities import ability
-    from mosfet.abilities.communication import conversation
-
-    async def run() -> None:
-        body = _test_bot(tmp_path)
-        environment = Environment()
-        _ = await body.attach(environment)
-        await body.dispatch(
-            environment,
-            _routed_event(
-                conversation.FailedEvent.with_data_and_id(
-                    ability.FailureData(message="MLX Audio speech decoding failed."),
-                    "conversation-turn",
-                ),
-                source=hsm.id(body.conversation()),
-                target=hsm.id(body),
-            ),
-        )
-        await _assert_ready(body)
-        assert body.conversation_failures()
-        _ = await body.detach(environment)
-
-    asyncio.run(run())
-
-
-def test_listen_speak_communication_drives_body_conversation_and_speaking(tmp_path: pathlib.Path) -> None:
-    """The composed Communication ability admits handoffs into the body conversation.
-
-    Behavioral wiring proof for the example composition (replaces
-    constructor-text asserts): a listening handoff plus a selected
-    ``communication.respond`` completes the run through the body's own
-    conversation and speaking ports, recorded on public seams.
-    """
-
-    import mosfet
-    from mosfet.abilities import speaking
-    from mosfet.abilities.communication import communication, conversation
-
-    async def run() -> tuple[int, tuple[object, ...]]:
-        body = _test_bot(tmp_path)
-        assert isinstance(body.communication(), communication.Communication)
-        assert isinstance(body.conversation(), conversation.Conversation)
-        assert isinstance(body.speaking(), speaking.Speaking)
-        environment = Environment()
-        _ = await body.attach(environment)
-        turn_id = "wiring-turn"
-        history = conversation.OutputEvent.with_data(conversation.Messages())
-        await body.dispatch(
-            environment,
-            _routed_event(
-                cognition.InputEvent.with_data_and_id(cognition.InputData(stimulus=history), turn_id),
-                source=hsm.id(body.listening()),
-                target=hsm.id(body),
-            ),
-        )
-        await asyncio.sleep(0.05)
-        await body.dispatch(
-            environment,
-            _routed_event(
-                mosfet.ProcessingCompletedEvent.with_data_and_id(
-                    mosfet.ProcessingCompletedEventData(
-                        output=(
-                            cognition.EventData(
-                                event=communication.RespondEvent.name,
-                                target="communication",
-                                data=communication.RespondData(parts=(vocal.speech.Part(words="Hello."),)),
-                            ),
-                        ),
-                        focus_candidates=(),
-                    ),
-                    turn_id,
-                ),
-                source="cognition",
-                target=hsm.id(body),
-            ),
-        )
-        # Let run progress observe the selected response before its speaking
-        # terminal arrives; production always separates the two by Speaking work.
-        await asyncio.sleep(0.05)
-        await body.dispatch(
-            environment,
-            _routed_event(
-                speaking.OutputEvent.with_data_and_id(_spoken("Hello."), f"{turn_id}:intuition"),
-                source=hsm.id(body.speaking()),
-                target=hsm.id(body),
-            ),
-        )
-        await _assert_ready(body)
-        selections = body.response_selection_count()
-        done = body.completed()
-        _ = await body.detach(environment)
-        return selections, done
-
-    selections, completed = asyncio.run(run())
-    assert selections == 1
-    assert completed
-
-
-def test_listen_speak_example_uses_configured_silero_vad_and_real_silence_boundary() -> None:
-    root = _repo_root()
-    source = (root / "examples" / "listen_speak_bot" / "src" / "listen_speak_bot_example" / "__init__.py").read_text(
-        encoding="utf-8"
-    )
-    pyproject = (root / "examples" / "listen_speak_bot" / "pyproject.toml").read_text(encoding="utf-8")
-    readme = (root / "examples" / "listen_speak_bot" / "README.md").read_text(encoding="utf-8")
-
-    assert "mosfet-provider-mlx-audio" in pyproject
-    assert "mosfet-provider-pyannote" in pyproject
-    assert "from mosfet.providers.mlx_audio import VoiceActivityClassifier as SileroVoiceActivityClassifier" in source
-    assert "from mosfet.providers.mlx_audio import SpeechDecoder" in source
-    assert "from mosfet.providers.mlx_audio import VoiceDecoder as MlxVoiceDecoder" in source
-    assert "from mosfet.providers.pyannote import Classifier as PyannoteVoiceClassifier" in source
-    assert "from mosfet.abilities import communication" in source
-    assert "from mosfet.abilities.communication import conversation" in source
-    assert "seeded_behaviors=(communication.speech_heard_seed(),)" in source
-    assert "memory=store" in source
-    assert 'DEFAULT_SILERO_VAD_MODEL = "mlx-community/silero-vad"' in source
-    assert 'DEFAULT_PYANNOTE_VOICE_IDENTITY_MODEL = "pyannote/wespeaker-voxceleb-resnet34-LM"' in source
-    assert '"BOT_SILERO_VAD_MODEL", "BOT_VAD_MODEL", "SILERO_VAD_MODEL"' in source
-    assert '"BOT_STT_MODEL", "BOT_WHISPER_MODEL", "STT_MODEL", "WHISPER_MODEL"' in source
-    assert "stt_model_id: str | None = None" in source
-    assert "voice_activity_classifier: voice.detection.VoiceActivityClassifier | None = None" in source
-    assert "voice_classifier=classifier" in source
-    assert "registry=_voice_registry()" in source
-    assert "policy=identification.MatchPolicy(threshold=0.50, margin=0.05, refine_threshold=0.65)" in source
-    assert "voice_identity_model_id: str = DEFAULT_PYANNOTE_VOICE_IDENTITY_MODEL" in source
-    assert '"BOT_PYANNOTE_VOICE_IDENTITY_MODEL",' in source
-    assert "speech_decoder=None" in source
-    assert "MlxVoiceDecoder(speech_decoder=speech_decoder)" in source
-    assert "_SequencedVoiceActivityClassifier" not in source
-    assert "model_id=vad_model_id" in source
-    assert "sample_rate_hz=sample_rate_hz" in source
-    assert "channels=_DEFAULT_CHANNELS" in source
-    assert "def _silence_wav(" in source
-    assert 'media_type="audio/wav"' in source
-    assert 'kind="silence"' in source
-    assert source.count("await body.dispatch(") >= 2
-    assert "wait_for_first_listening_handoff" not in source
-    assert "_first_listening_handoff" not in source
-    assert "FixedTranscriptDecoder" not in source
-    assert ".decoder().calls" not in source
-    assert "await body.wait_for_conversation_processing()" in source
-    assert "await self.wait_for_activation()" in source
-    assert "ActivatingDoneEventData" in source
-    assert "ActivatingFailedEventData" in source
-    assert "_BotLifecycle" not in source
-    assert "bot.lifecycle." not in source
-    # Response-selection tracking is pinned behaviorally, not textually: one
-    # terminal per selection, stale/duplicate rejection, and failure correlation
-    # are covered by the run-progress tests (one-terminal-per-selection, rejects
-    # stale/duplicates, correlates speaking failure).
-    assert 'reason="response_execution_failed"' in source
-    assert "observe_response_request" not in source
-    assert "hsm.choice(" in source
-    assert "_RunTerminalEvent" in source
-    assert "bool(body.completed()) or bool(body.failures())" not in source
-    assert "body.encoder().audio is not None and bool(body.completed())" not in source
-    assert 'status="ok" if has_speaking_output else "incomplete"' in source
-    assert "status_reason:" in source
-    assert "_OperatorSummary" in source
-    assert '"response_execution_failed"' in source
-    assert "processing_outputs" not in source
-    assert "source_ids" not in source
-    assert "not select communication.respond" not in source
-    assert '"reply_wav": str(reply_wav) if has_speaking_output else None' not in source
-    assert 'return 0 if summary.get("status") == "ok" else 1' in source
-    assert "status: incomplete" in readme
-    assert "real PyAnnote speaker classifier" in readme
-    assert "turns\neach embedding into an opaque voice id" in readme
-    assert "`communication.respond` action" in readme
-
-
-def test_listen_speak_reads_pyannote_model_override_without_credentials(tmp_path: pathlib.Path) -> None:
-    from listen_speak_bot_example import AppConfig
-
+def test_python_m_names_a_missing_key_and_exits_1(tmp_path: pathlib.Path) -> None:
     env_file = tmp_path / ".env"
-    _ = env_file.write_text(
-        "BOT_PYANNOTE_VOICE_IDENTITY_MODEL=local/test-speaker-model\n",
-        encoding="utf-8",
+    _ = env_file.write_text("BOT_GEMINI_MODEL=gemini-test\n", encoding="utf-8")
+    finished = subprocess.run(
+        [sys.executable, "-m", "listen_speak_bot_example", "--env", str(env_file), "--assets-dir", str(tmp_path)],
+        cwd=tmp_path,
+        env=_environ(),
+        capture_output=True,
+        timeout=_RUN_BOUND,
+        check=False,
     )
 
-    config = AppConfig.from_env_file(env_file)
+    assert finished.returncode == 1, finished.stderr.decode(errors="replace")
+    assert finished.stdout == b""
+    assert b"BOT_GEMINI_API_KEY" in finished.stderr
+    # Nothing was heard, so nothing was rendered.
+    assert not (tmp_path / "hey_gabe.wav").exists()
 
-    assert config.voice_identity_model_id == "local/test-speaker-model"
 
-
-def test_listen_speak_reads_the_lab_speech_wiring_from_the_environment(tmp_path: pathlib.Path) -> None:
-    env_file = tmp_path / ".env"
-    _ = env_file.write_text(
-        "BOT_SPEECH_SERVER_STREAM_URL=ws://lab.test:8001\n"
-        "BOT_SPEECH_SERVER_URL=http://lab.test:8003\n"
-        "BOT_SPEECH_SERVER_TTS_URL=http://lab.test:8002\n",
-        encoding="utf-8",
+def test_python_m_refuses_a_trait_that_is_not_one(tmp_path: pathlib.Path) -> None:
+    finished = subprocess.run(
+        [sys.executable, "-m", "listen_speak_bot_example", "--trait", ""],
+        cwd=tmp_path,
+        env={**_environ(), "BOT_GEMINI_API_KEY": _KEY},
+        capture_output=True,
+        timeout=_RUN_BOUND,
+        check=False,
     )
 
-    config = example.AppConfig.from_env_file(env_file)
+    assert finished.returncode == 2, finished.stderr.decode(errors="replace")
+    assert b"--trait" in finished.stderr
+    assert _KEY.encode() not in finished.stderr
 
-    assert config.lab == example.LabConfig(
-        stream_url="ws://lab.test:8001",
-        speech_server_url="http://lab.test:8003",
-        tts_url="http://lab.test:8002",
+
+def test_the_bot_file_is_one_inline_bot_define() -> None:
+    package = _example_root() / "src" / "listen_speak_bot_example"
+    main = ast.parse((package / "__main__.py").read_text(encoding="utf-8"))
+    calls = [
+        node
+        for node in ast.walk(main)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "define"
+    ]
+
+    assert len(calls) == 1
+    assert isinstance(calls[0].func, ast.Attribute) and ast.unparse(calls[0].func) == "bot.define"
+    # The bot file defines no function or class of its own: its one definition is the bot.
+    assert not [node for node in ast.walk(main) if isinstance(node, ast.FunctionDef | ast.ClassDef)]
+    library = ast.parse((package / "__init__.py").read_text(encoding="utf-8"))
+    for node in ast.walk(library):
+        if isinstance(node, ast.ClassDef):
+            assert "Bot" not in {ast.unparse(base).rpartition(".")[2] for base in node.bases}, node.name
+        assert not (isinstance(node, ast.Attribute) and ast.unparse(node) == "bot.define"), (
+            "only the bot file defines a bot"
+        )
+
+
+# --- One run, observed -----------------------------------------------------------------------------------------
+
+
+class _FixedVoiceActivityClassifier(voice.detection.VoiceActivityClassifier):
+    """Speech is the audio ``b"speech"``; anything else is silence."""
+
+    @typing.override
+    async def classify(self, input: bytes) -> voice.detection.ApplyData:
+        if input == b"speech":
+            return voice.detection.ApplyData(
+                segments=(voice.detection.VoiceDetectionSegment(start_seconds=0.0, end_seconds=0.1, confidence=0.9),)
+            )
+        return voice.detection.ApplyData(segments=())
+
+
+class _RecordingInference:
+    """PyAnnote's embedding inference: one fixed print for every clip, each clip checked and kept."""
+
+    def __init__(self) -> None:
+        self.calls: list[pathlib.Path] = []
+
+    def __call__(self, audio: pathlib.Path) -> object:
+        with wave.open(str(audio), "rb") as stream:
+            assert (stream.getframerate(), stream.getnchannels(), stream.getsampwidth()) == (16_000, 1, 2)
+        self.calls.append(audio)
+        return [0.12, -0.08, 0.31]
+
+
+class _Hanging(processing.Processor):
+    """A model that never answers: these runs are about what reaches the bot, not its turns."""
+
+    @typing.override
+    async def process(
+        self, input: processing.InputData, *, drafts: processing.DraftSink | None = None
+    ) -> processing.Events:
+        del input, drafts
+        _ = await asyncio.Event().wait()
+        raise AssertionError("a cancelled model resumed")
+
+
+def _registry() -> identification.Registry:
+    return identification.Registry(
+        identifier=identification.Matcher(store=identification.InProcessStore(max_ids=8), policy=example.VOICE_POLICY),
+        kind="voice",
+        max_unlinked_age=datetime.timedelta(days=1),
+        max_ids=8,
     )
 
 
-def test_listen_speak_takes_the_traits_its_maker_gives_it_on_the_command_line(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    given: list[persona.Traits] = []
-
-    async def run(**kwargs: typing.Any) -> dict[str, object]:
-        given.append(kwargs["config"].traits)
-        return {"status": "ok"}
-
-    monkeypatch.setattr(example, "run", run)
-
-    assert example.main(["--trait", "curious", "--trait", "patient with children", "--json"]) == 0
-    assert example.main(["--json"]) == 0
-    assert given == [persona.Traits(traits=("curious", "patient with children")), example.DEFAULT_TRAITS]
+def _pcm(sample: int, seconds: float) -> bytes:
+    return sample.to_bytes(2, "little", signed=True) * round(seconds * _RATE_HZ)
 
 
-def test_listen_speak_is_unvoiced_on_the_lab_until_inception_gives_it_a_voice(tmp_path: pathlib.Path) -> None:
-    body = ListenSpeakBot(
-        reply_wav=tmp_path / "reply.wav",
-        cognition=_empty_cognition,
-        lab=example.LabConfig(
-            stream_url="ws://lab.test:8001",
-            speech_server_url="http://lab.test:8003",
-            tts_url="http://lab.test:8002",
-        ),
+def _sound(audio: bytes) -> SoundData:
+    return SoundData(audio=audio, media_type="audio/pcm", sample_rate_hz=_RATE_HZ, channels=1)
+
+
+def test_speech_reaches_the_bot_from_a_voice_it_does_not_know_on_the_local_path() -> None:
+    inference = _RecordingInference()
+    loaded: list[str] = []
+
+    def load(model_id: str) -> pyannote.SpeakerEmbeddingInference:
+        loaded.append(model_id)
+        return inference
+
+    heard: list[cognition.InputData] = []
+
+    def record(ctx: hsm.Context, instance: hsm.Instance, observed: hsm.Event[typing.Any]) -> None:
+        del ctx, instance
+        data = typing.cast(dict[str, hsm.Event[typing.Any]], observed.data)["event"].data
+        if isinstance(data, cognition.InputData) and isinstance(data.stimulus, hsm.Event):
+            heard.append(data)
+
+    hearing = listening.Listening(
+        voice_activity_classifier=_FixedVoiceActivityClassifier(),
+        speech_decoder=None,
+        voice_classifier=pyannote.Classifier(model_id="local/test-speaker-model", load_inference=load),
+        registry=_registry(),
+    )
+    listener = bot.define(
+        "listen_speak",
+        bot.traits(*example.DEFAULT_TRAITS.traits),
+        bot.cognition(_Hanging()),
+        bot.input(hearing),
     )
 
-    # The lab voice is the one inception gives the bot, so nothing speaks before it is given.
-    assert body.encoder() is None
+    async def run() -> listening.SpeechData:
+        async with testing.running(listener, observe=(bot.observe(cognition.InputEvent, record),)) as running:
+            for audio in (b"speech", b"silence"):
+                _ = await hsm.dispatch(running.environment, running.bot, SoundEvent.with_data(_sound(audio)))
+            async with asyncio.timeout(_WAIT):
+                while not heard:
+                    await asyncio.sleep(0.01)
+        stimulus = heard[0].stimulus
+        assert isinstance(stimulus, hsm.Event)
+        assert stimulus.name == listening.SpeechEvent.name
+        assert isinstance(stimulus.data, listening.SpeechData)
+        return stimulus.data
+
+    speech = asyncio.run(run())
+
+    assert len(inference.calls) == 1
+    assert loaded == ["local/test-speaker-model"]
+    (voiced,) = speech.voices
+    # A voice the bot has never heard: an opaque ref, recognized as nobody, and never a vector.
+    assert voiced.recognition.recognized is False
+    assert speech.source_ids == frozenset({identification.ref("voice", voiced.recognition.id)})
+
+
+class _Socket:
+    """The speech server's end of one streaming session: every second of audio it is sent is one turn."""
+
+    def __init__(self) -> None:
+        self._incoming: asyncio.Queue[str | transcription.Closed] = asyncio.Queue()
+        self._heard: float = 0.0
+        self._turns: int = 0
+        self._incoming.put_nowait(json.dumps({"type": "ready"}))
+
+    async def send(self, message: str | bytes) -> None:
+        if not isinstance(message, bytes):
+            return
+        self._heard += len(message) / 2 / _RATE_HZ
+        while self._heard >= self._turns + 1 - 1e-6:
+            start = float(self._turns)
+            self._turns += 1
+            for frame in (
+                {"type": "speech_start", "t": start},
+                {"type": "final", "text": "hey how are you", "words": [{"t": start}, {"t": start + 0.9}]},
+                {"type": "turn_end", "t": start + 1.0},
+            ):
+                self._incoming.put_nowait(json.dumps(frame))
+
+    async def recv(self) -> str | bytes:
+        item = await self._incoming.get()
+        if isinstance(item, transcription.Closed):
+            raise item
+        return item
+
+    async def close(self) -> None:
+        self._incoming.put_nowait(transcription.Closed(1000))
+
+
+async def _connect(url: str) -> transcription.Socket:
+    del url
+    return _Socket()
+
+
+def _voiceprints(request: httpx.Request) -> httpx.Response:
+    assert request.url.path == "/v1/embed"
+    return httpx.Response(200, json={"embedding": [1.0, 0.0, 0.0], "model": "wespeaker-test"})
+
+
+class _Mouth(vocal.speech.SpeechEncoder):
+    """The bot's voice: whatever it says comes out as a tenth of a second of quiet, and is kept."""
+
+    def __init__(self) -> None:
+        self.format: vocal.speech.Format = vocal.speech.Format(sample_rate_hz=_RATE_HZ, channels=1)
+        self.said: list[str] = []
+
+    @typing.override
+    async def encode(
+        self, input: collections.abc.AsyncIterable[vocal.speech.Piece]
+    ) -> collections.abc.AsyncIterator[vocal.speech.Audio]:
+        said = "".join([piece.words async for piece in input])
+        self.said.append(said)
+        yield vocal.speech.Audio(pcm=_pcm(0, 0.1), text=said)
+
+
+@dataclasses.dataclass(frozen=True)
+class _Ran:
+    summary: example.Summary
+    model: testing.Scripted
+    mouth: _Mouth
+
+
+def _respond(words: str) -> testing.Choice:
+    return testing.Choice(
+        stimulus=conversation.OutputEvent.name,
+        event=communication.RespondEvent.name,
+        data={"parts": [{"words": words}]},
+    )
+
+
+def _hear_on_the_lab(*choices: testing.Choice) -> _Ran:
+    """One run of a listen_speak bot on the lab's wire, with its model's ``choices`` scripted: what ``hear`` does."""
+
+    model = testing.Scripted(*choices)
+    mouth = _Mouth()
+    run = example.Run(timeout=datetime.timedelta(seconds=_WAIT))
+
+    async def played() -> example.SettledData:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(_voiceprints)) as client:
+            hearing = listening.Listening(
+                transcription=lambda: speech_server.Transcription(url="ws://speech.test", connect=_connect),
+                voice_classifier=speech_server.VoiceEmbedder(base_url="http://voiceprint.test", client=client),
+                registry=_registry(),
+            )
+            talk = conversation.Conversation()
+            voiced = speaking.Speaking(
+                encoder=example.LabEncoder(mouth, run=run), listening=(hearing,), conversation=(talk,)
+            )
+            listener = bot.define(
+                "listen_speak",
+                bot.traits(*example.DEFAULT_TRAITS.traits),
+                bot.cognition(model, autonomy=True, seeds=(communication.speech_heard_seed(),)),
+                bot.input(hearing),
+                bot.output(voiced),
+                bot.attach(communication.Communication(conversations=(talk,), speaking=voiced)),
+            )
+            return await example.hear(listener, (_sound(_pcm(1, 1.0)),), run=run)
+
+    settled = asyncio.run(played())
+    summary = example.Summary.model_validate(
+        settled.model_dump() | {"heard_audio_bytes": len(_pcm(1, 1.0)), "reply_audio_bytes": 0}
+    )
+    return _Ran(summary=summary, model=model, mouth=mouth)
+
+
+def test_a_heard_turn_offers_the_bot_its_answer_and_what_it_selects_is_said() -> None:
+    ran = _hear_on_the_lab(_respond("I am well."))
+
+    (turn, *_) = ran.model.woken_by(conversation.OutputEvent.name)
+    assert communication.RespondEvent.name in frozenset(schema.name for schema in turn.schemas)
+    assert ran.mouth.said == ["I am well."]
+    assert ran.summary.status == "ok"
+    assert ran.summary.status_reason == "response_spoken"
+    assert (ran.summary.listening_handoffs, ran.summary.response_selections) == (1, 1)
+    assert ran.summary.processing_completed >= 1
+
+
+def test_a_bot_that_selects_nothing_says_nothing_and_the_run_is_incomplete() -> None:
+    ran = _hear_on_the_lab()
+
+    # It was offered the answer and chose not to give one: that is the bot's to decide.
+    assert ran.model.woken_by(conversation.OutputEvent.name)
+    assert ran.mouth.said == []
+    assert (ran.summary.status, ran.summary.status_reason) == ("incomplete", "no_response_selected")
+    assert ran.summary.response_selections == 0
+
+
+def test_the_summary_carries_counts_and_outcomes_only() -> None:
+    ran = _hear_on_the_lab(_respond("I am well."))
+    encoded = ran.summary.model_dump_json()
+
+    assert set(json.loads(encoded)) == {
+        "status",
+        "status_reason",
+        "heard_audio_bytes",
+        "reply_audio_bytes",
+        "listening_handoffs",
+        "processing_completed",
+        "response_selections",
+    }
+    for forbidden in ("embedding", "source_ids", "voice:", "I am well", "hey how are you", "media", "content"):
+        assert forbidden not in encoded
+
+
+class _Closing:
+    """A worker the run owns, such as an MLX model's thread: it records that it was closed."""
+
+    def __init__(self) -> None:
+        self.closed: bool = False
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
+def test_hear_closes_its_workers_when_the_run_never_settles() -> None:
+    workers = (_Closing(), _Closing())
+    listener = bot.define("listen_speak", bot.cognition(_Hanging()), bot.allow("no_devices"))
+
+    async def run() -> None:
+        with pytest.raises(TimeoutError):
+            _ = await example.hear(
+                listener, (), run=example.Run(timeout=datetime.timedelta(seconds=0.05)), workers=workers
+            )
+
+    asyncio.run(run())
+
+    assert all(worker.closed for worker in workers)
+
+
+# --- The run, as a machine -------------------------------------------------------------------------------------
+
+
+def _handed(turn: str) -> hsm.Event[typing.Any]:
+    """The body handing its cognition a conversation turn, as the run's observer sees it."""
+
+    history = conversation.OutputEvent.with_data(conversation.Messages())
+    return cognition.InputEvent.with_data_and_id(cognition.InputData(stimulus=history), turn)
+
+
+def _decided(turn: str, *, responses: int) -> hsm.Event[typing.Any]:
+    """The bot's decision on ``turn``, selecting ``responses`` responses."""
+
+    respond = cognition.EventData(
+        event=communication.RespondEvent.name,
+        target="communication",
+        data=communication.RespondData(parts=(vocal.speech.Part(words="Reply."),)),
+    )
+    return mosfet.ProcessingCompletedEvent.with_data_and_id(
+        mosfet.ProcessingCompletedEventData(output=(respond,) * responses, focus_candidates=()), turn
+    )
+
+
+def _failed(turn: str) -> hsm.Event[typing.Any]:
+    return mosfet.ProcessingFailedEvent.with_data_and_id(mosfet.ProcessingFailedEventData(message="failed"), turn)
+
+
+class _Ended:
+    """How a run ended, as a boundary observer of its terminals sees it, the way ``hear`` waits for it."""
+
+    def __init__(self) -> None:
+        self.seen: list[example.SettledData | example.TimedOutData] = []
+
+    def record(self, ctx: hsm.Context, instance: hsm.Instance, observed: hsm.Event[typing.Any]) -> None:
+        del ctx, instance
+        data = typing.cast(dict[str, hsm.Event[typing.Any]], observed.data)["event"].data
+        assert isinstance(data, example.SettledData | example.TimedOutData)
+        self.seen.append(data)
+
+    async def started(self, run: example.Run) -> None:
+        observed = hsm.redefine(
+            example.Run.model, bot.observe(example.SettledEvent, example.TimedOutEvent, self.record)
+        )
+        _ = await mosfet.started(None, run, observed)
+
+    async def ended(self) -> example.SettledData | example.TimedOutData:
+        async with asyncio.timeout(_WAIT):
+            while not self.seen:
+                await asyncio.sleep(0.01)
+        return self.seen[0]
+
+    async def open(self) -> None:
+        await asyncio.sleep(0.05)
+        assert self.seen == []
+
+
+def _settled(status: example.Status, reason: example.Reason, *, completed: int, selections: int) -> example.SettledData:
+    return example.SettledData(
+        status=status,
+        status_reason=reason,
+        listening_handoffs=1,
+        processing_completed=completed,
+        response_selections=selections,
+    )
+
+
+def test_the_run_settles_once_the_selected_response_is_said_and_ignores_a_reply_after_it_settled() -> None:
+    async def run() -> None:
+        ended = _Ended()
+        progress = example.Run()
+        await ended.started(progress)
+        for event in (_handed("turn"), _decided("turn", responses=1)):
+            _ = await hsm.dispatch(None, progress, event)
+        await ended.open()
+        progress.said()
+        assert await ended.ended() == _settled("ok", "response_spoken", completed=1, selections=1)
+        progress.said()
+        progress.not_said()
+        await asyncio.sleep(0.05)
+        assert len(ended.seen) == 1
+        await hsm.stop(progress)
+
+    asyncio.run(run())
+
+
+def test_a_reply_said_before_its_decision_reached_the_run_waits_for_that_decision() -> None:
+    async def run() -> None:
+        ended = _Ended()
+        progress = example.Run()
+        await ended.started(progress)
+        _ = await hsm.dispatch(None, progress, _handed("turn"))
+        progress.said()
+        await ended.open()
+        _ = await hsm.dispatch(None, progress, _decided("turn", responses=1))
+        assert await ended.ended() == _settled("ok", "response_spoken", completed=1, selections=1)
+        await hsm.stop(progress)
+
+    asyncio.run(run())
+
+
+def test_the_run_counts_only_decisions_on_the_turns_it_saw_handed() -> None:
+    async def run() -> None:
+        ended = _Ended()
+        progress = example.Run()
+        await ended.started(progress)
+        for event in (_handed("turn"), _decided("other", responses=1), _failed("other")):
+            _ = await hsm.dispatch(None, progress, event)
+        await ended.open()
+        _ = await hsm.dispatch(None, progress, _decided("turn:autonomy", responses=0))
+        assert await ended.ended() == _settled("incomplete", "no_response_selected", completed=1, selections=0)
+        await hsm.stop(progress)
+
+    asyncio.run(run())
+
+
+def test_the_run_waits_for_every_response_and_fails_when_one_could_not_be_said() -> None:
+    async def run() -> None:
+        ended = _Ended()
+        progress = example.Run()
+        await ended.started(progress)
+        for event in (_handed("turn"), _decided("turn", responses=2)):
+            _ = await hsm.dispatch(None, progress, event)
+        progress.said()
+        await ended.open()
+        progress.not_said()
+        assert await ended.ended() == _settled("failed", "response_execution_failed", completed=1, selections=2)
+        await hsm.stop(progress)
+
+    asyncio.run(run())
+
+
+def test_a_turn_whose_processing_failed_fails_the_run() -> None:
+    async def run() -> None:
+        ended = _Ended()
+        progress = example.Run()
+        await ended.started(progress)
+        for event in (_handed("turn"), _failed("turn")):
+            _ = await hsm.dispatch(None, progress, event)
+        assert await ended.ended() == _settled("failed", "processing_failed", completed=0, selections=0)
+        await hsm.stop(progress)
+
+    asyncio.run(run())
+
+
+def test_the_run_times_out_on_its_own_deadline_while_a_response_is_outstanding() -> None:
+    bound = datetime.timedelta(seconds=0.2)
+
+    async def run() -> None:
+        ended = _Ended()
+        progress = example.Run(timeout=bound)
+        await ended.started(progress)
+        for event in (_handed("turn"), _decided("turn", responses=1)):
+            _ = await hsm.dispatch(None, progress, event)
+        assert await ended.ended() == example.TimedOutData(timeout=bound)
+        await hsm.stop(progress)
+
+    asyncio.run(run())
+
+
+def test_the_run_is_a_state_machine_with_its_own_deadline_and_no_asyncio_wait_of_its_own() -> None:
+    source = (_example_root() / "src" / "listen_speak_bot_example" / "__init__.py").read_text(encoding="utf-8")
+
+    assert "class Run(hsm.Instance):" in source
+    assert "hsm.after(" in source
+    for forbidden in ("asyncio.Event", "asyncio.timeout", "asyncio.wait_for", "async def settled(", ".state()"):
+        assert forbidden not in source, forbidden
+
+
+# --- Its voice ---------------------------------------------------------------------------------------------------
+
+
+_DESCRIBED = "A bright, quick young voice with a smile in it, never hurried."
+
+
+class _Maker(processing.Processor):
+    """The bot's model, scripted at its birth: it conceives one described voice whenever it is asked for one."""
+
+    def __init__(self) -> None:
+        self.asked: int = 0
+
+    @typing.override
+    async def process(
+        self, input: processing.InputData, *, drafts: processing.DraftSink | None = None
+    ) -> processing.Events:
+        del drafts
+        if vocal.voice.ConceiveEvent.name not in {schema.name for schema in input.schemas}:
+            return ()
+        self.asked += 1
+        return (
+            processing.SelectedEvent(
+                event=vocal.voice.ConceiveEvent.name,
+                data={"conception": {"kind": "described", "description": _DESCRIBED}},
+            ),
+        )
+
+
+class _LabVoices:
+    """The lab TTS engine's /v1/voices protocol: its built-in voice, and each voice it designs, kept for good."""
+
+    def __init__(self) -> None:
+        self.held: list[dict[str, object]] = [{"id": "warm", "description": "A warm voice."}]
+        self.designed: list[object] = []
+
+    def handle(self, request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/v1/voices"
+        if request.method == "POST":
+            self.designed.append(json.loads(request.content))
+            made: dict[str, object] = {"id": f"v-{len(self.designed):012x}", "description": _DESCRIBED, "custom": True}
+            self.held.append(made)
+            return httpx.Response(201, json={"voices": [made]})
+        return httpx.Response(200, json={"default": "warm", "voices": self.held, "emotive_tags": ["laugh"]})
+
+
+def test_on_the_lab_the_bot_is_given_its_voice_at_birth_and_keeps_it_for_life(tmp_path: pathlib.Path) -> None:
+    lab = _LabVoices()
+    database = tmp_path / "memory.sqlite3"
+
+    async def born(maker: _Maker) -> example.LabEncoder | None:
+        given = example.LabVoice("http://lab.test:8002", destination=tmp_path / "reply.wav")
+        # Nothing speaks before the voice is given: the lab voice is the one its birth gives it.
+        assert given.encoder is None
+        async with httpx.AsyncClient(transport=httpx.MockTransport(lab.handle)) as voices:
+            listener = bot.define(
+                "listen_speak",
+                bot.traits(*example.DEFAULT_TRAITS.traits),
+                bot.voice(
+                    speech_server.Catalog(
+                        "http://lab.test:8002", source=example.LAB_SOURCE, languages=example.LANGUAGES, client=voices
+                    ),
+                    designer=speech_server.Designer("http://lab.test:8002", source=example.LAB_SOURCE, client=voices),
+                    languages=example.LANGUAGES,
+                ),
+                bot.cognition(maker, memory=memory.Memory(database=str(database))),
+                bot.output(speaking.Speaking(encoder=given)),
+                # Being born is all it does here: it has nothing to hear, and it is never woken.
+                bot.allow("no_devices"),
+            )
+            async with testing.running(listener):
+                async with asyncio.timeout(_WAIT):
+                    while given.encoder is None:
+                        await asyncio.sleep(0.01)
+        return given.encoder
+
+    first, again = _Maker(), _Maker()
+    made = asyncio.run(born(first))
+    kept = asyncio.run(born(again))
+
+    # Made once, from its traits: one conception, one voice designed for it, which it speaks in.
+    assert isinstance(made, example.LabEncoder)
+    assert first.asked == 1
+    assert lab.designed == [{"description": _DESCRIBED, "count": 1}]
+    # Started again, it recalls that voice, finds the lab still holds it, and is not made again.
+    assert isinstance(kept, example.LabEncoder)
+    assert again.asked == 0
+    assert len(lab.designed) == 1
 
 
 class _Served(vocal.speech.SpeechEncoder):
@@ -1007,109 +868,8 @@ def test_lab_voice_speaks_in_the_voice_it_is_given_and_keeps_its_description(tmp
     assert "".join(chunk.text for chunk in chunks) == "Oh, you got me. Shh."
 
 
-_DESCRIBED = "A bright, quick young voice with a smile in it, never hurried."
-
-
-class _Maker(processing.Processor):
-    """The makers' inception model, scripted: it conceives one described voice, and counts what it was asked."""
-
-    def __init__(self) -> None:
-        self.inputs: list[processing.InputData] = []
-
-    @override
-    async def process(
-        self, input: processing.InputData, *, drafts: processing.DraftSink | None = None
-    ) -> processing.Events:
-        self.inputs.append(input)
-        return (
-            processing.SelectedEvent(
-                event=vocal.voice.ConceiveEvent.name,
-                data={"conception": {"kind": "described", "description": _DESCRIBED}},
-            ),
-        )
-
-
-class _Hanging(processing.Processor):
-    """The bot's own models, never answering: this test is about the voice it was given, not its turns."""
-
-    @override
-    async def process(
-        self, input: processing.InputData, *, drafts: processing.DraftSink | None = None
-    ) -> processing.Events:
-        del input
-        await asyncio.Event().wait()
-        raise AssertionError("cancelled test processor resumed")
-
-
-class _LabVoices:
-    """The lab TTS engine's /v1/voices protocol: its built-in voice, and each voice it designs, kept for good."""
-
-    def __init__(self) -> None:
-        self.held: list[dict[str, object]] = [{"id": "warm", "description": "A warm voice."}]
-        self.designed: list[object] = []
-
-    def handle(self, request: httpx.Request) -> httpx.Response:
-        assert request.url.path == "/v1/voices"
-        if request.method == "POST":
-            self.designed.append(json.loads(request.content))
-            made: dict[str, object] = {"id": f"v-{len(self.designed):012x}", "description": _DESCRIBED, "custom": True}
-            self.held.append(made)
-            return httpx.Response(201, json={"voices": [made]})
-        return httpx.Response(200, json={"default": "warm", "voices": self.held, "emotive_tags": ["laugh"]})
-
-
-def test_listen_speak_is_given_its_voice_at_inception_on_the_lab_and_keeps_it_for_life(tmp_path: pathlib.Path) -> None:
-    lab = _LabVoices()
-    database = tmp_path / "memory.sqlite3"
-
-    async def start(maker: _Maker) -> example.LabEncoder | None:
-        voices = httpx.AsyncClient(transport=httpx.MockTransport(lab.handle))
-
-        def compose(mouth: speaking.Speaking) -> cognition.Cognition:
-            return example.compose_cognition(
-                mouth,
-                intuition=_Hanging(),
-                deliberate=_Hanging(),
-                maker=maker,
-                traits=example.DEFAULT_TRAITS,
-                store=memory.Memory(database=str(database)),
-                voice_source=example.lab_voice_source("http://lab.test:8002", client=voices),
-            )
-
-        body = ListenSpeakBot(
-            reply_wav=tmp_path / "reply.wav",
-            cognition=compose,
-            voice_activity_classifier=_FixedVoiceActivityClassifier(),
-            voice_identification_inference=_RecordingInference(),
-            lab=example.LabConfig(tts_url="http://lab.test:8002"),
-        )
-        environment = Environment()
-        _ = await body.attach(environment)
-        try:
-            async with asyncio.timeout(10):
-                while body.encoder() is None:
-                    await asyncio.sleep(0.01)
-            return body.encoder()
-        finally:
-            _ = await body.detach(environment)
-            await voices.aclose()
-
-    first, again = _Maker(), _Maker()
-    made = asyncio.run(start(first))
-    kept = asyncio.run(start(again))
-
-    # Made once, from its traits: one conception, one voice designed for it, which it speaks in.
-    assert isinstance(made, example.LabEncoder)
-    assert len(first.inputs) == 1
-    assert lab.designed == [{"description": _DESCRIBED, "count": 1}]
-    # Started again, it recalls that voice, finds the lab still holds it, and is not made again.
-    assert isinstance(kept, example.LabEncoder)
-    assert again.inputs == []
-    assert len(lab.designed) == 1
-
-
 def _listen_check() -> types.ModuleType:
-    path = _repo_root() / "examples" / "listen_speak_bot" / "scripts" / "listen_check.py"
+    path = _example_root() / "scripts" / "listen_check.py"
     spec = importlib.util.spec_from_file_location("listen_check", path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
@@ -1145,111 +905,7 @@ def test_listen_check_writes_one_wav_per_line(tmp_path: pathlib.Path) -> None:
     assert all(path.read_bytes().startswith(b"RIFF") for path in written)
 
 
-def test_listen_speak_injects_pyannote_classifier_and_emits_the_heard_voice_ref() -> None:
-    async def run() -> tuple[object, _RecordingInference, list[str]]:
-        inference = _RecordingInference()
-        loaded_models: list[str] = []
-
-        def load_inference(model_id: str) -> pyannote.SpeakerEmbeddingInference:
-            loaded_models.append(model_id)
-            return inference
-
-        classifier = pyannote.Classifier(
-            model_id="local/test-speaker-model",
-            load_inference=load_inference,
-        )
-        listening_ability = _RecordingListening(
-            voice_activity_classifier=_FixedVoiceActivityClassifier(),
-            voice_classifier=classifier,
-            registry=_voice_registry(),
-        )
-        from tests.hsm_instance_state import start_ability_tree
-
-        await start_ability_tree(None, listening_ability)
-        from mosfet.environment import SoundData
-
-        await listening_ability.apply(
-            SoundData(
-                audio=b"speech",
-                media_type="audio/pcm",
-                sample_rate_hz=16_000,
-                channels=1,
-            )
-        )
-        await listening_ability.apply(
-            SoundData(
-                audio=b"silence",
-                media_type="audio/pcm",
-                sample_rate_hz=16_000,
-                channels=1,
-            )
-        )
-        for _ in range(1000):
-            if listening_ability.handoffs:
-                break
-            await asyncio.sleep(0)
-        assert listening_ability.handoffs
-        stimulus = listening_ability.handoffs[0].stimulus
-        assert isinstance(stimulus, hsm.Event)
-        assert stimulus.name == listening.SpeechEvent.name
-        assert isinstance(stimulus.data, listening.SpeechData)
-        return stimulus.data, inference, loaded_models
-
-    stimulus, inference, loaded_models = asyncio.run(run())
-    assert len(inference.calls) == 1
-    assert loaded_models == ["local/test-speaker-model"]
-    assert isinstance(stimulus, listening.SpeechData)
-    (heard,) = stimulus.voices
-    assert heard.recognition.recognized is False
-    assert stimulus.source_ids == frozenset({identification.ref("voice", heard.recognition.id)})
-
-
-def test_listen_speak_operator_summary_excludes_raw_provider_and_content_data(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: pathlib.Path,
-) -> None:
-    summary = _run_with_public_seams(
-        monkeypatch,
-        tmp_path,
-        response_selections=1,
-    )
-
-    encoded = json.dumps(summary)
-    assert set(summary) == {
-        "status",
-        "status_reason",
-        "heard_audio_bytes",
-        "reply_audio_bytes",
-        "listening_handoffs",
-        "processing_completed",
-        "response_selections",
-    }
-    for forbidden in ("embedding", "source_ids", "media", "content", "provenance", "processing_outputs"):
-        assert forbidden not in encoded
-
-
-def test_listen_speak_operator_summary_distinguishes_no_response_and_execution_failure(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: pathlib.Path,
-) -> None:
-    no_response = _run_with_public_seams(
-        monkeypatch,
-        tmp_path / "no-response",
-        response_selections=0,
-        encoder_calls=(),
-        encoder_audio=None,
-    )
-    failed_response = _run_with_public_seams(
-        monkeypatch,
-        tmp_path / "failed-response",
-        response_selections=1,
-        response_execution_failed=True,
-    )
-
-    assert no_response["status"] == "incomplete"
-    assert no_response["status_reason"] == "no_response_selected"
-    assert failed_response["status"] == "failed"
-    assert failed_response["status_reason"] == "response_execution_failed"
+# --- macOS say ---------------------------------------------------------------------------------------------------
 
 
 def _rendered(*samples: int) -> bytes:
@@ -1272,19 +928,16 @@ async def _encoded(encoder: vocal.speech.SpeechEncoder, text: str) -> list[bytes
 def test_say_encoder_streams_the_rendered_pcm_and_renders_in_a_temporary_directory(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import listen_speak_bot_example as example
-    from listen_speak_bot_example import SayEncoder
-
     rendered: list[pathlib.Path] = []
 
     def render(text: str, destination: pathlib.Path, *, sample_rate_hz: int) -> bytes:
         assert (text, sample_rate_hz) == ("reply", 22_050)
         rendered.append(destination)
-        destination.write_bytes(_rendered(1, 2))
+        _ = destination.write_bytes(_rendered(1, 2))
         return _rendered(1, 2)
 
-    monkeypatch.setattr(example, "_say_to_wav", render)
-    encoder = SayEncoder()
+    monkeypatch.setattr(example, "say_to_wav", render)
+    encoder = example.SayEncoder()
 
     assert asyncio.run(_encoded(encoder, " reply ")) == [b"\x01\x00\x02\x00"]
     assert encoder.format == vocal.speech.Format(sample_rate_hz=22_050, channels=1)
@@ -1296,15 +949,12 @@ def test_say_encoder_streams_the_rendered_pcm_and_renders_in_a_temporary_directo
 
 
 def test_say_encoder_failures_are_encoding_errors(monkeypatch: pytest.MonkeyPatch) -> None:
-    import listen_speak_bot_example as example
-    from listen_speak_bot_example import SayEncoder
-
     def fail_render(*args: object, **kwargs: object) -> bytes:
         del args, kwargs
         raise RuntimeError("render failed")
 
-    monkeypatch.setattr(example, "_say_to_wav", fail_render)
-    encoder = SayEncoder()
+    monkeypatch.setattr(example, "say_to_wav", fail_render)
+    encoder = example.SayEncoder()
 
     with pytest.raises(encoding.Error) as failed:
         _ = asyncio.run(_encoded(encoder, "reply"))
@@ -1315,12 +965,7 @@ def test_say_encoder_failures_are_encoding_errors(monkeypatch: pytest.MonkeyPatc
     assert (encoder.calls, encoder.audio) == ([], None)
 
 
-def test_say_encoder_cancellation_does_not_publish_the_cancelled_audio(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    import listen_speak_bot_example as example
-    from listen_speak_bot_example import SayEncoder
-
+def test_say_encoder_cancellation_does_not_publish_the_cancelled_audio(monkeypatch: pytest.MonkeyPatch) -> None:
     started = threading.Event()
     release = threading.Event()
     finished = threading.Event()
@@ -1335,8 +980,8 @@ def test_say_encoder_cancellation_does_not_publish_the_cancelled_audio(
         finally:
             finished.set()
 
-    monkeypatch.setattr(example, "_say_to_wav", blocked_say_to_wav)
-    encoder = SayEncoder()
+    monkeypatch.setattr(example, "say_to_wav", blocked_say_to_wav)
+    encoder = example.SayEncoder()
 
     async def run() -> None:
         task = asyncio.create_task(_encoded(encoder, "reply"))
@@ -1355,18 +1000,15 @@ def test_say_encoder_cancellation_does_not_publish_the_cancelled_audio(
 def test_say_encoder_keeps_everything_said_in_an_explicit_destination(
     monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
 ) -> None:
-    import listen_speak_bot_example as example
-    from listen_speak_bot_example import SayEncoder
-
     samples = iter((1, 2))
 
     def render(text: str, destination: pathlib.Path, *, sample_rate_hz: int) -> bytes:
         del text, destination, sample_rate_hz
         return _rendered(next(samples))
 
-    monkeypatch.setattr(example, "_say_to_wav", render)
+    monkeypatch.setattr(example, "say_to_wav", render)
     destination = tmp_path / "reply.wav"
-    encoder = SayEncoder(destination=destination)
+    encoder = example.SayEncoder(destination=destination)
 
     _ = asyncio.run(_encoded(encoder, "First."))
     _ = asyncio.run(_encoded(encoder, "Second."))
@@ -1376,250 +1018,19 @@ def test_say_encoder_keeps_everything_said_in_an_explicit_destination(
     assert encoder.calls == ["First.", "Second."]
 
 
-def test_listen_speak_progress_rejects_stale_and_duplicate_speaking_terminals(tmp_path: pathlib.Path) -> None:
-    import mosfet
-    from mosfet.abilities import speaking
-    from mosfet.abilities.communication import communication, conversation
+@pytest.mark.skipif(
+    shutil.which("say") is None or shutil.which("afconvert") is None, reason="macOS say and afconvert render speech"
+)
+def test_silence_and_a_rendering_are_wavs_whose_frames_the_bot_can_hear(tmp_path: pathlib.Path) -> None:
+    silence = example.silence_wav()
+    rendered = example.say_to_wav("Hi.", tmp_path / "hi.wav")
 
-    async def run() -> None:
-        body = _test_bot(tmp_path)
-        environment = Environment()
-        _ = await body.attach(environment)
-        history = conversation.OutputEvent.with_data(conversation.Messages())
-        await body.dispatch(
-            environment,
-            _routed_event(
-                cognition.InputEvent.with_data_and_id(cognition.InputData(stimulus=history), "turn-id"),
-                source=hsm.id(body.listening()),
-                target=hsm.id(body),
-            ),
-        )
-        await body.dispatch(
-            environment,
-            _routed_event(
-                mosfet.ProcessingCompletedEvent.with_data_and_id(
-                    mosfet.ProcessingCompletedEventData(
-                        output=(
-                            cognition.EventData(
-                                event=communication.RespondEvent.name,
-                                target="communication",
-                                data=communication.RespondData(parts=(vocal.speech.Part(words="Reply."),)),
-                            ),
-                        ),
-                        focus_candidates=(),
-                    ),
-                    "turn-id",
-                ),
-                source="cognition",
-                target=hsm.id(body),
-            ),
-        )
-
-        await body.dispatch(
-            environment,
-            _routed_event(
-                speaking.OutputEvent.with_data_and_id(_spoken("stale"), "stale-id"),
-                source=hsm.id(body.speaking()),
-                target=hsm.id(body),
-            ),
-        )
-        await _assert_not_ready(body)
-
-        await body.dispatch(
-            environment,
-            _routed_event(
-                speaking.OutputEvent.with_data_and_id(_spoken("Reply."), "turn-id"),
-                source=hsm.id(body.speaking()),
-                target=hsm.id(body),
-            ),
-        )
-        await body.dispatch(
-            environment,
-            _routed_event(
-                speaking.OutputEvent.with_data_and_id(_spoken("duplicate"), "turn-id"),
-                source=hsm.id(body.speaking()),
-                target=hsm.id(body),
-            ),
-        )
-        await _assert_ready(body)
-        _ = await body.detach(environment)
-
-    asyncio.run(run())
+    assert example.wav_pcm(silence) == b"\x00" * (round(0.5 * example.SAMPLE_RATE_HZ) * 2)
+    assert (tmp_path / "hi.wav").read_bytes() == rendered
+    assert len(example.wav_pcm(rendered)) > 0
 
 
-def test_listen_speak_progress_correlates_speaking_failure_to_selected_operation(tmp_path: pathlib.Path) -> None:
-    import mosfet
-    from mosfet.abilities import ability, speaking
-    from mosfet.abilities.communication import communication, conversation
-
-    async def run() -> None:
-        body = _test_bot(tmp_path)
-        environment = Environment()
-        _ = await body.attach(environment)
-        history = conversation.OutputEvent.with_data(conversation.Messages())
-        await body.dispatch(
-            environment,
-            _routed_event(
-                cognition.InputEvent.with_data_and_id(cognition.InputData(stimulus=history), "turn-id"),
-                source=hsm.id(body.listening()),
-                target=hsm.id(body),
-            ),
-        )
-        await body.dispatch(
-            environment,
-            _routed_event(
-                mosfet.ProcessingCompletedEvent.with_data_and_id(
-                    mosfet.ProcessingCompletedEventData(
-                        output=(
-                            cognition.EventData(
-                                event=communication.RespondEvent.name,
-                                target="communication",
-                                data=communication.RespondData(parts=(vocal.speech.Part(words="Reply."),)),
-                            ),
-                        ),
-                        focus_candidates=(),
-                    ),
-                    "turn-id",
-                ),
-                source="cognition",
-                target=hsm.id(body),
-            ),
-        )
-
-        failure = ability.FailureData(message="encoding failed")
-        await body.dispatch(
-            environment,
-            _routed_event(
-                ability.FailedEvent.with_data_and_id(failure, "stale-id"),
-                source=hsm.id(body.speaking()),
-                target=hsm.id(body),
-            ),
-        )
-        await _assert_not_ready(body)
-        assert not body.response_execution_failed()
-
-        await body.dispatch(
-            environment,
-            _routed_event(
-                ability.FailedEvent.with_data_and_id(failure, "turn-id"),
-                source=hsm.id(body.speaking()),
-                target=hsm.id(body),
-            ),
-        )
-        await body.dispatch(
-            environment,
-            _routed_event(
-                speaking.OutputEvent.with_data_and_id(_spoken("duplicate"), "turn-id"),
-                source=hsm.id(body.speaking()),
-                target=hsm.id(body),
-            ),
-        )
-        await _assert_ready(body)
-        assert body.response_execution_failed()
-        _ = await body.detach(environment)
-
-    asyncio.run(run())
-
-
-def test_listen_speak_progress_has_no_snapshot_or_asyncio_event_protocol() -> None:
-    root = _repo_root()
-    source = (root / "examples" / "listen_speak_bot" / "src" / "listen_speak_bot_example" / "__init__.py").read_text(
-        encoding="utf-8"
-    )
-
-    assert "asyncio.Event" not in source
-    assert "body.state()" not in source
-    assert "_RunProgress(hsm.Instance)" in source
-
-
-def test_listen_speak_models_progress_without_dispatch_interception_or_actor_waiters() -> None:
-    source = (
-        _repo_root() / "examples" / "listen_speak_bot" / "src" / "listen_speak_bot_example" / "__init__.py"
-    ).read_text(encoding="utf-8")
-    bot_source = source.split("class ListenSpeakBot", 1)[1]
-    progress_source = source.split("class _RunProgress", 1)[1].split("class ListenSpeakBot", 1)[0]
-
-    assert "machine.dispatch =" not in source
-    assert "def dispatch(" not in bot_source
-    assert "asyncio.Future" not in bot_source
-    assert "event.name in" not in bot_source
-    assert "def is_ready(" not in progress_source
-    assert "async def wait(" not in progress_source
-    assert "def conversation_failures(" not in progress_source
-    assert "def response_selection_count(" not in progress_source
-    assert "def response_execution_failed(" not in progress_source
-
-
-def test_listen_speak_closes_owned_decoder_and_vad_on_detach(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: pathlib.Path,
-) -> None:
-    import listen_speak_bot_example as example
-
-    _CloseTrackingDecoder.instances.clear()
-    _CloseTrackingVoiceActivityClassifier.instances.clear()
-    monkeypatch.setattr(example, "SpeechDecoder", _CloseTrackingDecoder)
-    monkeypatch.setattr(example, "SileroVoiceActivityClassifier", _CloseTrackingVoiceActivityClassifier)
-
-    async def run() -> None:
-        body = ListenSpeakBot(reply_wav=tmp_path / "reply.wav", cognition=_empty_cognition)
-        environment = Environment()
-        _ = await body.attach(environment)
-        _ = await body.detach(environment)
-
-    asyncio.run(run())
-
-    assert _CloseTrackingDecoder.instances and _CloseTrackingDecoder.instances[0].closed
-    assert _CloseTrackingVoiceActivityClassifier.instances and _CloseTrackingVoiceActivityClassifier.instances[0].closed
-
-
-def test_listen_speak_closes_owned_decoder_and_vad_when_attach_fails(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: pathlib.Path,
-) -> None:
-    import listen_speak_bot_example as example
-
-    _CloseTrackingDecoder.instances.clear()
-    _CloseTrackingVoiceActivityClassifier.instances.clear()
-    monkeypatch.setattr(example, "SpeechDecoder", _CloseTrackingDecoder)
-    monkeypatch.setattr(example, "SileroVoiceActivityClassifier", _CloseTrackingVoiceActivityClassifier)
-
-    async def fail_attach(
-        instance: object,
-        environment: Environment,
-        *,
-        placement: object | None = None,
-        reply_to: object | None = None,
-        operation_id: str | None = None,
-    ) -> object:
-        del instance, environment, placement, reply_to, operation_id
-        raise RuntimeError("attach failed")
-
-    monkeypatch.setattr(mosfet.Bot, "attach", fail_attach)
-
-    async def run() -> None:
-        body = ListenSpeakBot(reply_wav=tmp_path / "reply.wav", cognition=_empty_cognition)
-        with pytest.raises(RuntimeError, match="attach failed"):
-            _ = await body.attach(Environment())
-
-    asyncio.run(run())
-
-    assert _CloseTrackingDecoder.instances and _CloseTrackingDecoder.instances[0].closed
-    assert _CloseTrackingVoiceActivityClassifier.instances and _CloseTrackingVoiceActivityClassifier.instances[0].closed
-
-
-def test_listen_speak_attach_and_detach_answer_the_activator_under_its_operation_ids(
-    tmp_path: pathlib.Path,
-) -> None:
-    async def run() -> list[tuple[str, str]]:
-        replies = await started_replies()
-        body = _test_bot(tmp_path)
-        environment = Environment()
-        _ = await body.attach(environment, reply_to=replies, operation_id="op-attach")
-        _ = await body.detach(environment, reply_to=replies, operation_id="op-detach")
-        return replies.ledger()
-
-    assert asyncio.run(run()) == [("bot.activated", "op-attach"), ("bot.deactivated", "op-detach")]
+# --- CI ----------------------------------------------------------------------------------------------------------
 
 
 def test_ci_runs_fatal_root_and_listen_speak_python_gates() -> None:
@@ -1643,43 +1054,3 @@ def test_ci_runs_fatal_root_and_listen_speak_python_gates() -> None:
     assert "uv run --locked --project examples/listen_speak_bot ruff check" in workflow
     assert "uv run --locked --project examples/listen_speak_bot ruff format --check" in workflow
     assert "uv run --locked basedpyright --project examples/listen_speak_bot" in workflow
-
-
-def test_listen_speak_detach_waits_for_lifecycle_terminal_and_leaves_no_lifecycle_tasks(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: pathlib.Path,
-) -> None:
-    original_detach = attachment.Group.detach
-    entered = asyncio.Event()
-    release = asyncio.Event()
-
-    async def gated_detach(
-        group: attachment.Group,
-        ctx: hsm.Context,
-        event: hsm.Event[attachment.DetachData],
-    ) -> None:
-        _ = entered.set()
-        await release.wait()
-        await original_detach(group, ctx, event)
-
-    monkeypatch.setattr(attachment.Group, "detach", gated_detach)
-
-    async def run() -> tuple[str, ...]:
-        body = _test_bot(tmp_path)
-        environment = Environment()
-        _ = await body.attach(environment)
-        detach_task = asyncio.create_task(body.detach(environment))
-        await entered.wait()
-        assert not detach_task.done()
-        _ = release.set()
-        _ = await detach_task
-        current = asyncio.current_task()
-        return tuple(repr(task.get_coro()) for task in asyncio.all_tasks() if task is not current and not task.done())
-
-    pending = asyncio.run(run())
-
-    assert not any(
-        lifecycle_name in coroutine
-        for coroutine in pending
-        for lifecycle_name in ("AttachmentGroup", "BotLifecycleReply", "HSM._process")
-    )

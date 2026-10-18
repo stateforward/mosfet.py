@@ -45,24 +45,21 @@ OPENAI_BASE_URL=... OPENAI_MODEL=... OPENAI_API_KEY=... \
 The other examples run as programs from the repository root:
 
 ```bash
-uv run --project examples/listen_speak_bot listen-speak-bot
+uv run --project examples/listen_speak_bot python -m listen_speak_bot_example
 uv run --project examples/phone_bot phone-bot-example
 ```
 
-`listen_speak_bot` is its own example package (macOS only, device-free). It uses
-`say` and `afconvert` to render *Hey I'm Gabe how are you* into a WAV, injects
-that audio as `environment.sound` into a bot with no devices, attaches real **Listening**
-(MLX Audio VAD + Whisper STT) and an acquired **Communication** ability, then runs **Mercury 2**
-intuition (OpenAI-compatible) / Gemini **reasoning** (`gemini-3.5-flash`) and reports the cognition run.
-The real Listening product carries a provider-neutral source identity into Communication, whose
-native seeded behavior admits the typed speech into Conversation. Cognition can select
-`communication.respond`, which routes through the injected Speaking port and produces a reply WAV.
+`listen_speak_bot` is its own example package (macOS only, device-free). Its bot file,
+`listen_speak_bot_example/__main__.py`, has one `bot.define`: a bot with no devices, whose input is a real
+**Listening** (MLX Audio Silero VAD and PyAnnote voice embeddings, or the lab's streaming speech server), whose
+output is **Speaking**, and which has **Communication** with its **Conversation**, on one Gemini model. It renders
+*Hey I'm Gabe how are you* with `say` and `afconvert`, and `hear` plays it to the bot once as `environment.sound`.
+The Listening product carries a provider-neutral source identity, which the speech seed admits into
+Conversation. The bot may select `communication.respond`, which Communication says through Speaking into a reply
+WAV, or say nothing; the run reports `status: ok` or `status: incomplete`, and its observers never act on it.
 The bot knows the traits the example gives it and the persona it writes of itself, and on the lab TTS engine
-(`BOT_SPEECH_SERVER_TTS_URL`) it speaks in the voice it is given there at inception.
-The run remains `status: incomplete` when cognition does not select a response. Cognition requires
-`BOT_MERCURY_API_KEY`
-(intuition) and `BOT_GEMINI_API_KEY` / `GEMINI_API_KEY` (reasoning). No LiveKit or
-phone device. `--play` plays only the generated heard WAV in this slice.
+(`BOT_SPEECH_SERVER_TTS_URL`) it speaks in the voice it is born with. It needs `BOT_GEMINI_API_KEY` (or
+`GEMINI_API_KEY` / `GOOGLE_API_KEY`). No LiveKit or phone device.
 
 Run its tests from the repository root via the example project env (the root
 env does not install the example package, so the test module skips there
@@ -71,9 +68,6 @@ with a reason instead of failing collection):
 ```bash
 uv run --project examples/listen_speak_bot python -m pytest tests/examples/test_listen_speak_bot.py -q -m 'not live'
 ```
-
-Listening and Speaking remain body composition ports, not direct cognition tools. Communication
-offers the semantic `communication.respond` action and owns the temporary route to Speaking.
 
 `phone_bot` is its own example package because it depends on real provider
 packages: LiveKit for the phone device and room audio, OpenAI-compatible

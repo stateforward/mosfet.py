@@ -1,7 +1,7 @@
 [project]
 name = "bot-example-listen-speak-bot"
 version = "0.1.0"
-description = "Device-free listen→speak stateforward.mosfet example with Mercury 2 intuition + Gemini reasoning (macOS say)."
+description = "Device-free listen→speak stateforward.mosfet example: one bot.define on Gemini, heard and spoken with macOS say."
 requires-python = ">=3.13"
 dependencies = [
   "stateforward.mosfet",
@@ -11,10 +11,6 @@ dependencies = [
   "mosfet-provider-pyannote",
   "mosfet-provider-speech-server",
 ]
-
-[project.scripts]
-listen-speak-bot = "listen_speak_bot_example:main"
-listen-speak-bot-example = "listen_speak_bot_example:main"
 
 [tool.uv.sources]
 stateforward-mosfet = { path = "../..", editable = true }
