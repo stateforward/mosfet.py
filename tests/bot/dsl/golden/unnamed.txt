@@ -9,7 +9,7 @@ error[B0003]: device id `speaker` is used twice
    = note: a bot keys its devices and abilities by `id`; the bot addresses `speaker` by it
 help: give the second device its own id
    |
-12 |     bot.attach(audio.Speaker(id="speaker_2")),
+12 |     bot.attach(audio.Speaker(id="speaker-2")),
    |                ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
    = explain: bot.explain("B0003")
 

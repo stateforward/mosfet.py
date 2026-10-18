@@ -1,0 +1,29 @@
+error[B0003]: device id `desk` is used twice
+  --> greeter.py:12:5
+   |
+11 |     bot.attach(computer.Computer(id="desk")),
+   |     ---------------------------------------- first used here
+12 |     bot.attach(computer.Computer(id="desk")),
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ used again here
+   |
+   = note: a bot keys its devices and abilities by `id`; the bot addresses `desk` by it
+help: give the second device its own id
+   |
+12 |     bot.attach(computer.Computer(id="computer")),
+   |                                     ~~~~~~~~~~
+   = explain: bot.explain("B0003")
+
+error[B0004]: `bot.attach` takes a constructed device or ability, not a class
+  --> greeter.py:13:16
+   |
+13 |     bot.attach(computer.Computer),
+   |                ^^^^^^^^^^^^^^^^^ this is the class `computer.Computer`
+   |
+   = note: the bot file builds its parts; the bot holds the very instances it is given
+help: construct it
+   |
+13 |     bot.attach(computer.Computer(id="computer-3")),
+   |                ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+   = explain: bot.explain("B0004")
+
+error: could not define bot `greeter`: 2 errors

@@ -170,6 +170,52 @@ def test_one_pass_reports_every_mistake_in_source_order(here: pathlib.Path) -> N
     assert str(error).endswith("error: could not define bot `Greeter Bot`: 5 errors")
 
 
+def test_the_ids_one_pass_suggests_are_unique_among_themselves_and_the_ids_written(here: pathlib.Path) -> None:
+    error = support.failure(support.copy("conflicting_ids", here))
+
+    assert [diagnostic.code for diagnostic in error.diagnostics] == ["B0003", "B0004"]
+    assert support.rendered(error) == support.golden("conflicting_ids")
+    # The duplicate is renamed `computer`, so the class is constructed as `computer-3`: `computer-2` is written.
+    assert [
+        diagnostic.help.suggestion.replacement
+        for diagnostic in error.diagnostics
+        if diagnostic.help and diagnostic.help.suggestion
+    ] == [
+        '"computer"',
+        'computer.Computer(id="computer-3")',
+    ]
+
+
+def test_a_misplaced_parts_rewrite_never_reuses_an_id(here: pathlib.Path) -> None:
+    """D-W7-10: a stray part keeps its id while it is free, and the class, the second stray and the
+    misplaced part beside an attached `desk` each get an id no other part has or is given."""
+
+    error = support.failure(support.copy("misplaced_ids", here))
+
+    assert [
+        (diagnostic.code, diagnostic.help.suggestion.replacement, diagnostic.help.suggestion.applicability)
+        for diagnostic in error.diagnostics
+        if diagnostic.help and diagnostic.help.suggestion
+    ] == [
+        ("B0017", "bot.attach(computer.Computer())", "machine-applicable"),
+        ("B0004", 'computer.Computer(id="computer-2")', "machine-applicable"),
+        ("B0006", 'bot.attach(computer.Computer(id="computer-3"))', "machine-applicable"),
+        ("B0017", 'bot.attach(computer.Computer(id="computer-4"))', "machine-applicable"),
+    ]
+
+
+def test_a_misplaced_parts_rewrite_into_an_element_the_bot_has_is_not_certain(here: pathlib.Path) -> None:
+    """D-W7-10: a second `bot.cognition` or `bot.register` would be B0009, so that rewrite is maybe-incorrect."""
+
+    error = support.failure(support.copy("misplaced_singletons", here))
+
+    assert [
+        (diagnostic.code, diagnostic.help.suggestion.applicability)
+        for diagnostic in error.diagnostics
+        if diagnostic.help and diagnostic.help.suggestion
+    ] == [("B0006", "maybe-incorrect"), ("B0017", "maybe-incorrect")]
+
+
 def test_no_value_from_the_bot_file_is_rendered(here: pathlib.Path) -> None:
     error = support.failure(support.copy("mixed", here))
 

@@ -58,10 +58,15 @@ class Model(hsm.NamespaceElement, kind=ModelKind):
 
     ``members`` holds the bot's parts by qualified name, in the order they were written, and
     ``owned_elements`` the elements it was defined from, so ``bot.redefine`` can add to them.
-    ``findings`` collects the diagnostics the walk and the validator found.
+    ``findings`` collects the diagnostics the walk and the validator found, ``suggested_ids`` the ids
+    their ``help:`` rewrites give parts, and ``suggested_elements`` the singular elements
+    (``bot.cognition``, ``bot.register``) they write, so no two rewrites of one pass give the same id
+    or a second one of an element.
     """
 
     findings: list[diagnostics.Diagnostic] = dataclasses.field(default_factory=list[diagnostics.Diagnostic])
+    suggested_ids: set[str] = dataclasses.field(default_factory=set[str])
+    suggested_elements: set[str] = dataclasses.field(default_factory=set[str])
 
     def __post_init__(self) -> None:
         super().__post_init__()
@@ -204,12 +209,71 @@ def _argument(location: hsm.Location) -> tuple[diagnostics.Span, ast.expr | None
 
 
 def free_id(base: str, taken: collections.abc.Collection[str]) -> str:
-    """``base`` if it is free, else ``base_2``, ``base_3``, ...: an id no other part of the bot has."""
+    """``base`` if it is free, else ``base-2``, ``base-3``, ...: an id no other part of the bot has.
+
+    The number joins with a hyphen, which every id allows, a computer's peer id included.
+    """
 
     candidate, number = base, 2
     while candidate in taken or candidate in RESERVED_IDS:
-        candidate, number = f"{base}_{number}", number + 1
+        candidate, number = f"{base}-{number}", number + 1
     return candidate
+
+
+def _identity(value: object) -> str | None:
+    """``value``'s id when it is a constructed device or ability whose base set one, else ``None``."""
+
+    if isinstance(value, type) or not isinstance(value, mosfet.device.Device | abilities.Ability):
+        return None
+    part = typing.cast(mosfet.device.Device | abilities.Ability[typing.Any, typing.Any], value)
+    try:
+        return part.identity()
+    except AttributeError:
+        return None
+
+
+def _written_ids(model: Model, *, attached: bool = False) -> set[str]:
+    """The ids of the parts the bot file wrote anywhere in the definition, those after this one too.
+
+    ``attached`` keeps only the parts given to an element that takes them, which are keyed by id;
+    otherwise a part written where nothing takes it (a misplaced or a stray one) counts as well, since
+    its rewrite may give it that id.
+    """
+
+    ids: set[str] = set()
+    for element in model.owned_elements:
+        if isinstance(element, RedefinableAttachment):
+            value = element.instance if not attached or _attachable(element.instance, element.role) else None
+        elif isinstance(element, RedefinableRegister | Stray) and not attached:
+            value = element.store if isinstance(element, RedefinableRegister) else element.value
+        else:
+            continue
+        identity = _identity(value)
+        if identity is not None:
+            ids.add(identity)
+    return ids
+
+
+def _suggest_id(model: Model, base: str) -> str:
+    """A free id for a rewrite to give a part: none the bot file wrote, and none another rewrite gave.
+
+    The ids written are every part's in the definition, those after this one and those written where
+    nothing takes them too, so applying every rewrite of the pass at once defines clean.
+    """
+
+    suggested = free_id(base, _written_ids(model) | _actor_ids(model) | model.suggested_ids)
+    model.suggested_ids.add(suggested)
+    return suggested
+
+
+def _with_id(span: diagnostics.Span, node: ast.Call, new_id: str) -> str:
+    """The constructor call ``node``, written under ``span``'s file, as written but with ``id=new_id``."""
+
+    def piece(item: ast.expr | ast.keyword) -> str:
+        return diagnostics.text(diagnostics.node_span(span, item))
+
+    others = [piece(keyword) for keyword in node.keywords if keyword.arg != "id"]
+    return f"{piece(node.func)}({', '.join([*map(piece, node.args), f'id="{new_id}"', *others])})"
 
 
 def _rename(location: hsm.Location, instance: object, new_id: str, message: str) -> diagnostics.Help:
@@ -228,13 +292,13 @@ def _rename(location: hsm.Location, instance: object, new_id: str, message: str)
                     applicability="machine-applicable",
                 ),
             )
-    written = diagnostics.node_span(span, argument)
-    callee = diagnostics.text(diagnostics.node_span(span, argument.func))
-    rest = diagnostics.text(written)[len(callee) :].strip()[1:-1].strip()
-    replacement = f'{callee}(id="{new_id}"{", " + rest if rest else ""})'
     return diagnostics.Help(
         message=message,
-        suggestion=diagnostics.Suggestion(span=written, replacement=replacement, applicability="machine-applicable"),
+        suggestion=diagnostics.Suggestion(
+            span=diagnostics.node_span(span, argument),
+            replacement=_with_id(span, argument, new_id),
+            applicability="machine-applicable",
+        ),
     )
 
 
@@ -254,12 +318,23 @@ def _constructible(cls: type) -> bool:
 
 
 def misplaced(
-    value: object, primary: diagnostics.Span, written: str, where: str, *, code: str = "B0006"
+    value: object,
+    primary: diagnostics.Span,
+    written: str,
+    where: str,
+    *,
+    code: str = "B0006",
+    model: Model | None = None,
+    node: ast.expr | None = None,
 ) -> diagnostics.Diagnostic | None:
     """``code`` for ``value``, written as ``written`` at ``primary`` where ``where`` takes something else.
 
-    The help names the element that takes it, with the rewrite when it is certain. ``None`` when no
-    element takes it, so the caller says what ``where`` takes instead.
+    The help names the element that takes it. With the ``model`` being defined, it carries the rewrite
+    of ``primary`` into that element, machine-applicable only when applying it with every other rewrite
+    of the pass defines clean: a part keeps its id when no other part has it, and is given a free one
+    when ``node``, the expression written, is its constructor call; a second ``bot.cognition`` or
+    ``bot.register`` is never certain. ``None`` when no element takes it, so the caller says what
+    ``where`` takes instead.
     """
 
     def found(name: str, element: str, suggestion: diagnostics.Suggestion | None) -> diagnostics.Diagnostic:
@@ -271,21 +346,45 @@ def misplaced(
             help=diagnostics.Help(message=f"{name} is given to `{element}`", suggestion=suggestion),
         )
 
-    def rewrite(replacement: str) -> diagnostics.Suggestion | None:
-        if written == "...":
+    def rewrite(replacement: str, certain: bool) -> diagnostics.Suggestion:
+        return diagnostics.Suggestion(
+            span=primary,
+            replacement=replacement,
+            applicability="machine-applicable" if certain else "maybe-incorrect",
+        )
+
+    def single(element: type[Element[typing.Any]], function: str) -> diagnostics.Suggestion | None:
+        if model is None or written == "...":
             return None
-        return diagnostics.Suggestion(span=primary, replacement=replacement, applicability="machine-applicable")
+        taken = function in model.suggested_elements or any(
+            isinstance(given, element) for given in model.owned_elements
+        )
+        model.suggested_elements.add(function)
+        return rewrite(f"{function}({written})", not taken)
+
+    def attached() -> diagnostics.Suggestion | None:
+        if model is None or written == "...":
+            return None
+        identity = _identity(value)
+        if identity is not None and identity not in (
+            _written_ids(model, attached=True) | model.suggested_ids | RESERVED_IDS
+        ):
+            model.suggested_ids.add(identity)
+            return rewrite(f"bot.attach({written})", True)
+        if identity is not None and isinstance(node, ast.Call):
+            return rewrite(f"bot.attach({_with_id(primary, node, _suggest_id(model, kind(value)))})", True)
+        return rewrite(f"bot.attach({written})", False)
 
     if isinstance(value, mosfet.device.Device):
-        return found("a device", "bot.attach", rewrite(f"bot.attach({written})"))
+        return found("a device", "bot.attach", attached())
     if isinstance(value, processing.Processor):
-        return found("a processor", "bot.cognition", rewrite(f"bot.cognition({written})"))
+        return found("a processor", "bot.cognition", single(RedefinableCognition, "bot.cognition"))
     if isinstance(value, memory.StmMemory):
-        return found("a sensory register", "bot.register", rewrite(f"bot.register({written})"))
+        return found("a sensory register", "bot.register", single(RedefinableRegister, "bot.register"))
     if isinstance(value, memory.Memory):
         return found("a memory", "bot.cognition(processor, memory=...)", None)
     if isinstance(value, abilities.Ability):
-        return found("an ability", "bot.attach", rewrite(f"bot.attach({written})"))
+        return found("an ability", "bot.attach", attached())
     if isinstance(value, str):
         return found("a string", "bot.traits", None)
     return None
@@ -310,9 +409,9 @@ class RedefinableAttachment(Element[AttachmentElement]):
             span, argument = _argument(self.location)
             written = diagnostics.text(diagnostics.node_span(span, argument)) if argument is not None else "..."
             if isinstance(instance, type):
-                model.findings.append(self._class(instance, span, argument, written))
+                model.findings.append(self._class(model, instance, span, argument, written))
             else:
-                model.findings.append(self._unattachable(instance, written))
+                model.findings.append(self._unattachable(model, instance, written, argument))
             return None
         held = typing.cast(mosfet.device.Device | abilities.Ability[typing.Any, typing.Any], instance)
         try:
@@ -334,7 +433,6 @@ class RedefinableAttachment(Element[AttachmentElement]):
         # One namespace of ids for every role: the firmware sends to devices and abilities alike by id.
         key = posixpath.join(model.qualified_name, identity)
         if identity in RESERVED_IDS:
-            taken = _actor_ids(model)
             model.findings.append(
                 diagnostics.Diagnostic(
                     code="B0007",
@@ -345,7 +443,7 @@ class RedefinableAttachment(Element[AttachmentElement]):
                         "the body keeps `bot`, `cognition` and `firmware` for itself, the way cognition "
                         + "addresses them",
                     ),
-                    help=_rename(self.location, held, free_id(kind(held), taken), "give it another id"),
+                    help=_rename(self.location, held, _suggest_id(model, kind(held)), "give it another id"),
                 )
             )
             return None
@@ -362,7 +460,7 @@ class RedefinableAttachment(Element[AttachmentElement]):
                 message = f"{what} id `{identity}` is used twice"
                 note = f"a bot keys its devices and abilities by `id`; the bot addresses `{identity}` by it"
                 help = _rename(
-                    self.location, held, free_id(kind(held), _actor_ids(model)), f"give the second {what} its own id"
+                    self.location, held, _suggest_id(model, kind(held)), f"give the second {what} its own id"
                 )
             model.findings.append(
                 diagnostics.Diagnostic(
@@ -381,16 +479,15 @@ class RedefinableAttachment(Element[AttachmentElement]):
         return member
 
     def _class(
-        self, cls: type, span: diagnostics.Span, argument: ast.expr | None, written: str
+        self, model: Model, cls: type, span: diagnostics.Span, argument: ast.expr | None, written: str
     ) -> diagnostics.Diagnostic:
         function = _FUNCTIONS[self.role]
         what = "device or ability" if self.role == "attach" else "ability"
-        constructed = f'{written}(id="{kind(cls)}")'
         suggestion = None
         if argument is not None:
             suggestion = diagnostics.Suggestion(
                 span=diagnostics.node_span(span, argument),
-                replacement=constructed,
+                replacement=f'{written}(id="{_suggest_id(model, kind(cls))}")',
                 applicability="machine-applicable" if _constructible(cls) else "maybe-incorrect",
             )
         primary = diagnostics.node_span(span, argument) if argument is not None else span
@@ -403,10 +500,12 @@ class RedefinableAttachment(Element[AttachmentElement]):
             help=diagnostics.Help(message="construct it", suggestion=suggestion),
         )
 
-    def _unattachable(self, instance: object, written: str) -> diagnostics.Diagnostic:
+    def _unattachable(
+        self, model: Model, instance: object, written: str, argument: ast.expr | None
+    ) -> diagnostics.Diagnostic:
         function = _FUNCTIONS[self.role]
         takes = "a device or an ability" if self.role == "attach" else "an ability"
-        found = misplaced(instance, diagnostics.Span.of(self.location), written, function)
+        found = misplaced(instance, diagnostics.Span.of(self.location), written, function, model=model, node=argument)
         if found is not None:
             return found.model_copy(update={"notes": (f"`{function}` takes {takes}",)})
         return diagnostics.Diagnostic(
@@ -579,7 +678,9 @@ class RedefinableRegister(_Single[RegisterElement]):
                     )
                 )
                 return None
-            found = misplaced(store, diagnostics.Span.of(self.location), written, "bot.register")
+            found = misplaced(
+                store, diagnostics.Span.of(self.location), written, "bot.register", model=model, node=argument
+            )
             model.findings.append(
                 found.model_copy(update={"notes": ("`bot.register` takes a `memory.StmMemory`",)})
                 if found is not None
@@ -658,7 +759,9 @@ class Stray(Element[Member]):
                 )
             )
             return None
-        misplacement = misplaced(value, primary, written, "bot.define", code="B0017")
+        misplacement = misplaced(
+            value, primary, written, "bot.define", code="B0017", model=model, node=None if found is None else found[1]
+        )
         if misplacement is not None:
             model.findings.append(misplacement.model_copy(update={"notes": ("`bot.define` takes bot elements",)}))
             return None

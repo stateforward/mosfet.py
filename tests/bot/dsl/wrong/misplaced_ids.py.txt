@@ -1,0 +1,16 @@
+"""Misplaced parts whose rewrites would reuse an id: each rewrite gives its part an id no other part has."""
+
+from mosfet import bot
+from mosfet.devices import computer
+
+from tests.bot.dsl import support
+
+model = bot.define(
+    "greeter",
+    bot.cognition(support.Silent()),
+    computer.Computer(),
+    bot.attach(computer.Computer),
+    bot.input(computer.Computer(id="desk")),
+    bot.attach(computer.Computer(id="desk")),
+    computer.Computer(),
+)

@@ -25,7 +25,9 @@ FIXABLE = [
     "B0014",
     "B0017",
     "B0018",
+    "conflicting_ids",
     "empty_timeouts",
+    "misplaced_ids",
     "mixed",
     "unnamed",
 ]
@@ -45,6 +47,7 @@ ALL = [
     "ability_without_tools",
     "command_without_examples",
     "instruction_like_traits",
+    "misplaced_singletons",
     "no_devices",
     "unreachable_state",
     "unused_register",

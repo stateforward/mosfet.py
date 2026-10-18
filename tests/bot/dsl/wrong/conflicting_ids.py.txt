@@ -1,0 +1,15 @@
+"""Two rewrites in one pass that would both give a part the id `computer`: each gets an id of its own."""
+
+from mosfet import bot
+from mosfet.devices import computer
+
+from tests.bot.dsl import support
+
+model = bot.define(
+    "greeter",
+    bot.cognition(support.Silent()),
+    bot.attach(computer.Computer(id="desk")),
+    bot.attach(computer.Computer(id="desk")),
+    bot.attach(computer.Computer),
+    bot.attach(computer.Computer(id="computer-2")),
+)
