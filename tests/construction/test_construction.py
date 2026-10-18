@@ -87,7 +87,7 @@ def _clock() -> datetime.datetime:
 
 
 def _speaking() -> speaking.Speaking:
-    return speaking.Speaking(encoder=_SpeechEncoder(), speaker=audio.Speaker())
+    return speaking.Speaking(encoder=_SpeechEncoder())
 
 
 def _cognition() -> cognition.Cognition:

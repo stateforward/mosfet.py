@@ -1406,6 +1406,27 @@ def test_speaking_powers_an_unstarted_mouth_and_stops_only_the_mouth_it_started(
     assert not still_wired
 
 
+def test_speaking_given_no_speaker_powers_a_fresh_mouth_of_its_own_and_stops_it() -> None:
+    """DSL-28f: with no ``speaker``, the bot's mouth is a fresh ``audio.Speaker()``, Speaking's own to power."""
+
+    async def run() -> tuple[list[bool], list[bool], list[bool]]:
+        environment = Environment()
+        alone = speaking.Speaking(encoder=Script())
+        await start_ability_tree(environment, alone)
+        live = typing.cast(collections.abc.Mapping[str, object], environment.value(hsm.Keys.Instances))
+        mouths = [instance for instance in live.values() if isinstance(instance, audio.Speaker)]
+        powered = [lifecycle.is_started(mouth) for mouth in mouths]
+        held = [alone in device_bots(mouth) for mouth in mouths]
+        await alone.stop(environment)
+        return powered, held, [lifecycle.is_started(mouth) for mouth in mouths]
+
+    powered, held, after = asyncio.run(run())
+
+    assert powered == [True]
+    assert held == [True]
+    assert after == [False]
+
+
 def test_cognition_does_not_directly_select_speaking_output() -> None:
     """Body output wiring is absent from cognition's actor/tool inventory."""
 

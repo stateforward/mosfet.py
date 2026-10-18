@@ -58,13 +58,12 @@ PY
 ```python
 from mosfet.abilities import speaking
 from mosfet.abilities.hearing.speech import SpeechDecoding
-from mosfet.devices import audio
 from mosfet.providers.moonshine import SpeechDecoder, SpeechEncoder
 
 listening_speech = SpeechDecoding(decoder=SpeechDecoder(language="en"))
+# With no speaker, Speaking's mouth is a fresh audio.Speaker(), the bot's own voice.
 voice = speaking.Speaking(
     encoder=SpeechEncoder(language="en-us", voice="kokoro_af_heart", sample_rate_hz=24000),
-    speaker=audio.Speaker(),
 )
 ```
 
@@ -82,7 +81,6 @@ refused (`ValueError`).
 
 ```python
 from mosfet.abilities import speaking, vocal
-from mosfet.devices import audio
 from mosfet.providers import moonshine
 
 voices = moonshine.Catalog(
@@ -97,7 +95,6 @@ voices = moonshine.Catalog(
 )
 mouth = speaking.Speaking(
     encoder=lambda key, description: moonshine.SpeechEncoder(language="en-us", voice=key),
-    speaker=audio.Speaker(),
 )
 inception = vocal.voice.Inception(
     traits=traits, languages=("en",), speaking=mouth, processor=inception_model, catalog=voices, memory=bot_memory

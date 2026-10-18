@@ -777,8 +777,9 @@ class Speaking(ability.Ability[InputData, OutputData]):
     """Bot output ability: say a reply, part by part, in the bot's own voice through the mouth it is wired to.
 
     Constructor-injected, all of it: the streaming ``encoder`` (or the factory that constructs it once from the voice
-    the bot is given), the ``speaker`` that is the bot's mouth, the ``listening`` peers that receive motor-command
-    copies and the copy of its own voice, and the ``conversation`` sinks it records what was said in.
+    the bot is given), the ``speaker`` that is the bot's mouth (a fresh ``audio.Speaker()`` when none is given), the
+    ``listening`` peers that receive motor-command copies and the copy of its own voice, and the ``conversation`` sinks
+    it records what was said in.
 
     Speaking attaches to its mouth as a controller as part of being attached by its owner (its composite
     attachment group): a mouth that refuses or never answers within the owner's attach timeout fails that attach,
@@ -859,7 +860,7 @@ class Speaking(ability.Ability[InputData, OutputData]):
         id: ability.AbilityId | None = None,
         clock: hsm.Clock | None = None,
         encoder: vocal.speech.SpeechEncoder | collections.abc.Callable[[str, str | None], vocal.speech.SpeechEncoder],
-        speaker: audio.Speaker,
+        speaker: audio.Speaker | None = None,
         listening: collections.abc.Sequence[hsm.Instance] = (),
         conversation: collections.abc.Sequence[ConversationTarget] = (),
         lookahead: datetime.timedelta = _LOOKAHEAD,
@@ -877,6 +878,8 @@ class Speaking(ability.Ability[InputData, OutputData]):
                 aligned s16le PCM for them, or a factory ``(key, description) -> encoder`` that Speaking calls exactly
                 once, with the voice ``speaking.voice`` gives it.
             speaker: The bot's mouth. Speaking powers it when nobody has, and attaches to it as a controller.
+                Omitted, the mouth is a fresh ``audio.Speaker()``: a transducer with no placement, the bot's own
+                voice, which Speaking powers and stops.
             listening: Peers that receive motor-command copies and the copy of the bot's own voice.
             conversation: Conversation sinks the spoken text is recorded in as outbound messages.
             lookahead: The most unplayed audio commanded ahead of the mouth before the next chunk is pulled.
@@ -908,7 +911,8 @@ class Speaking(ability.Ability[InputData, OutputData]):
             raise ValueError(f"Speaking voicing_timeout must be positive, got {voicing_timeout}.")
         if enroll_seconds < _MIN_ENROLL:
             raise ValueError(f"Speaking enroll_seconds must be at least {_MIN_ENROLL}, got {enroll_seconds}.")
-        self._speaker = speaker
+        mouth = audio.Speaker() if speaker is None else speaker
+        self._speaker = mouth
         self._voice_id = None
         self._speaker_started = False
         self._listening = tuple(dict.fromkeys(listening))
@@ -929,7 +933,7 @@ class Speaking(ability.Ability[InputData, OutputData]):
         self._sequence = 0
         self._finished = collections.deque(maxlen=_FINISHED_UTTERANCES)
         self._held = collections.OrderedDict()
-        self._attachment_group: attachment.Group | None = attachment.Group(speaker)
+        self._attachment_group: attachment.Group | None = attachment.Group(mouth)
 
     @typing.override
     async def start(self, ctx: hsm.Context, data: object = None) -> typing.Self:
