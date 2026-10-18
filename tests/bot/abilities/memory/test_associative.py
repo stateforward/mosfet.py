@@ -165,7 +165,8 @@ async def _harness(
     owner, memory_owner = Owner(), Owner()
     for actor in (owner, memory_owner):
         _ = await mosfet.started(ctx, actor, Owner.model)
-    stamps = times if times is not None else iter(lambda: _NOW, None)
+    # Memory stamps the bot's own person when it opens, before the episodes the test times.
+    stamps = itertools.chain((_NOW,), times) if times is not None else iter(lambda: _NOW, None)
     store = memory.Memory(
         engine=memory.store.open_sqlite_engine(),
         embedder=embedder,

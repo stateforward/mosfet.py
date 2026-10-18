@@ -1716,7 +1716,10 @@ def test_cognition_handoff_stamps_string_identities_as_source_and_target_partici
 def _speech_turn(*voices: str, own: str | None = None) -> tuple[conversation.TurnData, tuple[mosfet.Participant, ...]]:
     """A speech turn as SpeechHeard builds it from what Listening stamped: voice refs, own voice never a source."""
 
-    stamped = tuple(identification.participant("voice", voice_id) for voice_id in (*voices, *((own,) if own else ())))
+    stamped = (
+        *(identification.participant("voice", voice_id) for voice_id in voices),
+        *((identification.participant("voice", own, own=True),) if own else ()),
+    )
     ada = mosfet.Participant(ref="ada", role=mosfet.ParticipantRole.SOURCE)
     speech = interpretation.SpeechData(
         content="hello",
@@ -1783,7 +1786,7 @@ def _append_outbound(
     )
 
 
-_OWN_VOICE = identification.participant("voice", "tts:warm")
+_OWN_VOICE = identification.participant("voice", "tts:warm", own=True)
 
 
 def test_the_bots_own_voice_on_what_it_said_reaches_the_next_cognition_handoff_once() -> None:
@@ -1833,10 +1836,16 @@ def test_the_bots_voice_and_its_heard_echo_are_one_person_in_memory(echo: bool) 
         at=datetime.datetime(2026, 10, 15, tzinfo=datetime.UTC),
     )
     with engine.connect() as connection:
-        persons = connection.exec_driver_sql("SELECT key FROM bot_memory_node WHERE kind = 'person'").scalars().all()
+        rows = connection.exec_driver_sql(
+            "SELECT r.ref, n.key FROM bot_person_ref r JOIN bot_memory_node n ON n.seq = r.person_seq"
+        ).all()
+        links = {str(row[0]): str(row[1]) for row in rows}
     engine.dispose()
 
-    assert sorted(persons) == ["ada", "bot", "voice:3f2a9c", "voice:tts:warm"]
+    assert sorted(links) == ["ada", "bot", "voice:3f2a9c", "voice:tts:warm"]
+    assert links["voice:tts:warm"] == memory.SELF
+    others = {links[ref] for ref in ("ada", "bot", "voice:3f2a9c")}
+    assert len(others) == 3 and memory.SELF not in others
 
 
 def _unstamped(metrics: metric_reader.Reader) -> int:

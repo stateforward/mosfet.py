@@ -13,6 +13,16 @@ holds a canonical vector per node in its embedder's space. Requests:
 * ``LeaseEvent`` (``LeaseData``) → ``LeasedEvent``
 * ``ConsolidateEvent`` (``ConsolidateData``, model-callable) → ``ConsolidatedEvent``
 * ``ReleaseEvent`` (``ReleaseData``) → ``ReleasedEvent``
+* ``PersonEvent`` (``PersonData``: declare, name, link, unlink, forget, list) → ``PersonDoneEvent``
+
+Memory is the authority on who is who: every participant ref belongs to exactly one person
+(``bot_person_ref``), resolved inside the transaction that keeps an episode. A ref first seen gets a
+provisional person, and a ref stamped own is the bot's own person, ``self``, which Memory creates
+when it opens. A person statement is one transaction; it refuses ``conflict`` (the ref is another
+person's), ``declared`` (an owner fact or the bot itself) or ``not_found``, and changes nothing then.
+The owner's declaration is never refused for a ref: an owner ref is taken from whoever holds it, except
+the bot itself, which keeps its own ref (the reply lists it as ``refused``), and an owner ref a member
+no longer lists is unlinked (the reply lists it as ``dropped`` unless another member now lists it).
 
 Every addressed request gets exactly one reply, sent to its ``source`` with its ``id``: the
 operation's own reply, or ``FailedEvent`` with a ``FailureKind``. SQL runs one step at a time, in
@@ -35,20 +45,23 @@ most once per pass, and never retries a node that cannot be embedded in that spa
 
 Telemetry (cardinality, METRICS > SPANS > Logs; every attribute value comes from code):
 
-* ``bot.memory.operation.count`` — operation (9) × outcome {ok, failed} × ``bot.failure.kind``
-  (FailureKind or ``none``): at most 54 series.
+* ``bot.memory.operation.count`` — operation (10) × outcome {ok, failed} × ``bot.failure.kind``
+  (FailureKind or ``none``; ok is always ``none``): at most 10 × (1 + 8) = 90 series.
 * ``bot.memory.operation.duration`` — operation × outcome, from accepting a request to answering
-  it (its embed wait included): 18 series.
+  it (its embed wait included): 20 series.
 * ``bot.memory.embed.waiting`` — requests waiting on an embed reply, no attributes: 1 series.
 * ``bot.memory.remember.indexed.count`` — indexed × unindexed reason × index path: 10 series.
 * ``bot.memory.node.count`` — node kind: 3 series.
 * ``bot.memory.search.lane.count`` — lane: 4 series.
 * ``bot.memory.search.nearest.skipped.count`` — skip reason: 4 series.
+* ``bot.memory.person.conflict.count`` — own-stamped refs kept with the other person they belong
+  to, no attributes: 1 series.
 * ``bot.ability.request.dropped.count`` — requests answered while detaching or degraded.
 
 Spans ``bot.memory.<operation>`` (component ``memory``), one per SQL step, carry only bounded
-counts and whether the step resumes after an embed; node ids, unit ids, participant refs, relation
-labels, text, images, vectors, and space names are never attributes.
+counts, whether the step resumes after an embed, and a person statement's ``bot.memory.person.op``
+(6 values); node ids, unit ids, person ids, participant refs, names, relation labels, text, images,
+vectors, and space names are never attributes.
 """
 
 import asyncio
@@ -82,7 +95,7 @@ _DEFAULT_EMBED_TIMEOUT: typing.Final = datetime.timedelta(seconds=30)
 _DEFAULT_OPERATION_TIMEOUT: typing.Final = datetime.timedelta(seconds=60)
 
 Operation: typing.TypeAlias = typing.Literal[
-    "transact", "remember", "search", "fetch", "recent", "backfill", "lease", "consolidate", "release"
+    "transact", "remember", "search", "fetch", "recent", "backfill", "lease", "consolidate", "release", "person"
 ]
 _UnindexedReason: typing.TypeAlias = typing.Literal["none", "no_embedder", "capacity", "too_long", "embed_failed"]
 
@@ -122,6 +135,11 @@ _SKIPPED = _METER.create_counter(
     unit="{search}",
     description="Searches whose nearest lane did not run, by reason.",
 )
+_CONFLICTS = _METER.create_counter(
+    "bot.memory.person.conflict.count",
+    unit="{ref}",
+    description="Refs stamped as the bot's own that memory kept with the other person they already belong to.",
+)
 
 InputEvent = hsm.Event[store.InputData](name="bot.ability.memory.input", schema=store.InputData)
 """One relational statement transaction; answered with ``OutputEvent`` or ``FailedEvent``."""
@@ -154,6 +172,11 @@ ConsolidatedEvent = hsm.Event[payload.ConsolidatedData](
 )
 ReleaseEvent = hsm.Event[payload.ReleaseData](name="bot.ability.memory.release", schema=payload.ReleaseData)
 ReleasedEvent = hsm.Event[payload.ReleasedData](name="bot.ability.memory.released", schema=payload.ReleasedData)
+PersonEvent = hsm.Event[payload.PersonData](name="bot.ability.memory.person", schema=payload.PersonData)
+"""One person statement (declare, name, link, unlink, forget, list); not model-callable."""
+PersonDoneEvent = hsm.Event[payload.PersonDoneData](
+    name="bot.ability.memory.person.done", schema=payload.PersonDoneData
+)
 
 REQUESTS: typing.Final[tuple[hsm.Event[typing.Any], ...]] = (
     InputEvent,
@@ -165,10 +188,13 @@ REQUESTS: typing.Final[tuple[hsm.Event[typing.Any], ...]] = (
     LeaseEvent,
     ConsolidateEvent,
     ReleaseEvent,
+    PersonEvent,
 )
 """Every request Memory answers."""
 
-_OPERATIONS_BY_DATA: typing.Final[tuple[tuple[type[pydantic.BaseModel], Operation], ...]] = (
+_OPERATIONS_BY_DATA: typing.Final[
+    tuple[tuple[type[pydantic.BaseModel] | tuple[type[pydantic.BaseModel], ...], Operation], ...]
+] = (
     (store.InputData, "transact"),
     (payload.EpisodeData, "remember"),
     (payload.SearchData, "search"),
@@ -178,6 +204,7 @@ _OPERATIONS_BY_DATA: typing.Final[tuple[tuple[type[pydantic.BaseModel], Operatio
     (payload.LeaseData, "lease"),
     (payload.ConsolidateData, "consolidate"),
     (payload.ReleaseData, "release"),
+    (payload.PERSON_DATA, "person"),
 )
 
 
@@ -284,14 +311,18 @@ class _Embedded:
         return cls(failure=data)
 
 
-def _carrying(request: hsm.Event[typing.Any], data_type: type[pydantic.BaseModel]) -> hsm.Element:
+def _carrying(
+    request: hsm.Event[typing.Any],
+    data_type: type[pydantic.BaseModel] | tuple[type[pydantic.BaseModel], ...],
+    operation: Operation,
+) -> hsm.Element:
     """Admit ``request`` into busy only when it carries its own schema (typed payload, not its name)."""
 
     def carries(ctx: hsm.Context, instance: "Memory", event: hsm.Event[typing.Any]) -> bool:
         del ctx, instance
         return isinstance(event.data, data_type)
 
-    carries.__name__ = carries.__qualname__ = f"carries_{data_type.__name__}"
+    carries.__name__ = carries.__qualname__ = f"carries_{operation}"
     return hsm.transition(hsm.on(request), hsm.guard(carries), hsm.target("/Memory/serving/busy"))
 
 
@@ -454,9 +485,20 @@ class Memory(store.MemoryStore):
 
     @typing.override
     async def _open_engine(self) -> Engine:
-        """Open the database on the worker, so the event loop never blocks on the open or the migration."""
+        """Open the database on the worker, so the event loop never blocks on the open or the migration.
 
-        return await Memory._run(self, self._connect)
+        The bot is a person in its own memory from the moment it opens: ``self`` is created here.
+        """
+
+        return await Memory._run(self, self._open)
+
+    def _open(self) -> Engine:
+        """Open and migrate the database and create ``self`` (database I/O; runs on the worker)."""
+
+        engine = self._connect()
+        if graph.ensure_self(engine, at=self._now()):
+            _NODES.add(1, {"bot.memory.node.kind": payload.NodeKind.PERSON.value})
+        return engine
 
     # --- replies -------------------------------------------------------------------------------
 
@@ -888,10 +930,16 @@ class Memory(store.MemoryStore):
             output = await Memory._run(instance, instance._execute, data)
             Memory._done(ctx, instance, in_flight, OutputEvent.with_data(output))
         elif isinstance(data, payload.EpisodeData):
-            seq, node_id, persons = await Memory._run(instance, graph.write_episode, engine, data, at=instance._now())
+            kept = await Memory._run(instance, graph.write_episode, engine, data, at=instance._now())
+            seq, node_id = kept.seq, kept.node_id
             _NODES.add(1, {"bot.memory.node.kind": payload.NodeKind.EPISODE.value})
-            if persons:
-                _NODES.add(persons, {"bot.memory.node.kind": payload.NodeKind.PERSON.value})
+            if kept.persons:
+                _NODES.add(kept.persons, {"bot.memory.node.kind": payload.NodeKind.PERSON.value})
+            if kept.conflicts:
+                _CONFLICTS.add(kept.conflicts)
+                _LOG.warning(
+                    "memory kept %d own-stamped ref(s) with the person they belong to: conflict", kept.conflicts
+                )
             # An episode with no parts has nothing to embed: it is not an index attempt, so it
             # records no attempt row, logs nothing and counts nothing, and backfill never selects it.
             item = None if capacity is None or not data.parts else _item(capacity, data.parts)
@@ -955,6 +1003,18 @@ class Memory(store.MemoryStore):
                 Memory._wait(ctx, instance, in_flight, embedding.Role.DOCUMENT, chunks[0], resume, lease="decide")
                 return
             await Memory._commit(ctx, instance, in_flight, data, lease_state, (None,) * len(data.merges))
+        elif isinstance(data, payload.PERSON_DATA):
+            active.set_attribute("bot.memory.person.op", data.op)
+            outcome, change = await Memory._run(
+                instance, graph.person_statement, engine, instance._index, data, at=instance._now()
+            )
+            if change:
+                _NODES.add(change, {"bot.memory.node.kind": payload.NodeKind.PERSON.value})
+            if isinstance(outcome, graph.Refused):
+                span.record_failure(active, outcome.kind.value)
+                Memory._done(ctx, instance, in_flight, Memory._failure(outcome.kind, outcome.message))
+                return
+            Memory._done(ctx, instance, in_flight, PersonDoneEvent.with_data(outcome))
         else:
             assert isinstance(data, payload.ReleaseData)
             lease_state = instance._lease
@@ -1272,8 +1332,8 @@ class Memory(store.MemoryStore):
                 hsm.transition(hsm.on(ConsolidateEvent), hsm.guard(_is_invalid_decision), hsm.effect(_reject_decision)),
                 hsm.transition(hsm.on(ReleaseEvent), hsm.guard(_is_stale_release), hsm.effect(_reply_stale)),
                 *(
-                    _carrying(request, data_type)
-                    for request, (data_type, _) in zip(REQUESTS, _OPERATIONS_BY_DATA, strict=True)
+                    _carrying(request, data_type, operation)
+                    for request, (data_type, operation) in zip(REQUESTS, _OPERATIONS_BY_DATA, strict=True)
                 ),
                 hsm.transition(hsm.on(*REQUESTS), hsm.effect(_reply_invalid)),
                 # An embed reply queues the step it resumes; one that matches no waiting request is ignored.
@@ -1334,6 +1394,8 @@ __all__ = [
     "LeasedEvent",
     "Memory",
     "OutputEvent",
+    "PersonDoneEvent",
+    "PersonEvent",
     "RecentEvent",
     "RecentOutputEvent",
     "ReleaseEvent",

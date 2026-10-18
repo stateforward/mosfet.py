@@ -412,7 +412,7 @@ def test_an_invalid_decision_fails_once_and_the_unit_is_not_offered_again() -> N
 
     assert _outcomes(outcomes) == ["failed", "exhausted"]
     assert reviewed == [("Ada called", 1)]
-    assert persons == 1
+    assert persons == 2  # the bot itself and Ada
 
 
 def test_a_decision_selected_twice_commits_once() -> None:

@@ -615,17 +615,19 @@ def test_forget_removes_only_the_identity_row_and_its_print(tmp_path: pathlib.Pa
     store = sqlite_memory.IdentityStore(engine=engine)
     (voice,) = store.identify("voice", (_angle(0),), _POLICY, at=_START)
     ref = identification.ref("voice", voice.id)
-    seq, _, _ = memory.graph.write_episode(engine, _episode("hello", voice.id), at=_START)
+    kept = memory.graph.write_episode(engine, _episode("hello", voice.id), at=_START)
 
     assert store.forget("voice", voice.id) is True
     with engine.connect() as connection:
-        nodes = connection.execute(text("SELECT seq, kind, key FROM bot_memory_node ORDER BY seq")).all()
+        nodes = connection.execute(text("SELECT seq, kind FROM bot_memory_node ORDER BY seq")).all()
+        refs = connection.execute(text("SELECT ref FROM bot_person_ref")).scalars().all()
         identities = connection.execute(text("SELECT count(*) FROM bot_identity")).scalar_one()
         prints = connection.execute(text(f"SELECT count(*) FROM {_vec_table(_MODEL, 2)}")).scalar_one()
     engine.dispose()
 
-    assert [(kind, key) for _, kind, key in nodes] == [("episode", None), ("person", ref)]
-    assert nodes[0][0] == seq
+    assert [kind for _, kind in nodes] == ["episode", "person"]
+    assert refs == [ref]
+    assert nodes[0][0] == kept.seq
     assert (identities, prints) == (0, 0)
 
 
@@ -635,7 +637,7 @@ def test_memory_forget_and_merge_leave_identities_intact(tmp_path: pathlib.Path)
     vec = sqlite_memory.VecIndex()
     _ = store.enroll("voice", "tts:warm", _angle(0), True, _POLICY, at=_START)
     (heard,) = store.identify("voice", (_angle(90),), _POLICY, at=_START)
-    seqs = [memory.graph.write_episode(engine, _episode(words), at=_START)[0] for words in ("a", "b", "c")]
+    seqs = [memory.graph.write_episode(engine, _episode(words), at=_START).seq for words in ("a", "b", "c")]
     memory.graph.write_vectors(
         engine, vec, _SPACE, [(seq, _angle(index * 10).vector) for index, seq in enumerate(seqs)]
     )

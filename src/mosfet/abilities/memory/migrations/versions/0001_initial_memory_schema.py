@@ -5,8 +5,8 @@ Revises:
 Create Date: 2026-10-14 16:30:00.000000
 
 The one baseline revision: relational memory rows, behavior inventory (with each behavior's
-``lifetime``), the short-term register, the episodic graph (nodes, parts, edges,
-canonical vectors, index attempts), and the identities (voices and faces) an identification
+``lifetime``), the short-term register, the episodic graph (nodes, the person each participant
+ref belongs to, parts, edges, canonical vectors, index attempts), and the identities (voices and faces) an identification
 store keeps. Provider-created vector tables (memory's index and identity prints) are not
 managed here. Schema changes after this baseline go in new revisions.
 """
@@ -110,6 +110,16 @@ def upgrade() -> None:
     op.create_index("bot_memory_node_review_idx", "bot_memory_node", ["kind", "reviewed_at", "seq"])
 
     _ = op.create_table(
+        "bot_person_ref",
+        sa.Column("ref", sa.Text(), nullable=False),
+        sa.Column("person_seq", sa.Integer(), nullable=False),
+        sa.Column("origin", sa.Text(), nullable=False),
+        sa.Column("linked_at", sa.Text(), nullable=False),
+        sa.PrimaryKeyConstraint("ref"),
+    )
+    op.create_index("bot_person_ref_person_idx", "bot_person_ref", ["person_seq"])
+
+    _ = op.create_table(
         "bot_memory_part",
         sa.Column("node_seq", sa.Integer(), nullable=False),
         sa.Column("ordinal", sa.Integer(), nullable=False),
@@ -187,6 +197,8 @@ def downgrade() -> None:
     op.drop_index("bot_memory_edge_target_idx", table_name="bot_memory_edge")
     op.drop_table("bot_memory_edge")
     op.drop_table("bot_memory_part")
+    op.drop_index("bot_person_ref_person_idx", table_name="bot_person_ref")
+    op.drop_table("bot_person_ref")
     op.drop_index("bot_memory_node_review_idx", table_name="bot_memory_node")
     op.drop_index("bot_memory_node_recent_idx", table_name="bot_memory_node")
     op.drop_table("bot_memory_node")

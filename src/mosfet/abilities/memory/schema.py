@@ -4,7 +4,9 @@ Domain code builds Core ``select`` / ``insert`` / ``update`` / ``delete`` agains
 ``memory_table``. The store and providers compile those clauses to dialect SQL.
 
 The episodic graph lives beside it: ``node_table`` (episodes, persons, concepts),
-``part_table`` (each node's ordered text and image parts), ``edge_table`` (typed links),
+``person_ref_table`` (which person each participant ref belongs to; a ref is its primary key, so
+each ref is exactly one person's), ``part_table`` (each node's ordered text and image parts),
+``edge_table`` (typed links),
 ``vector_table`` (the canonical vector of a node in one embedding space), and
 ``index_attempt_table`` (failed indexing attempts, so backfill never retries what cannot
 succeed in a space). No foreign key cascades are relied on: Memory deletes dependent rows
@@ -44,6 +46,7 @@ PART_TABLE = "bot_memory_part"
 EDGE_TABLE = "bot_memory_edge"
 VECTOR_TABLE = "bot_memory_vector"
 INDEX_ATTEMPT_TABLE = "bot_memory_index_attempt"
+PERSON_REF_TABLE = "bot_person_ref"
 
 # Identities (voices and faces) an identification store keeps.
 IDENTITY_TABLE = "bot_identity"
@@ -113,10 +116,13 @@ node_table = Table(
     Column("seq", Integer, primary_key=True, autoincrement=True),
     Column("node_id", Text, nullable=False),
     Column("kind", Text, nullable=False),
-    # The participant ref of a person node; NULL for every other kind.
+    # The person id of a person node ("self", an owner-declared slug, or a minted uuid hex); NULL
+    # for every other kind. A person's refs are in ``person_ref_table``.
     Column("key", Text, nullable=True),
+    # A person node's text is its name, or empty while it has none.
     Column("text", Text, nullable=False, server_default=""),
-    # Kind-specific typed JSON (an episode's stimulus, acts, outcome, turn id, focus, participants).
+    # Kind-specific typed JSON (an episode's stimulus, acts, outcome, turn id, focus, participants;
+    # a person's name, role, birth year and whether the owner declared it).
     Column("content_json", Text, nullable=False, server_default="{}"),
     Column("created_at", Text, nullable=False),
     Column("updated_at", Text, nullable=False),
@@ -128,6 +134,20 @@ node_table = Table(
     Index("bot_memory_node_recent_idx", "kind", "created_at", "seq"),
     Index("bot_memory_node_review_idx", "kind", "reviewed_at", "seq"),
     sqlite_autoincrement=True,
+)
+
+# Which person each participant ref belongs to. The ref is the primary key: two persons never
+# share a ref. ``origin`` is how the link was made: ``stamped`` (a ref first seen, given its own
+# provisional person), ``own`` (a ref its producer stamped as the bot's own, linked to ``self``),
+# ``model`` (the bot linked it) or ``owner`` (the owner declared it).
+person_ref_table = Table(
+    PERSON_REF_TABLE,
+    metadata,
+    Column("ref", Text, primary_key=True),
+    Column("person_seq", Integer, nullable=False),
+    Column("origin", Text, nullable=False),
+    Column("linked_at", Text, nullable=False),
+    Index("bot_person_ref_person_idx", "person_seq"),
 )
 
 part_table = Table(
@@ -219,6 +239,7 @@ __all__ = [
     "MEMORY_TABLE",
     "NODE_TABLE",
     "PART_TABLE",
+    "PERSON_REF_TABLE",
     "STM_MEMORY_TABLE",
     "VECTOR_INDEX_PREFIX",
     "VECTOR_TABLE",
@@ -229,6 +250,7 @@ __all__ = [
     "metadata",
     "node_table",
     "part_table",
+    "person_ref_table",
     "stm_memory_table",
     "vector_table",
 ]

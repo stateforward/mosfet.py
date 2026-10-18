@@ -115,16 +115,22 @@ by Alembic. There is no `alembic.ini`;
 `memory.Memory` is the bot's one durable memory, a state machine reached by message only
 (`memory.transact` for relational statements; typed request events for everything else). It
 keeps each remembered turn (`RememberEvent`, `EpisodeData`: rendered stimulus parts with images,
-producer-stamped participants, acts, outcome) as an episode node, one person node per
-participant ref with `involves_source`/`involves_target` links, and a canonical vector per node
-in its embedder's `embedding.Space`. `SearchEvent` runs the nearest, recent, present, and
+producer-stamped participants, acts, outcome) as an episode node, linked by
+`involves_source`/`involves_target` to the person each participant ref belongs to, and a
+canonical vector per node in its embedder's `embedding.Space`. A person is one node keyed by
+person id with many refs, and each ref is exactly one person's (`bot_person_ref`, the ref its
+primary key): a ref first seen gets a provisional person, a ref stamped `own` is the bot's own
+person `self` (created when Memory opens), and `PersonEvent` declares the owner's household and
+links, unlinks, names, forgets and lists persons, refusing `conflict`, `declared` or `not_found`
+with nothing changed. The owner's declaration wins every ref it names except the bot's own (those stay
+`self`'s and are answered `refused`), and an owner ref a member no longer lists is unlinked (answered `dropped` unless another member now lists it). `SearchEvent` runs the nearest, recent, present, and
 one-link lanes at once; `FetchEvent` reads nodes in full (image bytes on request) and can
 reinforce them; `RecentEvent` reads the latest episodes oldest first. Consolidation leases a
 unit (`LeaseEvent`, nodes named by unit aliases), the model decides with the one model-callable
 `ConsolidateEvent` (links, merges into concept nodes, hard-delete forgets), and Memory applies
 it in one transaction; `ReleaseEvent` gives a unit back. Every request gets exactly one reply or
 `FailedEvent` with `FailureKind` (`invalid_input`, `unavailable`, `store_failed`, `stale_lease`,
-`timeout`); a detached Memory answers `unavailable`.
+`timeout`, `conflict`, `declared`, `not_found`); a detached Memory answers `unavailable`.
 
 Consolidation runs while the bot rests. With `memory.Consolidation` composed, Cognition between
 turns is `ready/awake` rather than `ready/idle`; once it has been awake for `rest_after` (default

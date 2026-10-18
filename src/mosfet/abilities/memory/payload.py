@@ -5,6 +5,12 @@ An episode is one cognition turn as its producer stamped it: the memory renderin
 keeps every episode as a node of a graph (episodes, the persons they involve, and the concepts
 consolidation merges them into), with a canonical vector per node in the embedder's space.
 
+A person is one node with many participant refs, and each ref is exactly one person's. A ref seen
+for the first time gets a provisional person (no name, not declared); a ref its producer stamped
+``own`` is the bot's, whose person is the reserved ``SELF``. The owner declares who lives here
+(``Member``); the bot links, unlinks, names and forgets the rest (``PersonData``), and code only
+refuses what would change an owner fact or the bot itself.
+
 Read models (``Episode``, ``Node``, ``Candidate``) carry images as ``media.ReleasedImage``
 placeholders (reason ``"memory"``) unless a read asked for media. Consolidation sees a leased
 ``UnitData`` whose nodes are named by unit-scoped aliases, never by node ids, and answers with one
@@ -55,7 +61,7 @@ class NodeKind(enum.StrEnum):
     EPISODE = "episode"
     """One cognition turn as its producer stamped it."""
     PERSON = "person"
-    """Someone episodes involve, keyed by the participant ref producers stamp."""
+    """Someone episodes involve, keyed by person id; the participant refs producers stamp each belong to one."""
     CONCEPT = "concept"
     """A statement consolidation merged out of other nodes, in the model's words."""
 
@@ -94,6 +100,12 @@ class FailureKind(enum.StrEnum):
     """A consolidation decision or release named a unit that is no longer leased."""
     TIMEOUT = "timeout"
     """The request did not complete within Memory's operation timeout."""
+    CONFLICT = "conflict"
+    """A ref already belongs to another person (or a declared member's ref does); nothing was changed."""
+    DECLARED = "declared"
+    """The statement would change an owner fact or the bot itself: a declared person or ``self``."""
+    NOT_FOUND = "not_found"
+    """The statement names a person or ref memory does not hold."""
 
 
 class FailureData(ability.FailureData):
@@ -339,8 +351,294 @@ class Node(pydantic.BaseModel):
     text: str = pydantic.Field(description="The node's text.", examples=["Ada prefers calls at noon."])
     created_at: datetime.datetime = pydantic.Field(description="When the node was created (UTC).")
     episode: Episode | None = pydantic.Field(default=None, description="The episode, for episode nodes.")
-    key: str | None = pydantic.Field(
-        default=None, description="The participant ref, for person nodes.", examples=["+15555550100"]
+    key: str | None = pydantic.Field(default=None, description="The person id, for person nodes.", examples=["self"])
+
+
+SELF: typing.Final = "self"
+"""The reserved person id of the bot itself: memory creates it when it opens, and every ref stamped own is its."""
+
+MAX_PERSON_REFS: typing.Final = 16
+"""Most refs one person shows, and most refs one declared member names."""
+
+MAX_MEMBERS: typing.Final = 64
+"""Most members one household declaration names."""
+
+MAX_PERSONS: typing.Final = 256
+"""Most persons one statement's reply lists."""
+
+PersonId = typing.Annotated[
+    str,
+    pydantic.StringConstraints(pattern=r"^(self|[a-z][a-z0-9_-]{0,31}|[0-9a-f]{32})$"),
+    pydantic.Field(
+        description=(
+            "A person memory knows: 'self' (the bot itself), an id the owner declared, or an id memory minted for "
+            "someone the bot has perceived."
+        ),
+        examples=["self", "3f2a9c0d4b5e6f708192a3b4c5d6e7f8"],
+    ),
+]
+
+Name = typing.Annotated[
+    str,
+    pydantic.StringConstraints(min_length=1, max_length=64),
+    pydantic.Field(
+        description=(
+            "What a person is called, exactly as it was given: the name itself, not the sentence it arrived in. "
+            "No example on purpose: a name is a complete answer, and a name nobody gave names nobody."
+        ),
+    ),
+]
+
+Ref = typing.Annotated[
+    str,
+    pydantic.StringConstraints(min_length=1, max_length=200),
+    pydantic.Field(
+        description=(
+            "A participant ref as producers stamp it: 'voice:<id>' or 'face:<id>' for a voice or face, or another "
+            "opaque identity such as a phone number. Never a print."
+        ),
+        examples=["voice:3f2a9c", "face:7b1e04"],
+    ),
+]
+
+
+class Role(enum.StrEnum):
+    """What the owner declared a member of the household to be; never the bot's to set."""
+
+    ADULT = "adult"
+    CHILD = "child"
+
+
+class Person(pydantic.BaseModel):
+    """Someone memory knows: their id, the owner's facts about them, the name they go by, and their refs."""
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
+        frozen=True,
+        extra="forbid",
+        json_schema_extra={
+            "description": (
+                "Someone memory knows. role, born and declared are the owner's facts; name is the owner's for a "
+                "declared person and the bot's otherwise. refs are the voices, faces and other identities that are "
+                "theirs, each belonging to exactly one person."
+            ),
+            "examples": [{"id": "3f2a9c0d4b5e6f708192a3b4c5d6e7f8", "declared": False, "refs": ["voice:3f2a9c"]}],
+        },
+    )
+
+    id: PersonId
+    name: Name | None = pydantic.Field(
+        default=None, description="What they are called; None while nobody has named them."
+    )
+    role: Role | None = pydantic.Field(
+        default=None, description="adult or child, as the owner declared it; None when the owner declared none."
+    )
+    born: int | None = pydantic.Field(
+        default=None, ge=1900, le=2100, description="Their birth year, as the owner declared it.", examples=[2018]
+    )
+    declared: bool = pydantic.Field(
+        default=False, description="Whether the owner declared this person a member of the household."
+    )
+    refs: tuple[Ref, ...] = pydantic.Field(
+        default=(),
+        max_length=MAX_PERSON_REFS,
+        description=f"Their refs, newest link first, at most {MAX_PERSON_REFS}.",
+        examples=[["voice:3f2a9c", "face:7b1e04"]],
+    )
+
+
+class Member(pydantic.BaseModel):
+    """One member of the household, as the owner declares them; never the bot itself."""
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
+        frozen=True,
+        extra="forbid",
+        json_schema_extra={
+            "description": "One member of the household as the owner declares them: facts the bot cannot change.",
+            "examples": [{"id": "ada", "name": "Ada", "role": "child", "born": 2018}],
+        },
+    )
+
+    id: PersonId
+    name: Name
+    role: Role | None = pydantic.Field(default=None, description="adult or child.", examples=["child"])
+    born: int | None = pydantic.Field(default=None, ge=1900, le=2100, description="Birth year.", examples=[2018])
+    refs: tuple[Ref, ...] = pydantic.Field(
+        default=(),
+        max_length=MAX_PERSON_REFS,
+        description="Refs the owner knows are theirs, such as a phone number.",
+        examples=[["+15555550100"]],
+    )
+
+    @pydantic.field_validator("id")
+    @classmethod
+    def _validate_id(cls, value: str) -> str:
+        if value == SELF:
+            raise ValueError("the bot itself ('self') is not a member the owner declares")
+        return value
+
+
+class PersonDeclareData(pydantic.BaseModel):
+    """The owner's household, all at once: each member is declared, and anyone declared before but missing is not."""
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
+        frozen=True,
+        extra="forbid",
+        json_schema_extra={"examples": [{"op": "declare", "members": [{"id": "ada", "name": "Ada", "role": "child"}]}]},
+    )
+
+    op: typing.Literal["declare"] = "declare"
+    members: tuple[Member, ...] = pydantic.Field(
+        max_length=MAX_MEMBERS, description="Every member of the household; an empty tuple declares nobody."
+    )
+
+    @pydantic.model_validator(mode="after")
+    def _validate_once(self) -> typing.Self:
+        ids = [member.id for member in self.members]
+        refs = [ref for member in self.members for ref in member.refs]
+        if len(set(ids)) != len(ids) or len(set(refs)) != len(refs):
+            raise ValueError("a declaration names each member and each ref once")
+        return self
+
+
+class PersonNameData(pydantic.BaseModel):
+    """Name a person the owner did not declare."""
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
+        frozen=True,
+        extra="forbid",
+        json_schema_extra={"examples": [{"op": "name", "person": "3f2a9c0d4b5e6f708192a3b4c5d6e7f8"}]},
+    )
+
+    op: typing.Literal["name"] = "name"
+    person: PersonId
+    name: Name
+
+
+class PersonLinkData(pydantic.BaseModel):
+    """Make ``ref`` a person's: ``person``, or a new person (named ``name``, or not yet) when it is None."""
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
+        frozen=True,
+        extra="forbid",
+        json_schema_extra={"examples": [{"op": "link", "ref": "voice:3f2a9c", "person": "ada"}]},
+    )
+
+    op: typing.Literal["link"] = "link"
+    ref: Ref
+    person: PersonId | None = pydantic.Field(
+        default=None, description="Whose ref it is; None makes a new person for it."
+    )
+    name: Name | None = pydantic.Field(default=None, description="The new person's name, when person is None.")
+
+    @pydantic.model_validator(mode="after")
+    def _validate_name(self) -> typing.Self:
+        if self.person is not None and self.name is not None:
+            raise ValueError("name only names a new person (person is None)")
+        return self
+
+
+class PersonUnlinkData(pydantic.BaseModel):
+    """Take ``ref`` from its person: it gets a fresh provisional person, and past episodes stay where they were."""
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
+        frozen=True, extra="forbid", json_schema_extra={"examples": [{"op": "unlink", "ref": "voice:3f2a9c"}]}
+    )
+
+    op: typing.Literal["unlink"] = "unlink"
+    ref: Ref
+
+
+class PersonForgetData(pydantic.BaseModel):
+    """Forget a person the owner did not declare: the node, its ref links and its involves links; episodes stay."""
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
+        frozen=True,
+        extra="forbid",
+        json_schema_extra={"examples": [{"op": "forget", "person": "3f2a9c0d4b5e6f708192a3b4c5d6e7f8"}]},
+    )
+
+    op: typing.Literal["forget"] = "forget"
+    person: PersonId
+
+
+class PersonListData(pydantic.BaseModel):
+    """List the bot itself and every person someone has named or declared."""
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
+        frozen=True, extra="forbid", json_schema_extra={"examples": [{"op": "list"}]}
+    )
+
+    op: typing.Literal["list"] = "list"
+
+
+PersonData = typing.Annotated[
+    PersonDeclareData | PersonNameData | PersonLinkData | PersonUnlinkData | PersonForgetData | PersonListData,
+    pydantic.Field(discriminator="op"),
+]
+"""One person statement, discriminated by ``op``; Memory answers each in one transaction."""
+
+PERSON_DATA: typing.Final = (
+    PersonDeclareData,
+    PersonNameData,
+    PersonLinkData,
+    PersonUnlinkData,
+    PersonForgetData,
+    PersonListData,
+)
+"""Every ``PersonData`` variant, for typed admission."""
+
+PersonOp: typing.TypeAlias = typing.Literal["declare", "name", "link", "unlink", "forget", "list"]
+
+
+class PersonDoneData(pydantic.BaseModel):
+    """What a person statement did."""
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
+        frozen=True,
+        extra="forbid",
+        json_schema_extra={
+            "examples": [
+                {"op": "forget", "person": {"id": "3f2a9c0d4b5e6f708192a3b4c5d6e7f8"}, "refs": ["voice:3f2a9c"]}
+            ]
+        },
+    )
+
+    op: PersonOp = pydantic.Field(description="The statement answered.", examples=["link"])
+    person: Person | None = pydantic.Field(
+        default=None,
+        description=(
+            "The person the statement is about, as it now is (link: whose the ref is; unlink: the ref's fresh "
+            "person; name: the named person; forget: the person as it was). None for declare and list."
+        ),
+    )
+    refs: tuple[Ref, ...] = pydantic.Field(
+        default=(),
+        max_length=256,
+        description=(
+            "name: every ref the named person has, so their prints can be kept; forget: every ref the forgotten "
+            "person had, so their prints can be erased."
+        ),
+    )
+    persons: tuple[Person, ...] = pydantic.Field(
+        default=(),
+        max_length=MAX_PERSONS,
+        description="declare: the declared members; list: the bot itself and every named or declared person.",
+    )
+    refused: tuple[Ref, ...] = pydantic.Field(
+        default=(),
+        max_length=MAX_MEMBERS * MAX_PERSON_REFS,
+        description=(
+            "declare: the owner refs memory did not take, because each is the bot's own (``self``'s) and stays "
+            "its own; every other ref and member was declared."
+        ),
+    )
+    dropped: tuple[Ref, ...] = pydantic.Field(
+        default=(),
+        max_length=MAX_MEMBERS * MAX_PERSON_REFS,
+        description=(
+            "declare: the owner refs memory unlinked because no member lists them any more; each now has a "
+            "fresh provisional person nobody knows, so its print need no longer be kept."
+        ),
     )
 
 
@@ -554,7 +852,8 @@ class UnitNode(pydantic.BaseModel):
     role: UnitRole = pydantic.Field(
         description=(
             "'episode': an unreviewed episode this unit is about; 'neighbor': an existing node near one of them; "
-            "'person': someone they involve (persons can be linked but never forgotten)."
+            "'person': someone they involve, by name when they have one (persons can be linked but never "
+            "forgotten here)."
         ),
         examples=["episode"],
     )
@@ -582,7 +881,7 @@ class UnitData(pydantic.BaseModel):
                         {
                             "ref": "n2",
                             "kind": "person",
-                            "text": "+15555550100",
+                            "text": "Ada",
                             "created_at": "2026-10-14T16:30:00.000000Z",
                             "participants": [],
                             "role": "person",
@@ -1024,7 +1323,12 @@ __all__ = [
     "MAX_ASSOCIATIONS",
     "MAX_EPISODE_PARTS",
     "MAX_EPISODE_TEXT_BYTES",
+    "MAX_MEMBERS",
     "MAX_PARTICIPANTS",
+    "MAX_PERSONS",
+    "MAX_PERSON_REFS",
+    "PERSON_DATA",
+    "SELF",
     "Act",
     "Association",
     "AssociationsData",
@@ -1046,17 +1350,32 @@ __all__ = [
     "LeaseData",
     "LeasedData",
     "LinkData",
+    "Member",
     "MergeData",
+    "Name",
     "Node",
     "NodeKind",
     "Outcome",
+    "Person",
+    "PersonData",
+    "PersonDeclareData",
+    "PersonDoneData",
+    "PersonForgetData",
+    "PersonId",
+    "PersonLinkData",
+    "PersonListData",
+    "PersonNameData",
+    "PersonOp",
+    "PersonUnlinkData",
     "RecallData",
     "RecentData",
     "RecollectionData",
+    "Ref",
     "ReleaseData",
     "ReleasedData",
     "RememberedData",
     "RestData",
+    "Role",
     "SearchData",
     "UnitData",
     "UnitNode",
