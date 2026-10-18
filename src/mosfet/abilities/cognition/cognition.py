@@ -14,6 +14,7 @@ import uuid
 import hsm
 import mosfet
 from mosfet.define import define
+from opentelemetry import metrics
 
 from mosfet.protocols import attachment
 import pydantic
@@ -190,6 +191,52 @@ StepTimedOutEvent = hsm.Event[StepTimedOutData](
 )
 
 
+class StepFailedData(ability.FailureData):
+    """A step of the bot's cognition failed, so the turn it was taking failed.
+
+    The bot perceives this as a turn of its own: which step failed and why, and which turn failed for
+    which stimulus. Only that turn failed; nothing was rebooted and every ability kept its state. A
+    step that fails while the bot perceives a failed step is not handed back again.
+    """
+
+    # The base names its own description in json_schema_extra; this payload's docstring describes it.
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(frozen=True, json_schema_extra=None)
+
+    stage: typing.Literal["autonomy", "intuition", "reasoning"] = pydantic.Field(
+        description=(
+            "The step of cognition that failed: autonomy (a learned behavior running), intuition (the fast "
+            "first decision) or reasoning (the deliberate one)."
+        ),
+        examples=["reasoning"],
+    )
+    turn_id: str = pydantic.Field(
+        min_length=1,
+        description="Identifier of the turn that failed.",
+        examples=["turn-123"],
+    )
+    stimulus: str | None = pydantic.Field(
+        default=None,
+        description="Name of the stimulus the failed turn was taken up for, when it has one.",
+        examples=["bot.input"],
+    )
+
+
+StepFailedEvent = hsm.Event[StepFailedData](
+    name="bot.ability.cognition.step.failed",
+    schema=StepFailedData,
+)
+
+_HANDED_BACK = metrics.get_meter("mosfet.abilities.cognition").create_counter(
+    "bot.cognition.step.failure.count",
+    unit="{failure}",
+    description=(
+        "Steps of a turn that failed or outlasted the step timeout, by stage (autonomy, intuition, reasoning), "
+        "kind (failed, timed_out) and outcome: handed_back (the bot perceives it as its next turn) or bounded "
+        "(the turn that failed was itself perceiving a failed step, so it is not handed back again)."
+    ),
+)
+
+
 class _HopTimedOutData(pydantic.BaseModel):
     """Private: the step that outlasted its timeout, with the turn it was taking, sent to Cognition itself."""
 
@@ -330,7 +377,11 @@ class Cognition(ability.Ability[InputData, OutputData]):
     observing ``StepTimedOutEvent``, a new turn the bot decides on, while the step is stopped the
     way a cancel stops it. Nothing reboots and no ability loses its state, unless the step cannot be
     stopped within the cancel teardown bound. An association that outlasts it leaves the turn
-    without associations.
+    without associations. A step that fails (autonomy, intuition or reasoning, or a frame that
+    cannot be built for one) is handed back the same way, as a ``cognition.InputEvent`` observing
+    ``StepFailedEvent``. Both are bounded: a step that fails or outlasts its timeout on a turn
+    taken up for a failed step is not handed back again (``bot.cognition.step.failure.count``
+    counts each, by stage, kind and outcome).
 
     With ``memory`` composed, Cognition attaches it and remembers every turn it settles —
     completed, failed, or cancelled — as one ``memory.RememberEvent`` it does not wait on: what it
@@ -702,6 +753,15 @@ class Cognition(ability.Ability[InputData, OutputData]):
                 metadata=public_metadata,
                 cognition_input=cognition_input,
                 failure=failed.failure,
+            )
+            Cognition._hand_back_step_failure(
+                ctx,
+                instance,
+                stage="intuition",
+                message=str(error),
+                turn_id=base,
+                cognition_input=cognition_input,
+                metadata=public_metadata,
             )
             _ = hsm.dispatch(
                 ctx,
@@ -1139,6 +1199,15 @@ class Cognition(ability.Ability[InputData, OutputData]):
                     cognition_input=cognition_input,
                     failure=failed.failure,
                 )
+                Cognition._hand_back_step_failure(
+                    ctx,
+                    instance,
+                    stage="reasoning",
+                    message=str(error),
+                    turn_id=base,
+                    cognition_input=cognition_input,
+                    metadata=public_metadata,
+                )
                 _ = hsm.dispatch(
                     ctx,
                     instance,
@@ -1225,6 +1294,23 @@ class Cognition(ability.Ability[InputData, OutputData]):
                 cognition_input=event.data.turn.input,
                 # What failed, without the turn it correlates: the episode already holds that turn.
                 failure=ability.FailureData(message=failure.message),
+            )
+            # The failure's modeled source says which step it was.
+            stage: typing.Literal["autonomy", "intuition", "reasoning"] = (
+                "autonomy"
+                if instance._autonomy is not None and event.source == hsm.id(instance._autonomy)
+                else "intuition"
+                if event.source == hsm.id(instance._intuition)
+                else "reasoning"
+            )
+            Cognition._hand_back_step_failure(
+                ctx,
+                instance,
+                stage=stage,
+                message=failure.message,
+                turn_id=operation_id,
+                cognition_input=event.data.turn.input,
+                metadata=_public_metadata(dict(event.metadata)),
             )
         _ = hsm.dispatch(
             ctx,
@@ -1328,23 +1414,81 @@ class Cognition(ability.Ability[InputData, OutputData]):
             source=hsm.id(instance),
         )
         ability.Ability._forward_terminal_event(ctx, instance, ability.TerminalErrorEvent.with_data(terminal))
+        Cognition._hand_back_failure(
+            ctx,
+            instance,
+            data.failure,
+            cognition_input=data.turn.input,
+            metadata=public_metadata,
+        )
+
+    @staticmethod
+    def _hand_back_failure(
+        ctx: hsm.Context,
+        instance: "Cognition",
+        failure: StepFailedData | StepTimedOutData,
+        *,
+        cognition_input: InputData,
+        metadata: dict[str, object],
+    ) -> None:
+        """Hand the body ``failure``, a failed step's typed failure, to perceive as a new turn.
+
+        The body gets a ``cognition.InputEvent`` observing it with the failed turn's participants: a
+        turn the bot decides on, the way a recall outcome is. Bounded: when the failed turn was itself
+        taken up for a failed step (its stimulus carries one), nothing is handed back, so a step that
+        keeps failing cannot keep waking the bot.
+        """
+
+        timed_out = isinstance(failure, StepTimedOutData)
+        kind = "timed_out" if timed_out else "failed"
+        perceived = cognition_input.stimulus
+        if isinstance(perceived, hsm.Event) and isinstance(perceived.data, StepFailedData | StepTimedOutData):
+            _HANDED_BACK.add(1, {"stage": failure.stage, "kind": kind, "outcome": "bounded"})
+            return
         if not instance._attachments:
             return
         owner = instance._attachments[0]
-        stimulus = dataclasses.replace(
-            StepTimedOutEvent.with_data(data.failure), source=hsm.id(instance), metadata=public_metadata
-        )
+        observed = StepTimedOutEvent.with_data(failure) if timed_out else StepFailedEvent.with_data(failure)
+        stimulus = dataclasses.replace(observed, source=hsm.id(instance), metadata=metadata)
         _ = hsm.dispatch(
             ctx,
             owner,
             dataclasses.replace(
                 InputEvent.with_data_and_id(
-                    InputData(stimulus=stimulus, participants=data.turn.input.participants), uuid.uuid4().hex
+                    InputData(stimulus=stimulus, participants=cognition_input.participants), uuid.uuid4().hex
                 ),
                 source=hsm.id(instance),
                 target=hsm.id(owner),
-                metadata=public_metadata,
+                metadata=metadata,
             ),
+        )
+        _HANDED_BACK.add(1, {"stage": failure.stage, "kind": kind, "outcome": "handed_back"})
+
+    @staticmethod
+    def _hand_back_step_failure(
+        ctx: hsm.Context,
+        instance: "Cognition",
+        *,
+        stage: typing.Literal["autonomy", "intuition", "reasoning"],
+        message: str,
+        turn_id: str,
+        cognition_input: InputData,
+        metadata: dict[str, object],
+    ) -> None:
+        """Hand the body the failure of a step that failed (not one that outlasted its timeout)."""
+
+        failure = StepFailedData(
+            message=f"Cognition's {stage} step failed, so the turn failed: {message}",
+            stage=stage,
+            turn_id=turn_id,
+            stimulus=input.stimulus_name(cognition_input.stimulus),
+        )
+        Cognition._hand_back_failure(
+            ctx,
+            instance,
+            failure,
+            cognition_input=cognition_input,
+            metadata=metadata,
         )
 
     @staticmethod
@@ -2438,6 +2582,8 @@ __all__ = [
     "Cognition",
     "InputData",
     "OutputData",
+    "StepFailedData",
+    "StepFailedEvent",
     "StepTimedOutData",
     "StepTimedOutEvent",
 ]

@@ -1555,6 +1555,87 @@ def test_a_step_that_outlasts_the_step_timeout_fails_its_turn_as_a_typed_failure
     assert episodes["next-turn"].outcome is memory.Outcome.COMPLETED
 
 
+class _FailingStepProcessor(processing.Processor):
+    """A model step that fails outright, every time, the way a malformed dispatch failed reasoning live."""
+
+    calls: int
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    @typing.override
+    async def process(
+        self, input: processing.InputData, *, drafts: processing.DraftSink | None = None
+    ) -> processing.Events:
+        del input, drafts
+        self.calls += 1
+        raise RuntimeError("the step failed")
+
+
+@pytest.mark.parametrize("stage", ["intuition", "reasoning"])
+def test_a_step_that_fails_is_a_typed_failure_the_bot_perceives_but_failing_on_it_is_not_handed_back(
+    stage: typing.Literal["intuition", "reasoning"],
+) -> None:
+    """D-R-13 (live round 2, E3): after a reasoning step failed (not timed out), no turn ran until the
+    person typed again, and the screen said "writing code…" indefinitely. A failed step is now handed
+    back as a typed failure the bot perceives as its next turn, like a timed-out one; a step that fails
+    while the bot perceives that failure is not handed back again."""
+
+    async def run() -> tuple[list[hsm.Event[typing.Any]], str]:
+        failing = _FailingStepProcessor()
+        intuition, reasoning = cognition_abilities(
+            intuition_processor=failing
+            if stage == "intuition"
+            else RecordingIntuitionProcessor(cognition.intuition.OutputData(reason="needs thought")),
+            reasoning_processor=failing,
+        )
+        store = memory.Memory()
+        ability = cognition.Cognition(
+            intuition=intuition,
+            reasoning=reasoning,
+            reflection=cognition.Reflection(processor=FixedProcessor(no_output("reflection")), memory=store),
+            memory=store,
+        )
+        ctx = shared_hsm_context()
+        body = _StepTimeoutBody()
+        _ = await mosfet.started(ctx, body, body.model)
+        await ability.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=body)))
+        await wait_until(lambda: ability.state().endswith("/idle"))
+        turn = (await started_cognition_input(ctx)).model_copy(update={"participants": (_ADA,)})
+        _ = await hsm.dispatch(ctx, ability, ability.input_event.with_data_and_id(turn, "failing-turn"))
+        await wait_until(lambda: any(event.name == cognition.InputEvent.name for event in body.told))
+        await wait_until(lambda: ability.state().endswith("/idle"))
+        (perceived,) = [event for event in body.told if event.name == cognition.InputEvent.name]
+        assert isinstance(perceived.data, cognition.InputData)
+        # The bot takes up the failure as a turn of its own, and that step fails too.
+        _ = await hsm.dispatch(ctx, ability, ability.input_event.with_data_and_id(perceived.data, "perceiving-turn"))
+        await wait_until(
+            lambda: len([event for event in body.told if event.name == cognition.Cognition.failed_event.name]) == 2
+        )
+        await wait_until(lambda: ability.state().endswith("/idle"))
+        for _ in range(50):
+            await asyncio.sleep(0)
+        return list(body.told), hsm.id(ability)
+
+    told, cognition_id = asyncio.run(run())
+
+    assert [event.id for event in told if event.name == cognition.Cognition.failed_event.name] == [
+        "failing-turn",
+        "perceiving-turn",
+    ]
+    (perceived,) = [event for event in told if event.name == cognition.InputEvent.name]
+    assert perceived.source == cognition_id
+    assert isinstance(perceived.data, cognition.InputData)
+    assert perceived.data.participants == (_ADA,)
+    stimulus = perceived.data.stimulus
+    assert isinstance(stimulus, hsm.Event)
+    assert stimulus.name == cognition.StepFailedEvent.name
+    failed = stimulus.data
+    assert isinstance(failed, cognition.StepFailedData)
+    assert (failed.stage, failed.turn_id, failed.stimulus) == (stage, "failing-turn", mosfet.InputEvent.name)
+    assert failed.message == f"Cognition's {stage} step failed, so the turn failed: the step failed"
+
+
 def test_a_step_is_given_a_local_models_time_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
     """D-R-3: one step of a local model with thinking on takes 30 s and more (live: 31.8 s), so a
     cognition built without a step timeout waits at least 120 s for each of its steps."""

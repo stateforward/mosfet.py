@@ -2755,7 +2755,9 @@ def test_bot_routes_operation_snapshot_failure_to_processing_failed_event() -> N
             active_bot.context(),
             mosfet.InputEvent.with_data(mosfet.InputEventData(target_device="phone", priority=2)),
         )
-        await wait_until(lambda: bool(active_bot.failures) and active_bot.state() == "/Bot/active/focused")
+        # The bot perceives the failed step as one more turn (D-R-13); that turn fails the same way and is
+        # not handed back again.
+        await wait_until(lambda: len(active_bot.failures) == 2 and active_bot.state() == "/Bot/active/focused")
 
         return active_bot.state(), ability.calls, active_bot.failures
 
@@ -2763,8 +2765,7 @@ def test_bot_routes_operation_snapshot_failure_to_processing_failed_event() -> N
 
     assert state == "/Bot/active/focused"
     assert calls == []
-    assert len(failures) == 1
-    assert failures[0].message == "snapshot unavailable"
+    assert [failure.message for failure in failures] == ["snapshot unavailable", "snapshot unavailable"]
 
 
 def test_bot_processing_input_includes_primary_ability_affordance() -> None:
@@ -2967,13 +2968,15 @@ def test_focused_agent_rejects_operation_output_that_does_not_match_event_schema
             mosfet.InputEvent.with_data(mosfet.InputEventData(target_device="phone", priority=3)),
         )
         await wait_until(lambda: bool(active_bot.failures) and active_bot.state() == "/Bot/active/focused")
+        # The bot perceives its failed step as one more turn (D-R-13), which selects nothing here.
+        await wait_until(lambda: len(active_bot.actions) == 1 and active_bot.state() == "/Bot/active/focused")
 
         return active_bot.state(), active_bot.actions, active_bot.failures
 
     state, actions, failures = asyncio.run(run())
 
     assert state == "/Bot/active/focused"
-    assert actions == []
+    assert actions == [()]
     assert len(failures) == 1
     assert (
         failures[0].message
@@ -3005,13 +3008,15 @@ def test_focused_agent_rejects_operation_event_not_offered_by_input() -> None:
             mosfet.InputEvent.with_data(mosfet.InputEventData(target_device="phone", priority=3)),
         )
         await wait_until(lambda: bool(active_bot.failures) and active_bot.state() == "/Bot/active/focused")
+        # The bot perceives its failed step as one more turn (D-R-13), which selects nothing here.
+        await wait_until(lambda: len(active_bot.actions) == 1 and active_bot.state() == "/Bot/active/focused")
 
         return active_bot.state(), active_bot.actions, active_bot.failures
 
     state, actions, failures = asyncio.run(run())
 
     assert state == "/Bot/active/focused"
-    assert actions == []
+    assert actions == [()]
     assert len(failures) == 1
     assert (
         failures[0].message
@@ -3043,13 +3048,15 @@ def test_focused_agent_rejects_operation_target_not_offered_by_input() -> None:
             mosfet.InputEvent.with_data(mosfet.InputEventData(target_device="phone", priority=3)),
         )
         await wait_until(lambda: bool(active_bot.failures) and active_bot.state() == "/Bot/active/focused")
+        # The bot perceives its failed step as one more turn (D-R-13), which selects nothing here.
+        await wait_until(lambda: len(active_bot.actions) == 1 and active_bot.state() == "/Bot/active/focused")
 
         return active_bot.state(), active_bot.actions, active_bot.failures
 
     state, actions, failures = asyncio.run(run())
 
     assert state == "/Bot/active/focused"
-    assert actions == []
+    assert actions == [()]
     assert len(failures) == 1
     assert (
         failures[0].message
@@ -3081,6 +3088,8 @@ def test_focused_agent_rejects_agent_local_operation_with_target() -> None:
             mosfet.InputEvent.with_data(mosfet.InputEventData(target_device="phone", priority=3)),
         )
         await wait_until(lambda: bool(active_bot.failures) and active_bot.state() == "/Bot/active/focused")
+        # The bot perceives its failed step as one more turn (D-R-13), which selects nothing here.
+        await wait_until(lambda: len(active_bot.actions) == 1 and active_bot.state() == "/Bot/active/focused")
 
         return active_bot.state(), bot_has_focus(active_bot), active_bot.actions, active_bot.failures
 
@@ -3088,7 +3097,7 @@ def test_focused_agent_rejects_agent_local_operation_with_target() -> None:
 
     assert state == "/Bot/active/focused"
     assert focused_device
-    assert actions == []
+    assert actions == [()]
     assert len(failures) == 1
     assert (
         failures[0].message
@@ -3192,13 +3201,15 @@ def test_focused_agent_rejects_operation_data_that_does_not_match_event_schema()
             mosfet.InputEvent.with_data(mosfet.InputEventData(target_device="phone", priority=3)),
         )
         await wait_until(lambda: bool(active_bot.failures) and active_bot.state() == "/Bot/active/focused")
+        # The bot perceives its failed step as one more turn (D-R-13), which selects nothing here.
+        await wait_until(lambda: len(active_bot.actions) == 1 and active_bot.state() == "/Bot/active/focused")
 
         return active_bot.state(), active_bot.actions, active_bot.failures
 
     state, actions, failures = asyncio.run(run())
 
     assert state == "/Bot/active/focused"
-    assert actions == []
+    assert actions == [()]
     assert len(failures) == 1
     assert failures[0].message.startswith(
         "Selection rejected: Processing selected invalid event data for event: phone.transfer_call: phone.transfer_call|"
@@ -3223,15 +3234,17 @@ def test_bot_receives_one_redacted_terminal_for_bounded_alternating_selection_re
             active_bot.context(),
             mosfet.InputEvent.with_data(mosfet.InputEventData(target_device="phone", priority=3)),
         )
-        await wait_until(lambda: len(active_bot.failures) == 1 and active_bot.state() == "/Bot/active/focused")
+        # The bot perceives the failed turn as one more turn (D-R-13), whose selections are rejected the same
+        # way; that failure is not handed back again.
+        await wait_until(lambda: len(active_bot.failures) == 2 and active_bot.state() == "/Bot/active/focused")
 
         return len(processor.calls), active_bot.failures, active_bot.actions
 
     calls, failures, actions = asyncio.run(run())
 
-    assert calls == 3
-    assert len(failures) == 1
-    assert "input_value" not in failures[0].message
+    assert calls == 6
+    assert len(failures) == 2
+    assert all("input_value" not in failure.message for failure in failures)
     assert actions == []
 
 
@@ -3251,15 +3264,17 @@ def test_bot_receives_one_redacted_terminal_for_same_selection_rejection() -> No
             active_bot.context(),
             mosfet.InputEvent.with_data(mosfet.InputEventData(target_device="phone", priority=3)),
         )
-        await wait_until(lambda: len(active_bot.failures) == 1 and active_bot.state() == "/Bot/active/focused")
+        # The bot perceives the failed turn as one more turn (D-R-13), whose selections are rejected the same
+        # way; that failure is not handed back again.
+        await wait_until(lambda: len(active_bot.failures) == 2 and active_bot.state() == "/Bot/active/focused")
 
         return len(processor.calls), active_bot.failures
 
     calls, failures = asyncio.run(run())
 
-    assert calls == 2
-    assert len(failures) == 1
-    assert "input_value" not in failures[0].message
+    assert calls == 4
+    assert len(failures) == 2
+    assert all("input_value" not in failure.message for failure in failures)
 
 
 def test_focused_agent_dispatches_multi_event_focus_selection() -> None:
@@ -3508,6 +3523,7 @@ def test_focused_agent_rejects_focus_device_outside_processing_candidates() -> N
             no_output("stay on phone"),
             focus_output("screen", "bad target"),
             focus_output("screen", "bad target"),
+            no_output("perceive the failed turn"),
             no_output("observe retained focus"),
         )
         cognitive = InputRecordingCognition(ability)
@@ -3524,19 +3540,27 @@ def test_focused_agent_rejects_focus_device_outside_processing_candidates() -> N
             mosfet.InputEvent.with_data(mosfet.InputEventData(target_device="browser", priority=1)),
         )
         await wait_until(lambda: bool(active_bot.failures) and active_bot.state() == "/Bot/active/focused")
+        # The bot perceives its failed turn as one more turn (D-R-13).
+        await wait_until(lambda: len(ability.calls) == 4 and active_bot.state() == "/Bot/active/focused")
         await active_bot.dispatch(
             active_bot.context(),
             mosfet.InputEvent.with_data(mosfet.InputEventData(target_device="browser", priority=2)),
         )
-        await wait_until(lambda: len(ability.calls) == 4 and active_bot.state() == "/Bot/active/focused")
+        await wait_until(lambda: len(ability.calls) == 5 and active_bot.state() == "/Bot/active/focused")
 
         return active_bot.state(), cognitive.inputs, active_bot.actions, active_bot.failures
 
     state, inputs, actions, failures = asyncio.run(run())
 
     assert state == "/Bot/active/focused"
-    assert inputs[2].focus == "phone"
-    assert actions == [no_output("stay on phone"), no_output("observe retained focus")]
+    perceived = inputs[2].stimulus
+    assert isinstance(perceived, hsm.Event) and perceived.name == cognition.StepFailedEvent.name
+    assert inputs[3].focus == "phone"
+    assert actions == [
+        no_output("stay on phone"),
+        no_output("perceive the failed turn"),
+        no_output("observe retained focus"),
+    ]
     assert len(failures) == 1
     assert (
         failures[0].message
@@ -3839,15 +3863,16 @@ def test_bot_processing_state_routes_ability_failure_to_failed_event() -> None:
             active_bot.context(),
             mosfet.InputEvent.with_data(mosfet.InputEventData(target_device="phone", priority=3)),
         )
-        await wait_until(lambda: active_bot.state() == "/Bot/active/focused")
+        # The bot perceives the failed step as one more turn (D-R-13); that turn fails the same way and is
+        # not handed back again.
+        await wait_until(lambda: len(active_bot.failures) == 2 and active_bot.state() == "/Bot/active/focused")
 
         return active_bot.state(), active_bot.failures, active_bot.actions
 
     state, failures, actions = asyncio.run(run())
 
     assert state == "/Bot/active/focused"
-    assert len(failures) == 1
-    assert failures[0].message == "ability unavailable"
+    assert [failure.message for failure in failures] == ["ability unavailable", "ability unavailable"]
     assert actions == []
 
 
