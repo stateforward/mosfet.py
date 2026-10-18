@@ -6,6 +6,7 @@ import dataclasses
 import math
 import typing
 import uuid
+from xml.sax import saxutils
 
 import hsm
 import mosfet
@@ -27,9 +28,10 @@ _DEFAULT_TUNER_WARMUP = 8
 # Variance floor on 0–100 scale (~std 10 when expressed as variance 100).
 _DEFAULT_TUNER_VAR_FLOOR = 100.0
 _DEFAULT_TUNER_MEAN = 70.0
-# No static system prose: the model-facing system channel is only the per-turn world block
-# (``Environment.model_snapshot`` XML stamped on ``InputData.instructions``). Tool schemas and
-# the stimulus carry the rest of the contract.
+# No static system prose: the model-facing system channel is only the per-turn world and self
+# blocks (``Environment.model_snapshot`` XML stamped on ``InputData.instructions``), followed by
+# the per-turn ``<reasoning_only>`` capacities above this stage's ceiling when there are any.
+# Tool schemas and the stimulus carry the rest of the contract.
 DEFAULT_INSTRUCTIONS = ""
 
 
@@ -414,6 +416,24 @@ def _environment_actions(
     )
 
 
+def _reasoning_only(
+    frame: processing.InputData,
+    narrowed: processing.InputData,
+) -> tuple[hsm.Event[typing.Any], ...]:
+    """Offered events of the host's ``frame`` that intuition's ``narrowed`` frame no longer offers.
+
+    These are the capacities above intuition's effort ceiling (``within_effort`` dropped the actors
+    that enable them), which the turn reaches only by escalating to deliberate reasoning; reasoning
+    then offers them within its own ceiling. An event another admitted actor still enables stays
+    offered here and is not held.
+    """
+
+    if narrowed is frame:
+        return ()
+    offered = {event.name for event in narrowed.schemas}
+    return tuple(event for event in frame.schemas if event.name not in offered)
+
+
 def _processor_feedback(input: processing.InputData, message: str) -> processing.InputData:
     """Append bounded, redacted dispatch feedback to the next model request."""
 
@@ -609,13 +629,40 @@ class Intuition(processing.Processing):
             processing.finish_operation(ctx, instance, operation_id)
 
     @staticmethod
-    def _intuition_input_for_processor(instance: "Intuition", input: processing.InputData) -> processing.InputData:
-        """Narrow the host's frame to this stage's effort ceiling; stamp instructions and the EventPatch."""
+    def _intuition_input_for_processor(
+        instance: "Intuition",
+        narrowed: processing.InputData,
+        held: tuple[hsm.Event[typing.Any], ...],
+    ) -> processing.InputData:
+        """Stamp instructions, what only reasoning holds, and the EventPatch on the narrowed frame.
 
-        stamped = processing.Processing._input_for_processor(
-            instance, cognition_input.within_effort(input, instance._max_effort)
-        )
+        ``held`` (see :func:`_reasoning_only`) renders after the world and self blocks as one
+        ``<reasoning_only>`` element: each capacity's event name and the opening paragraph of its own
+        schema description. It is what the model knows of those capacities; their tools stay off
+        this turn's dispatch, and escalating the turn is how it reaches them.
+        """
+
+        stamped = processing.Processing._input_for_processor(instance, narrowed)
         updates: dict[str, object] = {}
+        if held:
+            capacities: list[str] = []
+            for event in held:
+                description = processing.model_facing_event_json_schema(event).get("description")
+                summary = description.strip().split("\n\n", 1)[0].strip() if isinstance(description, str) else ""
+                name = saxutils.quoteattr(event.name)
+                capacities.append(
+                    f"  <capacity event={name}>{saxutils.escape(summary)}</capacity>"
+                    if summary
+                    else f"  <capacity event={name}/>"
+                )
+            block = "\n".join(
+                (
+                    '<reasoning_only reached_by="escalating this turn to deliberate reasoning">',
+                    *capacities,
+                    "</reasoning_only>",
+                )
+            )
+            updates["instructions"] = "\n".join(part for part in (stamped.instructions, block) if part)
         if stamped.patch is None:
             updates["patch"] = EventPatch
         if updates:
@@ -630,7 +677,7 @@ class Intuition(processing.Processing):
             component="cognition.intuition",
             stage="intuition_invoke",
             context=telemetry.event_context(event),
-        ):
+        ) as active:
             retry = event.data if isinstance(event.data, _SelectionRejectionData) else None
             data = retry.request if retry is not None else event.data
             assert isinstance(data, InputData)
@@ -647,7 +694,10 @@ class Intuition(processing.Processing):
             metadata = dict(event.metadata)
             try:
                 # Narrowing reads live actor snapshots, so a frame that cannot be read fails the turn.
-                input = Intuition._intuition_input_for_processor(instance, data.processing_input)
+                narrowed = cognition_input.within_effort(data.processing_input, instance._max_effort)
+                held = _reasoning_only(data.processing_input, narrowed)
+                active.set_attribute("bot.intuition.held.count", len(held))
+                input = Intuition._intuition_input_for_processor(instance, narrowed, held)
                 if retry is not None:
                     input = _processor_feedback(input, retry.message)
                 raw = await instance._processor.process(input)

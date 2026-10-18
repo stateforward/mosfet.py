@@ -3,6 +3,7 @@ from mosfet.abilities.cognition import types
 from mosfet.abilities.cognition import input as cognition_input
 from mosfet.abilities import ability as ability_module
 from mosfet.abilities import processing
+from mosfet.abilities import sandbox
 import mosfet
 from mosfet import event
 
@@ -407,3 +408,56 @@ def test_intuition_offers_only_what_its_own_effort_ceiling_admits() -> None:
     assert "deliberate" not in frame.actors
     assert _SelectionEvent.name not in {schema.name for schema in frame.schemas}
     assert _SelectionEvent.name not in frame.actor_events
+
+
+class _BenchActor(hsm.Instance):
+    """An M-effort actor enabling the real sandbox run command, as the builder's bench does."""
+
+    effort: typing.ClassVar[ability_module.Effort] = ability_module.Effort.M
+    model: typing.ClassVar[hsm.Model | None] = mosfet.define(
+        "IntuitionBenchActor",
+        hsm.initial(hsm.target("/IntuitionBenchActor/active")),
+        hsm.state("active", hsm.transition(hsm.on(sandbox.RunEvent), hsm.effect(_accept_selection))),
+    )
+
+
+def test_intuition_is_told_what_only_reasoning_holds() -> None:
+    """Live check P1: the bench (sandbox.run, effort M) is above intuition's ceiling (S).
+
+    Intuition never offered it and nothing told the model it existed, so a confident model made
+    up test output instead of escalating. Every intuition turn now names each capacity held above
+    its ceiling, with what it does, so escalating to reasoning is the model's informed choice; the
+    capacity itself stays off intuition's dispatch tool.
+    """
+
+    async def run() -> processing.InputData:
+        ctx = shared_hsm_context()
+        bench = _BenchActor()
+        nearby = _SelectionActor()
+        assert bench.model is not None and nearby.model is not None
+        _ = await mosfet.started(ctx, bench, bench.model)
+        _ = await mosfet.started(ctx, nearby, nearby.model)
+        stimulus = mosfet.InputEventData(target_device="desk", priority=0)
+        turn_input = cognition_input.InputData(stimulus=stimulus, actors={"sandbox": bench, "nearby": nearby})
+        processor = _SequenceProcessor(())
+        _ = await dispatch_ability_for_test(
+            intuition.Intuition(processor=processor, max_effort=ability_module.Effort.S),
+            ctx,
+            intuition.InputData(
+                turn=types.TurnData(input=turn_input, operation_id="held-turn", generation="held-generation"),
+                processing_input=cognition_input.build_processing_input(turn_input),
+            ),
+        )
+        (frame,) = processor.calls
+        return frame
+
+    frame = asyncio.run(run())
+
+    offered = {schema.name for schema in frame.schemas}
+    assert sandbox.RunEvent.name not in offered
+    assert _SelectionEvent.name in offered
+    instructions = frame.instructions or ""
+    assert sandbox.RunEvent.name in instructions
+    assert "Run one command in the sandbox and wait for it to finish." in instructions
+    # What intuition itself offers is on its tool, not repeated as something only reasoning holds.
+    assert _SelectionEvent.name not in instructions

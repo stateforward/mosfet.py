@@ -164,7 +164,11 @@ the turn without them. Reasoning, Reflection, and Conversation never read or wri
 Reasoning can also recall a memory deliberately. Cognition adds `memory.Associative` to every
 frame it builds, and its effort (`M`) keeps it out of Intuition's frames, so only Reasoning is
 offered the model-callable `bot.ability.memory.recall` (`memory.RecallData`: `about` something in
-plain words, or one association's `node` ref). Associative reads the chosen memories in full,
+plain words, or one association's `node` ref). Intuition is still told it exists: every
+capacity its effort ceiling keeps off its dispatch tool (recall, the sandbox bench, any other
+actor rated above it) is named on its frame after the world and self blocks, in one
+`<reasoning_only>` element with the opening paragraph of the event's own description, so
+escalating the turn to reasoning is the model's informed choice. Associative reads the chosen memories in full,
 images included and reinforced, and tells its owner with `memory.RecollectedEvent`
 (`memory.RecollectionData`), or with a typed `ability.FailedEvent` when memory cannot serve it.
 Cognition hands either to the body as a `cognition.InputEvent` observing it, the way it hands a
