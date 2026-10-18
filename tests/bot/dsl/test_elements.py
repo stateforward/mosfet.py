@@ -111,7 +111,7 @@ def test_the_singular_elements_register_at_their_keys() -> None:
         "greeter",
         bot.traits("curious", "patient"),
         bot.cognition(support.Silent(), memory=store, associative=True, autonomy=True),
-        bot.timeouts(processing=datetime.timedelta(seconds=5)),
+        bot.timeouts(processing=datetime.timedelta(seconds=5), step=datetime.timedelta(minutes=3)),
         bot.register(register),
         bot.attach(phone.Phone()),
     )
@@ -128,7 +128,8 @@ def test_the_singular_elements_register_at_their_keys() -> None:
         False,
         True,
     )
-    assert isinstance(timeouts, elements.TimeoutsElement) and timeouts.processing == datetime.timedelta(seconds=5)
+    assert isinstance(timeouts, elements.TimeoutsElement)
+    assert (timeouts.processing, timeouts.step) == (datetime.timedelta(seconds=5), datetime.timedelta(minutes=3))
     assert isinstance(sensory, elements.RegisterElement) and sensory.store is register
 
 

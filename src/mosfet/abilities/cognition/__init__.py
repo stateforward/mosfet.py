@@ -24,6 +24,8 @@ if typing.TYPE_CHECKING:
         InputEvent,
         OutputData,
         OutputEvent,
+        StepTimedOutData,
+        StepTimedOutEvent,
     )
     from .input import SelfData, is_input, stimulus_name
     from .intuition import Intuition
@@ -42,6 +44,8 @@ _LAZY_EXPORT_MODULES = {
     "Cognition": ".cognition",
     "InputData": ".cognition",
     "OutputData": ".cognition",
+    "StepTimedOutData": ".cognition",
+    "StepTimedOutEvent": ".cognition",
     "SelfData": ".input",
     "is_input": ".input",
     "stimulus_name": ".input",
@@ -67,6 +71,8 @@ __all__ = [
     "Cognition",
     "InputData",
     "OutputData",
+    "StepTimedOutData",
+    "StepTimedOutEvent",
     "SelfData",
     "is_input",
     "stimulus_name",

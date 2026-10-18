@@ -4,7 +4,7 @@ error[B0011]: the processing timeout is not a positive `datetime.timedelta`
 14 |     bot.timeouts(processing=datetime.timedelta(0)),
    |                             ^^^^^^^^^^^^^^^^^^^^^ not positive
    |
-   = note: a timeout bounds how long the body waits; zero or less would never wait
+   = note: a timeout bounds how long the bot waits; zero or less would never wait
 help: give a positive duration
    |
 14 |     bot.timeouts(processing=datetime.timedelta(seconds=30)),

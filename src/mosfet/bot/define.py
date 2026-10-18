@@ -507,6 +507,7 @@ class Validator(hsm.ModelValidator):
             ("processing", member.processing),
             ("deactivation", member.deactivation),
             ("attachment", member.attachment),
+            ("step", member.step),
         ):
             # The annotation is the bot file's promise, not a fact: check what was actually given.
             given = typing.cast(object, value)
@@ -520,7 +521,7 @@ class Validator(hsm.ModelValidator):
                     level="error",
                     message=f"the {key} timeout is not a positive `datetime.timedelta`",
                     primary=primary.model_copy(update={"label": "not positive"}),
-                    notes=("a timeout bounds how long the body waits; zero or less would never wait",),
+                    notes=("a timeout bounds how long the bot waits; zero or less would never wait",),
                     help=diagnostics.Help(
                         message="give a positive duration",
                         suggestion=None

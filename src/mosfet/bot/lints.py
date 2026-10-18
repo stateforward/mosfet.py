@@ -187,13 +187,16 @@ def empty_timeouts(model: elements.Model) -> list[diagnostics.Diagnostic]:
             "empty_timeouts",
             "`bot.timeouts()` sets no timeout",
             diagnostics.Span.of(member.location, "changes nothing"),
-            notes=("with no values, the body keeps every default timeout",),
+            notes=("with no values, the bot keeps every default timeout",),
             help=diagnostics.Help(
                 message="remove it, or set a timeout", suggestion=_removal(model, member, "machine-applicable")
             ),
         )
         for member in _members(model, elements.TimeoutsElement)
-        if member.processing is None and member.deactivation is None and member.attachment is None
+        if member.processing is None
+        and member.deactivation is None
+        and member.attachment is None
+        and member.step is None
     ]
 
 

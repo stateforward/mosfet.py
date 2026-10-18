@@ -217,6 +217,33 @@ def test_the_body_takes_each_part_in_the_role_it_was_given(recording: type[Recor
     assert parts["name"] == "greeter"
 
 
+@pytest.mark.parametrize(
+    ("timeouts", "step"),
+    [
+        ((bot.timeouts(step=datetime.timedelta(minutes=3)),), datetime.timedelta(minutes=3)),
+        ((bot.timeouts(processing=datetime.timedelta(seconds=30)),), None),
+        ((), None),
+    ],
+)
+def test_the_step_timeout_bounds_each_step_of_the_bots_cognition(
+    timeouts: tuple[bot.Element[hsm.Element], ...], step: datetime.timedelta | None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D-R-3: ``bot.timeouts(step=)`` is cognition's step timeout; without it cognition keeps its own default."""
+
+    found: Built = []
+    monkeypatch.setattr(cognition, "Cognition", _recorded(cognition.Cognition, found))
+    model = bot.define("greeter", bot.cognition(support.Silent()), bot.attach(phone.Phone()), *timeouts)
+
+    async def run() -> None:
+        started, _ = await _started(model)
+        await bot.stop(started)
+
+    asyncio.run(run())
+
+    ((_, given),) = found
+    assert given["child_operation_timeout"] == step
+
+
 def test_one_ability_given_as_input_and_acquired_is_given_to_the_body_in_both_roles(
     recording: type[Recording],
 ) -> None:

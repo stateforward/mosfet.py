@@ -362,7 +362,7 @@ def _body(
         except Exception as error:
             raise _raised(name, voice.location, "voice", error, location) from error
     try:
-        mind = _mind(declared, processor, store, nature, born)
+        mind = _mind(declared, processor, store, nature, born, None if timeouts is None else timeouts.step)
     except Exception as error:
         raise _raised(name, declared.location, "cognition", error, location) from error
     # A firmware of its own for every body: it starts fresh with each start of the model, and takes
@@ -423,11 +423,13 @@ def _mind(
     store: memory.Memory,
     nature: persona.Traits | None,
     voice: vocal.voice.Inception | None,
+    step: datetime.timedelta | None,
 ) -> cognition.Cognition:
     """Cognition, its faculties, its persona and the ``voice`` it is given at inception, all on ``store``.
 
     ``declared`` is ``bot.cognition`` as written, ``processor`` its processor, and ``nature`` the traits
-    of ``bot.traits``, which give the bot a persona.
+    of ``bot.traits``, which give the bot a persona. ``step`` is ``bot.timeouts(step=)``; ``None`` keeps
+    cognition's own step timeout.
     """
 
     now = typing.cast(schedule.WallClock | None, declared.routines)
@@ -447,6 +449,7 @@ def _mind(
         consolidation=memory.Consolidation(memory=store, processor=processor) if declared.consolidation else None,
         persona=self_knowledge,
         voice=voice,
+        child_operation_timeout=step,
     )
 
 

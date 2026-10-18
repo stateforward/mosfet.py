@@ -416,8 +416,10 @@ EXPLANATIONS: tuple[Explanation, ...] = (
         code="B0011",
         level="error",
         title="a timeout is not a positive `datetime.timedelta`",
-        meaning="Each of `bot.timeouts(processing=, deactivation=, attachment=)` is a positive `datetime.timedelta`.",
-        why="A timeout bounds how long the body waits for something; zero or less would never wait at all.",
+        meaning=(
+            "Each of `bot.timeouts(processing=, deactivation=, attachment=, step=)` is a positive `datetime.timedelta`."
+        ),
+        why="A timeout bounds how long the bot waits for something; zero or less would never wait at all.",
         wrong=(
             'model = bot.define(\n    "greeter",\n    bot.cognition(processor),\n    bot.attach(phone.Phone()),\n'
             "    bot.timeouts(processing=datetime.timedelta(0)),\n)"

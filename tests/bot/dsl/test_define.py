@@ -1,6 +1,7 @@
 """``bot.define`` and ``bot.redefine``: the walk, the validator, one pass, and the errors (DSL-3, DSL-27)."""
 
 import asyncio
+import datetime
 import pathlib
 import typing
 import warnings
@@ -326,6 +327,19 @@ def test_a_misplaced_parts_rewrite_into_an_element_the_bot_has_is_not_certain(he
         for diagnostic in error.diagnostics
         if diagnostic.help and diagnostic.help.suggestion
     ] == [("B0006", "maybe-incorrect"), ("B0017", "maybe-incorrect")]
+
+
+def test_a_step_timeout_that_is_not_positive_is_b0011() -> None:
+    with pytest.raises(bot.DefinitionError) as caught:
+        _ = bot.define(
+            "greeter",
+            bot.cognition(support.Silent()),
+            bot.attach(phone.Phone()),
+            bot.timeouts(step=datetime.timedelta(0)),
+        )
+
+    (found,) = caught.value.diagnostics
+    assert (found.code, found.message) == ("B0011", "the step timeout is not a positive `datetime.timedelta`")
 
 
 def test_no_value_from_the_bot_file_is_rendered(here: pathlib.Path) -> None:

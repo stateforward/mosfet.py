@@ -1,6 +1,7 @@
 from mosfet import abilities
 import mosfet
 from mosfet import behavior as behavior_events
+from mosfet.abilities import ability as ability_module
 from mosfet.abilities import cognition
 from mosfet.abilities import memory
 from mosfet.abilities import persona
@@ -1432,61 +1433,167 @@ def test_cognition_stubborn_child_cancel_timeout_requests_reboot(
     assert operation_keys == ()
 
 
-def test_cognition_child_timeout_reboots_from_active_leaf(monkeypatch: pytest.MonkeyPatch) -> None:
-    class StubbornIntuition(cognition.Intuition):
-        @staticmethod
-        async def _hold(ctx: hsm.Context, instance: "StubbornIntuition", event: hsm.Event[typing.Any]) -> None:
-            del ctx
-            operation_id = event.id if event.id else hsm.id(instance)
-            if processing.active_operation(instance, operation_id) is None:
-                _ = await processing.start_operation(instance, operation_id)
-            await asyncio.Event().wait()
+class _SlowFirstStepProcessor(processing.Processor):
+    """A local model whose first step outlasts any step timeout, then answers every later one at once."""
 
-        submodel = mosfet.define(
-            "TimedOutIntuition",
-            hsm.initial(hsm.target("/TimedOutIntuition/waiting")),
-            hsm.state(
-                "waiting",
-                hsm.transition(
-                    hsm.on(cognition.Intuition.input_event),
-                    hsm.target("/TimedOutIntuition/holding"),
-                ),
-            ),
-            hsm.state(
-                "holding",
-                hsm.activity(_hold.__get__(None, object)),
-            ),
+    calls: int
+    cancelled: int
+    _hangs: bool
+
+    def __init__(self, *, hangs: bool) -> None:
+        self.calls = 0
+        self.cancelled = 0
+        self._hangs = hangs
+
+    @typing.override
+    async def process(
+        self, input: processing.InputData, *, drafts: processing.DraftSink | None = None
+    ) -> processing.Events:
+        del input, drafts
+        self.calls += 1
+        if self._hangs and self.calls == 1:
+            try:
+                _ = await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                self.cancelled += 1
+                raise
+        return ()
+
+
+class _StepTimeoutBody(hsm.Instance):
+    """Body stand-in: records how Cognition settles its turns and what it hands the body to perceive."""
+
+    told: list[hsm.Event[typing.Any]]
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.told = []
+
+    @staticmethod
+    def _record(ctx: hsm.Context, instance: "_StepTimeoutBody", event: hsm.Event[typing.Any]) -> None:
+        del ctx
+        instance.told.append(event)
+
+    model: typing.ClassVar[hsm.Model] = mosfet.define(
+        "StepTimeoutBody",
+        hsm.initial(hsm.target("ready")),
+        hsm.state(
+            "ready",
+            hsm.transition(hsm.on(cognition.InputEvent), hsm.effect(_record)),
+            hsm.transition(hsm.on(cognition.OutputEvent), hsm.effect(_record)),
+            hsm.transition(hsm.on(cognition.Cognition.failed_event), hsm.effect(_record)),
+            hsm.transition(hsm.on(mosfet.RebootEvent), hsm.effect(_record)),
+        ),
+    )
+
+
+@pytest.mark.parametrize("stage", ["intuition", "reasoning"])
+def test_a_step_that_outlasts_the_step_timeout_fails_its_turn_as_a_typed_failure_the_bot_perceives(
+    stage: typing.Literal["intuition", "reasoning"],
+) -> None:
+    """D-R-3 (live: a 31.8 s intuition rebooted the bot and destroyed its bench): a slow step fails
+    only its turn. The step is stopped, the turn is remembered and reported as a typed failure, the
+    bot perceives that failure as its next turn, and the same children serve the turn after it."""
+
+    async def run() -> tuple[list[hsm.Event[typing.Any]], str, str, _SlowFirstStepProcessor, dict[str, memory.Episode]]:
+        slow = _SlowFirstStepProcessor(hangs=True)
+        store = memory.Memory()
+        intuition, reasoning = cognition_abilities(
+            intuition_processor=slow if stage == "intuition" else _SlowFirstStepProcessor(hangs=False),
+            reasoning_processor=slow if stage == "reasoning" else None,
         )
-
-    async def run() -> tuple[list[hsm.Event[typing.Any]], str]:
-        monkeypatch.setattr(cognition_module, "_CHILD_OPERATION_TIMEOUT", datetime.timedelta(milliseconds=10))
-        stubborn = StubbornIntuition(processor=RecordingIntuitionProcessor(no_output("unused")))
-        _, reasoning = cognition_abilities()
         ability = cognition.Cognition(
-            intuition=stubborn,
+            intuition=intuition,
             reasoning=reasoning,
-            reflection=cognition.Reflection(processor=FixedProcessor(no_output("reflection")), memory=memory.Memory()),
+            reflection=cognition.Reflection(processor=FixedProcessor(no_output("reflection")), memory=store),
+            memory=store,
+            child_operation_timeout=datetime.timedelta(milliseconds=500),
         )
+        ctx = shared_hsm_context()
+        body = _StepTimeoutBody()
+        _ = await mosfet.started(ctx, body, body.model)
+        await ability.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=body)))
+        await wait_until(lambda: ability.state().endswith("/idle"))
+        turn = (await started_cognition_input(ctx)).model_copy(update={"participants": (_ADA,)})
+        _ = await hsm.dispatch(ctx, ability, ability.input_event.with_data_and_id(turn, "slow-turn"))
+        await wait_until(lambda: any(event.name == cognition.InputEvent.name for event in body.told))
+        await wait_until(lambda: ability.state().endswith("/idle"))
+        _ = await hsm.dispatch(ctx, ability, ability.input_event.with_data_and_id(turn, "next-turn"))
+        await wait_until(lambda: any(event.name == cognition.OutputEvent.name for event in body.told))
+        episodes = {episode.turn_id: episode for episode in await _remembered(ctx, store)}
+        return list(body.told), ability.state(), hsm.id(ability), slow, episodes
+
+    told, state, cognition_id, slow, episodes = asyncio.run(run())
+
+    assert [event for event in told if event.name == mosfet.RebootEvent.name] == []
+    assert state.endswith("/idle")
+    (failed,) = [event for event in told if event.name == cognition.Cognition.failed_event.name]
+    assert failed.id == "slow-turn"
+    timed_out = failed.data
+    assert isinstance(timed_out, cognition.StepTimedOutData)
+    assert (timed_out.stage, timed_out.timeout_seconds, timed_out.turn_id, timed_out.stimulus) == (
+        stage,
+        0.5,
+        "slow-turn",
+        mosfet.InputEvent.name,
+    )
+    assert timed_out.message == f"Cognition's {stage} step took longer than 0.5 seconds, so the turn failed."
+    (perceived,) = [event for event in told if event.name == cognition.InputEvent.name]
+    assert perceived.source == cognition_id
+    assert isinstance(perceived.data, cognition.InputData)
+    assert perceived.data.participants == (_ADA,)
+    stimulus = perceived.data.stimulus
+    assert isinstance(stimulus, hsm.Event)
+    assert stimulus.name == cognition.StepTimedOutEvent.name
+    assert stimulus.data == timed_out
+    assert (slow.calls, slow.cancelled) == (2, 1)
+    assert [event.id for event in told if event.name == cognition.OutputEvent.name] == ["next-turn"]
+    assert episodes["slow-turn"].outcome is memory.Outcome.FAILED
+    _assert_keeps_what_was_said(episodes["slow-turn"])
+    assert episodes["next-turn"].outcome is memory.Outcome.COMPLETED
+
+
+def test_a_step_is_given_a_local_models_time_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """D-R-3: one step of a local model with thinking on takes 30 s and more (live: 31.8 s), so a
+    cognition built without a step timeout waits at least 120 s for each of its steps."""
+
+    hops: list[tuple[str, datetime.timedelta]] = []
+    run_terminal_operation = ability_module.run_terminal_operation
+
+    async def recorded(
+        ctx: hsm.Context,
+        *,
+        child: hsm.Instance,
+        request: hsm.Event[typing.Any] | collections.abc.Callable[[hsm.Instance], hsm.Event[typing.Any]],
+        terminals: tuple[hsm.Event[typing.Any], ...],
+        timeout: datetime.timedelta,
+        on_terminal: collections.abc.Callable[[hsm.Event[typing.Any]], None] | None = None,
+    ) -> hsm.Event[typing.Any]:
+        if isinstance(child, cognition.Intuition | cognition.Reasoning):
+            hops.append((type(child).__name__, timeout))
+        return await run_terminal_operation(
+            ctx, child=child, request=request, terminals=terminals, timeout=timeout, on_terminal=on_terminal
+        )
+
+    monkeypatch.setattr(ability_module, "run_terminal_operation", recorded)
+
+    async def run() -> None:
+        # Intuition leaves the turn to reasoning, so both steps are taken.
+        ability = make_cognition(intuition_processor=_SlowFirstStepProcessor(hangs=False))
         ctx = shared_hsm_context()
         owner = CognitionAttachmentOwner()
         _ = await mosfet.started(ctx, owner, owner.model)
         await ability.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)))
         await wait_until(lambda: ability.state().endswith("/idle"))
-        owner.lifecycle.clear()
         _ = await hsm.dispatch(
-            ctx,
-            ability,
-            ability.input_event.with_data_and_id(await started_cognition_input(ctx), "timed-out-turn"),
+            ctx, ability, ability.input_event.with_data_and_id(await started_cognition_input(ctx), "turn")
         )
-        await wait_until(lambda: any(event.name == mosfet.RebootEvent.name for event in owner.lifecycle))
-        return list(owner.lifecycle), ability.state()
+        await wait_until(lambda: len(hops) >= 2 and ability.state().endswith("/idle"))
 
-    lifecycle, state = asyncio.run(run())
+    asyncio.run(run())
 
-    reboots = [event for event in lifecycle if event.name == mosfet.RebootEvent.name]
-    assert len(reboots) == 1
-    assert reboots[0].data == mosfet.RebootEventData(reason="cognition_child_teardown_failed")
-    assert state.endswith("/rebooting")
+    assert [step for step, _ in hops] == ["Intuition", "Reasoning"]
+    assert all(timeout >= datetime.timedelta(seconds=120) for _, timeout in hops)
 
 
 def test_cognition_settled_child_terminal_is_not_abandoned_by_parent_deadline() -> None:
@@ -4020,9 +4127,7 @@ class _HoldingIntuition(cognition.Intuition):
 
 async def _rebooted_turn(
     *,
-    cancel: bool,
-    child_operation_timeout: datetime.timedelta | None = None,
-    cancel_teardown_timeout: datetime.timedelta | None = None,
+    cancel_teardown_timeout: datetime.timedelta,
 ) -> tuple[list[hsm.Event[typing.Any]], tuple[memory.Episode, ...]]:
     store = memory.Memory()
     _, reasoning = cognition_abilities()
@@ -4031,7 +4136,6 @@ async def _rebooted_turn(
         reasoning=reasoning,
         reflection=cognition.Reflection(processor=FixedProcessor(no_output("reflection")), memory=store),
         memory=store,
-        child_operation_timeout=child_operation_timeout,
         cancel_teardown_timeout=cancel_teardown_timeout,
     )
     ctx = shared_hsm_context()
@@ -4043,41 +4147,24 @@ async def _rebooted_turn(
     turn = (await started_cognition_input(ctx)).model_copy(update={"participants": (_ADA,)})
     _ = await hsm.dispatch(ctx, ability, ability.input_event.with_data_and_id(turn, "rebooted-turn"))
     await wait_until(lambda: ability.state().endswith("/intuition"))
-    if cancel:
-        _ = await hsm.dispatch(
-            ctx,
-            ability,
-            dataclasses.replace(
-                cognition.CancelEvent.with_data(cognition.CancelData(operation_id="rebooted-turn", token="token")),
-                id="rebooted-turn",
-                source=hsm.id(owner),
-                target=hsm.id(ability),
-            ),
-        )
+    _ = await hsm.dispatch(
+        ctx,
+        ability,
+        dataclasses.replace(
+            cognition.CancelEvent.with_data(cognition.CancelData(operation_id="rebooted-turn", token="token")),
+            id="rebooted-turn",
+            source=hsm.id(owner),
+            target=hsm.id(ability),
+        ),
+    )
     async with asyncio.timeout(5):
         while not any(event.name == mosfet.RebootEvent.name for event in owner.lifecycle):
             await asyncio.sleep(0.01)
     return list(owner.lifecycle), await _remembered(ctx, store)
 
 
-def test_cognition_remembers_a_turn_a_child_timeout_reboots_away_as_failed() -> None:
-    lifecycle, episodes = asyncio.run(
-        _rebooted_turn(cancel=False, child_operation_timeout=datetime.timedelta(milliseconds=50))
-    )
-
-    assert [event.data for event in lifecycle if event.name == mosfet.RebootEvent.name] == [
-        mosfet.RebootEventData(reason="cognition_child_teardown_failed")
-    ]
-    (kept,) = episodes
-    assert kept.turn_id == "rebooted-turn"
-    assert kept.outcome is memory.Outcome.FAILED
-    _assert_keeps_what_was_said(kept)
-
-
 def test_cognition_remembers_a_cancelled_turn_whose_teardown_reboots_as_cancelled() -> None:
-    lifecycle, episodes = asyncio.run(
-        _rebooted_turn(cancel=True, cancel_teardown_timeout=datetime.timedelta(milliseconds=50))
-    )
+    lifecycle, episodes = asyncio.run(_rebooted_turn(cancel_teardown_timeout=datetime.timedelta(milliseconds=50)))
 
     assert [event.data for event in lifecycle if event.name == mosfet.RebootEvent.name] == [
         mosfet.RebootEventData(reason="cognition_cancel_teardown_failed")

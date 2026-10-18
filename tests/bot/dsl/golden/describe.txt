@@ -52,7 +52,8 @@
       ],
       "sensory_register": "StmMemory",
       "timeouts": [
-        "processing"
+        "processing",
+        "step"
       ],
       "allowed": [
         "ability_without_tools"

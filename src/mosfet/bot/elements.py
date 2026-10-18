@@ -135,12 +135,13 @@ class VoiceElement(Member, kind=VoiceKind):
 
 @dataclasses.dataclass(kw_only=True)
 class TimeoutsElement(Member, kind=TimeoutsKind):
-    """The body's timeout overrides; ``None`` keeps the body's default."""
+    """The bot's timeout overrides; ``None`` keeps the default of the body or cognition that owns it."""
 
     function: typing.ClassVar[str] = "bot.timeouts"
     processing: datetime.timedelta | None = None
     deactivation: datetime.timedelta | None = None
     attachment: datetime.timedelta | None = None
+    step: datetime.timedelta | None = None
 
 
 @dataclasses.dataclass(kw_only=True)
@@ -691,12 +692,13 @@ class RedefinableVoice(_Single[VoiceElement]):
 
 @dataclasses.dataclass(kw_only=True)
 class RedefinableTimeouts(_Single[TimeoutsElement]):
-    """``bot.timeouts``: the body's timeout overrides."""
+    """``bot.timeouts``: the bot's timeout overrides."""
 
     function: typing.ClassVar[str] = "bot.timeouts"
     processing: datetime.timedelta | None = None
     deactivation: datetime.timedelta | None = None
     attachment: datetime.timedelta | None = None
+    step: datetime.timedelta | None = None
 
     @typing.override
     def _redefine(self, model: Model, stack: list[hsm.Element]) -> TimeoutsElement | None:
@@ -705,6 +707,7 @@ class RedefinableTimeouts(_Single[TimeoutsElement]):
             processing=self.processing,
             deactivation=self.deactivation,
             attachment=self.attachment,
+            step=self.step,
             location=self.location,
         )
         return self._register(model, member)
@@ -934,13 +937,20 @@ def timeouts(
     processing: datetime.timedelta | None = None,
     deactivation: datetime.timedelta | None = None,
     attachment: datetime.timedelta | None = None,
+    step: datetime.timedelta | None = None,
 ) -> RedefinableTimeouts:
-    """The body's timeout overrides (``bot.timeouts(processing=datetime.timedelta(seconds=30))``); each positive."""
+    """The bot's timeout overrides (``bot.timeouts(processing=datetime.timedelta(seconds=30))``); each positive.
+
+    ``processing``, ``deactivation`` and ``attachment`` are the body's own bounds. ``step`` bounds each step
+    of a turn in cognition (intuition, reasoning, ...; two minutes by default); a step that outlasts it
+    fails only its turn, which the bot then perceives.
+    """
 
     return RedefinableTimeouts(
         processing=processing,
         deactivation=deactivation,
         attachment=attachment,
+        step=step,
         location=diagnostics.Location.capture(),
     )
 

@@ -55,7 +55,7 @@ GREETER = bot.define(
     bot.output(memory.Memory(id="voice")),
     bot.attach(audio.Speaker()),
     bot.register(memory.StmMemory(database=f"/tmp/{_SECRET}-register.sqlite3")),
-    bot.timeouts(processing=datetime.timedelta(seconds=17)),
+    bot.timeouts(processing=datetime.timedelta(seconds=17), step=datetime.timedelta(minutes=3)),
     bot.allow("ability_without_tools"),
 )
 

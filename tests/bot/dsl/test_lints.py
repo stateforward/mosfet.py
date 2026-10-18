@@ -1,5 +1,6 @@
 """Clippy-style lints: each lint's golden, ``bot.allow``, ``bot.check`` and ``LintWarning`` (DSL-33)."""
 
+import datetime
 import pathlib
 import subprocess
 import sys
@@ -102,6 +103,18 @@ def test_check_returns_what_define_found() -> None:
 
     assert bot.check(model) == tuple(model.findings)
     assert [found.code for found in bot.check(model)] == ["instruction_like_traits", "empty_timeouts"]
+
+
+def test_timeouts_that_set_only_the_step_timeout_set_a_timeout() -> None:
+    model = bot.define(
+        "greeter",
+        bot.traits("curious"),
+        bot.cognition(support.Silent()),
+        bot.timeouts(step=datetime.timedelta(minutes=3)),
+        bot.attach(phone.Phone()),
+    )
+
+    assert bot.check(model) == ()
 
 
 def test_one_pass_reports_errors_and_lints_but_no_lint_about_a_part_that_failed(here: pathlib.Path) -> None:

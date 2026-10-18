@@ -44,7 +44,10 @@ _INTUITION_ID_SUFFIX = ":intuition"
 _REASONING_ID_SUFFIX = ":reasoning"
 _REFLECTION_ID_SUFFIX = ":reflection"
 _REMEMBER_ID_SUFFIX = ":remember"
-_CHILD_OPERATION_TIMEOUT = datetime.timedelta(seconds=30)
+# How long one step of a turn (autonomy, associating, intuition, reasoning) may take: a capacity of
+# the composition (``bot.timeouts(step=)``). One step of a local model with thinking on takes 30 s
+# and more, and intuition and reasoning together still fit the body's 5-minute turn bound.
+_CHILD_OPERATION_TIMEOUT = datetime.timedelta(seconds=120)
 # How long cognition stays idle before it rests (and consolidation may run): a capacity of the
 # composition, like the processing timeout, not a choice the bot makes.
 _DEFAULT_REST_AFTER: typing.Final = datetime.timedelta(minutes=10)
@@ -137,10 +140,62 @@ _ApplyFailedEvent = hsm.Event[_UseFailedEventData](
     kind=hsm.ErrorEventKind,
     schema=_UseFailedEventData,
 )
-_ChildHopTimedOutEvent = hsm.Event[object](
+
+
+class StepTimedOutData(ability.FailureData):
+    """A step of the bot's cognition took longer than its step timeout, so the turn it was taking failed.
+
+    The bot perceives this as a turn of its own: which step it was in, how long that step was
+    allowed, and which turn failed for which stimulus. Only the step was stopped; nothing was
+    rebooted and every ability kept its state.
+    """
+
+    # The base names its own description in json_schema_extra; this payload's docstring describes it.
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(frozen=True, json_schema_extra=None)
+
+    stage: typing.Literal["autonomy", "intuition", "reasoning"] = pydantic.Field(
+        description=(
+            "The step of cognition that outlasted its timeout: autonomy (a learned behavior running), "
+            "intuition (the fast first decision) or reasoning (the deliberate one)."
+        ),
+        examples=["reasoning"],
+    )
+    timeout_seconds: float = pydantic.Field(
+        gt=0,
+        description="How long the step was allowed, in seconds, before the turn failed.",
+        examples=[120.0],
+    )
+    turn_id: str = pydantic.Field(
+        min_length=1,
+        description="Identifier of the turn that failed.",
+        examples=["turn-123"],
+    )
+    stimulus: str | None = pydantic.Field(
+        default=None,
+        description="Name of the stimulus the failed turn was taken up for, when it has one.",
+        examples=["bot.input"],
+    )
+
+
+StepTimedOutEvent = hsm.Event[StepTimedOutData](
+    name="bot.ability.cognition.step.timed_out",
+    schema=StepTimedOutData,
+)
+
+
+class _HopTimedOutData(pydantic.BaseModel):
+    """Private: the step that outlasted its timeout, with the turn it was taking, sent to Cognition itself."""
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(arbitrary_types_allowed=True, frozen=True)
+
+    turn: types.TurnData
+    failure: StepTimedOutData
+
+
+_ChildHopTimedOutEvent = hsm.Event[_HopTimedOutData](
     name="bot.ability.cognition.child.hop.timed_out",
     kind=hsm.ErrorEventKind,
-    schema=object,
+    schema=_HopTimedOutData,
 )
 
 
@@ -165,7 +220,8 @@ class _TurnOpenedData(pydantic.BaseModel):
     ``processing`` defers it for the whole turn, so it reaches whichever state the turn ends in:
     ``cancelling`` remembers the turn as cancelled and ``rebooting`` as failed, each with what was
     said and who took part. A turn that completes or fails is remembered from its own terminal,
-    which carries the turn, so ``ready`` lets this event fall through.
+    which carries the turn, so ``ready`` lets this event fall through; so is a turn whose step
+    outlasted its timeout, so ``stopping`` only spends it.
     """
 
     model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(arbitrary_types_allowed=True, frozen=True)
@@ -259,6 +315,15 @@ class Cognition(ability.Ability[InputData, OutputData]):
 
     Chart states are lifecycle phases only. The active turn rides the child request
     and terminal event chain, not instance fields (HSM-COMPLETION-001).
+
+    Each step of a turn (autonomy, associating, intuition, reasoning) is bounded by the step
+    timeout, ``child_operation_timeout`` (``bot.timeouts(step=)``; two minutes by default, as one
+    step of a local model can take half a minute and more). A step that outlasts it fails only its
+    turn: the body gets the turn's ``StepTimedOutData`` failure and then a ``cognition.InputEvent``
+    observing ``StepTimedOutEvent``, a new turn the bot decides on, while the step is stopped the
+    way a cancel stops it. Nothing reboots and no ability loses its state, unless the step cannot be
+    stopped within the cancel teardown bound. An association that outlasts it leaves the turn
+    without associations.
 
     With ``memory`` composed, Cognition attaches it and remembers every turn it settles —
     completed, failed, or cancelled — as one ``memory.RememberEvent`` it does not wait on. With
@@ -459,7 +524,17 @@ class Cognition(ability.Ability[InputData, OutputData]):
         event: hsm.Event[typing.Any],
     ) -> bool:
         del ctx
-        return event.source == hsm.id(instance) and event.target == hsm.id(instance)
+        data = event.data
+        if not isinstance(data, _HopTimedOutData):
+            return False
+        operation = processing.active_operation(instance, data.turn.operation_id)
+        # The stage topology selected the step; source, target and generation correlate the turn.
+        return (
+            event.source == hsm.id(instance)
+            and event.target == hsm.id(instance)
+            and operation is not None
+            and data.turn.generation == hsm.id(operation)
+        )
 
     @staticmethod
     async def _await_child_hop(
@@ -470,24 +545,35 @@ class Cognition(ability.Ability[InputData, OutputData]):
         child: ability.Ability[typing.Any, typing.Any],
         request: hsm.Event[typing.Any],
         hop_id: str,
+        turn: types.TurnData,
+        stage: typing.Literal["autonomy", "intuition", "reasoning"],
     ) -> None:
-        """Await one child hop through the settled one-shot. Timeout is the hop bound."""
+        """Await one child hop through the settled one-shot. The step timeout is the hop bound."""
 
         child_timeout = instance._child_operation_timeout
+        timeout = child_timeout if child_timeout is not None else _CHILD_OPERATION_TIMEOUT
         try:
             terminal = await ability.run_terminal_operation(
                 instance.context(),
                 child=child,
                 request=request,
                 terminals=(child.output_event, child.failed_event),
-                timeout=child_timeout if child_timeout is not None else _CHILD_OPERATION_TIMEOUT,
+                timeout=timeout,
             )
         except TimeoutError:
+            seconds = timeout.total_seconds()
+            failure = StepTimedOutData(
+                message=f"Cognition's {stage} step took longer than {seconds:g} seconds, so the turn failed.",
+                stage=stage,
+                timeout_seconds=seconds,
+                turn_id=turn.operation_id,
+                stimulus=input.stimulus_name(turn.input.stimulus),
+            )
             _ = hsm.dispatch(
                 ctx,
                 instance,
                 dataclasses.replace(
-                    _ChildHopTimedOutEvent.with_data_and_id(None, hop_id),
+                    _ChildHopTimedOutEvent.with_data_and_id(_HopTimedOutData(turn=turn, failure=failure), hop_id),
                     source=hsm.id(instance),
                     target=hsm.id(instance),
                     metadata=_public_metadata(dict(event.metadata)),
@@ -545,6 +631,8 @@ class Cognition(ability.Ability[InputData, OutputData]):
                 child=autonomy_ability,
                 request=input_event,
                 hop_id=hop_id,
+                turn=turn,
+                stage="autonomy",
             )
 
     @staticmethod
@@ -606,6 +694,8 @@ class Cognition(ability.Ability[InputData, OutputData]):
             child=instance._intuition,
             request=input_event,
             hop_id=hop_id,
+            turn=turn,
+            stage="intuition",
         )
 
     @staticmethod
@@ -1034,6 +1124,8 @@ class Cognition(ability.Ability[InputData, OutputData]):
                 child=instance._reasoning,
                 request=input_event,
                 hop_id=hop_id,
+                turn=turn,
+                stage="reasoning",
             )
 
     @staticmethod
@@ -1153,9 +1245,125 @@ class Cognition(ability.Ability[InputData, OutputData]):
 
     @staticmethod
     def _remember_abandoned(ctx: hsm.Context, instance: "Cognition", event: hsm.Event[typing.Any]) -> None:
-        """A reboot (a child hop that never answered, or reflection's) ended the turn: it failed."""
+        """A reboot (a step that could not be stopped, or reflection's) ended the turn: it failed."""
 
         Cognition._remember_opened_turn(ctx, instance, event, memory.Outcome.FAILED)
+
+    @staticmethod
+    def _spend_opened_turn(ctx: hsm.Context, instance: "Cognition", event: hsm.Event[typing.Any]) -> None:
+        """A turn whose step outlasted its timeout was remembered from that timeout: nothing is left to keep."""
+
+        del ctx, instance, event
+
+    @staticmethod
+    def _fail_timed_out_step(ctx: hsm.Context, instance: "Cognition", event: hsm.Event[typing.Any]) -> None:
+        """Fail the turn whose step outlasted its timeout, and hand the body that failure to perceive.
+
+        The turn is remembered as failed from the timeout, which carries it. The body gets the
+        turn's typed failure first, then a ``cognition.InputEvent`` observing it with the turn's
+        participants: a new turn the bot decides on, the way a recall outcome is.
+        """
+
+        data = event.data
+        assert isinstance(data, _HopTimedOutData)
+        public_metadata = _public_metadata(dict(event.metadata))
+        Cognition._remember(
+            ctx,
+            instance,
+            operation_id=data.turn.operation_id,
+            outcome=memory.Outcome.FAILED,
+            metadata=public_metadata,
+            cognition_input=data.turn.input,
+        )
+        terminal = dataclasses.replace(
+            instance.failed_event.with_data(data.failure),
+            id=data.turn.operation_id,
+            metadata=public_metadata,
+            source=hsm.id(instance),
+        )
+        ability.Ability._forward_terminal_event(ctx, instance, ability.TerminalErrorEvent.with_data(terminal))
+        if not instance._attachments:
+            return
+        owner = instance._attachments[0]
+        stimulus = dataclasses.replace(
+            StepTimedOutEvent.with_data(data.failure), source=hsm.id(instance), metadata=public_metadata
+        )
+        _ = hsm.dispatch(
+            ctx,
+            owner,
+            dataclasses.replace(
+                InputEvent.with_data_and_id(
+                    InputData(stimulus=stimulus, participants=data.turn.input.participants), uuid.uuid4().hex
+                ),
+                source=hsm.id(instance),
+                target=hsm.id(owner),
+                metadata=public_metadata,
+            ),
+        )
+
+    @staticmethod
+    async def _stop_step(
+        ctx: hsm.Context,
+        instance: "Cognition",
+        event: hsm.Event[typing.Any],
+        child: ability.Ability[typing.Any, typing.Any],
+        suffix: str,
+        *,
+        pending_after_child: bool = False,
+    ) -> None:
+        """Stop the step that outlasted its timeout the way a cancel stops it.
+
+        The cancellation capability is the turn's own generation, so only this turn's stop settles.
+        """
+
+        data = event.data
+        assert isinstance(data, _HopTimedOutData)
+        operation_id = data.turn.operation_id
+        stop = dataclasses.replace(
+            CancelEvent.with_data(CancelData(operation_id=operation_id, token=data.turn.generation)),
+            id=operation_id,
+            source=hsm.id(instance),
+            target=hsm.id(instance),
+            metadata=dict(event.metadata),
+        )
+        await Cognition._dispatch_cancel_to_child(
+            ctx, instance, stop, child, suffix, pending_after_child=pending_after_child
+        )
+
+    @staticmethod
+    async def _stop_autonomy(ctx: hsm.Context, instance: "Cognition", event: hsm.Event[typing.Any]) -> None:
+        child = instance._autonomy
+        assert child is not None
+        # Autonomy's cancellation is best-effort (see cancelling): the stop settles once it lands.
+        await Cognition._stop_step(ctx, instance, event, child, _AUTONOMY_ID_SUFFIX, pending_after_child=True)
+
+    @staticmethod
+    async def _stop_intuition(ctx: hsm.Context, instance: "Cognition", event: hsm.Event[typing.Any]) -> None:
+        await Cognition._stop_step(ctx, instance, event, instance._intuition, _INTUITION_ID_SUFFIX)
+
+    @staticmethod
+    async def _stop_reasoning(ctx: hsm.Context, instance: "Cognition", event: hsm.Event[typing.Any]) -> None:
+        await Cognition._stop_step(ctx, instance, event, instance._reasoning, _REASONING_ID_SUFFIX)
+
+    @staticmethod
+    def _is_step_stopped(ctx: hsm.Context, instance: "Cognition", event: hsm.Event[typing.Any]) -> bool:
+        """Autonomy's stop landed: Cognition's own acknowledgement, for a turn still live."""
+
+        del ctx
+        data = event.data
+        return (
+            isinstance(data, CancelData)
+            and event.id == data.operation_id
+            and event.source == hsm.id(instance)
+            and event.target == hsm.id(instance)
+            and processing.active_operation(instance, data.operation_id) is not None
+        )
+
+    @staticmethod
+    def _finish_stop(ctx: hsm.Context, instance: "Cognition", event: hsm.Event[typing.Any]) -> None:
+        """The stopped step no longer holds work: retire the capability its stop was sent under."""
+
+        _ = Cognition._finish_cancellation(ctx, instance, event)
 
     @staticmethod
     def _request_reboot(
@@ -1163,7 +1371,7 @@ class Cognition(ability.Ability[InputData, OutputData]):
         instance: "Cognition",
         event: hsm.Event[typing.Any],
     ) -> None:
-        # Child-wait timeout / teardown path only (wired from hsm.after transitions).
+        # A step that could not be stopped within the teardown bound (wired from hsm.after).
         processing.request_reboot(ctx, instance, event, reason="cognition_child_teardown_failed")
 
     @staticmethod
@@ -1369,7 +1577,9 @@ class Cognition(ability.Ability[InputData, OutputData]):
         )
 
     @staticmethod
-    def _emit_cancelled(ctx: hsm.Context, instance: "Cognition", event: hsm.Event[typing.Any]) -> None:
+    def _finish_cancellation(ctx: hsm.Context, instance: "Cognition", event: hsm.Event[typing.Any]) -> tuple[str, str]:
+        """Retire the capability a child's cancel was sent under; the cancelled turn's id and token."""
+
         if isinstance(event.data, CancelData):
             operation_id = event.data.operation_id
             token = event.data.token
@@ -1397,6 +1607,11 @@ class Cognition(ability.Ability[InputData, OutputData]):
                 event.source,
             )
             processing.finish_operation(ctx, instance, cancellation_id)
+        return operation_id, token
+
+    @staticmethod
+    def _emit_cancelled(ctx: hsm.Context, instance: "Cognition", event: hsm.Event[typing.Any]) -> None:
+        operation_id, token = Cognition._finish_cancellation(ctx, instance, event)
         owner = instance._attachments[0]
         _ = hsm.dispatch(
             ctx,
@@ -1867,8 +2082,8 @@ class Cognition(ability.Ability[InputData, OutputData]):
                 hsm.transition(
                     hsm.on(_ChildHopTimedOutEvent),
                     hsm.guard(_is_child_hop_timeout),
-                    hsm.effect(_request_reboot),
-                    hsm.target("/Cognition/rebooting"),
+                    hsm.effect(_fail_timed_out_step),
+                    hsm.target("/Cognition/processing/stopping/autonomy"),
                 ),
             ),
             hsm.state(
@@ -1917,8 +2132,8 @@ class Cognition(ability.Ability[InputData, OutputData]):
                 hsm.transition(
                     hsm.on(_ChildHopTimedOutEvent),
                     hsm.guard(_is_child_hop_timeout),
-                    hsm.effect(_request_reboot),
-                    hsm.target("/Cognition/rebooting"),
+                    hsm.effect(_fail_timed_out_step),
+                    hsm.target("/Cognition/processing/stopping/intuition"),
                 ),
             ),
             hsm.state(
@@ -1946,9 +2161,38 @@ class Cognition(ability.Ability[InputData, OutputData]):
                 hsm.transition(
                     hsm.on(_ChildHopTimedOutEvent),
                     hsm.guard(_is_child_hop_timeout),
+                    hsm.effect(_fail_timed_out_step),
+                    hsm.target("/Cognition/processing/stopping/reasoning"),
+                ),
+            ),
+            # A step outlasted its timeout: its turn has failed, and the step is stopped the way a
+            # cancel stops it. Only a step that cannot be stopped within the teardown bound reboots.
+            hsm.state(
+                "stopping",
+                hsm.initial(hsm.target("intuition")),
+                # The turn was remembered as failed with its timeout; its opened input is spent here
+                # (unguarded, so it is taken whenever it arrives), never kept for rebooting.
+                hsm.transition(hsm.on(_TurnOpenedEvent), hsm.effect(_spend_opened_turn)),
+                hsm.transition(
+                    hsm.on(processing.CancelledEvent),
+                    hsm.guard(_matches_child_cancelled),
+                    hsm.effect(_finish_stop, _finish_turn),
+                    hsm.target("/Cognition/ready/settling"),
+                ),
+                hsm.transition(
+                    hsm.on(_CancelPendingEvent),
+                    hsm.guard(_is_step_stopped),
+                    hsm.effect(_finish_stop, _finish_turn),
+                    hsm.target("/Cognition/ready/settling"),
+                ),
+                hsm.transition(
+                    hsm.after(_cancel_timeout_delay),
                     hsm.effect(_request_reboot),
                     hsm.target("/Cognition/rebooting"),
                 ),
+                hsm.state("autonomy", hsm.activity(_stop_autonomy)),
+                hsm.state("intuition", hsm.activity(_stop_intuition)),
+                hsm.state("reasoning", hsm.activity(_stop_reasoning)),
             ),
             hsm.state(
                 "cancelling",
@@ -2128,4 +2372,6 @@ __all__ = [
     "Cognition",
     "InputData",
     "OutputData",
+    "StepTimedOutData",
+    "StepTimedOutEvent",
 ]

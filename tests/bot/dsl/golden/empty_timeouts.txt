@@ -4,7 +4,7 @@ warning[empty_timeouts]: `bot.timeouts()` sets no timeout
 11 |     bot.timeouts(),
    |     ^^^^^^^^^^^^^^ changes nothing
    |
-   = note: with no values, the body keeps every default timeout
+   = note: with no values, the bot keeps every default timeout
    = note: allow it with `bot.allow("empty_timeouts")` if this is deliberate
 help: remove it, or set a timeout
    |
