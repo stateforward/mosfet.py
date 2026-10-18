@@ -34,7 +34,8 @@ opens and reads nothing; the model holds the very instances the file built.
 ```
 
 `testing.Scripted()` stands in for a model here; a bot file passes a real one, such as
-`openai_compat.Processor(client=openai_compat.ChatClient(model=...))`. `bot.define` is the only
+`openai_compat.Processor(client=openai_compat.ChatClient(model=...))`. Any processor is a
+`processing.Processor` (`from mosfet.abilities import processing`). `bot.define` is the only
 function that defines a bot: a bot file writes one `bot.define(...)` and constructs every part inline
 in it, from literals and the settings and secrets it read. A bot that needs values only its process
 has (a secret, the data dir) defines itself under `if __name__ == "__main__":`, after reading them. A
@@ -272,7 +273,8 @@ It is not part of the bot's definition, so given to `bot.define` it is `B0015`.
 
 ```
 
-`mosfet.bot.testing` is what a bot's tests need, and nothing that decides for the bot:
+`mosfet.bot.testing` (also reachable as `bot.testing`) is what a bot's tests need, and nothing that
+decides for the bot:
 
 * `testing.Scripted(*choices)` is a model whose choices a test writes down. It records every call,
   makes each `testing.Choice(stimulus=, event=, data=)` once, only on a turn woken by that stimulus

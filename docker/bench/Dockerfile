@@ -1,8 +1,9 @@
 # The builder bot's bench: the one image its sandbox allows (BL-5). docker.Host makes each machine from it with
 # `sleep infinity` as uid 65532 on a read-only root, with no network unless the owner configures a bridge, so the
 # bench has only what this image brings: python with stateforward.mosfet installed (bench image 2, W7-14), uv,
-# git and pytest, plus the sh, timeout, mkdir, cat and base64 that docker.Host's exec wrappers need. So the bot
-# can write a bot file, `from mosfet import bot`, and test it with pytest, reading bot.define's diagnostics.
+# git and pytest, plus the sh, timeout, mkdir, cat and base64 that docker.Host's exec wrappers need, and
+# docs/bot.md and docs/bot_diagnostics.md at /usr/share/doc/mosfet/. So the bot can write a bot file,
+# `from mosfet import bot`, and test it with pytest, reading bot.define's diagnostics.
 # Built locally into the rootless daemon and never pushed or pulled. The build context is the repository root,
 # because mosfet is installed from its source and its uv.lock. The image is built for one mosfet commit and
 # labeled with it (org.opencontainers.image.revision), so the build needs that commit:
@@ -51,6 +52,9 @@ LABEL org.opencontainers.image.title="mosfet bench" \
       org.opencontainers.image.version="2" \
       org.opencontainers.image.source="https://github.com/stateforward/mosfet.py" \
       org.opencontainers.image.licenses="MIT"
+# The bot definition guide and every diagnostic's explanation, for whoever writes a bot file on the bench; the
+# builder's README tells its person where they are.
+COPY docs/bot.md docs/bot_diagnostics.md /usr/share/doc/mosfet/
 # The mosfet commit this image carries, last so a new commit rebuilds only this layer of the final stage. A build
 # without it fails: an unlabeled bench is one the builder refuses.
 ARG MOSFET_COMMIT

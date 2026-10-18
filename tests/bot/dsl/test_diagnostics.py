@@ -327,6 +327,21 @@ def test_call_is_none_without_source_or_columns() -> None:
     assert diagnostics.call(bot.Span(filename=__file__, lineno=1)) is None
 
 
+def test_the_explanation_of_a_missing_cognition_names_where_a_processor_comes_from() -> None:
+    explained = " ".join(bot.explain("B0002").split())  # the prose is wrapped
+
+    assert "`from mosfet.abilities import processing`" in explained
+    assert "`testing.Scripted()`" in explained
+    assert "`from mosfet.bot import testing`" in explained
+
+
+def test_the_explanation_of_a_stray_names_the_firmware_elements_too() -> None:
+    explained = " ".join(bot.explain("B0017").split())  # the prose is wrapped
+
+    for name in ("allow", "state", "initial", "transition", "attribute", "on", "after", "target"):
+        assert f"`bot.{name}`" in explained
+
+
 def test_explain_rejects_an_unknown_code() -> None:
     with pytest.raises(ValueError, match="unknown diagnostic code `B9999`"):
         _ = bot.explain("B9999")

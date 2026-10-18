@@ -5,7 +5,7 @@ error[B0002]: bot `greeter` has no `bot.cognition`
   |         ^^^^^^^^^^ no cognition
   |
   = note: cognition is what perceives and decides; a bot without one is a body with no mind
-help: give it a cognition that thinks with a `processing.Processor`
+help: give it a cognition that thinks with a `processing.Processor` (`from mosfet.abilities import processing`); in a test, the offline one is `testing.Scripted()` (`from mosfet.bot import testing`)
   |
 6 | model = bot.define("…", bot.attach(phone.Phone()), bot.cognition(processor))
   |                                                  ~~~~~~~~~~~~~~~~~~~~~~~~~~

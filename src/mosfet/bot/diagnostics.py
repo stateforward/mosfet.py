@@ -283,7 +283,9 @@ EXPLANATIONS: tuple[Explanation, ...] = (
         meaning="Every bot has exactly one `bot.cognition`, the mind that perceives and decides.",
         why=(
             "A body with no cognition can hold devices but can never choose anything to do with them. "
-            "`bot.cognition(processor)` thinks with a `processing.Processor`."
+            "`bot.cognition(processor)` thinks with a `processing.Processor` (`from mosfet.abilities import "
+            "processing`). In a test, the offline one is `testing.Scripted()` (`from mosfet.bot import testing`), "
+            "which makes only the choices the test writes down."
         ),
         wrong='model = bot.define("greeter", bot.attach(phone.Phone()))',
         right='model = bot.define("greeter", bot.cognition(processor), bot.attach(phone.Phone()))',
@@ -544,9 +546,13 @@ EXPLANATIONS: tuple[Explanation, ...] = (
         title="`bot.define` is given something that is not a bot element",
         meaning=(
             "`bot.define` takes the bot's name, then elements: `bot.attach`, `bot.input`, `bot.output`, "
-            "`bot.register`, `bot.traits`, `bot.cognition`, `bot.voice`, `bot.timeouts` and `bot.allow`. A device, "
-            "a processor, a seed or a "
-            "tuple of elements given directly is this error, and the help says which element takes it."
+            "`bot.register`, `bot.traits`, `bot.cognition`, `bot.voice`, `bot.timeouts` and `bot.allow`, and the "
+            "bot's firmware: `bot.state`, `bot.initial`, `bot.transition`, `bot.attribute`, `bot.operation`, "
+            "`bot.final`, `bot.choice`, `bot.submachine_state`, `bot.entry`, `bot.exit`, `bot.activity` and "
+            "`bot.defer`, with `bot.on`, `bot.after`, `bot.every`, `bot.at`, `bot.when`, `bot.target`, "
+            "`bot.guard`, `bot.effect` and the rest inside them. A device, a processor, a seed, a tuple of "
+            "elements or an element function given uncalled is this error, and the help says which element "
+            "takes it."
         ),
         why="Each element says what a part is to the body; a bare part has no place in it until it is given to one.",
         wrong='model = bot.define("greeter", bot.cognition(processor), phone.Phone())',

@@ -56,6 +56,11 @@ from . import diagnostics, elements, firmware, lints
 
 _NAME: pydantic.TypeAdapter[str] = pydantic.TypeAdapter(runtime.BotName)
 _LANGUAGES: pydantic.TypeAdapter[tuple[str, ...]] = pydantic.TypeAdapter(tuple[vocal.speech.Locale, ...])
+_PROCESSOR: typing.Final = (
+    "a `processing.Processor` (`from mosfet.abilities import processing`); in a test, the offline one is "
+    + "`testing.Scripted()` (`from mosfet.bot import testing`)"
+)
+"""What ``bot.cognition`` thinks with, and where it is imported from, for the help of B0002 and B0006."""
 
 
 class Error(hsm.ErrorValidatingModel):
@@ -148,7 +153,7 @@ class Validator(hsm.ModelValidator):
                     primary=diagnostics.head(call, "no cognition"),
                     notes=("cognition is what perceives and decides; a bot without one is a body with no mind",),
                     help=diagnostics.Help(
-                        message="give it a cognition that thinks with a `processing.Processor`",
+                        message=f"give it a cognition that thinks with {_PROCESSOR}",
                         suggestion=diagnostics.append(call, "bot.cognition(processor)"),
                     ),
                 )
@@ -331,7 +336,7 @@ class Validator(hsm.ModelValidator):
                     level="error",
                     message=f"`{where}` takes {takes}, not `{type(value).__name__}`",
                     primary=primary.model_copy(update={"label": f"this is a `{type(value).__name__}`"}),
-                    help=diagnostics.Help(message=f"pass {takes}"),
+                    help=diagnostics.Help(message=f"pass {_PROCESSOR if key == 0 else takes}"),
                 )
             )
 

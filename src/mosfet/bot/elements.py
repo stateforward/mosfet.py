@@ -816,7 +816,9 @@ class Stray(Element[Member]):
                 )
             )
             return None
-        named = next((name for function, name in _ELEMENT_FUNCTIONS if value is function), None)
+        named = next(
+            (name for function, name in (*_ELEMENT_FUNCTIONS, *_FIRMWARE_FUNCTIONS) if value is function), None
+        )
         if named is not None:
             model.findings.append(
                 diagnostics.Diagnostic(
@@ -841,10 +843,7 @@ class Stray(Element[Member]):
                 level="error",
                 message=f"`bot.define` takes bot elements, not a `{type(value).__name__}`",
                 primary=primary.model_copy(update={"label": "not a bot element"}),
-                notes=(
-                    "a bot is defined from `bot.attach`, `bot.input`, `bot.output`, `bot.register`, `bot.traits`, "
-                    + "`bot.cognition`, `bot.voice`, `bot.timeouts` and `bot.allow`",
-                ),
+                notes=(_DEFINED_FROM,),
                 help=diagnostics.Help(
                     message=f"did you mean `bot.{nearest[0]}(...)`?"
                     if nearest
@@ -1015,6 +1014,53 @@ _ELEMENT_FUNCTIONS: tuple[tuple[object, str], ...] = (
     (allow, "allow"),
 )
 """Every element function, with the name it is written by after ``bot.``."""
+
+_FIRMWARE_FUNCTIONS: tuple[tuple[object, str], ...] = (
+    (hsm.state, "state"),
+    (hsm.initial, "initial"),
+    (hsm.transition, "transition"),
+    (hsm.attribute, "attribute"),
+    (hsm.operation, "operation"),
+    (hsm.final, "final"),
+    (hsm.choice, "choice"),
+    (hsm.submachine_state, "submachine_state"),
+    (hsm.entry, "entry"),
+    (hsm.exit, "exit"),
+    (hsm.activity, "activity"),
+    (hsm.defer, "defer"),
+    (hsm.on, "on"),
+    (hsm.after, "after"),
+    (hsm.every, "every"),
+    (hsm.at, "at"),
+    (hsm.when, "when"),
+    (hsm.on_call, "on_call"),
+    (hsm.on_set, "on_set"),
+    (hsm.target, "target"),
+    (hsm.source, "source"),
+    (hsm.guard, "guard"),
+    (hsm.effect, "effect"),
+    (hsm.entry_point, "entry_point"),
+    (hsm.exit_point, "exit_point"),
+    (hsm.shallow_history, "shallow_history"),
+    (hsm.deep_history, "deep_history"),
+)
+"""Every firmware element function (``bot.state is hsm.state``), with its name after ``bot.``: the first twelve
+are given at the top level of ``bot.define`` (and inside a state), the rest inside them."""
+
+_TOP_LEVEL_FIRMWARE = 12
+
+
+def _listed(names: collections.abc.Sequence[str]) -> str:
+    written = [f"`bot.{name}`" for name in names]
+    return f"{', '.join(written[:-1])} and {written[-1]}"
+
+
+_DEFINED_FROM: typing.Final = (
+    f"a bot is defined from {_listed([name for _, name in _ELEMENT_FUNCTIONS])}; its firmware from "
+    + f"{_listed([name for _, name in _FIRMWARE_FUNCTIONS[:_TOP_LEVEL_FIRMWARE]])}, with "
+    + f"{_listed([name for _, name in _FIRMWARE_FUNCTIONS[_TOP_LEVEL_FIRMWARE:]])} inside them"
+)
+"""What ``bot.define`` takes, for a diagnostic about something it does not: every element, firmware included."""
 
 
 __all__ = [

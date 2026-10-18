@@ -2,6 +2,8 @@
 
 import asyncio
 import datetime
+import subprocess
+import sys
 import typing
 
 import hsm
@@ -342,3 +344,16 @@ def test_a_run_is_the_bot_and_its_environment() -> None:
     made = asyncio.run(run())
 
     assert made.environment is environment
+
+
+def test_testing_is_an_attribute_of_the_bot_package_in_a_fresh_interpreter() -> None:
+    reached = subprocess.run(
+        [sys.executable, "-c", "from mosfet import bot; print(bot.testing.Scripted.__name__)"],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+
+    assert (reached.returncode, reached.stdout) == (0, "Scripted\n"), reached.stderr
+    assert "testing" in bot.__all__

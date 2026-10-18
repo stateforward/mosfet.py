@@ -11,7 +11,7 @@ import pytest
 
 import mosfet
 from mosfet import bot
-from mosfet.abilities import memory, people, speaking
+from mosfet.abilities import memory, people, processing, speaking
 from mosfet.bot import diagnostics, elements
 from mosfet.devices import audio, phone
 from mosfet.environment import Environment
@@ -226,6 +226,39 @@ def test_one_speaking_given_to_bot_output_twice_is_still_one_mouth() -> None:
         )
 
     assert [diagnostic.code for diagnostic in caught.value.diagnostics] == ["B0003"]
+
+
+_PROCESSORS = (
+    "`processing.Processor`",
+    "`from mosfet.abilities import processing`",
+    "`testing.Scripted()`",
+    "`from mosfet.bot import testing`",
+)
+
+
+def test_a_bot_without_cognition_is_told_where_a_processor_and_the_offline_one_come_from() -> None:
+    with pytest.raises(bot.DefinitionError) as caught:
+        _ = bot.define("greeter", bot.attach(phone.Phone()))
+
+    (missing,) = caught.value.diagnostics
+    assert missing.code == "B0002"
+    assert missing.help is not None
+    for named in _PROCESSORS:
+        assert named in missing.help.message
+
+
+def test_a_cognition_given_no_processor_is_told_where_a_processor_and_the_offline_one_come_from() -> None:
+    with pytest.raises(bot.DefinitionError) as caught:
+        _ = bot.define("greeter", bot.cognition(typing.cast(processing.Processor, len)), bot.attach(phone.Phone()))
+
+    (wrong,) = caught.value.diagnostics
+    assert (wrong.code, wrong.message) == (
+        "B0006",
+        "`bot.cognition` takes a `processing.Processor`, not `builtin_function_or_method`",
+    )
+    assert wrong.help is not None
+    for named in _PROCESSORS:
+        assert named in wrong.help.message
 
 
 def test_an_already_started_instance_renders_its_golden(here: pathlib.Path) -> None:

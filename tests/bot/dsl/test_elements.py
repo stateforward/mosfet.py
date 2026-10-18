@@ -368,6 +368,18 @@ catalog = support.Shelf()
             None,
         ),
         (
+            'bot.define("greeter", bot.cognition(processor), bot.attach(phone.Phone()), bot.state)',
+            "B0017",
+            "`bot.state` is given, not called",
+            None,
+        ),
+        (
+            'bot.define("greeter", bot.cognition(processor), bot.attach(phone.Phone()), bot.after)',
+            "B0017",
+            "`bot.after` is given, not called",
+            None,
+        ),
+        (
             'bot.define("greeter", bot.cognition(processor), (bot.attach(phone.Phone()),))',
             "B0017",
             "`bot.define` takes elements one by one, not a `tuple` of them",
@@ -453,3 +465,22 @@ def test_a_part_given_to_the_wrong_place_names_the_element_that_takes_it(
     assert diagnostic.message == message
     suggestion = diagnostic.help.suggestion if diagnostic.help is not None else None
     assert (suggestion.replacement if suggestion is not None else None) == replacement
+
+
+def test_a_stray_is_told_every_element_a_bot_is_defined_from_its_firmware_included(here: pathlib.Path) -> None:
+    path = here / "greeter.py"
+    _ = path.write_text(
+        f'{_PREAMBLE}\nmodel = bot.define("greeter", bot.cognition(processor), datetime.date(2026, 1, 1))\n',
+        encoding="utf-8",
+    )
+
+    error = support.failure(path)
+
+    (stray,) = [diagnostic for diagnostic in error.diagnostics if diagnostic.code == "B0017"]
+    (note,) = stray.notes
+    for name in (
+        *("attach", "input", "output", "register", "traits", "cognition", "timeouts", "allow"),
+        *("state", "initial", "transition", "attribute", "final", "choice", "entry", "exit", "activity"),
+        *("on", "after", "every", "at", "when", "target", "guard", "effect"),
+    ):
+        assert f"`bot.{name}`" in note

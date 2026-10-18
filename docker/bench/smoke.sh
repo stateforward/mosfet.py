@@ -2,10 +2,10 @@
 # Build the builder's bench image 2 (docker/bench/Dockerfile) into a rootless Podman daemon for this checkout's
 # commit, and check that it is labeled with that commit and what it promises the sandbox: docker.Host's own
 # live check passes in full on it (src/providers/docker/scripts/live_check.py), and one-off runs under the
-# sandbox's machine flags (src/providers/docker/README.md, "A machine") have git and pytest, run a test
-# and version a file in the workspace with no network, import mosfet, test a bot file that defines a bot, and
-# print bot.define's diagnostics for a wrong one. Manual, not CI: it needs a rootless daemon, and the build
-# pulls the pinned base images.
+# sandbox's machine flags (src/providers/docker/README.md, "A machine") have git, pytest and the bot docs, run
+# a test and version a file in the workspace with no network, import mosfet, test a bot file that defines a
+# bot, and print bot.define's diagnostics for a wrong one. Manual, not CI: it needs a rootless daemon, and the
+# build pulls the pinned base images.
 #
 # Usage: docker/bench/smoke.sh --socket PATH [--python PATH]
 #
@@ -82,6 +82,12 @@ versions="$(podman_remote run "${sandbox_run[@]}" 'git --version && python -m py
 echo "$versions"
 [[ "$versions" == *"git version"* ]] || fail "git --version printed no version"
 [[ "$versions" == *"pytest "* ]] || fail "python -m pytest --version printed no version"
+
+echo "bench_smoke: the bench has the bot guide and the diagnostics' explanations" >&2
+podman_remote run "${sandbox_run[@]}" '
+  grep -q "^# Defining a bot" /usr/share/doc/mosfet/bot.md \
+  && grep -q "^## B0002" /usr/share/doc/mosfet/bot_diagnostics.md' \
+  || fail "/usr/share/doc/mosfet/bot.md or bot_diagnostics.md is missing from $image"
 
 echo "bench_smoke: a test runs and a file is versioned in the workspace" >&2
 worked="$(podman_remote run "${sandbox_run[@]}" '

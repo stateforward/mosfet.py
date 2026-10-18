@@ -100,6 +100,10 @@ podman build --build-arg MOSFET_COMMIT=$(git rev-parse HEAD) -t localhost/mosfet
 docker/bench/smoke.sh --socket "$BUILDER_SANDBOX_SOCKET" --python examples/builder_bot/.venv/bin/python
 ```
 
+The bench also has the guide to writing a bot file and every diagnostic's explanation, at
+`/usr/share/doc/mosfet/bot.md` and `/usr/share/doc/mosfet/bot_diagnostics.md`. Nothing tells the bot they are
+there. If you ask it to write a bot, you can tell it.
+
 Rebuild it after every pull or commit. The builder checks the label when it starts. If the image was built for
 another commit, has no label, or is not in the daemon, or the daemon does not answer, the builder exits `1`
 before anything starts. The message names both commits and the command above.

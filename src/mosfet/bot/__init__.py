@@ -64,10 +64,12 @@ FirmwareOutline(commands=('timer.set',), states=('/timer_firmware/idle', '/timer
 A bot file's mistakes come back as rustc-style :class:`Diagnostic`\\ s (``mosfet.bot.diagnostics``),
 all of them in one :class:`DefinitionError`; clippy-style lints are :class:`LintWarning`\\ s that
 :func:`allow` allows per bot and :func:`check` returns; :func:`start`'s are :class:`StartError`\\ s; and
-:func:`explain` says what any code means. ``mosfet.bot.testing`` is what a bot's tests need: a scripted
-model, a bot running for an ``async with`` block, and its snapshot. ``docs/bot.md`` is the guide.
+:func:`explain` says what any code means. ``mosfet.bot.testing`` (also ``bot.testing``) is what a bot's
+tests need: a scripted model, a bot running for an ``async with`` block, and its snapshot. ``docs/bot.md``
+is the guide.
 """
 
+from . import testing
 from .define import DefinitionError, Error, Finalizer, RedefinableBot, Validator, define, redefine
 from .describe import Description, FirmwareOutline, Outline, Part, describe
 from .diagnostics import Diagnostic, Help, Location, Span, Suggestion, explain
@@ -188,6 +190,7 @@ __all__ = [
     "stop",
     "submachine_state",
     "target",
+    "testing",
     "timeouts",
     "traits",
     "transition",
