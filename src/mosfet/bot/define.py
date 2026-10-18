@@ -5,22 +5,33 @@ the elements into a :class:`~mosfet.bot.elements.Model`, a :class:`Validator` (a
 ``hsm.ModelValidator``) checks each member by kind, and a :class:`Finalizer` puts what they found in
 source order. Where hsm raises at the first mistake, the walk and the validator *collect*
 :class:`~mosfet.bot.diagnostics.Diagnostic`\\ s, so one :class:`DefinitionError` carries every error
-in the file, rendered the way rustc renders them::
+in the file, rendered the way rustc renders them. Each member is keyed like an hsm state:
 
-    model = bot.define(
-        "greeter",
-        bot.traits("curious"),
-        bot.cognition(processor),
-        bot.attach(computer.Computer(id="desk", transport=server)),
-    )
+>>> from mosfet import bot
+>>> from mosfet.bot import testing
+>>> from mosfet.devices import computer
+>>> model = bot.define(
+...     "greeter",
+...     bot.traits("curious"),
+...     bot.cognition(testing.Scripted()),
+...     bot.attach(computer.Computer(id="desk")),
+... )
+>>> list(model.members)
+['/greeter', '/greeter/.traits', '/greeter/.cognition', '/greeter/desk']
 
 The hsm partials among the elements (``bot.state``, ``bot.transition``, ...) are the bot's one
 firmware: they compile after the walk, together, into a machine of its own
 (``mosfet.bot.firmware``), and the validator checks the commands it offers cognition.
 
 ``bot.redefine(model, *elements)`` is a new model from the old one's elements and more, as
-``hsm.redefine`` is; the old model is unchanged. Defining starts, opens and reads nothing: it holds
-the instances the bot file constructed.
+``hsm.redefine`` is; the old model is unchanged:
+
+>>> from mosfet.devices import phone
+>>> more = bot.redefine(model, bot.attach(phone.Phone()))
+>>> [[part.id for part in outline.parts] for outline in bot.describe(model, more).bots]
+[['desk'], ['desk', 'phone']]
+
+Defining starts, opens and reads nothing: it holds the instances the bot file constructed.
 """
 
 import collections.abc

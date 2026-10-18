@@ -8,8 +8,14 @@ A bot file is a plain Python file that defines its bots and runs them::
         bot.run(model, process=process)
 
 ``bot.process()`` reads the ``MOSFET_*`` environment variables, then the flags after the bot's module
-(``python -m greeter --ready-file /tmp/ready``); a flag wins over its variable. It knows only its own
-options, so a bot file that takes flags of its own passes ``argv=`` explicitly:
+(``python -m greeter --ready-file /tmp/ready``); a flag wins over its variable:
+
+>>> from mosfet import bot
+>>> process = bot.process(argv=["--ready-file", "/tmp/ready"], environ={"MOSFET_NAME": "greeter"})
+>>> process.name, str(process.ready_file)
+('greeter', '/tmp/ready')
+
+It knows only its own options, so a bot file that takes flags of its own passes ``argv=`` explicitly:
 
 ========================== ============================== ==================================================
 Flag                       Variable                       Meaning

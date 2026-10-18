@@ -11,16 +11,24 @@
   snapshot never drives a bot or a test's progression.
 
 There is no factory seam and no configuration helper: a test imports the model, or the function that
-defines it, and passes its doubles as plain arguments::
+defines it, and passes its doubles as plain arguments:
 
-    from mosfet.bot import testing
+>>> import asyncio
+>>> from mosfet import bot
+>>> from mosfet.bot import testing
+>>> from mosfet.devices import computer
+>>> def greeter(*, processor: testing.Scripted) -> bot.Model:
+...     return bot.define("greeter", bot.cognition(processor), bot.attach(computer.Computer(id="desk")))
+>>> model = testing.Scripted()
+>>> async def run() -> str:
+...     async with testing.running(greeter(processor=model)) as running:
+...         return testing.snapshot(running.bot).State
+>>> asyncio.run(run())
+'/greeter/active/unfocused'
+>>> model.woken_by(computer.TextEnteredEvent.name)
+()
 
-
-    async def test_the_ring_is_perceived() -> None:
-        model = testing.Scripted()
-        async with testing.running(greeter(processor=model)) as running:
-            ...
-        assert model.woken_by("device.phone.ringing")
+Nothing was typed into the desk, so nothing woke the bot.
 """
 
 import collections.abc

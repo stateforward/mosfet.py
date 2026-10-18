@@ -30,24 +30,27 @@ interpretation, behavior selection, and dispatch. Nothing sits in between decidi
 bot's behalf.
 
 ```python
-import mosfet
-from mosfet.abilities import cognition, listening, speaking
+from mosfet import bot
+from mosfet.devices import computer
 
 
-class Assistant(mosfet.Bot):
-    """Hears, thinks, answers. Devices attach at the body; cognition selects."""
+def greeter(*, processor) -> bot.Model:
+    """Reached at its desk; what it does about what is typed there is its own."""
 
-    _listening: listening.Listening
-    _speaking: speaking.Speaking
-
-    def __init__(self, *, cognition: cognition.Cognition) -> None:
-        super().__init__()
-        ...
+    return bot.define(
+        "greeter",
+        bot.traits("warm", "curious"),
+        bot.cognition(processor),
+        bot.attach(computer.Computer(id="desk")),
+    )
 ```
 
-`Bot` is concrete: it is constructed with the devices it attaches, its cognition, and the
-abilities it composes, so a subclass is optional. See [`examples/`](examples/README.md) for complete programs, including a phone bot
-that answers a real call over LiveKit.
+`bot.define` returns the bot as data. `bot.start` (or `bot.run`, for a process) builds its body,
+`mosfet.Bot`, around the very parts the file constructed: the devices it holds, the abilities it
+composes, and one cognition. The hsm states and transitions given beside them are the bot's
+firmware, the machinery its owner wrote for it. [`docs/bot.md`](docs/bot.md) is the guide to the
+DSL. See [`examples/`](examples/README.md) for complete programs, including a phone bot that answers
+a real call over LiveKit.
 
 ## Pieces
 
@@ -121,7 +124,9 @@ help: give the second device its own id
    = explain: bot.explain("B0003")
 ```
 
-[`docs/bot_diagnostics.md`](docs/bot_diagnostics.md) explains every code. `bot.run` stops
+[`docs/bot_diagnostics.md`](docs/bot_diagnostics.md) explains every code, and
+[`docs/bot.md`](docs/bot.md) covers every element, starting and testing a bot, its firmware and its
+diagnostics, with examples that run. `bot.run` stops
 gracefully on SIGTERM or SIGINT, keeps stdout empty, and exits `0` (graceful stop), `1` (forced
 stop), `64` (a bad process option), `70` (a bot used up its restart budget) or `78` (the process
 could not boot). [`examples/minimal_bot`](examples/minimal_bot/README.md) is the smallest bot, one

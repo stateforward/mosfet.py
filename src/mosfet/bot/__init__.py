@@ -1,20 +1,38 @@
 """The bot package: the body every bot runs on, and the names a bot file is written with.
 
 The body is ``mosfet.Bot``, defined in ``mosfet.bot.body``. This package's own namespace is the bot
-definition DSL (``from mosfet import bot``), so it re-exports nothing from the body::
+definition DSL (``from mosfet import bot``), so it re-exports nothing from the body. A bot file
+constructs its bot's parts and gives them to :func:`define` (``testing.Scripted()`` stands in for a
+model here):
 
-    model = bot.define(
-        "greeter",
-        bot.traits("curious"),
-        bot.cognition(processor),
-        bot.attach(phone.Phone()),
-    )
+>>> from mosfet import bot
+>>> from mosfet.bot import testing
+>>> from mosfet.devices import phone
+>>> model = bot.define(
+...     "greeter",
+...     bot.traits("curious"),
+...     bot.cognition(testing.Scripted()),
+...     bot.attach(phone.Phone()),
+... )
 
-:func:`describe` is the JSON view of defined bots. :func:`start` builds the body around the model's
-parts and brings it to life in an environment, and :func:`stop` deactivates and stops it::
+:func:`describe` is the JSON view of defined bots:
 
-    greeter = await bot.start(Environment(), model)
-    await bot.stop(greeter)
+>>> [part.id for part in bot.describe(model).bots[0].parts]
+['phone']
+
+:func:`start` builds the body around the model's parts and brings it to life in an environment, and
+:func:`stop` deactivates and stops it:
+
+>>> import asyncio
+>>> from mosfet.environment import Environment
+>>> async def lifetime() -> str:
+...     greeter = await bot.start(Environment(), model)
+...     try:
+...         return greeter.state()
+...     finally:
+...         await bot.stop(greeter)
+>>> asyncio.run(lifetime())
+'/greeter/active/unfocused'
 
 A bot file runs its bots as a process from its ``__main__`` with :func:`run`, reading the process's
 options once with :func:`process`::
@@ -24,21 +42,30 @@ options once with :func:`process`::
 
 The hsm element functions are re-exported as the very same objects (``bot.state is hsm.state``):
 given at the top level of :func:`define`, mixed with the ``bot.*`` elements, they are the bot's one
-firmware (``mosfet.bot.firmware``), the machinery its owner wrote for it::
+firmware (``mosfet.bot.firmware``), the machinery its owner wrote for it:
 
-    model = bot.define(
-        "timer",
-        bot.cognition(processor),
-        bot.initial(bot.target("idle")),
-        bot.state("idle", bot.transition(bot.on(SetEvent), bot.target("../running"))),
-        bot.state("running", bot.transition(bot.after(duration), bot.target("../idle"))),
-    )
+>>> import datetime
+>>> import hsm
+>>> import pydantic
+>>> from mosfet import event
+>>> class SetData(pydantic.BaseModel):
+...     "Start the timer."
+>>> SetEvent = hsm.Event[SetData](name="timer.set", kind=event.EventKind, schema=SetData)
+>>> timer = bot.define(
+...     "timer",
+...     bot.cognition(testing.Scripted()),
+...     bot.initial(bot.target("idle")),
+...     bot.state("idle", bot.transition(bot.on(SetEvent), bot.target("../running"))),
+...     bot.state("running", bot.transition(bot.after(datetime.timedelta(minutes=10)), bot.target("../idle"))),
+... )
+>>> bot.describe(timer).bots[0].firmware
+FirmwareOutline(commands=('timer.set',), states=('/timer_firmware/idle', '/timer_firmware/running'))
 
 A bot file's mistakes come back as rustc-style :class:`Diagnostic`\\ s (``mosfet.bot.diagnostics``),
 all of them in one :class:`DefinitionError`; clippy-style lints are :class:`LintWarning`\\ s that
 :func:`allow` allows per bot and :func:`check` returns; :func:`start`'s are :class:`StartError`\\ s; and
 :func:`explain` says what any code means. ``mosfet.bot.testing`` is what a bot's tests need: a scripted
-model, a bot running for an ``async with`` block, and its snapshot.
+model, a bot running for an ``async with`` block, and its snapshot. ``docs/bot.md`` is the guide.
 """
 
 from .define import DefinitionError, Error, Finalizer, RedefinableBot, Validator, define, redefine

@@ -1,7 +1,7 @@
 # Running bots (`bot.run`, `bot.process`, `mosfet.runtime`)
 
-A bot file is a plain Python file: it defines its bots with `bot.define` and runs them from its
-`__main__` with `bot.run`, the way an hsm program defines and starts its machines.
+A bot file is a plain Python file: it defines its bots with `bot.define` ([`bot.md`](bot.md)) and runs
+them from its `__main__` with `bot.run`, the way an hsm program defines and starts its machines.
 
 ```python
 from mosfet import bot

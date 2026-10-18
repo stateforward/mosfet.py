@@ -7,22 +7,39 @@ built once from ``bot.cognition``'s processor and flags on one shared memory (a 
 ``memory.Memory()`` when none was given), with a persona when the model has traits. The body takes
 the bot's name, so it runs as ``/<name>`` and its devices as ``/<name><DeviceClass>``. It then starts
 the body in ``ctx`` with ``data`` as its start data, joins it to the environment, and awaits the
-body's answer to its activation::
+body's answer to its activation:
 
-    greeter = await bot.start(Environment(), model)
-    ...
-    await bot.stop(greeter)
+>>> import asyncio
+>>> from mosfet import bot
+>>> from mosfet.bot import testing
+>>> from mosfet.devices import computer
+>>> from mosfet.environment import Environment
+>>> model = bot.define("greeter", bot.cognition(testing.Scripted()), bot.attach(computer.Computer(id="desk")))
+>>> async def lifetime() -> tuple[str, str]:
+...     greeter = await bot.start(Environment(), model)
+...     running = greeter.state()
+...     await bot.stop(greeter)
+...     return running, greeter.state()
+>>> asyncio.run(lifetime())
+('/greeter/active/unfocused', '')
 
 ``observe=`` is the boundary observers whoever starts the bot opts into, for logs, harness records and
 summaries (AGENTS: observable at the owning runtime boundary when that boundary opts in). Each is a
 :data:`Observer`, made by :func:`observe`, which is ``hsm.observe`` itself; the body runs on its model
-redefined with them, so they watch this start of this bot only, and they never act on it::
+redefined with them, so they watch this start of this bot only, and they never act on it:
 
-    def log(ctx, instance, event):
-        print(event.data["event"].name)
-
-
-    greeter = await bot.start(Environment(), model, observe=(bot.observe(mosfet.ActivateEvent, log),))
+>>> import typing
+>>> import hsm
+>>> import mosfet
+>>> seen: list[str] = []
+>>> def record(ctx: hsm.Context, instance: hsm.Instance, observed: hsm.Event[typing.Any]) -> None:
+...     seen.append(typing.cast(dict[str, hsm.Event[typing.Any]], observed.data)["event"].name)
+>>> async def watched() -> None:
+...     greeter = await bot.start(Environment(), model, observe=(bot.observe(mosfet.ActivateEvent, record),))
+...     await bot.stop(greeter)
+>>> asyncio.run(watched())
+>>> seen
+['bot.activate']
 
 An observer is not part of a bot's definition: given to ``bot.define`` it is ``B0015``.
 

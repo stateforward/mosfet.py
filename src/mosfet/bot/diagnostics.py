@@ -29,8 +29,13 @@ the diagnosed span as written, and every string and number literal outside a spa
 the writer's code renders as ``<Type>: <message>``, and a ``pydantic.ValidationError`` as ``loc: msg``
 without its input.
 
-Every code and lint has an :class:`Explanation`: :func:`explain` returns it, like ``rustc --explain``,
-and ``docs/bot_diagnostics.md`` is generated from the same table by :func:`document`::
+Every code and lint has an :class:`Explanation`: :func:`explain` returns it, like ``rustc --explain``:
+
+>>> from mosfet import bot
+>>> print(bot.explain("B0003").splitlines()[0])
+error[B0003]: a device or ability id is used twice
+
+``docs/bot_diagnostics.md`` is generated from the same table by :func:`document`::
 
     python -c 'from mosfet.bot import diagnostics; print(diagnostics.document(), end="")' > docs/bot_diagnostics.md
 """

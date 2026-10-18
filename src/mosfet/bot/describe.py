@@ -3,9 +3,23 @@
 ``bot.describe(*models)`` reads each model's members and constructs, starts and opens nothing. It
 names what each bot is made of: its traits, its faculties, its parts by id, kind, role and the
 class each was constructed from, and its firmware's commands and states. No value given to a part's
-constructor, a timeout, a faculty or a firmware attribute appears in it::
+constructor, a timeout, a faculty or a firmware attribute appears in it:
 
-    print(bot.describe(model).model_dump_json(indent=2))
+>>> from mosfet import bot
+>>> from mosfet.bot import testing
+>>> from mosfet.devices import computer
+>>> model = bot.define(
+...     "greeter",
+...     bot.cognition(testing.Scripted(), associative=True),
+...     bot.attach(computer.Computer(id="desk")),
+... )
+>>> outline = bot.describe(model).bots[0]
+>>> outline.faculties
+('intuition', 'reasoning', 'reflection', 'associative')
+>>> outline.parts[0].model_dump()
+{'id': 'desk', 'kind': 'device', 'roles': ('attach',), 'constructor': 'Computer'}
+
+``bot.describe(*models).model_dump_json(indent=2)`` is the same as JSON.
 """
 
 import typing

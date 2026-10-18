@@ -3,16 +3,27 @@
 A bot's mind is its cognition; its firmware is the machinery its owner wrote for it, the way a phone's
 call handling is the phone's. The hsm element functions are re-exported here as the very same
 objects (``bot.state is hsm.state``), and every one given at the top level of ``bot.define``, mixed
-freely with ``bot.*`` elements, is part of the bot's **one** firmware::
+freely with ``bot.*`` elements, is part of the bot's **one** firmware:
 
-    model = bot.define(
-        "timer",
-        bot.cognition(processor),
-        bot.attribute("minutes", int, 0),
-        bot.initial(bot.target("idle")),
-        bot.state("idle", bot.transition(bot.on(SetEvent), bot.target("../running"))),
-        bot.state("running", bot.transition(bot.after(duration), bot.target("../idle"))),
-    )
+>>> import datetime
+>>> import hsm
+>>> import pydantic
+>>> from mosfet import bot, event
+>>> from mosfet.bot import testing
+>>> class SetData(pydantic.BaseModel):
+...     "Start the timer."
+>>> SetEvent = hsm.Event[SetData](name="timer.set", kind=event.EventKind, schema=SetData)
+>>> model = bot.define(
+...     "timer",
+...     bot.cognition(testing.Scripted()),
+...     bot.attribute("minutes", int, 0),
+...     bot.initial(bot.target("idle")),
+...     bot.state("idle", bot.transition(bot.on(SetEvent), bot.target("../running"))),
+...     bot.state("running", bot.transition(bot.after(datetime.timedelta(minutes=10)), bot.target("../idle"))),
+... )
+>>> element = model.members["/timer/.firmware"]
+>>> element.model.qualified_name, [command.name for command in element.commands()]
+('/timer_firmware', ['timer.set'])
 
 They compile once, after the bot's own elements are walked, into ``mosfet.define(f"{name}_firmware",
 ...)``: a separate machine that never touches ``mosfet.Bot.model``. With no partials, the bot has no

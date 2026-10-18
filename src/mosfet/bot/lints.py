@@ -4,7 +4,18 @@ A lint reads only a defined model's structure (its members and their classes), n
 bot file passed in, and never runs anything. Each lint is a warning named in snake case and on by
 default; ``bot.allow("<lint>")`` allows it for one bot when what it warns about is deliberate.
 ``bot.define`` emits each one as a :class:`LintWarning` (pytest's ``-W error::mosfet.bot.LintWarning`` makes
-them fail), and :func:`check` returns them as diagnostics.
+them fail), and :func:`check` returns them as diagnostics:
+
+>>> import warnings
+>>> from mosfet import bot
+>>> from mosfet.bot import testing
+>>> with warnings.catch_warnings():
+...     warnings.simplefilter("ignore", bot.LintWarning)
+...     lonely = bot.define("lonely", bot.cognition(testing.Scripted()))
+>>> [found.code for found in bot.check(lonely)]
+['no_devices']
+>>> bot.check(bot.define("lonely", bot.cognition(testing.Scripted()), bot.allow("no_devices")))
+()
 
 A new lint is a function here, added to :data:`LINTS` with its golden test and its explanation.
 """
