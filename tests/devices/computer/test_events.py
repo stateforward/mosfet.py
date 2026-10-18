@@ -1,12 +1,14 @@
 from mosfet.devices import computer
 
 import json
+import typing
 
 import hsm
 import pydantic
 import pytest
 
 from mosfet import event, media
+from mosfet.abilities import processing
 from mosfet.environment import SoundData
 
 PNG = media.Image(content=b"\x89PNG\r\n\x1a\n" + b"\x00" * 8, media_type="image/png")
@@ -34,6 +36,51 @@ def test_content_and_show_reject_duplicate_element_ids() -> None:
         _ = computer.ShowData.model_validate({"elements": twice})
     with pytest.raises(pydantic.ValidationError, match="unique"):
         _ = computer.ContentData.model_validate({"elements": twice})
+
+
+def _kinds(schema: object) -> dict[str, list[object]]:
+    """Each object schema under ``schema`` whose ``kind`` is a constant, by that constant: what it requires."""
+
+    found: dict[str, list[object]] = {}
+    pending = [schema]
+    while pending:
+        node = pending.pop()
+        if isinstance(node, list):
+            pending.extend(typing.cast(list[object], node))
+        if not isinstance(node, dict):
+            continue
+        mapping = typing.cast(dict[str, object], node)
+        pending.extend(mapping.values())
+        properties = mapping.get("properties")
+        kind = typing.cast(dict[str, object], properties).get("kind") if isinstance(properties, dict) else None
+        if isinstance(kind, dict) and isinstance(const := typing.cast(dict[str, object], kind).get("const"), str):
+            found[const] = list(typing.cast(list[object], mapping.get("required", [])))
+    return found
+
+
+def test_the_model_facing_show_schema_requires_each_elements_kind_as_its_validator_does() -> None:
+    # Live (builder check round 3, H2): 20 of 26 shows left out `kind`, which the schema called optional, and
+    # every one was rejected for its missing discriminator, so the person saw a blank screen for 18 minutes.
+    required = _kinds(processing.dispatch_tool((computer.ShowEvent,)))
+
+    assert sorted(required) == ["button", "field", "text"]
+    assert all("kind" in names for names in required.values()), required
+    with pytest.raises(pydantic.ValidationError, match="union_tag_not_found"):
+        _ = computer.ShowData.model_validate({"elements": [{"id": "a", "text": "b"}]})
+
+
+@pytest.mark.parametrize("model", [computer.ContentData, computer.LayoutData, computer.StillData])
+def test_each_link_plane_payload_schema_requires_its_kind(model: type[pydantic.BaseModel]) -> None:
+    assert "kind" in model.model_json_schema()["required"]
+
+
+def test_a_constructed_element_or_payload_keeps_its_kind_by_default() -> None:
+    assert computer.TextElement(id="a", text="b").kind == "text"
+    assert computer.FieldElement(id="a").kind == "field"
+    assert computer.ButtonElement(id="a", label="b").kind == "button"
+    assert computer.ContentData().kind == "display.content"
+    assert computer.LayoutData().kind == "display.layout"
+    assert computer.StillData(image=PNG).kind == "camera.still"
 
 
 def test_still_needs_a_typed_image_not_raw_bytes() -> None:

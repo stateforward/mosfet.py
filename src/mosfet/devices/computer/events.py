@@ -16,6 +16,7 @@ import typing
 import hsm
 import mosfet.device
 import pydantic
+from pydantic.config import JsonDict, JsonValue
 
 from mosfet import environment, event, media
 
@@ -61,14 +62,33 @@ ElementId = typing.Annotated[
 ]
 
 
+def _kind_required(*examples: JsonDict) -> typing.Callable[[JsonDict], None]:
+    """The schema of a payload discriminated by its ``kind``, with ``kind`` required as its validator requires it.
+
+    Every payload here is one branch of a union discriminated on ``kind``, which rejects an item without its tag.
+    The JSON schema a model or a far side writes against lists ``kind`` as required too, so a schema-valid item
+    is never refused for a missing tag; a Python constructor keeps the ``kind`` default.
+    """
+
+    def extra(schema: JsonDict) -> None:
+        required = schema.get("required")
+        names: list[JsonValue] = list(required) if isinstance(required, list) else []
+        schema["required"] = ["kind", *(name for name in names if name != "kind")]
+        if examples:
+            given: list[JsonValue] = [*examples]
+            schema["examples"] = given
+
+    return extra
+
+
 class TextElement(pydantic.BaseModel):
     """A block of text on the display."""
 
     model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
         frozen=True,
-        json_schema_extra={
-            "examples": [{"kind": "text", "id": "greeting", "text": "Hello! What is your name?", "role": "heading"}],
-        },
+        json_schema_extra=_kind_required(
+            {"kind": "text", "id": "greeting", "text": "Hello! What is your name?", "role": "heading"}
+        ),
     )
 
     kind: typing.Literal["text"] = pydantic.Field(
@@ -94,9 +114,9 @@ class FieldElement(pydantic.BaseModel):
 
     model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
         frozen=True,
-        json_schema_extra={
-            "examples": [{"kind": "field", "id": "name", "value": "", "placeholder": "Your name", "focused": True}],
-        },
+        json_schema_extra=_kind_required(
+            {"kind": "field", "id": "name", "value": "", "placeholder": "Your name", "focused": True}
+        ),
     )
 
     kind: typing.Literal["field"] = pydantic.Field(
@@ -129,7 +149,7 @@ class ButtonElement(pydantic.BaseModel):
 
     model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
         frozen=True,
-        json_schema_extra={"examples": [{"kind": "button", "id": "submit", "label": "Send"}]},
+        json_schema_extra=_kind_required({"kind": "button", "id": "submit", "label": "Send"}),
     )
 
     kind: typing.Literal["button"] = pydantic.Field(
@@ -161,17 +181,15 @@ class ContentData(pydantic.BaseModel):
 
     model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
         frozen=True,
-        json_schema_extra={
-            "examples": [
-                {
-                    "kind": "display.content",
-                    "elements": [
-                        {"kind": "text", "id": "greeting", "text": "Hello!", "role": "heading"},
-                        {"kind": "button", "id": "ok", "label": "OK"},
-                    ],
-                }
-            ],
-        },
+        json_schema_extra=_kind_required(
+            {
+                "kind": "display.content",
+                "elements": [
+                    {"kind": "text", "id": "greeting", "text": "Hello!", "role": "heading"},
+                    {"kind": "button", "id": "ok", "label": "OK"},
+                ],
+            }
+        ),
     )
 
     kind: typing.Literal["display.content"] = pydantic.Field(
@@ -211,11 +229,9 @@ class LayoutData(pydantic.BaseModel):
 
     model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
         frozen=True,
-        json_schema_extra={
-            "examples": [
-                {"kind": "display.layout", "boxes": [{"id": "ok", "x": 0.4, "y": 0.8, "width": 0.2, "height": 0.08}]}
-            ],
-        },
+        json_schema_extra=_kind_required(
+            {"kind": "display.layout", "boxes": [{"id": "ok", "x": 0.4, "y": 0.8, "width": 0.2, "height": 0.08}]}
+        ),
     )
 
     kind: typing.Literal["display.layout"] = pydantic.Field(
@@ -271,7 +287,9 @@ class ShowData(pydantic.BaseModel):
 class StillData(pydantic.BaseModel):
     """One still from the remote camera, validated into a ``media.Image`` by the camera stream's codec."""
 
-    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(frozen=True)
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
+        frozen=True, json_schema_extra=_kind_required()
+    )
 
     kind: typing.Literal["camera.still"] = pydantic.Field(
         default="camera.still",
