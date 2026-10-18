@@ -25,6 +25,22 @@ class _StructuredOutputValidationError(ValueError):
     """Raised when model output violates the structured-output schema sent to the provider."""
 
 
+def _cause(error: Exception) -> str:
+    """Name an error's type and message, never the values the model sent.
+
+    A Pydantic error names each failing location and message without its input.
+    """
+
+    if isinstance(error, pydantic.ValidationError):
+        details = error.errors(include_url=False, include_context=False, include_input=False)
+        message = "; ".join(
+            f"{'.'.join(str(part) for part in detail['loc']) or '<root>'}: {detail['msg']}" for detail in details
+        )
+    else:
+        message = str(error)
+    return f"{type(error).__name__}: {message}"
+
+
 _IGNORED_STRICT_SCHEMA_KEYS = frozenset({"default", "examples", "title"})
 _UNSUPPORTED_STRICT_SCHEMA_KEYS = (
     "prefixItems",
@@ -289,6 +305,96 @@ def _validate_event_payload(
     _validate_structured_json(dict(data), schema, root_schema=schema)
 
 
+def _decoded_json_strings(
+    value: object,
+    schema: collections.abc.Mapping[str, object],
+    *,
+    root_schema: collections.abc.Mapping[str, object],
+) -> object:
+    """Parse, once, each JSON string the model sent where ``schema`` takes only an array or object.
+
+    Local models often encode a nested array or object as a JSON string. Each such string is decoded once: one that
+    decodes to anything but the array or object expected is rejected, and a value whose schema also takes a string
+    is kept as sent. Of ``anyOf`` branches, the first the decoded value satisfies wins; with none, the value is kept
+    for validation to reject.
+    """
+
+    ref_schema = _resolve_schema_ref(schema.get("$ref"), root_schema)
+    if ref_schema is not None:
+        return _decoded_json_strings(value, ref_schema, root_schema=root_schema)
+    any_of = schema.get("anyOf")
+    if any_of is not None:
+        for branch in _schema_sequence(any_of):
+            if not _is_schema_mapping(branch):
+                continue
+            try:
+                decoded = _decoded_json_strings(value, branch, root_schema=root_schema)
+                _validate_structured_json(decoded, branch, root_schema=root_schema)
+            except _StructuredOutputValidationError:
+                continue
+            return decoded
+        return value
+    schema_types = _schema_types(schema.get("type"))
+    containers = tuple(kind for kind in ("array", "object") if kind in schema_types)
+    if isinstance(value, str) and containers and "string" not in schema_types:
+        try:
+            value = typing.cast(object, json.loads(value))
+        except json.JSONDecodeError as error:
+            raise _StructuredOutputValidationError(f"string-encoded value did not decode ({_cause(error)})") from error
+        if not any(_schema_type_matches(value, kind) for kind in containers):
+            raise _StructuredOutputValidationError("string-encoded value did not decode to an array or object")
+    if "object" in schema_types and isinstance(value, collections.abc.Mapping):
+        properties = _mapping_dict(schema.get("properties"))
+        decoded_object: dict[str, object] = {}
+        for key, item in typing.cast(collections.abc.Mapping[object, object], value).items():
+            property_schema = properties.get(str(key))
+            decoded_object[str(key)] = (
+                _decoded_json_strings(item, property_schema, root_schema=root_schema)
+                if _is_schema_mapping(property_schema)
+                else item
+            )
+        return decoded_object
+    item_schema = schema.get("items")
+    if "array" in schema_types and _schema_type_matches(value, "array") and _is_schema_mapping(item_schema):
+        items = typing.cast(collections.abc.Sequence[object], value)
+        return [_decoded_json_strings(item, item_schema, root_schema=root_schema) for item in items]
+    return value
+
+
+_DISPATCH_ARGS_SCHEMA: dict[str, object] = {
+    "type": "object",
+    "properties": {"events": {"type": "array", "items": {"type": "object"}}},
+}
+
+
+def _decoded_dispatch_args(
+    args: collections.abc.Mapping[str, object],
+    offered: collections.abc.Sequence[processing.Event[typing.Any]],
+    *,
+    patch: processing.SchemaPatch | None = None,
+) -> dict[str, object]:
+    """Decode JSON strings in ``dispatch`` args: the events array, its items, and each offered event's data."""
+
+    decoded = typing.cast(
+        dict[str, object], _decoded_json_strings(args, _DISPATCH_ARGS_SCHEMA, root_schema=_DISPATCH_ARGS_SCHEMA)
+    )
+    events = decoded.get("events")
+    if not isinstance(events, list):
+        return decoded
+    by_name = {event.name: event for event in offered}
+    for item in typing.cast(list[object], events):
+        if not isinstance(item, dict):
+            continue
+        selection = typing.cast(dict[str, object], item)
+        event_name = selection.get("event")
+        event = by_name.get(event_name) if isinstance(event_name, str) else None
+        if event is None or "data" not in selection:
+            continue
+        schema = _event_payload_schema(event, patch=patch)
+        selection["data"] = _decoded_json_strings(selection["data"], schema, root_schema=schema)
+    return decoded
+
+
 def _events_from_dispatch_tool_calls(
     tool_calls: tuple[text.generation.TextToolCall, ...],
     offered: collections.abc.Sequence[processing.Event[typing.Any]],
@@ -307,15 +413,16 @@ def _events_from_dispatch_tool_calls(
     merged: list[processing.SelectedEvent] = []
     by_name = {event.name: event for event in offered}
     for call in dispatch_calls:
+        args = _decoded_dispatch_args(call.args, offered, patch=patch)
         try:
             selections = processing.events_from_dispatch_args(
-                call.args,
+                args,
                 patch=patch,
                 offered=offered,
                 targets_by_event=targets_by_event,
             )
         except ValueError as error:
-            raise _StructuredOutputValidationError(str(error)) from error
+            raise _StructuredOutputValidationError(_cause(error)) from error
         for selection in selections:
             event = by_name[selection.event]
             payload = dict(typing.cast(collections.abc.Mapping[str, object], selection.data or {}))
@@ -377,10 +484,11 @@ def _events_from_content(
     try:
         parsed: object = json.loads(content)
     except json.JSONDecodeError as error:
-        raise _StructuredOutputValidationError("processing response was not JSON") from error
+        raise _StructuredOutputValidationError(f"processing response was not JSON ({_cause(error)})") from error
     if isinstance(parsed, collections.abc.Mapping):
         mapping = typing.cast(collections.abc.Mapping[str, object], parsed)
         if "events" in mapping:
+            mapping = _decoded_dispatch_args(mapping, offered, patch=patch)
             parsed = mapping["events"]
         elif "result" in mapping:
             parsed = mapping["result"]
@@ -404,7 +512,7 @@ def _events_from_content(
             if targets_by_event is not None:
                 selections = processing.fill_unique_selection_targets(selections, targets_by_event)
     except ValueError as error:
-        raise _StructuredOutputValidationError(str(error)) from error
+        raise _StructuredOutputValidationError(_cause(error)) from error
     if offered:
         _validate_selection_payloads(selections, offered, patch=patch)
     return selections
@@ -684,7 +792,8 @@ class Processor(processing.Processor):
                 targets_by_event=input.actor_events,
             )
         except (pydantic.ValidationError, _StructuredOutputValidationError) as error:
-            message = "OpenAI-compatible processing response did not produce a valid events array."
+            cause = (str(error) if isinstance(error, _StructuredOutputValidationError) else _cause(error)).rstrip(".")
+            message = f"OpenAI-compatible processing response did not produce a valid events array: {cause}."
             raise ProcessingError(message) from error
 
 

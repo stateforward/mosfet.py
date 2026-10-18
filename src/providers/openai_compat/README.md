@@ -56,6 +56,12 @@ the `words` of each of `communication.respond`'s `parts`) reaches its target as 
 writing it.
 `ResponsesTextGenerator` does not stream; it ignores `deltas`.
 
+Local models often send a nested array or object as a JSON string, for example `{"events": "[{...}]"}`. Tool call
+arguments, and every `dispatch` value whose schema takes only an array or object (the `events` array, its items, and
+each event's data down through nested fields), are decoded from such a string once; a string field stays as sent.
+A response that still fails raises `ProcessingError` (or `TextGenerationError`) naming the cause's type and message,
+never the values the model sent.
+
 A user message may carry ordered content parts: `text.TextPart` and `text.ImagePart` (a typed `mosfet.media.Image`).
 Chat Completions receives them as `text` and `image_url` parts and the Responses API as `input_text` and `input_image`
 parts, each image as a base64 `data:` URL. Both generators default to a text-only `image_capacity` because the endpoint

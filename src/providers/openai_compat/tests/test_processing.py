@@ -469,3 +469,105 @@ def test_processor_without_a_draft_sink_does_not_stream() -> None:
 
     assert generator.deltas == [False]
     assert [(item.event, item.data) for item in output] == [(_SayEvent.name, {"text": "Whole."})]
+
+
+class _SlotData(pydantic.BaseModel):
+    """One appointment slot."""
+
+    day: str
+    hour: int
+
+
+class _BookData(pydantic.BaseModel):
+    """Book an appointment in one slot."""
+
+    slot: _SlotData
+    attendees: list[str]
+    note: str
+    backup: _SlotData | None = None
+
+
+_BookEvent = hsm.Event[_BookData](name="tests.openai_compat.book", kind=processing.EventKind, schema=_BookData)
+
+
+def _dispatched(args: dict[str, object]) -> processing.Events:
+    generator = RecordingGenerator(
+        content="",
+        tool_calls=(text.TextToolCall(id="tc1", name=processing.DISPATCH_TOOL_NAME, args=args),),
+    )
+    return asyncio.run(
+        Processor(generator=generator).process(
+            processing.InputData(
+                input="book it",
+                schemas=(_AnswerCallEvent, _BookEvent),
+                instructions="Select events from schemas.",
+            )
+        )
+    )
+
+
+def test_processor_decodes_an_events_array_sent_as_a_json_string() -> None:
+    # Live (builder check, qwen3_coder tool calls): the model sent {"events": "[{...}]"}.
+    events = [{"event": "phone.answer_call", "data": {"call_id": "c1"}}]
+
+    output = _dispatched({"events": json.dumps(events)})
+
+    assert [(item.event, item.data) for item in output] == [("phone.answer_call", {"call_id": "c1"})]
+
+
+def test_processor_decodes_event_items_and_data_sent_as_json_strings() -> None:
+    item = {"event": "phone.answer_call", "data": json.dumps({"call_id": "c1"})}
+
+    output = _dispatched({"events": [json.dumps(item)]})
+
+    assert [(item.event, item.data) for item in output] == [("phone.answer_call", {"call_id": "c1"})]
+
+
+def test_processor_decodes_nested_arrays_and_objects_sent_as_json_strings_and_keeps_strings() -> None:
+    data = {
+        "slot": json.dumps({"day": "mon", "hour": 9}),
+        "attendees": json.dumps(["ana", "bo"]),
+        "note": '["kept as text"]',
+        "backup": json.dumps({"day": "tue", "hour": 10}),
+    }
+
+    output = _dispatched({"events": [{"event": _BookEvent.name, "data": data}]})
+
+    assert [(item.event, item.data) for item in output] == [
+        (
+            _BookEvent.name,
+            {
+                "slot": {"day": "mon", "hour": 9},
+                "attendees": ["ana", "bo"],
+                "note": '["kept as text"]',
+                "backup": {"day": "tue", "hour": 10},
+            },
+        )
+    ]
+
+
+def test_processor_decodes_a_json_string_only_once() -> None:
+    events = [{"event": "phone.answer_call", "data": {"call_id": "c1"}}]
+
+    with pytest.raises(ProcessingError, match="did not decode to an array or object"):
+        _ = _dispatched({"events": json.dumps(json.dumps(events))})
+
+
+def test_processor_failure_names_the_decode_cause_without_the_values() -> None:
+    truncated = json.dumps([{"event": "phone.answer_call", "data": {"call_id": "secret-c1"}}])[:-2]
+
+    with pytest.raises(ProcessingError) as raised:
+        _ = _dispatched({"events": truncated})
+
+    message = str(raised.value)
+    assert "JSONDecodeError: Expecting" in message
+    assert "secret-c1" not in message
+
+
+def test_processor_failure_names_the_validation_cause_without_the_values() -> None:
+    with pytest.raises(ProcessingError) as raised:
+        _ = _dispatched({"events": [{"event": _BookEvent.name, "data": {"note": "secret-note"}}]})
+
+    message = str(raised.value)
+    assert "object value is missing required keys" in message
+    assert "secret-note" not in message

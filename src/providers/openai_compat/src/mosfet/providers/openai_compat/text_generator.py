@@ -157,12 +157,22 @@ def _reasoning_from_message(message: collections.abc.Mapping[str, object]) -> st
 
 
 def _tool_args(value: object) -> dict[str, object]:
+    """Decode a tool call's arguments into an object.
+
+    Arguments the model encoded as a JSON string of the object (a common local-model quirk) are decoded once more.
+    A decode failure names its cause's type and message, never the arguments themselves.
+    """
+
     if not isinstance(value, str):
         raise TextGenerationError("OpenAI-compatible tool call arguments must be a JSON object string.")
     try:
         parsed = typing.cast(object, json.loads(value))
-    except json.JSONDecodeError:
-        raise TextGenerationError("OpenAI-compatible tool call arguments must be a JSON object string.") from None
+        if isinstance(parsed, str):
+            parsed = typing.cast(object, json.loads(parsed))
+    except json.JSONDecodeError as error:
+        raise TextGenerationError(
+            f"OpenAI-compatible tool call arguments must be a JSON object string ({type(error).__name__}: {error})."
+        ) from error
     if isinstance(parsed, collections.abc.Mapping):
         parsed_mapping = typing.cast(collections.abc.Mapping[object, object], parsed)
         return {str(key): item for key, item in parsed_mapping.items()}

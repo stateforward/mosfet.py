@@ -339,9 +339,44 @@ def test_text_generator_rejects_malformed_tool_arguments() -> None:
             generator.generate(text.InputData(messages=(text.TextMessage(role=text.TextRole.USER, content="hello"),)))
         )
     except TextGenerationError as error:
-        assert str(error) == "OpenAI-compatible tool call arguments must be a JSON object string."
+        assert str(error) == (
+            "OpenAI-compatible tool call arguments must be a JSON object string "
+            "(JSONDecodeError: Expecting value: line 1 column 1 (char 0))."
+        )
+        assert isinstance(error.__cause__, json.JSONDecodeError)
     else:
         raise AssertionError("Expected TextGenerationError.")
+
+
+def test_text_generator_decodes_tool_arguments_sent_as_a_json_string_once() -> None:
+    def generated(arguments: str) -> text.OutputData:
+        client = FakeChatClient(
+            response={
+                "choices": [
+                    {
+                        "finish_reason": "tool_calls",
+                        "message": {
+                            "content": "",
+                            "tool_calls": [
+                                {
+                                    "id": "call_1",
+                                    "type": "function",
+                                    "function": {"name": "book_appointment", "arguments": arguments},
+                                }
+                            ],
+                        },
+                    }
+                ]
+            }
+        )
+        message = text.TextMessage(role=text.TextRole.USER, content="hello")
+        return asyncio.run(TextGenerator(client=client).generate(text.InputData(messages=(message,))))
+
+    encoded = json.dumps({"slot": "9am"})
+
+    assert generated(json.dumps(encoded)).tool_calls[0].args == {"slot": "9am"}
+    with pytest.raises(TextGenerationError, match="must be a JSON object string"):
+        _ = generated(json.dumps(json.dumps(encoded)))
 
 
 def test_text_generator_rejects_mapping_tool_arguments() -> None:
