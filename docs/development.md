@@ -169,7 +169,11 @@ plain words, or one association's `node` ref). Intuition is still told it exists
 capacity its effort ceiling keeps off its dispatch tool (recall, the sandbox bench, any other
 actor rated above it) is named on its frame after the world and self blocks, in one
 `<reasoning_only>` element with the opening paragraph of the event's own description, so
-escalating the turn to reasoning is the model's informed choice. Associative reads the chosen memories in full,
+escalating the turn to reasoning is the model's informed choice. While intuition decides, the
+Cognition host offers the deliberative handoff `bot.ability.reasoning.input` (`reasoning.CallData`)
+as a call surface, like ignore; intuition keeps it on its dispatch tool only when its ceiling held
+something, names it in the block's `reached_by`, and a selection of it leaves the turn unhandled
+for reasoning after the environment actions selected with it run. Associative reads the chosen memories in full,
 images included and reinforced, and tells its owner with `memory.RecollectedEvent`
 (`memory.RecollectionData`), or with a typed `ability.FailedEvent` when memory cannot serve it.
 Cognition hands either to the body as a `cognition.InputEvent` observing it, the way it hands a

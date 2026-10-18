@@ -33,6 +33,8 @@ _DEFAULT_TUNER_MEAN = 70.0
 # the per-turn ``<reasoning_only>`` capacities above this stage's ceiling when there are any.
 # Tool schemas and the stimulus carry the rest of the contract.
 DEFAULT_INSTRUCTIONS = ""
+# How the turn reaches what only reasoning holds when no handoff event is offered: cascading.
+_ESCALATION = "escalating this turn to deliberate reasoning"
 
 
 class EventPatch(pydantic.BaseModel):
@@ -639,12 +641,15 @@ class Intuition(processing.Processing):
         ``held`` (see :func:`_reasoning_only`) renders after the world and self blocks as one
         ``<reasoning_only>`` element: each capacity's event name and the opening paragraph of its own
         schema description. It is what the model knows of those capacities; their tools stay off
-        this turn's dispatch, and escalating the turn is how it reaches them.
+        this turn's dispatch, and escalating the turn is how it reaches them. ``reached_by`` names
+        the offered deliberative handoff when the host offers one.
         """
 
         stamped = processing.Processing._input_for_processor(instance, narrowed)
         updates: dict[str, object] = {}
         if held:
+            schemas = {event.name: event for event in narrowed.schemas}
+            handoff = next((name for name in schemas if _is_deliberative_input_event(name, schemas)), None)
             capacities: list[str] = []
             for event in held:
                 description = processing.model_facing_event_json_schema(event).get("description")
@@ -657,7 +662,7 @@ class Intuition(processing.Processing):
                 )
             block = "\n".join(
                 (
-                    '<reasoning_only reached_by="escalating this turn to deliberate reasoning">',
+                    f"<reasoning_only reached_by={saxutils.quoteattr(handoff or _ESCALATION)}>",
                     *capacities,
                     "</reasoning_only>",
                 )
@@ -696,6 +701,9 @@ class Intuition(processing.Processing):
                 # Narrowing reads live actor snapshots, so a frame that cannot be read fails the turn.
                 narrowed = cognition_input.within_effort(data.processing_input, instance._max_effort)
                 held = _reasoning_only(data.processing_input, narrowed)
+                if not held:
+                    # With nothing held, the handoff hands reasoning nothing intuition lacks.
+                    narrowed = cognition_input.without_handoff(narrowed)
                 active.set_attribute("bot.intuition.held.count", len(held))
                 input = Intuition._intuition_input_for_processor(instance, narrowed, held)
                 if retry is not None:

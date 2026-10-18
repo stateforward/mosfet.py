@@ -1938,6 +1938,16 @@ class Cognition(ability.Ability[InputData, OutputData]):
 
         del ctx, instance, event
 
+    @staticmethod
+    def _accept_handoff(
+        ctx: hsm.Context,
+        instance: "Cognition",
+        event: hsm.Event[typing.Any],
+    ) -> None:
+        """Acknowledge a handoff to reasoning; intuition leaves its turn unhandled, which is the handoff itself."""
+
+        del ctx, instance, event
+
     submodel: typing.ClassVar[hsm.Model | None] = define(
         "Cognition",
         hsm.initial(hsm.target("/Cognition/initializing")),
@@ -1979,6 +1989,12 @@ class Cognition(ability.Ability[InputData, OutputData]):
             hsm.transition(
                 hsm.on(types.IgnoreEvent),
                 hsm.effect(_accept_ignore),
+            ),
+            # The handoff to deliberate reasoning: intuition keeps it on its menu only when reasoning
+            # holds capacities above intuition's ceiling, and reasoning never offers it to itself.
+            hsm.transition(
+                hsm.on(reasoning.InputEvent),
+                hsm.effect(_accept_handoff),
             ),
             hsm.transition(
                 hsm.on(reflection.OutputEvent, ability.FailedEvent),
@@ -2037,10 +2053,14 @@ class Cognition(ability.Ability[InputData, OutputData]):
             hsm.initial(hsm.target("/Cognition/processing/intuition")),
             # The turn's own input waits here until the state the turn ends in takes it up.
             hsm.defer(input_event, _TurnOpenedEvent),
-            # Enabled while a child stage runs so ignore stays snapshot-offered mid-turn.
+            # Enabled while a child stage runs so ignore and the handoff stay snapshot-offered mid-turn.
             hsm.transition(
                 hsm.on(types.IgnoreEvent),
                 hsm.effect(_accept_ignore),
+            ),
+            hsm.transition(
+                hsm.on(reasoning.InputEvent),
+                hsm.effect(_accept_handoff),
             ),
             # Reflection of the previous turn, routine ticks and recall outcomes keep arriving
             # mid-turn; the body defers their handoff until this turn ends.

@@ -46,9 +46,10 @@ _InitializingCompleteEvent = hsm.Event[_InitializingCompleteData](
 
 
 class CallData(pydantic.BaseModel):
-    """Model-facing request to run deliberate (System-2) reasoning on the current turn.
+    """Model-facing handoff of the current turn to deliberate (System-2) reasoning.
 
-    The host reuses the live processing frame (stimulus, tools, actors). Do not restate the
+    The Cognition host offers it to intuition when reasoning holds capacities above intuition's
+    ceiling. The host reuses the live processing frame (stimulus, tools, actors). Do not restate the
     stimulus, schemas, or instructions here — leave ``data`` empty / omit fields.
     """
 
@@ -61,9 +62,10 @@ class CallData(pydantic.BaseModel):
         extra="forbid",
         json_schema_extra={
             "description": (
-                "Invoke deliberate reasoning for the current turn. The host supplies the deliberative "
-                "frame; do not include stimulus text, tools, or schemas in data. Use an empty object "
-                "as data."
+                "Hand this turn to deliberate reasoning, which holds the capacities listed in "
+                "<reasoning_only> as well as the events offered here. Other events selected with it "
+                "run first. The host supplies the deliberative frame; do not include stimulus text, "
+                "tools, or schemas in data. Use an empty object as data."
             ),
             "examples": [
                 {},
@@ -497,7 +499,10 @@ class Reasoning(processing.Processing):
             try:
                 # The host's frame narrowed to this stage's effort ceiling. Narrowing reads live
                 # actor snapshots, so a frame that cannot be read fails the turn.
-                host_input = cognition_input.within_effort(request.processing_input, instance._max_effort)
+                # Reasoning is the handoff's recipient: it never offers the handoff to itself.
+                host_input = cognition_input.without_handoff(
+                    cognition_input.within_effort(request.processing_input, instance._max_effort)
+                )
                 # Keep host tools/actors, the host's live instructions (device-state block), and what
                 # memory surfaced for this turn; nest the reasoning payload as the process input.
                 child_input = processing.Processing._input_for_processor(

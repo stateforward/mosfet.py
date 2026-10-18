@@ -246,6 +246,26 @@ def within_effort(frame: processing.InputData, ceiling: Effort | None) -> proces
     )
 
 
+def without_handoff(frame: processing.InputData) -> processing.InputData:
+    """``frame`` without the host's deliberative handoff (a schema marked ``__deliberative_handoff__``).
+
+    The Cognition host offers ``bot.ability.reasoning.input`` as part of its call surface. A stage
+    narrows it away when it would hand reasoning nothing: reasoning never offers it to itself, and
+    intuition keeps it only when reasoning holds capacities above intuition's ceiling. A frame that
+    offers no handoff is returned as it is.
+    """
+
+    dropped = {event.name for event in frame.schemas if processing.is_deliberative_handoff_schema(event.schema)}
+    if not dropped:
+        return frame
+    return frame.model_copy(
+        update={
+            "schemas": tuple(event for event in frame.schemas if event.name not in dropped),
+            "actor_events": {name: keys for name, keys in frame.actor_events.items() if name not in dropped},
+        }
+    )
+
+
 __all__ = [
     "InputData",
     "SelfData",
@@ -253,4 +273,5 @@ __all__ = [
     "is_input",
     "stimulus_name",
     "within_effort",
+    "without_handoff",
 ]

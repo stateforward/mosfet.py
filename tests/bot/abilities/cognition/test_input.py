@@ -529,6 +529,35 @@ def test_within_effort_narrows_a_frame_to_a_stage_ceiling() -> None:
     asyncio.run(run())
 
 
+def test_cognition_offers_the_deliberative_handoff_and_without_handoff_narrows_it_away() -> None:
+    """The Cognition host offers ``bot.ability.reasoning.input`` beside ignore; a stage may narrow it away."""
+
+    async def run() -> None:
+        cognition = make_cognition()
+        ctx = shared_hsm_context()
+        await start_abilities_for_test(ctx, cognition)
+        await wait_until(lambda: (cognition.state() or "").endswith("/idle"))
+        frame = cognition_input.build_processing_input(
+            cognition_input.InputData(
+                stimulus=mosfet.InputEventData(target_device="phone", priority=0),
+                actors={"phone": Device()},
+            ),
+            authority=cognition,
+        )
+        assert types.DELIBERATIVE_HANDOFF_EVENT_NAME in {event.name for event in frame.schemas}
+        assert frame.actor_events[types.DELIBERATIVE_HANDOFF_EVENT_NAME] == ("cognition",)
+
+        narrowed = cognition_input.without_handoff(frame)
+        assert {event.name for event in narrowed.schemas} == {event.name for event in frame.schemas} - {
+            types.DELIBERATIVE_HANDOFF_EVENT_NAME
+        }
+        assert types.DELIBERATIVE_HANDOFF_EVENT_NAME not in narrowed.actor_events
+        assert types.IgnoreEvent.name in narrowed.actor_events
+        assert cognition_input.without_handoff(narrowed) is narrowed
+
+    asyncio.run(run())
+
+
 def test_stimulus_name_labels_device_input_as_bot_input() -> None:
     """Device input has no event name of its own, so it is labelled with the bot input event."""
 

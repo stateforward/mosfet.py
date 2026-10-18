@@ -1,11 +1,13 @@
 from mosfet import abilities
 import mosfet
 from mosfet import behavior as behavior_events
+from mosfet import event
 from mosfet.abilities import ability as ability_module
 from mosfet.abilities import cognition
 from mosfet.abilities import memory
 from mosfet.abilities import persona
 from mosfet.abilities import processing
+from mosfet.abilities import sandbox
 from mosfet.abilities import speaking
 from mosfet.abilities import vocal
 from mosfet.abilities.cognition import cognition as cognition_module
@@ -2648,6 +2650,127 @@ def test_intuition_reasoning_selection_cascades_through_cognition() -> None:
     assert cognition.Reasoning.input_event.name not in events
     assert mosfet.FocusDeviceEvent.name in events
     assert reasoning_calls == 1
+
+
+class _ShowData(pydantic.BaseModel):
+    text: str = pydantic.Field(description="What the desk shows.")
+
+
+_ShowEvent = hsm.Event[_ShowData](name="tests.cognition.desk.show", kind=event.EventKind, schema=_ShowData)
+
+
+class _DeskActor(hsm.Instance):
+    """A display within intuition's ceiling that keeps what it was asked to show."""
+
+    shown: list[str]
+
+    @staticmethod
+    def _show(ctx: hsm.Context, instance: "_DeskActor", event: hsm.Event[typing.Any]) -> None:
+        del ctx
+        assert isinstance(event.data, _ShowData)
+        instance.shown.append(event.data.text)
+
+    model: typing.ClassVar[hsm.Model | None] = mosfet.define(
+        "CognitionDeskActor",
+        hsm.initial(hsm.target("/CognitionDeskActor/active")),
+        hsm.state("active", hsm.transition(hsm.on(_ShowEvent), hsm.effect(_show))),
+    )
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.shown = []
+
+
+class _BenchActor(hsm.Instance):
+    """An M-effort bench enabling the real sandbox run command, above intuition's ceiling (S)."""
+
+    effort: typing.ClassVar[ability_module.Effort] = ability_module.Effort.M
+    model: typing.ClassVar[hsm.Model | None] = mosfet.define(
+        "CognitionBenchActor",
+        hsm.initial(hsm.target("/CognitionBenchActor/active")),
+        hsm.state("active", hsm.transition(hsm.on(sandbox.RunEvent), hsm.effect(_accept_focus_event))),
+    )
+
+
+class _MenuBoundIntuitionProcessor(processing.Processor):
+    """Selects events by name the way a provider's dispatch tool does: one not on the turn's menu is refused."""
+
+    calls: list[processing.InputData]
+    selections: tuple[tuple[str, dict[str, object]], ...]
+
+    def __init__(self, *selections: tuple[str, dict[str, object]]) -> None:
+        self.calls = []
+        self.selections = selections
+
+    @typing.override
+    async def process(
+        self, input: processing.InputData, *, drafts: processing.DraftSink | None = None
+    ) -> processing.Events:
+        self.calls.append(input)
+        return processing.events_from_dispatch_args(
+            {"events": [{"event": name, "data": {**data, "confidence": 95}} for name, data in self.selections]},
+            patch=input.patch,
+            offered=input.schemas,
+            targets_by_event=input.actor_events,
+        )
+
+
+def test_intuition_can_choose_to_hand_a_turn_to_reasoning_when_reasoning_holds_what_it_lacks() -> None:
+    """Live check round 1 (D1): intuition was told the bench was held by reasoning, but offered no way to escalate.
+
+    The model said so ("I can only pick events from the dispatch enum") and escalated by confidence 55 or 70,
+    which stayed above the warm-up floor. With a capacity held above its ceiling, intuition is now offered the
+    cognition host's deliberative handoff, named where the held capacities are listed, and a confident selection of
+    it with an acknowledgement reaches reasoning with the acknowledgement shown.
+    """
+
+    async def run() -> tuple[processing.InputData, list[str], list[processing.InputData], list[abilities.FailureData]]:
+        handoff = cognition.Reasoning.input_event.name
+        intuition_processor = _MenuBoundIntuitionProcessor((_ShowEvent.name, {"text": "On it."}), (handoff, {}))
+        reasoning_processor = RecordingReasoningProcessor(ignore_output("deliberated"))
+        ability = RecordingCognition(intuition_processor=intuition_processor, reasoning_processor=reasoning_processor)
+        ctx = await start_cognition_ability_for_test(ability)
+        turn_input = await started_cognition_input(ctx)
+        desk = _DeskActor()
+        bench = _BenchActor()
+        for actor in (desk, bench):
+            assert actor.model is not None
+            _ = await mosfet.started(ctx, actor, actor.model)
+        turn_input = turn_input.model_copy(update={"actors": {**turn_input.actors, "desk": desk, "sandbox": bench}})
+        _ = await dispatch_ability_for_test(ability, ctx, turn_input)
+        await wait_until(lambda: ability.state().endswith("/idle"))
+        (frame,) = intuition_processor.calls
+        return frame, desk.shown, reasoning_processor.calls, ability.failures
+
+    frame, shown, reasoning_calls, failures = asyncio.run(run())
+
+    handoff = cognition.Reasoning.input_event.name
+    offered = {schema.name for schema in frame.schemas}
+    assert handoff in offered
+    assert sandbox.RunEvent.name not in offered
+    assert f'<reasoning_only reached_by="{handoff}">' in (frame.instructions or "")
+    assert failures == []
+    assert shown == ["On it."]
+    (deliberate,) = reasoning_calls
+    reasoning_offers = {schema.name for schema in deliberate.schemas}
+    # Reasoning holds the bench, and never offers the handoff into itself.
+    assert sandbox.RunEvent.name in reasoning_offers
+    assert handoff not in reasoning_offers
+
+
+def test_intuition_is_offered_no_handoff_when_reasoning_holds_nothing_it_lacks() -> None:
+    async def run() -> processing.InputData:
+        intuition_processor = _MenuBoundIntuitionProcessor((cognition.types.IgnoreEvent.name, {}))
+        ability = RecordingCognition(intuition_processor=intuition_processor)
+        ctx = await start_cognition_ability_for_test(ability)
+        _ = await dispatch_ability_for_test(ability, ctx, await started_cognition_input(ctx))
+        (frame,) = intuition_processor.calls
+        return frame
+
+    frame = asyncio.run(run())
+
+    assert cognition.Reasoning.input_event.name not in {schema.name for schema in frame.schemas}
+    assert "<reasoning_only" not in (frame.instructions or "")
 
 
 def test_intuition_processor_receives_input() -> None:
