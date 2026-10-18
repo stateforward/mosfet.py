@@ -4,11 +4,15 @@
 # git and pytest, plus the sh, timeout, mkdir, cat and base64 that docker.Host's exec wrappers need. So the bot
 # can write a bot file, `from mosfet import bot`, and test it with pytest, reading bot.define's diagnostics.
 # Built locally into the rootless daemon and never pushed or pulled. The build context is the repository root,
-# because mosfet is installed from its source and its uv.lock:
+# because mosfet is installed from its source and its uv.lock. The image is built for one mosfet commit and
+# labeled with it (org.opencontainers.image.revision), so the build needs that commit:
 #
-#   podman build --tag localhost/mosfet-bench:2 --file docker/bench/Dockerfile .
+#   podman build --build-arg MOSFET_COMMIT=$(git rev-parse HEAD) --tag localhost/mosfet-bench:2 \
+#     --file docker/bench/Dockerfile .
 #
-# docker/bench/smoke.sh builds it and checks it against a rootless Podman socket.
+# Rebuild it after every pull or commit that changes mosfet: the builder bot checks the label when it starts and
+# refuses an image built for another commit (or one with no label), naming both commits and this command.
+# docker/bench/smoke.sh builds it the same way and checks it against a rootless Podman socket.
 
 FROM ghcr.io/astral-sh/uv:0.9.18@sha256:5713fa8217f92b80223bc83aac7db36ec80a84437dbc0d04bbc659cae030d8c9 AS uv
 
@@ -47,3 +51,12 @@ LABEL org.opencontainers.image.title="mosfet bench" \
       org.opencontainers.image.version="2" \
       org.opencontainers.image.source="https://github.com/stateforward/mosfet.py" \
       org.opencontainers.image.licenses="MIT"
+# The mosfet commit this image carries, last so a new commit rebuilds only this layer of the final stage. A build
+# without it fails: an unlabeled bench is one the builder refuses.
+ARG MOSFET_COMMIT
+RUN case "$MOSFET_COMMIT" in \
+      *[!0-9a-f]* | "") echo "MOSFET_COMMIT must be a commit: --build-arg MOSFET_COMMIT=\$(git rev-parse HEAD)" >&2; exit 1 ;; \
+    esac \
+    && [ "${#MOSFET_COMMIT}" -eq 40 ] \
+    || { echo "MOSFET_COMMIT must be a full 40-character commit" >&2; exit 1; }
+LABEL org.opencontainers.image.revision="$MOSFET_COMMIT"

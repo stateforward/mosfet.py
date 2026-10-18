@@ -5,11 +5,13 @@
 
 ``__main__`` is the bot file. It reads the owner's :class:`Settings` and the process's secrets, then defines one
 bot, ``builder``, for one person, with one ``bot.define`` that constructs every part inline, and runs it with
-``bot.run``. The person reaches the bot through a ``computer.Computer``, ``computer``, which sits on a desk (an
-``environment.Object``) and is served by a ``websocket.Server`` on this host; :mod:`builder_bot_example.terminal`
-is that computer's far side in a terminal. The bot builds and tests on a ``sandbox.Sandbox`` bench backed by a
-``docker.Host`` on a rootless Docker or Podman socket. Its mind is the full cognition (memory, reflection, its
-persona and the routines it authors) on one OpenAI-compatible local model.
+``bot.run``. Before anything starts it checks the bench image (:func:`check_bench`): bench image 2 is built for
+one mosfet commit and labeled with it, and a stale image is refused. The person reaches the bot through a
+``computer.Computer``, ``computer``, which sits on a desk (an ``environment.Object``) and is served by a
+``websocket.Server`` on this host; :mod:`builder_bot_example.terminal` is that computer's far side in a terminal.
+The bot builds and tests on a ``sandbox.Sandbox`` bench backed by a ``docker.Host`` on a rootless Docker or Podman
+socket. Its mind is the full cognition (memory, reflection, its persona and the routines it authors) on one
+OpenAI-compatible local model.
 
 Nothing here tells the bot what to do. It is given no seeded behavior, no skill and no instruction text: what
 it can do comes from the tools its computer and its bench offer on each turn, and what it does with them is
@@ -17,9 +19,14 @@ its own to choose, including nothing. The owner fixes only who it is (its traits
 """
 
 import collections.abc
+import http.client
 import pathlib
+import socket as sockets
+import subprocess
 import typing
+import urllib.parse
 
+import mosfet
 import pydantic
 from mosfet.abilities import persona, sandbox
 from mosfet.devices import computer
@@ -28,11 +35,110 @@ from mosfet.providers import docker
 DEFAULT_IMAGE: typing.Final = "localhost/mosfet-bench:2"
 """Bench image 2, which ``docker/bench/Dockerfile`` builds into the rootless daemon; nothing is pulled. It has
 mosfet installed, so the bot can write a bot file and test it there."""
+REVISION_LABEL: typing.Final = "org.opencontainers.image.revision"
+"""The label bench image 2 carries: the mosfet commit it was built from (``--build-arg MOSFET_COMMIT``)."""
+_REBUILD: typing.Final = (
+    "rebuild it from the repository root: podman build --build-arg MOSFET_COMMIT=$(git rev-parse HEAD)"
+    + " --tag {image} --file docker/bench/Dockerfile ."
+)
+_CHECK_TIMEOUT_SECONDS: typing.Final = 10.0
+_MAX_INSPECT_BYTES: typing.Final = 1024 * 1024
 DEFAULT_TRAITS: typing.Final = persona.Traits(traits=("careful", "curious", "candid"))
 """The traits this example's owner gives the bot; ``BUILDER_TRAITS`` gives it others."""
 MAX_OUTPUT_CHARS: typing.Final = 8_192
 """Most characters the bench keeps of each output stream and file read, so a turn's observations fit a local
 model's context."""
+
+
+class BenchError(Exception):
+    """The bench cannot be used with the mosfet this host runs: its image is missing, stale or unlabeled, or the
+    check itself could not be made. The message says which, and how to rebuild the image."""
+
+
+def mosfet_commit(source: pathlib.Path | None = None) -> str:
+    """The commit of the mosfet checkout this process imports: ``git rev-parse HEAD`` in ``source``, by default
+    the directory ``mosfet`` is imported from (the example installs it editable from the repository).
+
+    Raises:
+        BenchError: If ``source`` is not in a git checkout, or git cannot be run.
+    """
+
+    where = source if source is not None else pathlib.Path(mosfet.__file__).parent
+    try:
+        found = subprocess.run(
+            ["git", "-C", str(where), "rev-parse", "--verify", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=_CHECK_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise BenchError(
+            f"cannot tell which mosfet commit this host runs: git failed ({type(error).__name__})"
+        ) from None
+    if found.returncode != 0:
+        raise BenchError(f"cannot tell which mosfet commit this host runs: {where} is not in a git checkout")
+    return found.stdout.strip()
+
+
+class _ImageConfig(pydantic.BaseModel):
+    labels: dict[str, str] | None = pydantic.Field(default=None, alias="Labels")
+
+
+class _Image(pydantic.BaseModel):
+    """The part of the Engine API's image inspect (``GET /images/{name}/json``) the check reads."""
+
+    config: _ImageConfig = pydantic.Field(default_factory=_ImageConfig, alias="Config")
+
+
+def check_bench(*, socket: pathlib.Path, image: str, commit: str) -> None:
+    """Check that the daemon on ``socket`` has the bench ``image``, built for mosfet ``commit``.
+
+    The image's ``REVISION_LABEL`` must be ``commit``: a bench built from another commit has another mosfet,
+    and a bot file the bot writes there is tested against an API this host does not run. The daemon is asked
+    once, by image inspect; nothing is pulled.
+
+    Raises:
+        BenchError: If the daemon cannot be reached or answers otherwise than an image inspect, the image is not
+            there, or it was built for another commit (or carries no commit at all).
+    """
+
+    rebuild = _REBUILD.format(image=image)
+    # One HTTP exchange with the Engine API on the daemon's unix socket: the connection uses the socket it is given.
+    connection = http.client.HTTPConnection("localhost", timeout=_CHECK_TIMEOUT_SECONDS)
+    try:
+        connected = sockets.socket(sockets.AF_UNIX, sockets.SOCK_STREAM)
+        connection.sock = connected  # closed with the connection
+        connected.settimeout(_CHECK_TIMEOUT_SECONDS)
+        connected.connect(str(socket))
+        connection.request("GET", f"/images/{urllib.parse.quote(image, safe='/:@')}/json")
+        response = connection.getresponse()
+        status, body = response.status, response.read(_MAX_INSPECT_BYTES + 1)
+    except (OSError, http.client.HTTPException) as error:
+        raise BenchError(
+            f"cannot check bench image {image}: the daemon at {socket} did not answer ({type(error).__name__});"
+            + " start it, then start the builder"
+        ) from None
+    finally:
+        connection.close()
+    if status == 404:
+        raise BenchError(f"bench image {image} is not in the daemon at {socket}; {rebuild}")
+    if status != 200 or len(body) > _MAX_INSPECT_BYTES:
+        raise BenchError(f"cannot check bench image {image}: the daemon at {socket} answered {status}")
+    try:
+        labels = _Image.model_validate_json(body).config.labels or {}
+    except pydantic.ValidationError:
+        raise BenchError(f"cannot check bench image {image}: the daemon at {socket} answered no image") from None
+    built_for = labels.get(REVISION_LABEL)
+    if built_for is None:
+        raise BenchError(
+            f"bench image {image} carries no mosfet commit ({REVISION_LABEL}), so it predates this host's"
+            + f" mosfet {commit}; {rebuild}"
+        )
+    if built_for != commit:
+        raise BenchError(
+            f"bench image {image} was built for mosfet {built_for}, but this host runs mosfet {commit}; {rebuild}"
+        )
 
 
 class Settings(pydantic.BaseModel):
@@ -131,4 +237,13 @@ class Settings(pydantic.BaseModel):
         return persona.Traits(traits=given)
 
 
-__all__ = ["DEFAULT_IMAGE", "DEFAULT_TRAITS", "MAX_OUTPUT_CHARS", "Settings"]
+__all__ = [
+    "DEFAULT_IMAGE",
+    "DEFAULT_TRAITS",
+    "MAX_OUTPUT_CHARS",
+    "REVISION_LABEL",
+    "BenchError",
+    "Settings",
+    "check_bench",
+    "mosfet_commit",
+]

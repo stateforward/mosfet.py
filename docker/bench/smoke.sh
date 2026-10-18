@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
-# Build the builder's bench image 2 (docker/bench/Dockerfile) into a rootless Podman daemon and check what it
-# promises the sandbox: docker.Host's own live check passes in full on it (src/providers/docker/scripts/
-# live_check.py), and one-off runs under the sandbox's machine flags (src/providers/docker/README.md, "A machine")
-# have git and pytest, run a test and version a file in the workspace with no network, import mosfet, test a bot
-# file that defines a bot, and print bot.define's diagnostics for a wrong one. Manual, not CI: it needs a rootless
-# daemon, and the build pulls the pinned base images.
+# Build the builder's bench image 2 (docker/bench/Dockerfile) into a rootless Podman daemon for this checkout's
+# commit, and check that it is labeled with that commit and what it promises the sandbox: docker.Host's own
+# live check passes in full on it (src/providers/docker/scripts/live_check.py), and one-off runs under the
+# sandbox's machine flags (src/providers/docker/README.md, "A machine") have git and pytest, run a test
+# and version a file in the workspace with no network, import mosfet, test a bot file that defines a bot, and
+# print bot.define's diagnostics for a wrong one. Manual, not CI: it needs a rootless daemon, and the build
+# pulls the pinned base images.
 #
 # Usage: docker/bench/smoke.sh --socket PATH [--python PATH]
 #
@@ -35,6 +36,7 @@ done
 cd "$(dirname "$0")/../.."
 
 image="localhost/mosfet-bench:2"
+commit="$(git rev-parse --verify HEAD)"
 label="org.stateforward.mosfet.smoke=mosfet-bench-smoke-$$"
 
 podman_remote() {
@@ -53,9 +55,13 @@ fail() {
   exit 1
 }
 
-echo "bench_smoke: build $image" >&2
+echo "bench_smoke: build $image for mosfet $commit" >&2
 # The build context is the repository root: the bench installs mosfet from its source and its uv.lock.
-podman_remote build --file docker/bench/Dockerfile --tag "$image" .
+podman_remote build --build-arg "MOSFET_COMMIT=$commit" --file docker/bench/Dockerfile --tag "$image" .
+
+echo "bench_smoke: $image is labeled with mosfet $commit" >&2
+revision="$(podman_remote image inspect --format '{{index .Labels "org.opencontainers.image.revision"}}' "$image")"
+[[ "$revision" == "$commit" ]] || fail "$image is labeled with mosfet '$revision', not $commit"
 
 echo "bench_smoke: docker.Host's live check on $image" >&2
 "$python" src/providers/docker/scripts/live_check.py --socket "$socket" --image "$image"

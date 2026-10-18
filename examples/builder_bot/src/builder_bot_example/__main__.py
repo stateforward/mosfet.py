@@ -6,7 +6,8 @@ Reads the owner's :class:`~builder_bot_example.Settings` from the environment (`
 terminal's token is signed with. Each is the Docker secret, the file named by ``<NAME>_FILE``, or
 ``<NAME>``. The process options (``MOSFET_*`` or flags) are ``bot.process``'s; memory is kept in
 ``<data dir>/memory.sqlite3``. A missing or malformed setting or secret ends the process with exit ``1``,
-naming it, before anything starts.
+naming it, before anything starts. So does a bench image that was not built for the mosfet commit this host
+runs (``check_bench``), naming both commits and the rebuild.
 
 Then one ``bot.define`` constructs every part of the bot inline: its model, its memory, the person's computer
 ``computer`` and its bench. The bench is the owner's: the settings' image on the default limits (one CPU,
@@ -30,7 +31,7 @@ from mosfet.providers import docker
 from mosfet.providers import openai_compat
 from mosfet.providers import websocket
 
-from builder_bot_example import MAX_OUTPUT_CHARS, Settings
+from builder_bot_example import MAX_OUTPUT_CHARS, BenchError, Settings, check_bench, mosfet_commit
 
 if __name__ == "__main__":
     process = bot.process()
@@ -41,6 +42,10 @@ if __name__ == "__main__":
             f"{'.'.join(str(part) for part in problem['loc'])}: {problem['msg']}" for problem in error.errors()
         )
         raise SystemExit(f"builder_bot_example: {problems}") from None
+    try:
+        check_bench(socket=settings.socket, image=settings.image, commit=mosfet_commit())
+    except BenchError as error:
+        raise SystemExit(f"builder_bot_example: {error}") from None
     server = websocket.Server(
         host=settings.host,
         port=settings.port,

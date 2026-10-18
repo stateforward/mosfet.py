@@ -91,12 +91,18 @@ On Linux it is `$XDG_RUNTIME_DIR/podman/podman.sock` (`systemctl --user enable -
 
 Build bench image 2 into that daemon, from the repository root. Nothing is ever pulled for the bench. Besides
 python, uv, git and pytest it has mosfet installed, so the bot can write a bot file (`from mosfet import bot`),
-test it with pytest, and read `bot.define`'s diagnostics when it is wrong. Then check it. This needs no model:
+test it with pytest, and read `bot.define`'s diagnostics when it is wrong. The image is built for the commit
+you have checked out and labeled with it (`org.opencontainers.image.revision`). Then check it. This needs no
+model:
 
 ```bash
-podman build -t localhost/mosfet-bench:2 -f docker/bench/Dockerfile .
+podman build --build-arg MOSFET_COMMIT=$(git rev-parse HEAD) -t localhost/mosfet-bench:2 -f docker/bench/Dockerfile .
 docker/bench/smoke.sh --socket "$BUILDER_SANDBOX_SOCKET" --python examples/builder_bot/.venv/bin/python
 ```
+
+Rebuild it after every pull or commit. The builder checks the label when it starts. If the image was built for
+another commit, has no label, or is not in the daemon, or the daemon does not answer, the builder exits `1`
+before anything starts. The message names both commits and the command above.
 
 ## Configure
 
@@ -149,6 +155,7 @@ A plain line is typed into the field the bot focused, then Enter. A line longer 
 and the terminal says so. `/click <id>` presses the element with that id. `/quit` leaves. When nothing is focused,
 the line still reaches the bot, as text entered with no field. The process stays up until SIGTERM or SIGINT and
 exits `0`. A missing or malformed setting or secret exits `1` before anything starts, and the message names it.
+So does a stale bench image (see [Set up the bench](#set-up-the-bench)).
 [`docs/runtime.md`](../../docs/runtime.md) lists every `bot.process` option and exit code.
 
 ## The live check (manual)
