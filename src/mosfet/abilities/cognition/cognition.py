@@ -66,6 +66,8 @@ _MAX_ACT_REASON: typing.Final = 4000
 # showed is kept as its placeholder), within a quarter of the episode's text, so the stimulus keeps the rest.
 _OUTPUT_IMAGES: typing.Final = media.ImageCapacity()
 _MAX_OUTPUT_BYTES: typing.Final = memory.MAX_EPISODE_TEXT_BYTES // 4
+# What an episode keeps of a failed turn's typed failure, rendered after its output, within its own bound.
+_MAX_FAILURE_BYTES: typing.Final = memory.MAX_EPISODE_TEXT_BYTES // 16
 
 _LOG = logging.getLogger(__name__)
 
@@ -485,15 +487,17 @@ class Cognition(ability.Ability[InputData, OutputData]):
         metadata: dict[str, object],
         cognition_input: InputData,
         output: OutputData = (),
+        failure: ability.FailureData | None = None,
     ) -> None:
         """Send memory the turn just settled, stamped here, where the turn is owned; never waited on.
 
         Every outcome carries the turn's input: a completed or failed turn from its terminal, a
         cancelled or rebooted one from its ``_TurnOpenedEvent``. The episode's parts are what the bot
         perceived, then, when the turn selected anything, its own output (``OutputEvent``: what it
-        showed, said and asked of its tools), so what it did is recalled with what it perceived; a
-        tool's result is perceived on a later turn and kept as that turn's. Memory's reply is not
-        awaited: Memory counts its own outcome, and no transition here consumes it.
+        showed, said and asked of its tools), then, when the turn failed with a typed failure, that
+        failure (``failed_event``), so what it did and what became of it are recalled with what it
+        perceived; a tool's result is perceived on a later turn and kept as that turn's. Memory's
+        reply is not awaited: Memory counts its own outcome, and no transition here consumes it.
         """
 
         store = instance._memory
@@ -507,6 +511,13 @@ class Cognition(ability.Ability[InputData, OutputData]):
             if acts
             else ()
         )
+        if failure is not None:
+            did = (
+                *did,
+                *projection.memory_content(
+                    instance.failed_event.with_data(failure), capacity=_OUTPUT_IMAGES, budget_bytes=_MAX_FAILURE_BYTES
+                ),
+            )
         # One newline joins the output to the last text of what was perceived.
         spent = sum(len(part.text.encode()) + 1 for part in did if isinstance(part, text.TextPart))
         perceived = projection.memory_content(
@@ -682,6 +693,7 @@ class Cognition(ability.Ability[InputData, OutputData]):
                 recalled=associations,
             )
         except Exception as error:
+            failed = _failure(operation_id, str(error))
             Cognition._remember(
                 ctx,
                 instance,
@@ -689,12 +701,13 @@ class Cognition(ability.Ability[InputData, OutputData]):
                 outcome=memory.Outcome.FAILED,
                 metadata=public_metadata,
                 cognition_input=cognition_input,
+                failure=failed.failure,
             )
             _ = hsm.dispatch(
                 ctx,
                 instance,
                 dataclasses.replace(
-                    _ApplyFailedEvent.with_data(_failure(operation_id, str(error))),
+                    _ApplyFailedEvent.with_data(failed),
                     id=operation_id,
                     metadata=public_metadata,
                 ),
@@ -798,6 +811,7 @@ class Cognition(ability.Ability[InputData, OutputData]):
         try:
             output = _coerce_output(data.output)
         except Exception as error:
+            failed = _failure(operation_id, str(error))
             Cognition._remember(
                 ctx,
                 instance,
@@ -805,12 +819,13 @@ class Cognition(ability.Ability[InputData, OutputData]):
                 outcome=memory.Outcome.FAILED,
                 metadata=public_metadata,
                 cognition_input=cognition_input,
+                failure=failed.failure,
             )
             _ = hsm.dispatch(
                 ctx,
                 instance,
                 dataclasses.replace(
-                    _ApplyFailedEvent.with_data(_failure(operation_id, str(error))),
+                    _ApplyFailedEvent.with_data(failed),
                     id=operation_id,
                     metadata=public_metadata,
                 ),
@@ -1114,6 +1129,7 @@ class Cognition(ability.Ability[InputData, OutputData]):
                     recalled=associations,
                 )
             except Exception as error:
+                failed = _failure(operation_id, str(error))
                 Cognition._remember(
                     ctx,
                     instance,
@@ -1121,12 +1137,13 @@ class Cognition(ability.Ability[InputData, OutputData]):
                     outcome=memory.Outcome.FAILED,
                     metadata=public_metadata,
                     cognition_input=cognition_input,
+                    failure=failed.failure,
                 )
                 _ = hsm.dispatch(
                     ctx,
                     instance,
                     dataclasses.replace(
-                        _ApplyFailedEvent.with_data(_failure(operation_id, str(error))),
+                        _ApplyFailedEvent.with_data(failed),
                         id=operation_id,
                         metadata=public_metadata,
                     ),
@@ -1206,6 +1223,8 @@ class Cognition(ability.Ability[InputData, OutputData]):
                 outcome=memory.Outcome.FAILED,
                 metadata=dict(event.metadata),
                 cognition_input=event.data.turn.input,
+                # What failed, without the turn it correlates: the episode already holds that turn.
+                failure=ability.FailureData(message=failure.message),
             )
         _ = hsm.dispatch(
             ctx,
@@ -1300,6 +1319,7 @@ class Cognition(ability.Ability[InputData, OutputData]):
             outcome=memory.Outcome.FAILED,
             metadata=public_metadata,
             cognition_input=data.turn.input,
+            failure=data.failure,
         )
         terminal = dataclasses.replace(
             instance.failed_event.with_data(data.failure),

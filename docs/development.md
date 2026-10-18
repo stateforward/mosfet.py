@@ -114,7 +114,8 @@ by Alembic. There is no `alembic.ini`;
 `memory.Memory` is the bot's one durable memory, a state machine reached by message only
 (`memory.transact` for relational statements; typed request events for everything else). It
 keeps each remembered turn (`RememberEvent`, `EpisodeData`: the rendered stimulus parts with images, then
-the bot's own output (`bot.ability.cognition.output`) when the turn selected anything, producer-stamped
+the bot's own output (`bot.ability.cognition.output`) when the turn selected anything, then its typed
+failure (`bot.ability.failed` with the failure message) when the turn failed, producer-stamped
 participants, acts, outcome) as an episode node, linked by
 `involves_source`/`involves_target` to the person each participant ref belongs to, and a
 canonical vector per node in its embedder's `embedding.Space`. A person is one node keyed by

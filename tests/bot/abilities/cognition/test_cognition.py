@@ -4169,6 +4169,43 @@ def test_cognition_remembers_a_failed_turn_with_its_stimulus_and_no_acts() -> No
     assert kept.acts == ()
 
 
+class _RefusingIntuitionProcessor(processing.Processor):
+    @typing.override
+    async def process(
+        self, input: processing.InputData, *, drafts: processing.DraftSink | None = None
+    ) -> processing.Events:
+        raise RuntimeError("the bench refused the write")
+
+
+def test_cognition_remembers_a_failed_turn_with_its_failure_after_what_it_perceived() -> None:
+    """Live check round 1 (D3): after a turn failed, the next turn recalled only its input, not that it failed.
+
+    The bot went on to promise work it could not reach. A failed turn's episode is now what was perceived,
+    then the turn's typed failure (cognition's failed event), so recall covers what happened to what it tried.
+    """
+
+    async def run() -> tuple[memory.Episode, ...]:
+        store = memory.Memory()
+        ability = RecordingCognition(intuition_processor=_RefusingIntuitionProcessor(), store=store)
+        ctx = await start_cognition_ability_for_test(ability)
+        _ = await hsm.dispatch(
+            ctx, ability, ability.input_event.with_data_and_id(await started_cognition_input(ctx), "refused-turn")
+        )
+        await wait_until(lambda: bool(ability.failures))
+        await wait_until(lambda: ability.state().endswith("/idle"))
+        return await _remembered(ctx, store)
+
+    (kept,) = asyncio.run(run())
+
+    assert kept.turn_id == "refused-turn"
+    assert kept.outcome is memory.Outcome.FAILED
+    perceived = kept.text.index("<events:input_event")
+    failed = kept.text.index("<ability:failure", perceived)
+    failure = kept.text[failed : kept.text.index("/>", failed)]
+    assert f'stimulus:event="{cognition.Cognition.failed_event.name}"' in failure
+    assert 'message="the bench refused the write"' in failure
+
+
 class _UnreadableActor(hsm.Instance):
     """A live actor whose state cannot be read, so no frame that offers it can be built."""
 
