@@ -15,8 +15,8 @@ with one `bot.define` that constructs every part inline, and runs it with `bot.r
 
 - **Rooms.** One `computer.Computer` per room the owner lists (`WILLY_ROOMS`), named for the room and set on
   something in it, an `environment.Object` such as a shelf or a counter, at its own place in the house. All are
-  served by one `websocket.Server`. A far side in each room carries the room's microphone and speaker (and,
-  optionally, camera) to it. A room's computer is shared, so it stamps nobody on what it hears: who is speaking is
+  served by one `websocket.Server`. A far side in each room, `willy_example.room`, carries the room's
+  microphone and speaker (and, optionally, camera) to it. A room's computer is shared, so it stamps nobody on what it hears: who is speaking is
   what Willy's ear recognizes.
 - **Ear.** `listening.Listening` on the lab's streaming speech to text, with voiceprints into a voice
   `identification.Registry` on the same file database as memory, diarization (several voices in one turn) and
@@ -52,6 +52,34 @@ Willy keeps its memory and every voiceprint in one SQLite file, `<data dir>/memo
 `bot.run` has created private (`0700`), and one that cannot be opened fails Willy's start there. The process options, exit codes and stop bound are `bot.run`'s
 ([`docs/runtime.md`](../../docs/runtime.md)). A missing or malformed setting or secret, or an unreadable or
 malformed household file, ends the process with exit `1`, naming it, before anything starts.
+
+## A room's far side
+
+Each room needs a far side for its computer: a host in the room with a microphone and a speaker (and, with
+`--camera`, a camera). `willy_example.room` is one:
+
+```sh
+examples/willy/.venv/bin/python -m willy_example.room --url ws://<willy-host>:8765 --peer kitchen \
+  --secret-file examples/willy/secrets/computer_token_secret [--camera]
+```
+
+It connects as the room (`--peer` is the room's name in `WILLY_ROOMS`), signs its token with
+`computer_token_secret`, and opens the computer's `microphone` and `speaker` channels (and `camera`). It decides
+nothing: it captures 16 kHz mono from the host's default input and sends it, plays whatever the computer sends on
+the host's default output (Willy's voice, at 24 kHz), and with `--camera` sends a JPEG still from the first
+camera every second. Sound comes from `sounddevice` (PortAudio; on Linux install `libportaudio2`), the camera from
+OpenCV.
+
+Echo cancellation is the operating system's or the device's: capture through a device or a voice-processing
+input that cancels what its speaker plays (a speakerphone, or the platform's echo-cancelled input). Without it
+Willy hears itself through the room's microphone a moment later; it knows its own voice, so it never takes it for
+someone else's.
+
+SIGINT or SIGTERM leaves the room. Exit codes: `0` when the room is left or Willy's computer closes the session
+normally, `1` when the connection fails, times out, is refused or ends abnormally (or the sound card cannot be
+opened), `64` for bad flags, `78` for a missing or unreadable secret. It writes nothing to stdout. Its telemetry
+(meter scope `willy_example.room`) counts connects by outcome, messages by channel, drops by channel and closes by
+reason; the room's name, the url, the token and every sound and image never are attributes.
 
 ## Settings
 
@@ -120,7 +148,11 @@ examples/willy/.venv/bin/python -m pytest -m "not live" -q examples/willy/tests
 
 The tests are hermetic. `test_build.py` covers the settings, the household file and the bot file run as a child
 process (it becomes ready on closed endpoints and stops on SIGTERM; a bad setting exits `1` naming it).
-`test_willy.py` writes its own small `bot.define` of Willy's shape, with a scripted model, the real ear, mouth,
+`test_room.py` runs the room's far side against a real
+websocket server and a real computer on a counter, with fake sound card and camera: what the microphone hears is
+put into the house, what the computer hears comes out of the speaker, a still reaches the house, and a refused
+token, nothing to connect to or a sound card that cannot open end it `1`. `test_willy.py` writes its own small
+`bot.define` of Willy's shape, with a scripted model, the real ear, mouth,
 memory and people, and fakes at the provider seams only: the speech server's wire behind
 `speech_server.Transcription(connect=...)`, and the voiceprint and diarization servers behind
 `httpx.MockTransport`. They pin what Willy perceives and what it can do (a stranger is `known=false` and linking
