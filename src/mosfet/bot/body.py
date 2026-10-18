@@ -372,6 +372,8 @@ class Bot(Traced):
     _innate_ability_instances: tuple[abilities.Ability[typing.Any, typing.Any], ...]
     # The machinery the bot's owner wrote for it: started after every part is attached, stopped first.
     _firmware: hsm.Instance | None
+    # The bot's name, fixed at construction: the body runs as /<name> and each device as /<name><Device>.
+    _name: str | None
     _acquired_abilities: tuple[abilities.Ability[typing.Any, typing.Any], ...]
     _input: tuple[abilities.Ability[typing.Any, typing.Any], ...]
     _output: tuple[abilities.Ability[typing.Any, typing.Any], ...]
@@ -398,8 +400,15 @@ class Bot(Traced):
         attachment_timeout: datetime.timedelta | None = None,
         stm_memory: memory.StmMemory | None = None,
         firmware: hsm.Instance | None = None,
+        name: str | None = None,
     ) -> None:
         """Build an unstarted body holding ``devices``, each known by its ``Device.identity()``.
+
+        ``name``, when given, is the bot's own (``bot.define``'s, lower snake case): the body runs on
+        ``Bot.model`` redefined as ``/<name>`` and starts each device it holds on that device's model
+        redefined as ``/<name><DeviceClass>``, so two bots in one process publish distinct topology
+        names. ``Bot.model`` itself is never changed. Without one, the body and its devices run their
+        own models.
 
         ``firmware``, when given, is the bot's one firmware (``bot.Firmware``): an unstarted machine
         whose ``model`` it runs on. The body starts it once its devices and abilities are attached,
@@ -457,6 +466,7 @@ class Bot(Traced):
             keys.add(identity)
         self._stm_memory: memory.StmMemory | None = stm_memory
         self._firmware = firmware
+        self._name = name
         self._attachments = attachment.Group(*Bot._lifecycle_attachment_members(self))
         self._lifecycle = None
         self._lifecycle_step = 0
@@ -496,14 +506,17 @@ class Bot(Traced):
         return self
 
     def _model_for_instance(self) -> hsm.Model:
-        """Return the topology model for this runtime bot instance."""
+        """Return the topology model for this runtime bot instance: its own, or ``/<name>``."""
 
-        return self.model
+        return self.model if self._name is None else hsm.redefine(self.model, self._name)
 
     def _model_for_device(self, device: Device) -> hsm.Model | None:
-        """Return the published model for one configured device."""
+        """Return the published model for one configured device: its own, or ``/<name><DeviceClass>``."""
 
-        return device.model
+        model = device.model
+        if model is None or self._name is None:
+            return model
+        return hsm.redefine(model, f"{self._name}{type(device).__name__}")
 
     async def detach(
         self,

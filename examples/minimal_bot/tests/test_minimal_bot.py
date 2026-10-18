@@ -41,7 +41,7 @@ def test_it_starts_activates_and_stops_with_a_scripted_model() -> None:
 
     async def run() -> None:
         async with testing.running(minimal_bot_example.minimal(processor=model, store=memory.Memory())) as running:
-            assert testing.snapshot(running.bot).State.startswith("/Bot/active")
+            assert testing.snapshot(running.bot).State.startswith("/minimal/active")
 
     asyncio.run(run())
 

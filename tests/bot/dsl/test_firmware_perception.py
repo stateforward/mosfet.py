@@ -86,7 +86,7 @@ def _kitchen(*devices: Device, processor: testing.Scripted | None = None) -> bot
 
 
 def _firmware_id(running: testing.Run) -> str:
-    return typing.cast(str, (running.bot.take_snapshot().Attributes or {})["/Bot/firmware"])
+    return typing.cast(str, (running.bot.take_snapshot().Attributes or {})["/kitchen/firmware"])
 
 
 async def _until(condition: collections.abc.Callable[[], bool]) -> None:
@@ -190,7 +190,7 @@ def test_a_device_that_allows_one_holder_fails_the_firmwares_start_and_so_the_ac
     state = asyncio.run(run())
 
     # bot.start returns the body as its activation failure leaves it: rolling back, or rolled back.
-    assert state in {"/Bot/activation_cleanup", "/Bot/inactive"}
+    assert state in {"/kitchen/activation_cleanup", "/kitchen/inactive"}
 
 
 def test_a_firmware_whose_devices_do_not_answer_fails_its_start_within_its_bound_and_stops_again() -> None:

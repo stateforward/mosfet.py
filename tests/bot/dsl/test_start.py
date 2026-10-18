@@ -86,6 +86,7 @@ class Recording(body.Bot):
         attachment_timeout: datetime.timedelta | None = None,
         stm_memory: memory.StmMemory | None = None,
         firmware: hsm.Instance | None = None,
+        name: str | None = None,
     ) -> None:
         parts: dict[str, object] = {
             "cognition": cognition,
@@ -97,6 +98,7 @@ class Recording(body.Bot):
             "attachment_timeout": attachment_timeout,
             "stm_memory": stm_memory,
             "firmware": firmware,
+            "name": name,
         }
         Recording.given.append((tuple(devices), parts))
         super().__init__(
@@ -110,6 +112,7 @@ class Recording(body.Bot):
             attachment_timeout=attachment_timeout,
             stm_memory=stm_memory,
             firmware=firmware,
+            name=name,
         )
 
     @typing.override
@@ -150,7 +153,7 @@ def test_start_returns_the_activated_body_holding_the_models_devices_by_id_in_or
     async def run() -> tuple[str, list[str], bool, bool]:
         started, environment = await _started(model)
         try:
-            owned = typing.cast(dict[str, str], (started.take_snapshot().Attributes or {})["/Bot/owned_devices"])
+            owned = typing.cast(dict[str, str], (started.take_snapshot().Attributes or {})["/greeter/owned_devices"])
             return (
                 started.state(),
                 list(owned),
@@ -162,7 +165,7 @@ def test_start_returns_the_activated_body_holding_the_models_devices_by_id_in_or
 
     state, owned, store_started, in_environment = asyncio.run(run())
 
-    assert state.startswith("/Bot/active")
+    assert state.startswith("/greeter/active")
     assert owned == ["desk", "speaker"]
     assert store_started
     assert in_environment
@@ -204,6 +207,7 @@ def test_the_body_takes_each_part_in_the_role_it_was_given(recording: type[Recor
     assert parts["deactivation_timeout"] is None
     assert parts["attachment_timeout"] == datetime.timedelta(seconds=5)
     assert isinstance(parts["cognition"], cognition.Cognition)
+    assert parts["name"] == "greeter"
 
 
 def test_one_ability_given_as_input_and_acquired_is_given_to_the_body_in_both_roles(

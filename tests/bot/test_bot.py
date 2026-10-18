@@ -1472,6 +1472,45 @@ def test_bot_snapshot_declares_owned_devices_by_their_ids() -> None:
     asyncio.run(run())
 
 
+def test_a_named_bot_publishes_its_own_and_its_devices_topology_names() -> None:
+    """DSL-25: a body given a name runs as ``/<name>`` and starts each device as ``/<name><Device>``."""
+
+    async def run() -> tuple[str, str, list[str]]:
+        desk = Device(id="desk")
+        named = Bot((desk,), cognition=as_cognition(IgnoreAbility()), name="greeter")
+        environment = Environment()
+        _ = await named.attach(environment)
+        await wait_until(lambda: named.state().startswith("/greeter/active"))
+        try:
+            return named.state(), desk.state(), list(named.take_snapshot().Attributes or {})
+        finally:
+            _ = await named.detach(environment)
+            await wait_until(lambda: named.state() == "/greeter/inactive")
+            await hsm.stop(named)
+
+    state, device_state, attributes = asyncio.run(run())
+
+    assert state.startswith("/greeter/active")
+    assert device_state.startswith("/greeterDevice/")
+    assert "/greeter/owned_devices" in attributes
+    assert Bot.model.qualified_name == "/Bot"
+
+
+def test_an_unnamed_bot_runs_the_body_model_itself() -> None:
+    """DSL-25: without a name the body and its devices keep their own models' names."""
+
+    async def run() -> tuple[str, str]:
+        desk = Device(id="desk")
+        active_bot = basic_agent(devices=(desk,))
+        _ = await start_bot_with_devices(active_bot)
+        return active_bot.state(), desk.state()
+
+    state, device_state = asyncio.run(run())
+
+    assert state.startswith("/Bot/active")
+    assert device_state.startswith("/Device/")
+
+
 @pytest.mark.parametrize("twice", ["one device twice", "two devices with one id"])
 def test_bot_refuses_two_devices_with_one_id(twice: str) -> None:
     """DSL-30: one id names one device; the body never resolves a duplicate by order."""

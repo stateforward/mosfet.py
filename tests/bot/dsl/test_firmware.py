@@ -154,7 +154,7 @@ def test_a_firmware_sends_on_its_own_timer_to_a_device_and_an_ability_by_id() ->
             return (
                 list(lamp.received),
                 list(bell.received),
-                typing.cast(str, attributes["/Bot/firmware"]),
+                typing.cast(str, attributes["/kitchen/firmware"]),
                 hsm.id(lamp),
                 hsm.id(bell),
             )
@@ -180,9 +180,9 @@ def test_each_start_of_a_model_with_firmware_runs_a_firmware_of_its_own_shown_li
     async def run() -> tuple[str | None, str, str]:
         async with testing.running(model) as running:
             world = running.environment.model_snapshot(running.bot)
-            first = typing.cast(str, (running.bot.take_snapshot().Attributes or {})["/Bot/firmware"])
+            first = typing.cast(str, (running.bot.take_snapshot().Attributes or {})["/kitchen/firmware"])
         async with testing.running(model) as running:
-            second = typing.cast(str, (running.bot.take_snapshot().Attributes or {})["/Bot/firmware"])
+            second = typing.cast(str, (running.bot.take_snapshot().Attributes or {})["/kitchen/firmware"])
         return world, first, second
 
     world, first, second = asyncio.run(run())

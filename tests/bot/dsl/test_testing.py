@@ -150,7 +150,7 @@ def test_running_yields_the_started_bot_and_its_environment_then_stops_both() ->
 
     state, in_environment, actor_started, started, actor_after = asyncio.run(run())
 
-    assert state.startswith("/Bot/active")
+    assert state.startswith("/greeter/active")
     assert in_environment
     assert actor_started
     assert not lifecycle.is_started(started)
@@ -306,7 +306,7 @@ def test_snapshot_is_the_bodys_own_snapshot_with_its_devices() -> None:
 
     assert taken.State == own.State
     assert taken.Attributes == own.Attributes
-    assert list(typing.cast(dict[str, str], (taken.Attributes or {})["/Bot/owned_devices"])) == ["desk"]
+    assert list(typing.cast(dict[str, str], (taken.Attributes or {})["/greeter/owned_devices"])) == ["desk"]
 
 
 def test_a_run_is_the_bot_and_its_environment() -> None:

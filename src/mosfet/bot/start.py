@@ -4,7 +4,8 @@
 ``mosfet.Bot``, around the very parts the bot file constructed and gave to ``bot.define``: its
 devices by id, its abilities in their roles, its sensory register and timeouts, and a cognition
 built once from ``bot.cognition``'s processor and flags on one shared memory (a fresh in-memory
-``memory.Memory()`` when none was given), with a persona when the model has traits. It then starts
+``memory.Memory()`` when none was given), with a persona when the model has traits. The body takes
+the bot's name, so it runs as ``/<name>`` and its devices as ``/<name><DeviceClass>``. It then starts
 the body in ``ctx`` with ``data`` as its start data, joins it to the environment, and awaits the
 body's answer to its activation::
 
@@ -116,7 +117,8 @@ async def _start(ctx: Environment, model: elements.Model, data: object, location
             if not isinstance(typing.cast(object, ctx), Environment):
                 raise _outside(name, ctx, location)
             instance = construct(model, location)
-            _ = await mosfet.started(ctx, instance, instance.model, hsm.Config(data=data))
+            # The body's own model under the bot's name, as ``mosfet.Bot(name=)`` runs it (DSL-25).
+            _ = await mosfet.started(ctx, instance, hsm.redefine(body.Bot.model, name), hsm.Config(data=data))
             try:
                 ctx.join(instance)
                 answer = await abilities.run_terminal_operation(
@@ -292,6 +294,7 @@ def _body(model: elements.Model, name: str, location: diagnostics.Location) -> b
             attachment_timeout=None if timeouts is None else timeouts.attachment,
             stm_memory=register,
             firmware=machine,
+            name=name,
         )
     except Exception as error:
         raise _raised(name, model.location, "body", error, location) from error
