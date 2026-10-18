@@ -25,7 +25,7 @@ import typing
 import hsm
 
 import mosfet.device
-from mosfet import abilities
+from mosfet import abilities, environment
 from mosfet.abilities import memory, persona, processing
 from mosfet.abilities.communication.conversation.conversation import snake_case
 from mosfet.behavior import schedule
@@ -405,6 +405,9 @@ class RedefinableAttachment(Element[AttachmentElement]):
     def _redefine(self, model: Model, stack: list[hsm.Element]) -> AttachmentElement | None:
         function = _FUNCTIONS[self.role]
         instance = self.instance
+        if isinstance(instance, environment.Object):
+            model.findings.append(self._object(model, instance))
+            return None
         if not _attachable(instance, self.role):
             span, argument = _argument(self.location)
             written = diagnostics.text(diagnostics.node_span(span, argument)) if argument is not None else "..."
@@ -498,6 +501,30 @@ class RedefinableAttachment(Element[AttachmentElement]):
             primary=primary.model_copy(update={"label": f"this is the class `{written}`"}),
             notes=("the bot file builds its parts; the bot holds the very instances it is given",),
             help=diagnostics.Help(message="construct it", suggestion=suggestion),
+        )
+
+    def _object(self, model: Model, placed: environment.Object) -> diagnostics.Diagnostic:
+        """B0019: ``placed`` is an object, which no element takes; a part sits on it instead."""
+
+        function = _FUNCTIONS[self.role]
+        _, argument = _argument(self.location)
+        written = argument.id if isinstance(argument, ast.Name) else f'environment.Object(id="{placed.id}")'
+        span = diagnostics.removal(diagnostics.Span.of(model.location), diagnostics.Span.of(self.location))
+        return diagnostics.Diagnostic(
+            code="B0019",
+            level="error",
+            message=f"`{function}` does not take an object",
+            primary=diagnostics.Span.of(self.location, f"`{placed.id}` is an object"),
+            notes=(
+                "an object does nothing: no power, no state and no machine, so the bot has nothing to hold or start",
+            ),
+            help=diagnostics.Help(
+                message=f"an object is not attached; place a part on it with `placement={written}.surface()`, "
+                + "and remove this element",
+                suggestion=None
+                if span is None
+                else diagnostics.Suggestion(span=span, replacement="", applicability="machine-applicable"),
+            ),
         )
 
     def _unattachable(

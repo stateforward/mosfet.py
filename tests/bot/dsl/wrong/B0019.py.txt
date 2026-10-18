@@ -1,0 +1,14 @@
+"""B0019: an object given to the bot as if it were a part, beside the computer that sits on it."""
+
+from mosfet import bot, environment
+from mosfet.devices import computer
+
+from tests.bot.dsl import support
+
+desk = environment.Object(id="desk")
+model = bot.define(
+    "greeter",
+    bot.cognition(support.Silent()),
+    bot.attach(computer.Computer(id="computer", placement=desk.surface())),
+    bot.attach(desk),
+)

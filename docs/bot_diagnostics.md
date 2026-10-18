@@ -30,6 +30,7 @@ a `processor` (a `processing.Processor`) and an `environment`.
 - [`B0016`](#b0016) (error): a held device has no id
 - [`B0017`](#b0017) (error): `bot.define` is given something that is not a bot element
 - [`B0018`](#b0018) (error): `bot.allow` names a lint that does not exist
+- [`B0019`](#b0019) (error): an object is given to the bot
 - [`B0101`](#b0101) (error): a model is started again while its parts run
 - [`B0102`](#b0102) (error): a part raised while `bot.start` built the bot
 - [`B0103`](#b0103) (error): `bot.start` is given something that is not an `Environment`
@@ -491,6 +492,37 @@ Right:
 
 ```python
 model = bot.define("greeter", bot.cognition(processor), bot.allow("no_devices"))
+```
+
+## B0019
+
+**error:** an object is given to the bot
+
+An `environment.Object` (a desk, a table, a shelf) is not attached, input or output: it is placed. A part sits on it through its own placement, `placement=desk.surface()`, and the help deletes the element that gave the object to the bot.
+
+Why: An object does nothing: it has no power, no state and no machine, so there is nothing for the bot to hold or start. It shows in the bot's world only through what sits on it, as `on=` on that part.
+
+Wrong:
+
+```python
+desk = mosfet.environment.Object(id="desk")
+model = bot.define(
+    "greeter",
+    bot.cognition(processor),
+    bot.attach(phone.Phone(placement=desk.surface())),
+    bot.attach(desk),
+)
+```
+
+Right:
+
+```python
+desk = mosfet.environment.Object(id="desk")
+model = bot.define(
+    "greeter",
+    bot.cognition(processor),
+    bot.attach(phone.Phone(placement=desk.surface())),
+)
 ```
 
 ## B0101

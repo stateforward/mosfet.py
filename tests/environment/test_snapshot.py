@@ -5,7 +5,10 @@ import asyncio
 import hsm
 import pytest
 
-from mosfet.environment import snapshot
+import mosfet
+import mosfet.device
+from mosfet import environment
+from mosfet.environment import snapshot, space
 
 
 def test_render_environment_wraps_self_with_world_identity() -> None:
@@ -83,3 +86,47 @@ def test_a_firmware_that_cannot_be_observed_renders_nothing(declared: object) ->
             await hsm.stop(perspective)
 
     assert asyncio.run(run()) == '  <self state="/Body/active"/>'
+
+
+_OWNER_MODEL = hsm.define(
+    "Owner",
+    hsm.attribute("owned_devices"),
+    hsm.initial(hsm.target("active")),
+    hsm.state("active"),
+)
+
+
+@pytest.mark.parametrize(
+    ("placement", "on"),
+    [
+        (environment.Object(id="desk").surface(), ' on="desk"'),
+        (space.Placement(position=space.Position(0.0, 0.0)), ""),
+        (None, ""),
+    ],
+)
+def test_a_device_on_an_object_renders_what_it_sits_on(placement: space.Placement | None, on: str) -> None:
+    """W8-2: the desk shows in the world block only through what sits on it, as that thing's ``on``."""
+
+    async def run() -> str | None:
+        world = environment.Environment()
+        held = mosfet.device.Device(id="computer", placement=placement)
+        model = mosfet.device.Device.model
+        assert model is not None
+        _ = await mosfet.started(world, held, model)
+        owner = await hsm.started(world, _Machine(), _OWNER_MODEL)
+        _ = owner.set("owned_devices", {"computer": hsm.id(held)})
+        actors = {hsm.id(held): held}
+        try:
+            return snapshot.render_self(owner, actors.get, 0)
+        finally:
+            await hsm.stop(owner)
+            await hsm.stop(held)
+
+    rendered = asyncio.run(run())
+
+    assert rendered is not None
+    device = rendered.splitlines()[2]
+    assert device.startswith('    <device ref="computer" id="')
+    assert device.endswith(f'"{on}/>')
+    assert device.count(" on=") == (1 if on else 0)
+    assert "<on>" not in rendered

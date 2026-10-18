@@ -1,0 +1,14 @@
+error[B0019]: `bot.attach` does not take an object
+  --> greeter.py:13:5
+   |
+13 |     bot.attach(desk),
+   |     ^^^^^^^^^^^^^^^^ `desk` is an object
+   |
+   = note: an object does nothing: no power, no state and no machine, so the bot has nothing to hold or start
+help: an object is not attached; place a part on it with `placement=desk.surface()`, and remove this element
+   |
+13 |     bot.attach(desk),
+   |     -----------------
+   = explain: bot.explain("B0019")
+
+error: could not define bot `greeter`: 1 error

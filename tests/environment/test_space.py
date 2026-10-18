@@ -1,5 +1,6 @@
 import math
 
+import pydantic
 import pytest
 
 from mosfet.environment import space
@@ -16,6 +17,19 @@ def test_placement_defaults_to_no_threshold() -> None:
     placement = space.Placement(position=space.Position(x=0.0, y=0.0))
 
     assert placement.threshold_db is None
+
+
+def test_placement_rests_on_nothing_unless_it_names_an_object() -> None:
+    """``on`` names the object a placed thing sits on; a free-standing one sits on nothing."""
+
+    assert space.Placement(position=space.Position(x=0.0, y=0.0)).on is None
+    assert space.Placement(position=space.Position(x=0.0, y=0.0), on="desk").on == "desk"
+
+
+@pytest.mark.parametrize("bad", ["", "Desk", "desk top"])
+def test_placement_on_must_be_an_object_id(bad: str) -> None:
+    with pytest.raises(pydantic.ValidationError):
+        _ = space.Placement(position=space.Position(x=0.0, y=0.0), on=bad)
 
 
 @pytest.mark.parametrize(

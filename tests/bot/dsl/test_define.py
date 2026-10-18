@@ -269,6 +269,7 @@ def test_each_explanation_shows_its_mistake_and_the_fix(explanation: diagnostics
         "B0016",
         "B0017",
         "B0018",
+        "B0019",
     ],
 )
 def test_every_define_code_has_an_explanation(code: str) -> None:

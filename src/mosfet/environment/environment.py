@@ -147,9 +147,19 @@ class Environment(hsm.Context):
 
         ``placement`` says where this citizen is and how quiet a sound can get before it stops
         hearing it. Without one it hears every stimulus, which is what keeps geometry opt-in.
+
+        Raises:
+            TypeError: If ``instance`` is not an ``hsm.Instance``: an ``environment.Object`` does
+                nothing, so it is never a citizen; a part sits on it through ``placement``.
+            RuntimeError: If ``instance`` is not started, or is already placed elsewhere here.
         """
 
         participant = type(instance).__name__
+        if not isinstance(typing.cast(object, instance), hsm.Instance):
+            raise TypeError(
+                f"{participant} is not an hsm.Instance and cannot join an environment; "
+                + "place a part on an object with placement=obj.surface()."
+            )
         if not lifecycle.is_started(instance):
             raise RuntimeError(f"{participant} must be started before it joins an environment.")
         require_environment_scope(self, instance, participant=participant)

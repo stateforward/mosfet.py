@@ -1,13 +1,15 @@
 """The bot elements: what each registers in the model, and the diagnostic for each misuse (DSL-3..DSL-6, DSL-22..24)."""
 
+import collections.abc
 import datetime
 import linecache
 import pathlib
+import typing
 
 import hsm
 import pytest
 
-from mosfet import bot
+from mosfet import bot, environment
 from mosfet.abilities import memory
 from mosfet.bot import elements
 from mosfet.devices import audio, phone
@@ -134,7 +136,9 @@ def test_hsm_define_rejects_a_bot_element_as_hsm_rejects_a_misplaced_attribute()
         _ = hsm.define("machine", bot.attach(phone.Phone()))
 
 
-@pytest.mark.parametrize("code", ["B0003", "B0004", "B0006", "B0007", "B0008", "B0009", "B0015", "B0016", "B0017"])
+@pytest.mark.parametrize(
+    "code", ["B0003", "B0004", "B0006", "B0007", "B0008", "B0009", "B0015", "B0016", "B0017", "B0019"]
+)
 def test_each_misuse_renders_its_golden(code: str, here: pathlib.Path) -> None:
     path = support.copy(code, here)
 
@@ -142,6 +146,41 @@ def test_each_misuse_renders_its_golden(code: str, here: pathlib.Path) -> None:
 
     assert [diagnostic.code for diagnostic in error.diagnostics] == [code]
     assert support.rendered(error) == support.golden(code)
+
+
+@pytest.mark.parametrize("element", [bot.attach, bot.input, bot.output])
+def test_an_object_is_placed_not_given_to_the_bot(
+    element: collections.abc.Callable[[typing.Any], bot.Element[hsm.Element]],
+) -> None:
+    """W8-2: an object does nothing, so no element takes it; a part sits on it through its placement."""
+
+    desk = environment.Object(id="desk")
+    with pytest.raises(bot.DefinitionError) as caught:
+        _ = bot.define(
+            "greeter",
+            bot.cognition(support.Silent()),
+            bot.attach(phone.Phone(placement=desk.surface())),
+            element(desk),
+        )
+
+    (diagnostic,) = caught.value.diagnostics
+    assert diagnostic.code == "B0019"
+    assert diagnostic.help is not None
+    assert "placement=desk.surface()" in diagnostic.help.message
+    assert diagnostic.help.suggestion is not None
+    assert (diagnostic.help.suggestion.replacement, diagnostic.help.suggestion.applicability) == (
+        "",
+        "machine-applicable",
+    )
+
+
+def test_a_part_on_an_object_is_held_with_its_placement() -> None:
+    desk = environment.Object(id="desk")
+    handset = phone.Phone(placement=desk.surface())
+
+    model = bot.define("greeter", bot.cognition(support.Silent()), bot.attach(handset))
+
+    assert _instance(model, "/greeter/phone") is handset
 
 
 def test_two_devices_of_one_kind_get_a_numbered_id_and_a_reserved_id_its_kind(here: pathlib.Path) -> None:

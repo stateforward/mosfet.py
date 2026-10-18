@@ -27,7 +27,7 @@ import hsm
 import pytest
 import sqlalchemy
 
-from mosfet import bot
+from mosfet import bot, environment
 from mosfet.abilities import cognition, communication, embedding, memory, persona, processing, speaking, vocal
 from mosfet.abilities.cognition import autonomy, routines
 from mosfet.abilities.communication import behaviors, conversation
@@ -130,6 +130,7 @@ _CASES: dict[str, collections.abc.Callable[[pathlib.Path], object]] = {
     "audio.Microphone": lambda tmp: audio.Microphone(),
     "audio.Speaker": lambda tmp: audio.Speaker(),
     "computer.Computer": lambda tmp: computer.Computer(id="desk", transport=hsm.Instance()),
+    "environment.Object": lambda tmp: environment.Object(id="desk"),
     "computer.Camera": lambda tmp: computer.Camera(),
     "computer.Display": lambda tmp: computer.Display(),
     "computer.Microphone": lambda tmp: computer.Microphone(),

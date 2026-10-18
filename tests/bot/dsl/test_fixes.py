@@ -25,6 +25,7 @@ FIXABLE = [
     "B0014",
     "B0017",
     "B0018",
+    "B0019",
     "conflicting_ids",
     "empty_timeouts",
     "misplaced_ids",

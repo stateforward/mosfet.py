@@ -116,6 +116,32 @@ with no transport is a computer with no remote side, unplugged. `websocket.Serve
 `audio.Speaker()` and needs only its `encoder`. `docker.Host` derives its capacity from its runtime,
 and `sandbox.Spec` gives `HOME` the workspace.
 
+## Objects and placements
+
+A desk, a table or a shelf is an `environment.Object`: a physical thing with an id and a place that
+does nothing. It has no power, no state and no machine, so it is never given to the bot. A part sits
+on it through its own `placement=`, and `surface(offset)` is where a thing set on the object is:
+
+```pycon
+>>> from mosfet import environment
+>>> from mosfet.environment import space
+>>> desk = environment.Object(id="desk", placement=space.Placement(position=space.Position(2.0, 1.0)))
+>>> desk.surface(space.Position(0.5, 0.0))
+Placement(position=Position(x=2.5, y=1.0, z=0.0), threshold_db=None, on='desk')
+>>> keeper = bot.define(
+...     "keeper",
+...     bot.cognition(testing.Scripted()),
+...     bot.attach(computer.Computer(id="computer", placement=desk.surface())),
+... )
+>>> [part.id for part in bot.describe(keeper).bots[0].parts]
+['computer']
+
+```
+
+The bot's world block shows the desk only through what sits on it: the computer's own element reads
+`<device ref="computer" id="…" state="…" on="desk">`. Giving the object itself to `bot.attach`,
+`bot.input` or `bot.output` is [`B0019`](bot_diagnostics.md#b0019), whose help deletes that element.
+
 ## Starting, stopping and testing a bot
 
 `bot.start(ctx, model, data=None, *, observe=())` follows `hsm.start(ctx, instance, data)`. It builds the bot's body,

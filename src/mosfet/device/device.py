@@ -169,7 +169,9 @@ class Device(Traced, attachment.Attachment):
         Args:
             id: The id the bot holding this device knows it by (:data:`DeviceId`); its kind when omitted.
             peripherals: Devices this device owns and powers.
-            placement: Where this device is in the environment, if known.
+            placement: Where this device is in the environment, if known. A placement on an
+                ``environment.Object`` (``desk.surface()``) names it as ``on``, which the device's
+                snapshot shows.
             clock: The ``hsm.Clock`` this device, its firmware and the peripherals it powers keep
                 time on (their ``hsm.after`` and ``hsm.every`` timers); when omitted, the clock of
                 whatever starts it, else its environment's (see :meth:`own_clock`).
@@ -613,6 +615,10 @@ class Device(Traced, attachment.Attachment):
                 key.rpartition("/")[2]: value for key, value in peripheral_attributes.items()
             }
             attributes[name] = observation
+        # What the device sits on is a fact of its own placement, shown on its own element: an
+        # ``environment.Object`` has no snapshot, so the desk is seen only through what is on it.
+        if self._placement is not None and self._placement.on is not None:
+            attributes["on"] = self._placement.on
         return dataclasses.replace(
             snapshot,
             State=state,

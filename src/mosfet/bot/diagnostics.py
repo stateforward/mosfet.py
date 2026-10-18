@@ -556,6 +556,30 @@ EXPLANATIONS: tuple[Explanation, ...] = (
         right='model = bot.define("greeter", bot.cognition(processor), bot.allow("no_devices"))',
     ),
     Explanation(
+        code="B0019",
+        level="error",
+        title="an object is given to the bot",
+        meaning=(
+            "An `environment.Object` (a desk, a table, a shelf) is not attached, input or output: it is placed. "
+            "A part sits on it through its own placement, `placement=desk.surface()`, and the help deletes the "
+            "element that gave the object to the bot."
+        ),
+        why=(
+            "An object does nothing: it has no power, no state and no machine, so there is nothing for the bot "
+            "to hold or start. It shows in the bot's world only through what sits on it, as `on=` on that part."
+        ),
+        wrong=(
+            'desk = mosfet.environment.Object(id="desk")\n'
+            'model = bot.define(\n    "greeter",\n    bot.cognition(processor),\n'
+            "    bot.attach(phone.Phone(placement=desk.surface())),\n    bot.attach(desk),\n)"
+        ),
+        right=(
+            'desk = mosfet.environment.Object(id="desk")\n'
+            'model = bot.define(\n    "greeter",\n    bot.cognition(processor),\n'
+            "    bot.attach(phone.Phone(placement=desk.surface())),\n)"
+        ),
+    ),
+    Explanation(
         code="B0101",
         level="error",
         title="a model is started again while its parts run",

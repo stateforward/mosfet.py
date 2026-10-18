@@ -30,7 +30,8 @@ from mosfet.device import (
     FirmwareInitializingDoneEventData,
     FirmwareInitializingFailedEventData,
 )
-from mosfet.environment import Environment
+from mosfet import environment
+from mosfet.environment import Environment, space
 from tests.hsm_instance_state import device_bots, device_firmware, device_peripherals
 from tests.hsm_model import transition_map
 from tests.type_helpers import callable_object, object_dict
@@ -242,6 +243,29 @@ def test_device_snapshot_presents_firmware_behavioral_state() -> None:
 
     snapshot = asyncio.run(run())
     assert snapshot.State == "/FirmwareAttributeProbe/idle"
+
+
+def test_device_snapshot_carries_the_object_it_sits_on() -> None:
+    """W8-2: a device placed on an object says so in its own snapshot, as ``on``."""
+
+    async def run() -> hsm.Snapshot:
+        device = Device(id="computer", placement=environment.Object(id="desk").surface())
+        _ = await start_device_in_environment(device)
+        return device.take_snapshot()
+
+    attributes = asyncio.run(run()).Attributes
+    assert attributes is not None
+    assert attributes["on"] == "desk"
+
+
+@pytest.mark.parametrize("placement", [None, space.Placement(position=space.Position(1.0, 0.0))])
+def test_device_snapshot_has_no_on_when_it_sits_on_nothing(placement: space.Placement | None) -> None:
+    async def run() -> hsm.Snapshot:
+        device = Device(placement=placement)
+        _ = await start_device_in_environment(device)
+        return device.take_snapshot()
+
+    assert "on" not in (asyncio.run(run()).Attributes or {})
 
 
 class ObservingPeripheral(Device):

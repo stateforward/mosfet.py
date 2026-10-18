@@ -108,16 +108,25 @@ def _render_actor_element(
     actor_snapshot: hsm.Snapshot,
     depth: int,
 ) -> str:
-    """One actor element: tag, given attributes plus state, snapshot attributes as children."""
+    """One actor element: tag, given attributes plus state, snapshot attributes as children.
+
+    A device's ``on``, the object it sits on (``Device.take_snapshot`` sets it from its placement), is
+    rendered as the element's own ``on`` attribute rather than a child: it says where the actor is,
+    not what it shows.
+    """
 
     children: list[str] = []
+    placed: dict[str, str] = {}
     if actor_snapshot.Attributes:
         snapshot_attributes = typing.cast(collections.abc.Mapping[str, object], actor_snapshot.Attributes)
         for key, value in snapshot_attributes.items():
+            if key == "on" and isinstance(value, str):
+                placed["on"] = value
+                continue
             child = _render_attribute(key, value, depth + 1)
             if child is not None:
                 children.append(child)
-    return _element(tag, {**attributes, "state": actor_snapshot.State}, children, depth)
+    return _element(tag, {**attributes, "state": actor_snapshot.State, **placed}, children, depth)
 
 
 def _render_owned_devices(
