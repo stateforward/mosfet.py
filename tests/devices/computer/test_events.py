@@ -88,6 +88,10 @@ def test_text_entered_must_carry_text() -> None:
     assert entered.person_id is None
 
 
+def test_text_entered_with_nothing_focused_names_no_field() -> None:
+    assert computer.TextEnteredData(device_id="studio-laptop", text="hello").field_id is None
+
+
 @pytest.mark.parametrize("device_id", ["desk", "my_desk"])
 def test_observations_carry_the_id_the_bot_knows_the_computer_by(device_id: str) -> None:
     """DSL-30: ``device_id`` is the computer's ``mosfet.device.DeviceId``, not its peer name."""

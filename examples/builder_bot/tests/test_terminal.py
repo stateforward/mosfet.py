@@ -362,15 +362,23 @@ def test_a_typed_line_goes_into_the_focused_field_and_enter_sends_it_to_the_hold
     assert "ask: make a test [focused]" in typed
 
 
-def test_a_typed_line_with_nothing_focused_reaches_no_one_and_the_terminal_says_so() -> None:
+@pytest.mark.parametrize(
+    "elements",
+    [(), (computer.FieldElement(id="ask"),)],
+    ids=["blank screen", "no field focused"],
+)
+def test_a_typed_line_with_nothing_focused_reaches_the_holder_with_no_field(
+    elements: tuple[computer.FieldElement, ...],
+) -> None:
+    # Live (builder check): the terminal said "nothing is focused" and the line reached no one.
     async def run() -> tuple[list[object], str]:
         bench = await desk()
         person = await linked(bench)
-        await bench.show(computer.FieldElement(id="ask"))
-        await wait_until(lambda: "ask: " in person.last_screen())
+        if elements:
+            await bench.show(*elements)
+            await wait_until(lambda: "ask: " in person.last_screen())
         person.type("hello")
-        await wait_until(lambda: "nothing is focused" in person.notices.getvalue())
-        await asyncio.sleep(0.1)
+        await wait_until(lambda: bool(bench.holder.observed(computer.TextEnteredEvent)))
         entered = bench.holder.observed(computer.TextEnteredEvent)
         person.type("/quit")
         _ = await stand_up(person)
@@ -379,8 +387,8 @@ def test_a_typed_line_with_nothing_focused_reaches_no_one_and_the_terminal_says_
 
     entered, notices = asyncio.run(run())
 
-    assert entered == []
-    assert notices.count("nothing is focused") == 1
+    assert entered == [computer.TextEnteredData(device_id=DEVICE, person_id="person-1", field_id=None, text="hello")]
+    assert "focused" not in notices
 
 
 def test_a_line_as_long_as_the_terminal_types_reaches_the_holder_whole() -> None:

@@ -125,11 +125,53 @@ def test_typing_into_a_focused_field_then_enter_tells_the_holder_once_and_clears
     assert cleared.value == ""
 
 
-def test_keys_with_no_focused_field_or_an_empty_field_tell_nobody() -> None:
+def test_typing_on_a_blank_screen_then_enter_tells_the_holder_the_text_with_no_field() -> None:
+    # Live (builder check): keys typed on the blank screen of a just-linked computer reached no one.
+    async def run() -> list[hsm.Event[typing.Any]]:
+        remote = await started_app(Environment())
+        for character in "hi!":
+            await send(remote.app, key(character, text=character))
+        await send(remote.app, key("Backspace"))
+        await send(remote.app, key("Enter"))
+        await wait_until(lambda: bool(remote.owner.observations()))
+        await send(remote.app, key("Enter"))
+        await settle()
+        return remote.owner.observations()
+
+    (entered,) = asyncio.run(run())
+
+    assert entered.name == computer.TextEnteredEvent.name
+    assert entered.data == computer.TextEnteredData(device_id=DEVICE_ID, person_id="p-1", field_id=None, text="hi")
+
+
+def test_typing_with_no_field_focused_then_enter_tells_the_holder_and_focusing_a_field_drops_the_line() -> None:
     async def run() -> list[hsm.Event[typing.Any]]:
         remote = await started_app(Environment())
         await on_screen(remote)
         await send(remote.app, key("h", text="h"))
+        await send(remote.app, key("Enter"))
+        await wait_until(lambda: bool(remote.owner.observations()))
+        await send(remote.app, key("x", text="x"))
+        await click(remote, 0.5, 0.35)
+        await send(remote.app, key("y", text="y"))
+        await send(remote.app, key("Enter"))
+        await wait_until(lambda: len(remote.owner.observations()) == 2)
+        # The bot shows the screen again with nothing focused: the "x" typed before the click is gone.
+        await on_screen(remote)
+        await send(remote.app, key("Enter"))
+        await settle()
+        return remote.owner.observations()
+
+    unfocused, focused = asyncio.run(run())
+
+    assert unfocused.data == computer.TextEnteredData(device_id=DEVICE_ID, person_id="p-1", field_id=None, text="h")
+    assert focused.data == computer.TextEnteredData(device_id=DEVICE_ID, person_id="p-1", field_id="answer", text="y")
+
+
+def test_enter_on_an_empty_line_or_with_shift_tells_nobody() -> None:
+    async def run() -> list[hsm.Event[typing.Any]]:
+        remote = await started_app(Environment())
+        await on_screen(remote)
         await send(remote.app, key("Enter"))
         await click(remote, 0.5, 0.35)
         await send(remote.app, key("Enter"))

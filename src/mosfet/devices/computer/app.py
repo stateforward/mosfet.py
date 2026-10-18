@@ -46,6 +46,13 @@ def _focused_field(content: ContentData) -> FieldElement | None:
     return None
 
 
+def _entry(content: ContentData, line: str) -> tuple[str | None, str]:
+    """Where keys type and what is typed there: the focused field and its value, or no field and ``line``."""
+
+    field = _focused_field(content)
+    return (field.id, field.value) if field is not None else (None, line)
+
+
 def _hit(layout: LayoutData | None, content: ContentData, x: float, y: float) -> str | None:
     """The id of the shown element drawn on top at ``(x, y)`` in the last layout, if any."""
 
@@ -80,7 +87,10 @@ class App(Firmware):
 
     It is what a person's keys and pointer act on, and how the remote camera and microphone reach the
     room. Typing goes into the focused field; Enter sends a non-empty field's text to whoever holds
-    the computer and clears the field; Backspace erases. A pointer pressed and released on the same
+    the computer and clears the field; Backspace erases. With nothing focused (a blank screen, or no
+    focused field), typing goes into a line of the computer's own that Enter sends the same way with no
+    field, so a person can always reach whoever holds the computer; a field taking focus drops that
+    line. A pointer pressed and released on the same
     button activates it; on a field, focuses it. A camera still and microphone audio are put into the
     room the computer is in, stamped with who uses the computer. What the computer's mouthpiece
     hears in the room goes up the link to the remote speaker while linked — except the remote
@@ -94,6 +104,8 @@ class App(Firmware):
     _layout: LayoutData | None = None
     # The pointer press in progress: which pointer, and the element it went down on (or None).
     _pressed: tuple[int, str | None] | None = None
+    # What the person typed with nothing focused, until Enter sends it or a field takes focus.
+    _line: str = ""
 
     # -- keyboard -------------------------------------------------------------------------------
 
@@ -103,8 +115,8 @@ class App(Firmware):
         data = event.data
         if not isinstance(data, hid.KeyData) or data.action != "down" or not data.text:
             return False
-        field = _focused_field(instance._content)
-        return field is not None and len(field.value) + len(data.text) <= _MAX_FIELD_CHARACTERS
+        _, typed = _entry(instance._content, instance._line)
+        return len(typed) + len(data.text) <= _MAX_FIELD_CHARACTERS
 
     @staticmethod
     def _is_submitting(ctx: hsm.Context, instance: "App", event: hsm.Event[typing.Any]) -> bool:
@@ -112,8 +124,8 @@ class App(Firmware):
         data = event.data
         if not isinstance(data, hid.KeyData) or data.action != "down" or data.key != "Enter":
             return False
-        field = _focused_field(instance._content)
-        return "shift" not in data.modifiers and field is not None and bool(field.value)
+        _, typed = _entry(instance._content, instance._line)
+        return "shift" not in data.modifiers and bool(typed)
 
     @staticmethod
     def _is_erasing(ctx: hsm.Context, instance: "App", event: hsm.Event[typing.Any]) -> bool:
@@ -121,49 +133,55 @@ class App(Firmware):
         data = event.data
         if not isinstance(data, hid.KeyData) or data.action != "down" or data.key != "Backspace":
             return False
-        field = _focused_field(instance._content)
-        return field is not None and bool(field.value)
+        _, typed = _entry(instance._content, instance._line)
+        return bool(typed)
 
     @staticmethod
     def _type(ctx: hsm.Context, instance: "App", event: hsm.Event[typing.Any]) -> None:
         data = event.data
         assert isinstance(data, hid.KeyData) and data.text is not None
-        field = _focused_field(instance._content)
-        assert field is not None
-        instance._content = _with_field(instance._content, field.id, value=field.value + data.text)
+        field_id, typed = _entry(instance._content, instance._line)
         Firmware._count("keyboard", "in", "delivered")
+        if field_id is None:
+            instance._line = typed + data.text
+            return
+        instance._content = _with_field(instance._content, field_id, value=typed + data.text)
         Firmware._drive_display(ctx, instance, event)
 
     @staticmethod
     def _erase(ctx: hsm.Context, instance: "App", event: hsm.Event[typing.Any]) -> None:
-        field = _focused_field(instance._content)
-        assert field is not None
-        instance._content = _with_field(instance._content, field.id, value=field.value[:-1])
+        field_id, typed = _entry(instance._content, instance._line)
         Firmware._count("keyboard", "in", "delivered")
+        if field_id is None:
+            instance._line = typed[:-1]
+            return
+        instance._content = _with_field(instance._content, field_id, value=typed[:-1])
         Firmware._drive_display(ctx, instance, event)
 
     @staticmethod
     def _submit(ctx: hsm.Context, instance: "App", event: hsm.Event[typing.Any]) -> None:
-        """Tell whoever holds the computer what was typed, then clear the field."""
+        """Tell whoever holds the computer what was typed and where, then clear the field or the line."""
 
-        field = _focused_field(instance._content)
-        assert field is not None
+        field_id, typed = _entry(instance._content, instance._line)
         entered = TextEnteredEvent.with_data(
             TextEnteredData(
                 device_id=instance._ports.device_id,
                 person_id=instance._person_id,
-                field_id=field.id,
-                text=field.value,
+                field_id=field_id,
+                text=typed,
             )
         )
         Firmware._count("keyboard", "in", "delivered")
         Firmware._observe(ctx, instance, event, dataclasses.replace(entered, id=event.id))
-        instance._content = _with_field(instance._content, field.id, value="")
+        if field_id is None:
+            instance._line = ""
+            return
+        instance._content = _with_field(instance._content, field_id, value="")
         Firmware._drive_display(ctx, instance, event)
 
     @staticmethod
     def _consume_key(ctx: hsm.Context, instance: "App", event: hsm.Event[typing.Any]) -> None:
-        """Any other key does nothing on this screen: a key up, a named key, a key with no field."""
+        """Any other key does nothing on this screen: a key up, a named key, Enter or Backspace on nothing typed."""
 
         del ctx, instance, event
         Firmware._count("keyboard", "in", "delivered")
@@ -237,6 +255,7 @@ class App(Firmware):
         assert isinstance(field, FieldElement)
         instance._pressed = None
         instance._content = _with_field(instance._content, field.id, focus=True)
+        instance._line = ""
         Firmware._count("pointer", "in", "delivered")
         Firmware._drive_display(ctx, instance, event)
 
@@ -280,6 +299,8 @@ class App(Firmware):
         data = event.data
         assert isinstance(data, ShowData)
         instance._content = ContentData(elements=data.elements)
+        if _focused_field(instance._content) is not None:
+            instance._line = ""
         Firmware._drive_display(ctx, instance, event)
 
     @staticmethod

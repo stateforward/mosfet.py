@@ -307,18 +307,27 @@ class HeardData(pydantic.BaseModel):
 
 
 class TextEnteredData(pydantic.BaseModel):
-    """A person typed into a field on the computer and pressed Enter."""
+    """A person typed a line on the computer and pressed Enter: into a field, or with nothing focused."""
 
     model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
         frozen=True,
         json_schema_extra={
-            "examples": [{"device_id": "desk", "person_id": "person-42", "field_id": "answer", "text": "A bird house"}],
+            "examples": [
+                {"device_id": "desk", "person_id": "person-42", "field_id": "answer", "text": "A bird house"},
+                {"device_id": "desk", "person_id": "person-42", "field_id": None, "text": "Hello?"},
+            ],
         },
     )
 
     device_id: mosfet.device.DeviceId = pydantic.Field(description=_COMPUTER_ID_DESCRIPTION)
     person_id: PersonId | None = pydantic.Field(default=None, description="Who uses the computer, when known.")
-    field_id: ElementId
+    field_id: ElementId | None = pydantic.Field(
+        default=None,
+        description=(
+            "The field the person typed into; null when nothing on the screen was focused, so they typed to "
+            "the computer itself (a blank screen, or one with no focused field)."
+        ),
+    )
     text: str = pydantic.Field(
         min_length=1,
         max_length=8 * 1024,

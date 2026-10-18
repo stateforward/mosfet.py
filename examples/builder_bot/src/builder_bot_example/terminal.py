@@ -15,8 +15,8 @@ app can tell what a click landed on. A line the person types is typed key by key
 longer than :data:`MAX_LINE` characters is not typed at all, and the terminal says so: its keys would not
 all fit the keyboard channel at once. ``/click <element id>`` presses and releases the pointer at the
 centre of that element's row. ``/quit``, or the end of input, leaves. The computer's app decides what every
-key and click does; the terminal decides nothing. A line typed while nothing on the screen is focused still
-goes to the computer, which puts it nowhere, and the terminal says so.
+key and click does; the terminal decides nothing. A line typed while nothing on the screen is focused goes to
+the computer like any other, and reaches whoever holds it with no field.
 
 The secret is ``computer_token_secret``, resolved through ``runtime.Secrets``: the Docker secret
 ``/run/secrets/computer_token_secret``, then the file ``--secret-file`` names (or ``COMPUTER_TOKEN_SECRET_FILE``),
@@ -453,13 +453,6 @@ class Terminal(Traced):
         return isinstance(data, _LineData) and len(data.text) > MAX_LINE
 
     @staticmethod
-    def _shows_focused_field(ctx: hsm.Context, instance: "Terminal", event: hsm.Event[typing.Any]) -> bool:
-        del ctx, event
-        return any(
-            isinstance(element, computer.FieldElement) and element.focused for element in instance._content.elements
-        )
-
-    @staticmethod
     def _connect_timeout_of(ctx: hsm.Context, instance: "Terminal", event: hsm.Event[typing.Any]) -> datetime.timedelta:
         del ctx, event
         return instance._connect_timeout
@@ -689,12 +682,6 @@ class Terminal(Traced):
         instance._notices.flush()
 
     @staticmethod
-    def _nothing_focused(ctx: hsm.Context, instance: "Terminal", event: hsm.Event[typing.Any]) -> None:
-        del ctx, event
-        _ = instance._notices.write("nothing is focused: click a field first\n")
-        instance._notices.flush()
-
-    @staticmethod
     def _click(ctx: hsm.Context, instance: "Terminal", event: hsm.Event[typing.Any]) -> None:
         """Press and release the pointer at the centre of the element's row."""
 
@@ -804,9 +791,7 @@ class Terminal(Traced):
                 hsm.transition(hsm.on(_LineEvent), hsm.guard(_clicks_shown_element), hsm.effect(_click)),
                 hsm.transition(hsm.on(_LineEvent), hsm.guard(_is_click), hsm.effect(_no_such_element)),
                 hsm.transition(hsm.on(_LineEvent), hsm.guard(_is_too_long), hsm.effect(_too_long)),
-                hsm.transition(hsm.on(_LineEvent), hsm.guard(_shows_focused_field), hsm.effect(_type)),
-                # Nothing on the screen takes keys: the computer still gets them, and the person is told.
-                hsm.transition(hsm.on(_LineEvent), hsm.effect(_type, _nothing_focused)),
+                hsm.transition(hsm.on(_LineEvent), hsm.effect(_type)),
                 hsm.transition(hsm.on(_EndOfInputEvent), hsm.effect(_quit), hsm.target("/Terminal/closing")),
             ),
         ),
@@ -940,7 +925,8 @@ def main(argv: collections.abc.Sequence[str] | None = None) -> int:
         prog="builder-terminal",
         description=(
             "Sit at the far side of the builder bot's computer: its screen here, your keys and clicks there. "
-            + "Type a line and press Enter to type it into the focused field; /click <element id> to click; "
+            + "Type a line and press Enter to type it into the focused field, or to the computer when nothing is "
+            + "focused; /click <element id> to click; "
             + "/quit to leave. Exit codes: 0 left or closed normally, 1 failed or refused, 64 bad flags, "
             + "78 missing secret."
         ),

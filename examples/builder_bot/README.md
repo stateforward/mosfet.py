@@ -147,8 +147,8 @@ examples/builder_bot/.venv/bin/builder-terminal --url ws://127.0.0.1:8765 --peer
 
 A plain line is typed into the field the bot focused, then Enter. A line longer than 4095 characters is not typed,
 and the terminal says so. `/click <id>` presses the element with that id. `/quit` leaves. When nothing is focused,
-the line goes nowhere, and the terminal says so. The process stays up until SIGTERM or SIGINT and exits `0`. A
-missing or malformed setting or secret exits `1` before anything starts, and the message names it.
+the line still reaches the bot, as text entered with no field. The process stays up until SIGTERM or SIGINT and
+exits `0`. A missing or malformed setting or secret exits `1` before anything starts, and the message names it.
 [`docs/runtime.md`](../../docs/runtime.md) lists every `bot.process` option and exit code.
 
 ## The live check (manual)
