@@ -508,7 +508,10 @@ def _events_from_content(
                 allowed = {event.name for event in offered}
                 for item in selections:
                     if item.event not in allowed:
-                        raise ValueError(f"dispatch selected unavailable event: {item.event}.")
+                        # A well-formed answer the model may repair, as from the dispatch tool.
+                        raise processing.SelectionRejectionError(
+                            f"Processing selected unavailable event: {item.event}."
+                        )
             if targets_by_event is not None:
                 selections = processing.fill_unique_selection_targets(selections, targets_by_event)
     except ValueError as error:

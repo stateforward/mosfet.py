@@ -654,6 +654,9 @@ def events_from_dispatch_args(
     When ``targets_by_event`` is provided and a selection omits ``target`` while exactly one
     actor enables that event, the unique actor key is filled so dispatch is explicit.
     Multi-enabler omissions stay unresolved until ``_resolve_target`` fails closed.
+
+    Raises ``ValueError`` for args that are not an events array, and :class:`SelectionRejectionError`
+    for a selection of an event ``offered`` does not hold: a well-formed answer the model may repair.
     """
 
     raw_events = args.get("events")
@@ -666,7 +669,7 @@ def events_from_dispatch_args(
         allowed = {event.name for event in offered}
         for item in selections:
             if item.event not in allowed:
-                raise ValueError(f"dispatch selected unavailable event: {item.event}.")
+                raise SelectionRejectionError(_unavailable_message(event=item.event))
     if targets_by_event is not None:
         selections = fill_unique_selection_targets(selections, targets_by_event)
     return selections

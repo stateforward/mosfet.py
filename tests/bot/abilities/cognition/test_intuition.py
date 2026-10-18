@@ -209,6 +209,8 @@ def test_intuition_models_processing_as_explicit_typed_phases() -> None:
     assert transitions["/Intuition/workflow/invoking"]["bot.ability.intuition.invocation.completed"]
     assert transitions["/Intuition/workflow/classifying"]["bot.ability.intuition.dispatch.planned"]
     assert transitions["/Intuition/workflow/dispatching"]["bot.ability.intuition.selection.rejected"]
+    # A processor's own refusal of a selection reaches the same repair.
+    assert transitions["/Intuition/workflow/invoking"]["bot.ability.intuition.selection.rejected"]
     rejection_routes = choice_transitions(model, "/Intuition/workflow/routing_rejection")
     assert len(rejection_routes) == 3
     assert rejection_routes[-1].guard is None
@@ -252,6 +254,47 @@ def test_intuition_retries_malformed_focus_selection_with_full_pydantic_feedback
             data={"value": "phone"},
         ),
     )
+
+
+class _HeldThenOfferedProcessor(processing.Processor):
+    """First selects an event the turn does not offer, the way the live model picked a held sandbox write.
+
+    Selections are parsed against the offered menu the way a provider's dispatch tool parses them.
+    """
+
+    calls: list[processing.InputData]
+
+    def __init__(self) -> None:
+        self.calls = []
+
+    @typing.override
+    async def process(
+        self, input: processing.InputData, *, drafts: processing.DraftSink | None = None
+    ) -> processing.Events:
+        self.calls.append(input)
+        if len(self.calls) == 1:
+            return processing.events_from_dispatch_args(
+                {"events": [{"event": sandbox.WriteEvent.name, "data": {"path": "fib.py", "content": ""}}]},
+                offered=input.schemas,
+            )
+        return _selection(value="phone")
+
+
+def test_intuition_asks_again_when_the_processor_selects_an_event_the_turn_does_not_offer() -> None:
+    """Live check round 1 (D2): selecting a held event failed the whole turn, with no repair and nothing shown.
+
+    The provider's "unavailable event" error surfaced as apply.failed, so intuition's bounded selection repair
+    never ran. It is now a selection rejection: intuition asks again with the diagnostic.
+    """
+
+    processor = _HeldThenOfferedProcessor()
+
+    output, _ = _run_intuition(processor, operation_id="unoffered-selection")
+
+    assert len(processor.calls) == 2
+    feedback = processor.calls[1].instructions or ""
+    assert f"Processing selected unavailable event: {sandbox.WriteEvent.name}." in feedback
+    assert output.output == (types.EventData(event=_SelectionEvent.name, target="target", data={"value": "phone"}),)
 
 
 def test_intuition_stops_on_same_normalized_selection_rejection() -> None:

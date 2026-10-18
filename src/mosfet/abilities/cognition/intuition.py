@@ -710,6 +710,29 @@ class Intuition(processing.Processing):
                     input = _processor_feedback(input, retry.message)
                 raw = await instance._processor.process(input)
                 product, confidence, event_confidences = _product_from_processor_output(raw)
+            except processing.SelectionRejectionError as error:
+                # The processor refused a selection (an event this turn does not offer): the model's to repair.
+                active.set_attribute("bot.selection.rejected", True)
+                _ = hsm.dispatch(
+                    ctx,
+                    instance,
+                    dataclasses.replace(
+                        _SelectionRejectedEvent.with_data(
+                            _SelectionRejectionData(
+                                request=data,
+                                message=_selection_rejection_message(error),
+                                normalized=_normalized_selection_rejection(error),
+                                previous_normalized=previous_normalized,
+                                attempt=attempt,
+                            )
+                        ),
+                        id=operation_id,
+                        source=reply_to,
+                        target=hsm.id(instance),
+                        metadata=metadata,
+                    ),
+                )
+                return
             except Exception as error:
                 _ = hsm.dispatch(
                     ctx,
@@ -998,6 +1021,10 @@ class Intuition(processing.Processing):
                     hsm.guard(_has_invocation_completed),
                     hsm.effect(_tune_confidence),
                     hsm.target("/Intuition/workflow/tuning"),
+                ),
+                hsm.transition(
+                    hsm.on(_SelectionRejectedEvent),
+                    hsm.target("/Intuition/workflow/routing_rejection"),
                 ),
                 hsm.transition(
                     hsm.on(_ApplyFailedEvent),

@@ -546,6 +546,25 @@ def test_processor_decodes_nested_arrays_and_objects_sent_as_json_strings_and_ke
     ]
 
 
+def test_processor_rejects_a_dispatched_event_the_turn_does_not_offer_as_a_selection() -> None:
+    # Live (builder check round 1, D2): intuition selected bot.ability.sandbox.write, which only reasoning
+    # holds; a malformed-answer failure ended the turn instead of letting the model choose again.
+    with pytest.raises(processing.SelectionRejectionError) as rejected:
+        _ = _dispatched({"events": [{"event": "bot.ability.sandbox.write", "data": {}}]})
+
+    assert rejected.value.normalized == "Processing selected unavailable event: bot.ability.sandbox.write."
+
+
+def test_processor_rejects_an_answered_event_the_turn_does_not_offer_as_a_selection() -> None:
+    generator = RecordingGenerator(content=json.dumps([{"event": "bot.ability.sandbox.write", "data": {}}]))
+    input = processing.InputData(input="write it", schemas=(_AnswerCallEvent,), instructions="Select events.")
+
+    with pytest.raises(processing.SelectionRejectionError) as rejected:
+        _ = asyncio.run(Processor(generator=generator).process(input))
+
+    assert rejected.value.normalized == "Processing selected unavailable event: bot.ability.sandbox.write."
+
+
 def test_processor_decodes_a_json_string_only_once() -> None:
     events = [{"event": "phone.answer_call", "data": {"call_id": "c1"}}]
 

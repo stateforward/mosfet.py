@@ -1232,6 +1232,18 @@ def test_dispatch_tool_embeds_ref_closed_payload_schemas() -> None:
     assert transfer_target.get("type") == "object"
 
 
+def test_events_from_dispatch_args_rejects_an_event_the_turn_does_not_offer_as_a_selection() -> None:
+    """An unoffered selection is the model's to repair (live check round 1, D2), not a malformed answer."""
+
+    with pytest.raises(processing.SelectionRejectionError) as rejected:
+        _ = processing.events_from_dispatch_args(
+            {"events": [{"event": "tests.processing.held", "data": {}}]},
+            offered=(_StampedEvent,),
+        )
+
+    assert rejected.value.normalized == "Processing selected unavailable event: tests.processing.held."
+
+
 def test_events_from_dispatch_args_parses_canonical_names() -> None:
     selections = processing.events_from_dispatch_args(
         {
