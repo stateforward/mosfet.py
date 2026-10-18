@@ -3,11 +3,12 @@
 One bot, for one person, that the person reaches through a computer and that builds and tests software on a
 sandbox bench of its own. Its bot file is `builder_bot_example/__main__.py`: it reads the owner's settings and
 secrets, then has one `bot.define` of the bot, `builder`, that constructs every part inline, and
-`python -m builder_bot_example` runs it with `bot.run`. The websocket server is the one variable, because it is
-also a shared actor of `bot.run`:
+`python -m builder_bot_example` runs it with `bot.run`. Two variables come first: the websocket server, because
+it is also a shared actor of `bot.run`, and the desk the computer sits on:
 
 ```python
 server = websocket.Server(host=settings.host, port=settings.port, verifier=websocket.HmacTokens(token_secret))
+desk = environment.Object(id="desk")
 builder = bot.define(
     "builder",
     bot.traits(*settings.traits.traits),
@@ -22,7 +23,15 @@ builder = bot.define(
         autonomy=True,
         routines=functools.partial(datetime.datetime.now, datetime.UTC),
     ),
-    bot.attach(computer.Computer(id="desk", transport=server, peer_id=settings.peer, person_id=settings.person_id)),
+    bot.attach(
+        computer.Computer(
+            id="computer",
+            transport=server,
+            peer_id=settings.peer,
+            person_id=settings.person_id,
+            placement=desk.surface(),
+        )
+    ),
     bot.attach(
         sandbox.Sandbox(
             host=docker.Host(
@@ -45,9 +54,10 @@ builder = bot.define(
 bot.run(builder, actors=(server,), process=process)
 ```
 
-* **Its computer** is a `computer.Computer`, `desk`, served on this host by a `websocket.Server`. The
-  person sits at its far side, `builder-terminal`: the screen shows what the bot shows, and the keyboard types
-  into the field the bot focused.
+* **Its computer** is a `computer.Computer`, `computer`, served on this host by a `websocket.Server`. It
+  sits on the desk, an `environment.Object` that does nothing and is never given to the bot, so the bot sees
+  the desk only as its computer's `on="desk"`. The person sits at its far side, `builder-terminal`: the
+  screen shows what the bot shows, and the keyboard types into the field the bot focused.
 * **Its bench** is a `sandbox.Sandbox` on a `docker.Host` over a rootless Docker or Podman socket. The bot may
   run commands, write and read files, and start over on a fresh machine.
 * **Its mind** is the full cognition, without voice: intuition, reasoning, reflection with its persona, the

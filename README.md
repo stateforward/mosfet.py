@@ -78,6 +78,7 @@ if __name__ == "__main__":
     process = bot.process()
     settings = Settings.model_validate(os.environ)
     server = websocket.Server(verifier=websocket.HmacTokens(process.secrets.get("computer_token_secret")))
+    desk = environment.Object(id="desk")
     builder = bot.define(
         "builder",
         bot.traits(*settings.traits.traits),
@@ -89,7 +90,9 @@ if __name__ == "__main__":
             autonomy=True,
             routines=functools.partial(datetime.datetime.now, datetime.UTC),
         ),
-        bot.attach(computer.Computer(id="desk", transport=server, peer_id=settings.peer)),
+        bot.attach(
+            computer.Computer(id="computer", transport=server, peer_id=settings.peer, placement=desk.surface())
+        ),
         bot.attach(
             sandbox.Sandbox(
                 host=docker.Host(socket=settings.socket, images=frozenset({settings.image}), owner=process.name),
@@ -102,8 +105,10 @@ if __name__ == "__main__":
 ```
 
 Its `__main__` reads its settings and secrets, then has one `bot.define` that constructs every part
-inline. `bot.define` is the only function that defines a bot. The websocket server its computer is
-served by is the one variable, because `bot.run` also starts it as a shared actor.
+inline. `bot.define` is the only function that defines a bot. Two variables come first: the websocket
+server its computer is served by, because `bot.run` also starts it as a shared actor, and the desk its
+computer sits on. The desk is an `environment.Object`: it does nothing and is never given to the bot,
+and the bot sees it only as its computer's `on="desk"`.
 
 ```bash
 uv sync --project examples/builder_bot

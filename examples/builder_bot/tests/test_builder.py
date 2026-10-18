@@ -1,10 +1,11 @@
 """The builder, end to end: a person at the terminal, the bot's computer, its mind and its bench.
 
 The test writes its own ``bot.define`` of the builder's shape: the full cognition on a scripted model
-(``testing.Scripted``), the computer ``desk`` on a loopback ``websocket.Server``, and a bench on a scripted
-sandbox host; the person sits at the real ``builder_bot_example.terminal``. The bot runs the way ``bot.run``
-runs it, through ``testing.running``: the server first, as a shared actor, then the bot started in the same
-environment with ``bot.start``, and both stopped when the test is done.
+(``testing.Scripted``), the computer ``computer`` on a loopback ``websocket.Server``, sitting on its desk (an
+``environment.Object``), and a bench on a scripted sandbox host; the person sits at the real
+``builder_bot_example.terminal``. The bot runs the way ``bot.run`` runs it, through ``testing.running``: the
+server first, as a shared actor, then the bot started in the same environment with ``bot.start``, and both
+stopped when the test is done.
 
 These tests pin capacities and perception: what the bot is given to perceive and what it is offered to do.
 Every choice is the scripted processor's. With a processor that chooses nothing, nothing happens.
@@ -18,6 +19,7 @@ import datetime
 import functools
 import io
 import pathlib
+import re
 import socket as sockets
 import typing
 
@@ -26,7 +28,7 @@ import hsm
 import mosfet
 import pydantic
 from builder_bot_example import terminal
-from mosfet import bot
+from mosfet import bot, environment
 from mosfet.abilities import cognition, memory, processing, sandbox
 from mosfet.abilities.sandbox import host
 from mosfet.bot import testing
@@ -231,7 +233,15 @@ async def bring_up(
             autonomy=True,
             routines=functools.partial(datetime.datetime.now, datetime.UTC),
         ),
-        bot.attach(computer.Computer(id="desk", transport=server, peer_id=PEER, person_id="person-1")),
+        bot.attach(
+            computer.Computer(
+                id="computer",
+                transport=server,
+                peer_id=PEER,
+                person_id="person-1",
+                placement=environment.Object(id="desk").surface(),
+            )
+        ),
         bot.attach(
             sandbox.Sandbox(
                 host=ScriptedHost(requests, run),
@@ -272,8 +282,13 @@ def test_the_link_up_turn_offers_the_computer_and_the_bench_and_a_silent_bot_doe
 
     woke = stimulus(link_up_calls[0])
     assert isinstance(woke, mosfet.StimulusData)
-    assert woke.data == computer.LinkUpData(device_id="desk", transport="websocket")
+    assert woke.data == computer.LinkUpData(device_id="computer", transport="websocket")
     assert any(TOOLS <= offered(call) for call in link_up_calls)
+    # The desk is an object: the bot sees it only through the computer that sits on it.
+    assert all(
+        re.search(r'<device ref="computer" id="[^"]+" state="[^"]+" on="desk"', call.instructions or "")
+        for call in link_up_calls
+    )
     # Nothing chose to show anything or to use the bench, so nothing did.
     assert [screen.strip() for screen in screens] == [""]
     assert requests == [host.SweepEvent.name, host.CreateEvent.name]

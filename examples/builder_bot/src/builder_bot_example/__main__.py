@@ -9,11 +9,13 @@ terminal's token is signed with. Each is the Docker secret, the file named by ``
 naming it, before anything starts.
 
 Then one ``bot.define`` constructs every part of the bot inline: its model, its memory, the person's computer
-``desk`` and its bench. The bench is the owner's: the settings' image on the default limits (one CPU, 1 GiB
-without swap, 256 pids and a 512 MiB workspace at ``/workspace``, which is ``HOME``, since the machine's root
-is read-only), no network unless the owner names an egress network, Python writing no bytecode and pip never
-prompting, and no secret in its environment. The websocket server the computer is served by is the one
-variable, because ``bot.run`` starts it first, as a shared actor, and then the bot.
+``computer`` and its bench. The bench is the owner's: the settings' image on the default limits (one CPU,
+1 GiB without swap, 256 pids and a 512 MiB workspace at ``/workspace``, which is ``HOME``, since the machine's
+root is read-only), no network unless the owner names an egress network, Python writing no bytecode and pip
+never prompting, and no secret in its environment. Two variables come first. The websocket server the computer
+is served by, because ``bot.run`` starts it first, as a shared actor, and then the bot. And the desk the
+computer sits on, an ``environment.Object``: it does nothing and is never given to the bot, and the computer is
+placed on it (``placement=desk.surface()``), so the bot sees the desk as its computer's ``on="desk"``.
 """
 
 import datetime
@@ -21,7 +23,7 @@ import functools
 import os
 
 import pydantic
-from mosfet import bot
+from mosfet import bot, environment
 from mosfet.abilities import memory, sandbox
 from mosfet.devices import computer
 from mosfet.providers import docker
@@ -44,6 +46,7 @@ if __name__ == "__main__":
         port=settings.port,
         verifier=websocket.HmacTokens(process.secrets.get("computer_token_secret")),
     )
+    desk = environment.Object(id="desk")
     builder = bot.define(
         "builder",
         bot.traits(*settings.traits.traits),
@@ -62,7 +65,15 @@ if __name__ == "__main__":
             autonomy=True,
             routines=functools.partial(datetime.datetime.now, datetime.UTC),
         ),
-        bot.attach(computer.Computer(id="desk", transport=server, peer_id=settings.peer, person_id=settings.person_id)),
+        bot.attach(
+            computer.Computer(
+                id="computer",
+                transport=server,
+                peer_id=settings.peer,
+                person_id=settings.person_id,
+                placement=desk.surface(),
+            )
+        ),
         bot.attach(
             sandbox.Sandbox(
                 host=docker.Host(

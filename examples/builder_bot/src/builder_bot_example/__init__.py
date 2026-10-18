@@ -5,11 +5,11 @@
 
 ``__main__`` is the bot file. It reads the owner's :class:`Settings` and the process's secrets, then defines one
 bot, ``builder``, for one person, with one ``bot.define`` that constructs every part inline, and runs it with
-``bot.run``. The person reaches the bot through a ``computer.Computer``, ``desk``, served by a ``websocket.Server``
-on this host; :mod:`builder_bot_example.terminal` is that computer's far side in a terminal. The bot builds and
-tests on a ``sandbox.Sandbox`` bench backed by a ``docker.Host`` on a rootless Docker or Podman socket. Its mind
-is the full cognition (memory, reflection, its persona and the routines it authors) on one OpenAI-compatible
-local model.
+``bot.run``. The person reaches the bot through a ``computer.Computer``, ``computer``, which sits on a desk (an
+``environment.Object``) and is served by a ``websocket.Server`` on this host; :mod:`builder_bot_example.terminal`
+is that computer's far side in a terminal. The bot builds and tests on a ``sandbox.Sandbox`` bench backed by a
+``docker.Host`` on a rootless Docker or Podman socket. Its mind is the full cognition (memory, reflection, its
+persona and the routines it authors) on one OpenAI-compatible local model.
 
 Nothing here tells the bot what to do. It is given no seeded behavior, no skill and no instruction text: what
 it can do comes from the tools its computer and its bench offer on each turn, and what it does with them is
