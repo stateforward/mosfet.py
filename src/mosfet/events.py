@@ -76,7 +76,9 @@ class Participant(pydantic.BaseModel):
     """Someone who took part in a stimulus, stamped by the producer that knows them.
 
     Producers stamp participants from identities they already hold; products built from a
-    stimulus copy them forward unchanged. Nobody infers a participant by walking actors.
+    stimulus copy them forward unchanged. Nobody infers a participant by walking actors. Only the
+    producer knows a participant is the bot itself (its own voice, heard or spoken), so only the
+    producer stamps ``own``; transformers copy it with the rest.
     """
 
     model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
@@ -90,6 +92,7 @@ class Participant(pydantic.BaseModel):
             "examples": [
                 {"ref": "+15555550100", "role": "source"},
                 {"ref": "person-42", "role": "target"},
+                {"ref": "voice:3f2a9c", "role": "source", "own": True},
             ],
         },
     )
@@ -106,6 +109,14 @@ class Participant(pydantic.BaseModel):
     role: ParticipantRole = pydantic.Field(
         description="source: who produced the stimulus (speaker, sender). target: who it was addressed to.",
         examples=["source", "target"],
+    )
+    own: bool = pydantic.Field(
+        default=False,
+        description=(
+            "True when the producer knows this participant is the bot itself, for example the bot's own voice "
+            "heard back or the voice it spoke with. Stamped only by that producer; never inferred."
+        ),
+        examples=[False, True],
     )
 
 

@@ -461,7 +461,7 @@ def test_the_bots_own_voice_enrolled_on_the_stream_path_is_never_a_source_and_it
     (own,) = speech.voices
     assert own.recognition.id == own_id and own.recognition.own
     assert speech.source_ids == frozenset()
-    assert speech.participants == (identification.participant("voice", own_id),)
+    assert speech.participants == (identification.participant("voice", own_id, own=True),)
 
 
 def test_an_overlap_while_producing_is_a_fact_carrying_the_words_so_far(

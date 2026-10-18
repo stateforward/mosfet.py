@@ -18,7 +18,8 @@ The perceiving ability owns the ``Registry`` and sends it ``IdentifyEvent`` (ans
 ``ForgottenEvent``). A peer that knows people marks an id as a person's with ``LinkEvent``
 (answered ``LinkedEvent``), so retention keeps its print. Any request may instead be answered
 ``FailedEvent`` with a closed ``FailureKind``. Producers stamp what they recognized with
-``participant(kind, id)``. A store implements ``Store``; a remote service implements ``Identifier``.
+``participant(kind, id, own=recognition.own)``. A store implements ``Store``; a remote service
+implements ``Identifier``.
 """
 
 from .identification import (

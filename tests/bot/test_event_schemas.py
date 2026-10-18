@@ -396,12 +396,32 @@ def test_participant_schema_describes_an_opaque_producer_stable_ref() -> None:
     ref = object_dict(properties["ref"])
 
     assert schema["description"]
-    assert schema["examples"] == [{"ref": "+15555550100", "role": "source"}, {"ref": "person-42", "role": "target"}]
-    assert set(properties) == {"ref", "role"}
+    assert schema["examples"] == [
+        {"ref": "+15555550100", "role": "source"},
+        {"ref": "person-42", "role": "target"},
+        {"ref": "voice:3f2a9c", "role": "source", "own": True},
+    ]
+    assert set(properties) == {"ref", "role", "own"}
     assert "producer-stable" in str(ref["description"])
     assert (ref["minLength"], ref["maxLength"]) == (1, 200)
     assert ref["examples"]
     assert object_dict(properties["role"])["description"]
+
+
+def test_participant_own_is_the_producers_fact_that_it_is_the_bot_itself_and_defaults_false() -> None:
+    own = object_dict(object_dict(mosfet.Participant.model_json_schema()["properties"])["own"])
+    heard = mosfet.Participant(ref="voice:3f2a9c", role=mosfet.ParticipantRole.SOURCE)
+    itself = mosfet.Participant(ref="voice:3f2a9c", role=mosfet.ParticipantRole.SOURCE, own=True)
+
+    assert own["default"] is False
+    assert "bot itself" in str(own["description"])
+    assert own["examples"]
+    assert heard.own is False
+    assert itself != heard
+    assert mosfet.Participant.model_validate({"ref": "voice:3f2a9c", "role": "source", "own": True}) == itself
+    assert mosfet.Participant.model_config.get("frozen") is True
+    with pytest.raises(pydantic.ValidationError):
+        _ = mosfet.Participant.model_validate({"ref": "voice:3f2a9c", "role": "source", "own": "maybe"})
 
 
 @pytest.mark.parametrize("ref", ["", "x" * 201], ids=["empty", "over-200"])

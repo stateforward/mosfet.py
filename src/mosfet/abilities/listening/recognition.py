@@ -55,15 +55,18 @@ def merge(*groups: tuple[mosfet.Participant, ...]) -> tuple[mosfet.Participant, 
 def stamps(voices: tuple[voice.HeardVoice, ...]) -> tuple[frozenset[str], tuple[mosfet.Participant, ...]]:
     """What a product stamps for the voices heard in it, earliest first.
 
-    Every voice is a ``voice:<id>`` participant, the bot's own included, so hearing itself resolves to
-    itself; only the others are ``source_ids``, at most ``MAX_IDENTITY_SET_SIZE`` of them.
+    Every voice is a ``voice:<id>`` participant, the bot's own included and stamped ``own``, so hearing
+    itself resolves to itself; only the others are ``source_ids``, at most ``MAX_IDENTITY_SET_SIZE`` of
+    them.
     """
 
     ordered = sorted(voices, key=lambda heard: heard.start_seconds)
     others = dict.fromkeys(
         identification.ref("voice", heard.recognition.id) for heard in ordered if not heard.recognition.own
     )
-    participants = tuple(identification.participant("voice", heard.recognition.id) for heard in ordered)
+    participants = tuple(
+        identification.participant("voice", heard.recognition.id, own=heard.recognition.own) for heard in ordered
+    )
     return frozenset(tuple(others)[: value.MAX_IDENTITY_SET_SIZE]), participants
 
 

@@ -1262,6 +1262,30 @@ def test_identified_faces_are_stamped_as_face_participants() -> None:
     assert data.participants == sight.participants
 
 
+def test_a_face_recognized_as_own_is_stamped_as_the_bot_itself() -> None:
+    identifier = FakeIdentifier(
+        identification.Recognition(id="self-face", recognized=True, similarity=0.9, own=True),
+        identification.Recognition(id="b", recognized=True, similarity=0.8, own=False),
+    )
+    faces = FakeFaces(_detected_face(0.4, _print(1.0, 0.0)), _detected_face(0.2, _print(0.0, 1.0)))
+
+    async def run() -> list[tuple[float, hsm.Event[typing.Any], seeing.SightData]]:
+        harness = await _harness(face_detector=faces, faces=_registry(identifier))
+        await harness.frame("camera-1", _jpeg("a"))
+        await harness.owner.until(lambda: len(harness.sights()) == 1)
+        return harness.sights()
+
+    ((_, handoff, sight),) = asyncio.run(run())
+
+    assert sight.participants == (
+        mosfet.Participant(ref="face:self-face", role=mosfet.ParticipantRole.SOURCE, own=True),
+        mosfet.Participant(ref="face:b", role=mosfet.ParticipantRole.SOURCE),
+    )
+    data = handoff.data
+    assert isinstance(data, cognition.InputData)
+    assert data.participants == sight.participants
+
+
 def test_a_face_without_a_print_or_a_recognition_has_no_id_and_no_participant() -> None:
     identifier = FakeIdentifier(None, identification.Recognition(id="c", recognized=True, similarity=0.7, own=False))
     large, medium = _print(1.0, 0.0), _print(0.0, 1.0)

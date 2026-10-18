@@ -1271,7 +1271,7 @@ def test_own_voice_is_enrolled_from_each_utterance_long_enough_until_hearing_tel
     assert math.isclose(copy.segment.duration_seconds, 2.5, abs_tol=1e-9)
     assert [output.voice_id for output in voice.outputs()] == [None, None, None, OWN_VOICE]
     assert histories[-1].messages[-1].participants == (
-        mosfet.Participant(ref=f"voice:{OWN_VOICE}", role=mosfet.ParticipantRole.SOURCE),
+        mosfet.Participant(ref=f"voice:{OWN_VOICE}", role=mosfet.ParticipantRole.SOURCE, own=True),
     )
     assert learned == 1
 

@@ -1840,10 +1840,12 @@ class Speaking(ability.Ability[InputData, OutputData]):
                         target_ids=frozenset(),
                         content=data.spoken,
                         content_type="text/plain",
-                        # The producer stamps whose voice said it, once the bot knows; a heard echo of it resolves to
-                        # the same ref.
+                        # The producer stamps whose voice said it, once the bot knows: its own, so ``own``; a heard
+                        # echo of it resolves to the same ref.
                         participants=(
-                            () if data.voice_id is None else (identification.participant("voice", data.voice_id),)
+                            ()
+                            if data.voice_id is None
+                            else (identification.participant("voice", data.voice_id, own=True),)
                         ),
                         provenance=conversation.MessageProvenance(event=conversation.AppendEvent.name),
                     )

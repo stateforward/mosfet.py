@@ -88,6 +88,9 @@ def test_ref_names_the_kind_and_participant_stamps_a_source() -> None:
     assert identification.participant("voice", "tts:warm") == mosfet.Participant(
         ref="voice:tts:warm", role=mosfet.ParticipantRole.SOURCE
     )
+    assert identification.participant("voice", "3f2a9c", own=True) == mosfet.Participant(
+        ref="voice:3f2a9c", role=mosfet.ParticipantRole.SOURCE, own=True
+    )
 
 
 @pytest.mark.parametrize(

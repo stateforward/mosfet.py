@@ -175,7 +175,7 @@ def test_message_content_recursive_alias_preserves_schema_and_validation() -> No
 
     schema = conversation.Message.model_json_schema()
     schema_hash = hashlib.sha256(json.dumps(schema, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-    assert schema_hash == "dea9c00486c9c0201b41911762b4acb96d38024e8b03dc8e6f057604d9313369"
+    assert schema_hash == "9bfdab04c754b72fa460a2bce95bc2ed35512b4dfbebd8a1f4521d88047c834a"
 
     payload = {
         "sequence": 0,

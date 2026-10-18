@@ -110,10 +110,14 @@ def ref(kind: Kind, id: Id) -> Ref:
     return _REF.validate_python(f"{kind}:{id}")
 
 
-def participant(kind: Kind, id: Id) -> mosfet.Participant:
-    """The source participant a producer stamps for an identity it recognized or declared."""
+def participant(kind: Kind, id: Id, *, own: bool = False) -> mosfet.Participant:
+    """The source participant a producer stamps for an identity it recognized or declared.
 
-    return mosfet.Participant(ref=ref(kind, id), role=mosfet.ParticipantRole.SOURCE)
+    ``own`` is the producer's own knowledge that the identity is the bot's (``Recognition.own``, or
+    the voice the bot speaks with); nobody else infers it.
+    """
+
+    return mosfet.Participant(ref=ref(kind, id), role=mosfet.ParticipantRole.SOURCE, own=own)
 
 
 class Print(capture.Biometric):

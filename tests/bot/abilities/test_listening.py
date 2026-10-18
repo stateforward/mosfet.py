@@ -934,10 +934,12 @@ def test_the_bots_own_voice_is_stamped_as_itself_but_is_never_a_source() -> None
     assert heard.recognition.id == own_id
     assert heard.recognition.own is True
     assert heard.recognition.recognized is True
-    # Hearing itself resolves to itself, and an echo is never a source the seed would admit as a turn.
-    assert speech_data.participants == (identification.participant("voice", own_id),)
+    # Hearing itself resolves to itself, stamped as the bot's own, and an echo is never a source the
+    # seed would admit as a turn.
+    itself = mosfet.Participant(ref=f"voice:{own_id}", role=mosfet.ParticipantRole.SOURCE, own=True)
+    assert speech_data.participants == (itself,)
     assert speech_data.source_ids == frozenset()
-    assert handoffs[0].participants == (identification.participant("voice", own_id),)
+    assert handoffs[0].participants == (itself,)
 
 
 def test_an_enrollment_copy_needs_no_voice_id_and_its_reply_names_one() -> None:

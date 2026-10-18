@@ -25,7 +25,8 @@ A stage that timed out is stuck in its applying behavior; the eye recovers it by
 re-attaching it (typed events, each bounded by ``restart_timeout``), which cancels the stuck work.
 A stage whose recovery fails is skipped until the eye itself is detached and reattached.
 
-Identified faces are stamped as ``face:<id>`` source participants. Biometric prints exist only in
+Identified faces are stamped as ``face:<id>`` source participants, ``own`` when the registry
+recognized the face as the bot's own. Biometric prints exist only in
 the face stage's output, the identify request and the interpretation's locals: never in a sight,
 a span, a metric or a log.
 
@@ -460,6 +461,10 @@ class _InterpretedData(_InterpretData):
         default=(),
         description="Every stage call that did not answer with a result, in the order they ended.",
     )
+    own_faces: frozenset[identification.Id] = pydantic.Field(
+        default=frozenset(),
+        description="Face ids the registry recognized as the bot's own, so their participants are stamped own.",
+    )
 
 
 class _RecoveredData(pydantic.BaseModel):
@@ -510,6 +515,7 @@ class _Interpretation:
     timed_out: set[_Stage] = dataclasses.field(default_factory=set[_Stage])
     served: set[_Stage] = dataclasses.field(default_factory=set[_Stage])
     failures: list[_StageFailureData] = dataclasses.field(default_factory=list[_StageFailureData])
+    own_faces: set[identification.Id] = dataclasses.field(default_factory=set[identification.Id])
     skipped: int = 0
 
     def fail(self, stage: _StageName, kind: str, outcome: typing.Literal["failed", "timeout"]) -> None:
@@ -542,15 +548,17 @@ def _age_ms(now: datetime.datetime, then: datetime.datetime) -> int:
     return int(_age(now, then) / datetime.timedelta(milliseconds=1))
 
 
-def _merged_participants(views: collections.abc.Sequence[View]) -> tuple[mosfet.Participant, ...]:
-    """The views' stamped participants, then ``face:<id>`` for every identified face.
+def _merged_participants(
+    views: collections.abc.Sequence[View], own_faces: frozenset[identification.Id]
+) -> tuple[mosfet.Participant, ...]:
+    """The views' stamped participants, then ``face:<id>`` for every identified face, ``own`` for the bot's.
 
     First occurrence wins, bounded like the field.
     """
 
     stamped = (participant for view in views for participant in view.participants)
     identified = (
-        identification.participant("face", face.face_id)
+        identification.participant("face", face.face_id, own=face.face_id in own_faces)
         for view in views
         for face in view.faces or ()
         if face.face_id is not None
@@ -1123,6 +1131,8 @@ class Seeing(ability.Ability[VisualData, cognition.InputData]):
             seen: list[Face] = []
             for face in detected.faces:
                 recognition = next(answers, None) if face.print is not None else None
+                if recognition is not None and recognition.own:
+                    tally.own_faces.add(recognition.id)
                 _FACES.add(1, {"recognized": "none" if recognition is None else str(recognition.recognized).lower()})
                 seen.append(
                     Face(
@@ -1189,6 +1199,7 @@ class Seeing(ability.Ability[VisualData, cognition.InputData]):
                                 timed_out=frozenset(tally.timed_out),
                                 served=frozenset(tally.served),
                                 failures=tuple(tally.failures),
+                                own_faces=frozenset(tally.own_faces),
                             ),
                             event.id or uuid.uuid4().hex,
                         ),
@@ -1218,7 +1229,7 @@ class Seeing(ability.Ability[VisualData, cognition.InputData]):
             stage="cognition_handoff",
             context=telemetry.event_context(event),
         ) as active:
-            participants = _merged_participants(interpreted.views)
+            participants = _merged_participants(interpreted.views, interpreted.own_faces)
             active.set_attribute("bot.seeing.view.count", len(interpreted.views))
             active.set_attribute("bot.participant.count", len(participants))
             sight = telemetry.inject_context(
