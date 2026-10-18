@@ -55,7 +55,8 @@
       ],
       "allowed": [
         "ability_without_tools"
-      ]
+      ],
+      "firmware": null
     }
   ]
 }

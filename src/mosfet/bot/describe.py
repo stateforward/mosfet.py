@@ -1,21 +1,22 @@
 """``bot.describe``: what defined bots are, as JSON, read from their models alone.
 
 ``bot.describe(*models)`` reads each model's members and constructs, starts and opens nothing. It
-names what each bot is made of: its traits, its faculties, and its parts by id, kind, role and the
-class each was constructed from. No value given to a part's constructor, a timeout or a faculty
-appears in it::
+names what each bot is made of: its traits, its faculties, its parts by id, kind, role and the
+class each was constructed from, and its firmware's commands and states. No value given to a part's
+constructor, a timeout, a faculty or a firmware attribute appears in it::
 
     print(bot.describe(model).model_dump_json(indent=2))
 """
 
 import typing
 
+import hsm
 import pydantic
 
 import mosfet.device
 from mosfet.abilities import memory
 
-from . import elements
+from . import elements, firmware
 
 _FROZEN = pydantic.ConfigDict(frozen=True, extra="forbid")
 
@@ -43,6 +44,24 @@ class Part(pydantic.BaseModel):
         examples=[["attach"], ["attach", "input"]],
     )
     constructor: str = pydantic.Field(description="The class the part was constructed from.", examples=["Computer"])
+
+
+class FirmwareOutline(pydantic.BaseModel):
+    """The bot's one firmware: the commands cognition may be offered and the states it can be in."""
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = _FROZEN
+
+    commands: tuple[str, ...] = pydantic.Field(
+        description=(
+            "The tool events its transitions react to, in the order it names them: offered to cognition "
+            "under the actor key `firmware` while a state that reacts to them is active."
+        ),
+        examples=[["timer.set", "timer.cancel"]],
+    )
+    states: tuple[str, ...] = pydantic.Field(
+        description="Its states by qualified name, in the order they were written, nested states after their parent.",
+        examples=[["/timer_firmware/idle", "/timer_firmware/running"]],
+    )
 
 
 class Outline(pydantic.BaseModel):
@@ -73,6 +92,9 @@ class Outline(pydantic.BaseModel):
     allowed: tuple[str, ...] = pydantic.Field(
         description="The lints it allows with `bot.allow`.", examples=[["no_devices"]]
     )
+    firmware: FirmwareOutline | None = pydantic.Field(
+        description="Its firmware, compiled from the hsm partials given to `bot.define`, or null without any."
+    )
 
 
 class Description(pydantic.BaseModel):
@@ -97,6 +119,7 @@ def _outline(model: elements.Model) -> Outline:
     sensory_register: str | None = None
     timeouts: tuple[Timeout, ...] = ()
     allowed: tuple[str, ...] = ()
+    outlined: FirmwareOutline | None = None
     for member in model.members.values():
         match member:
             case elements.AttachmentElement(instance=instance, roles=roles):
@@ -118,6 +141,15 @@ def _outline(model: elements.Model) -> Outline:
                 timeouts = tuple(name for name, value in overrides if value is not None)
             case elements.AllowElement(lints=given):
                 allowed = tuple(str(lint) for lint in given)
+            case firmware.FirmwareElement(model=compiled):
+                outlined = FirmwareOutline(
+                    commands=tuple(command.name for command in member.commands()),
+                    states=tuple(
+                        vertex.qualified_name
+                        for vertex in compiled.members.values()
+                        if isinstance(vertex, hsm.StateElement) and vertex is not compiled
+                    ),
+                )
             case _:
                 pass
     return Outline(
@@ -129,7 +161,8 @@ def _outline(model: elements.Model) -> Outline:
         sensory_register=sensory_register,
         timeouts=timeouts,
         allowed=allowed,
+        firmware=outlined,
     )
 
 
-__all__ = ["Description", "Outline", "Part", "Timeout", "describe"]
+__all__ = ["Description", "FirmwareOutline", "Outline", "Part", "Timeout", "describe"]

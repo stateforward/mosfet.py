@@ -42,7 +42,7 @@ model, a bot running for an ``async with`` block, and its snapshot.
 """
 
 from .define import DefinitionError, Error, Finalizer, RedefinableBot, Validator, define, redefine
-from .describe import Description, Outline, Part, describe
+from .describe import Description, FirmwareOutline, Outline, Part, describe
 from .diagnostics import Diagnostic, Help, Location, Span, Suggestion, explain
 from .elements import Element, Model, allow, attach, cognition, input, output, register, timeouts, traits
 from .firmware import (
@@ -90,6 +90,7 @@ __all__ = [
     "Error",
     "Finalizer",
     "Firmware",
+    "FirmwareOutline",
     "Help",
     "LintWarning",
     "Location",
