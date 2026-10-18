@@ -263,7 +263,13 @@ def patched_event_data_model(
     else:
         base_class = pydantic.BaseModel
     annotations: dict[str, object] = {}
-    attributes: dict[str, object] = {"model_config": pydantic.ConfigDict(extra="allow")}
+    # A class body without a docstring gets ``__doc__ = None``, which Pydantic reads as "no
+    # description": carry the domain model's own docstring so the patched schema still says what
+    # the event does. Field descriptions and ``json_schema_extra`` are inherited from the base.
+    attributes: dict[str, object] = {
+        "__doc__": base_class.__doc__ if base is not None else None,
+        "model_config": pydantic.ConfigDict(extra="allow"),
+    }
     for field_name, (annotation, field_info) in patch_fields.items():
         annotations[field_name] = annotation
         attributes[field_name] = field_info
