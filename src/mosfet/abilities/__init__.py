@@ -34,6 +34,7 @@ from . import (
     learning,
     listening,
     memory,
+    people,
     persona,
     processing,
     reading,
@@ -85,6 +86,7 @@ if typing.TYPE_CHECKING:
     from .generative import Generative, Generator
     from .identity import Identity, NameRecognizer, SpeechNameRecognizer
     from .listening import Listening, ListeningStage
+    from .people import People
     from .persona import Persona
     from .seeing import Seeing
     from .speaking import Speaking
@@ -126,6 +128,7 @@ _LAZY_EXPORT_MODULES = {
     "SpeechNameRecognizer": ".identity",
     "Listening": ".listening",
     "ListeningStage": ".listening",
+    "People": ".people",
     "Persona": ".persona",
     "Seeing": ".seeing",
     "Speaking": ".speaking",
@@ -159,6 +162,7 @@ __all__ = [
     "Learning",
     "Listening",
     "ListeningStage",
+    "People",
     "Persona",
     "Seeing",
     "Speaking",
@@ -199,6 +203,7 @@ __all__ = [
     "learning",
     "listening",
     "memory",
+    "people",
     "persona",
     "processing",
     "reading",

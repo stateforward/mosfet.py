@@ -53,9 +53,9 @@ failed, not which library raised:
 | `stage_failed` | a perception stage (objects, faces, description) answered with a failure; the view's field for it is empty; the span's `bot.seeing.stage` says which stage |
 | `design_failed` | a voice source could not make a voice from its description for a reason no narrower kind names; nothing was kept |
 | `unsupported` | a sandbox request is well formed but beyond what the host offers (its capacity, its image allowlist, or files at all); nothing was run |
-| `not_found` | a named thing is missing: a path to read in a sandbox machine is missing or is not a regular file, an identity id to mark is not in its registry, or a person or ref a person statement names is not in memory |
-| `conflict` | the request contradicts what already holds: for example a link mark on an id that is the bot's own, or a ref linked to a person while it belongs to another; nothing was changed |
-| `declared` | the request would change an owner fact or the bot itself (rename, unlink an owner's ref, or forget a declared person or `self`); nothing was changed |
+| `not_found` | a named thing is missing: a path to read in a sandbox machine is missing or is not a regular file, an identity id to mark is not in its registry, or a person or ref a person statement (memory's or a `people` tool's) names is not in memory |
+| `conflict` | the request contradicts what already holds: for example a link mark on an id that is the bot's own, or a ref linked to a person while it belongs to another (memory's or a `people.link`); nothing was changed |
+| `declared` | the request would change an owner fact or the bot itself (rename, unlink an owner's ref, or forget a declared person or `self`, through memory or a `people` tool); nothing was changed |
 | `too_large` | a file to read from a sandbox machine is larger than the host will move |
 | `busy` | the sandbox's request queue was full; the request was not taken |
 | `failed` | a sandbox host failed for a reason no narrower kind names |

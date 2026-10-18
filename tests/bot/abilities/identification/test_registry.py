@@ -318,6 +318,18 @@ def _failure(event: hsm.Event[typing.Any]) -> identification.FailureData:
     return data
 
 
+def test_a_registry_says_which_kind_it_serves_without_starting() -> None:
+    voices = identification.Registry(
+        identifier=FakeIdentifier(FakeTime()), kind="voice", max_unlinked_age=_MINUTE, max_ids=1
+    )
+    faces = identification.Registry(
+        identifier=FakeIdentifier(FakeTime()), kind="face", max_unlinked_age=_MINUTE, max_ids=1
+    )
+
+    assert (voices.kind(), faces.kind()) == ("voice", "face")
+    assert not voices.state()
+
+
 def test_the_constructor_rejects_non_positive_durations_and_a_negative_cap() -> None:
     identifier = FakeIdentifier(FakeTime())
     with pytest.raises(ValueError, match="durations"):

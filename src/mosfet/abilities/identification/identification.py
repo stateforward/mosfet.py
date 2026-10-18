@@ -679,6 +679,16 @@ class Registry(ability.Ability[IdentifyData, IdentifiedData]):
         self._next_prune_at = now() + prune_every
         self._in_flight = None
 
+    def kind(self) -> Kind:
+        """The kind of identity this registry serves, fixed when it was built.
+
+        Like :meth:`identity`, it is a construction-time fact a peer may ask for (``people.People`` knows
+        which registry a ``voice:`` or ``face:`` ref belongs to by it); it reads no machine state, and
+        everything the registry does is still reached only by its request events.
+        """
+
+        return self._kind
+
     # --- replies -------------------------------------------------------------------------------
 
     @staticmethod
