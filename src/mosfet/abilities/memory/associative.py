@@ -6,6 +6,10 @@ present) and gets one reply: ``AssociatedEvent`` (``AssociationsData``, best fir
 (``memory.SearchEvent``: nearest by vector, recent, involving someone present, one link away),
 scores each with the injected ``Weights``, and admits them best first while their text fits
 ``budget_tokens``. It never embeds and never reads Memory's state; Memory is only an address.
+The association also says who is here, as Memory resolved it in the search: each participant of
+the cue and the person it is (``known`` false for someone nobody has named or declared), those
+persons, and the bot itself (``you``, with its own refs). Those facts are what the bot is offered;
+whether to ask who someone is, or to do anything at all, stays the bot's choice.
 
 Scoring is pure and deterministic::
 
@@ -209,7 +213,9 @@ def _associations(
             continue
         used += tokens
         items.append(_association(candidate))
-    return payload.AssociationsData(items=tuple(items), omitted=omitted)
+    return payload.AssociationsData(
+        you=found.you, people=found.people, persons=found.persons, items=tuple(items), omitted=omitted
+    )
 
 
 def _recollection(about: str | None, fetched: payload.FetchedData) -> payload.RecollectionData:

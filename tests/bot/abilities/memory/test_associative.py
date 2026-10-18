@@ -143,6 +143,16 @@ class Harness:
         await self.owner.until(lambda: bool(self.owner.replies(request_id)))
         return self.owner.replies(request_id)[0]
 
+    async def person(self, statement: memory.PersonData) -> None:
+        reply = await ability.run_terminal_operation(
+            self.ctx,
+            child=self.memory,
+            request=memory.PersonEvent.with_data_and_id(statement, f"person-{statement.op}"),
+            terminals=(memory.PersonDoneEvent, memory.FailedEvent),
+            timeout=datetime.timedelta(seconds=_WAIT),
+        )
+        assert isinstance(reply.data, memory.PersonDoneData), reply.data
+
     async def remember(self, episode: memory.EpisodeData) -> None:
         reply = await ability.run_terminal_operation(
             self.ctx,
@@ -165,8 +175,9 @@ async def _harness(
     owner, memory_owner = Owner(), Owner()
     for actor in (owner, memory_owner):
         _ = await mosfet.started(ctx, actor, Owner.model)
-    # Memory stamps the bot's own person when it opens, before the episodes the test times.
-    stamps = itertools.chain((_NOW,), times) if times is not None else iter(lambda: _NOW, None)
+    # Memory stamps the bot's own person when it opens, before the episodes the test times, and
+    # every search after them (who is present is resolved, and stamped, in the search).
+    stamps = itertools.chain((_NOW,), times, itertools.repeat(_NOW)) if times is not None else iter(lambda: _NOW, None)
     store = memory.Memory(
         engine=memory.store.open_sqlite_engine(),
         embedder=embedder,
@@ -566,3 +577,74 @@ def test_a_recall_waiting_at_detach_and_one_after_it_are_answered_unavailable_on
         failure = answered[0].data
         assert isinstance(failure, ability.FailureData)
         assert failure.message.startswith("unavailable"), (request, failure)
+
+
+# --- who is here (W8-7) -------------------------------------------------------------------------
+
+
+def test_a_turn_says_who_is_speaking_who_is_present_and_who_the_bot_is() -> None:
+    """Pins what the bot is told, never what it does with it: asking who a stranger is stays its choice."""
+
+    child = mosfet.Participant(ref="voice:ada", role=mosfet.ParticipantRole.SOURCE)
+    stranger = mosfet.Participant(ref="voice:3f2a9c", role=mosfet.ParticipantRole.SOURCE)
+    seen = mosfet.Participant(ref="face:7b1e04", role=mosfet.ParticipantRole.SOURCE)
+    mouth = mosfet.Participant(ref="voice:tts-warm", role=mosfet.ParticipantRole.SOURCE, own=True)
+
+    async def scenario() -> hsm.Event[typing.Any]:
+        harness = await _harness()
+        await harness.attach_memory()
+        ada = memory.Member(id="ada", name="Ada", role=memory.Role.CHILD, born=2018, refs=(child.ref,))
+        await harness.person(memory.PersonDeclareData(members=(ada,)))
+        await harness.remember(_episode("Hello, I am here.", "spoke", participants=(mouth,)))
+        await harness.attach()
+        cue = memory.CueData(cue=(text.TextPart(text="who is that?"),), participants=(child, stranger, seen))
+        await harness.send(cue, "a-1")
+        return await harness.reply("a-1")
+
+    reply = asyncio.run(scenario())
+
+    assert reply.name == memory.AssociatedEvent.name
+    surfaced = reply.data
+    assert isinstance(surfaced, memory.AssociationsData)
+    assert [(present.ref, present.part, present.known) for present in surfaced.people] == [
+        (child.ref, mosfet.ParticipantRole.SOURCE, True),
+        (stranger.ref, mosfet.ParticipantRole.SOURCE, False),
+        (seen.ref, mosfet.ParticipantRole.SOURCE, False),
+    ]
+    assert surfaced.people[0].person == "ada"
+    unknown = surfaced.people[1].person
+    assert unknown not in ("ada", memory.SELF) and unknown != surfaced.people[2].person
+    persons = {person.id: person for person in surfaced.persons}
+    assert persons["ada"] == memory.Person(
+        id="ada", name="Ada", role=memory.Role.CHILD, born=2018, declared=True, refs=(child.ref,)
+    )
+    assert persons[unknown] == memory.Person(id=unknown, refs=(stranger.ref,))
+    assert surfaced.you == memory.Person(id=memory.SELF, refs=(mouth.ref,))
+    assert persons[memory.SELF] == surfaced.you
+
+    rendered = "".join(
+        part.text
+        for part in projection.model_facing_content(surfaced, capacity=media.ImageCapacity())
+        if isinstance(part, text.TextPart)
+    )
+    for shown in ("voice:3f2a9c", "child", "voice:tts-warm", "known"):
+        assert shown in rendered
+    for hidden in ("similarity", "print", "embedding", "vector"):
+        assert hidden not in rendered
+
+
+def test_the_bots_own_voice_on_the_turn_is_the_bot() -> None:
+    mouth = mosfet.Participant(ref="voice:tts-warm", role=mosfet.ParticipantRole.SOURCE, own=True)
+
+    async def scenario() -> hsm.Event[typing.Any]:
+        harness = await _harness()
+        await harness.attach_memory()
+        await harness.attach()
+        await harness.send(memory.CueData(cue=(text.TextPart(text="echo"),), participants=(mouth,)), "a-1")
+        return await harness.reply("a-1")
+
+    surfaced = asyncio.run(scenario()).data
+    assert isinstance(surfaced, memory.AssociationsData)
+    (present,) = surfaced.people
+    assert (present.ref, present.person, present.known) == (mouth.ref, memory.SELF, True)
+    assert surfaced.you.refs == (mouth.ref,)

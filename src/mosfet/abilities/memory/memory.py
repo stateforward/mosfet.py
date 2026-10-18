@@ -6,7 +6,8 @@ cognition turn as an episode node of a graph, links episodes to the persons they
 holds a canonical vector per node in its embedder's space. Requests:
 
 * ``RememberEvent`` (``EpisodeData``) → ``RememberedEvent``
-* ``SearchEvent`` (``SearchData``) → ``FoundEvent``
+* ``SearchEvent`` (``SearchData``) → ``FoundEvent``: candidates, and who is here (each participant
+  resolved to its person, the persons they are, and ``self``)
 * ``FetchEvent`` (``FetchData``) → ``FetchedEvent``
 * ``RecentEvent`` (``RecentData``) → ``RecentOutputEvent``
 * ``BackfillEvent`` (``BackfillData``) → ``BackfilledEvent``
@@ -1117,7 +1118,7 @@ class Memory(store.MemoryStore):
                 reason = _unindexed_reason(embedded.failure.kind)
             if reason is not None:
                 _SKIPPED.add(1, {"bot.memory.skip.reason": reason})
-        found = await Memory._run(
+        found, created, conflicts = await Memory._run(
             instance,
             graph.search,
             instance._opened_engine(),
@@ -1125,7 +1126,13 @@ class Memory(store.MemoryStore):
             data,
             space=None if capacity is None else capacity.space,
             cue=cue,
+            at=instance._now(),
         )
+        if created:
+            _NODES.add(created, {"bot.memory.node.kind": payload.NodeKind.PERSON.value})
+        if conflicts:
+            _CONFLICTS.add(conflicts)
+            _LOG.warning("memory kept %d own-stamped ref(s) with the person they belong to: conflict", conflicts)
         for candidate in found.candidates:
             for lane in candidate.lanes:
                 _LANES.add(1, {"bot.memory.lane": lane.value})

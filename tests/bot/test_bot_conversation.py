@@ -9,6 +9,7 @@ import typing
 import uuid
 
 import hsm
+import mosfet
 import pytest
 
 from mosfet import media
@@ -18,6 +19,7 @@ from mosfet.abilities.communication import conversation
 from mosfet.abilities import decoding
 from mosfet.abilities import ability
 from mosfet.abilities import listening
+from mosfet.abilities import memory
 from mosfet.abilities.communication.conversation import turn_detector
 from mosfet.abilities import processing
 from mosfet.abilities import speaking
@@ -768,3 +770,62 @@ class _VoiceThenSilence(hearing_voice.detection.VoiceActivityClassifier):
                 )
             )
         return hearing_voice.detection.ApplyData(segments=())
+
+
+def test_a_heard_turn_offers_the_bot_who_is_speaking_and_who_it_is() -> None:
+    """The offered frame carries the people block; it pins what is offered, never what is chosen."""
+
+    stranger = mosfet.Participant(ref="voice:3f2a9c", role=mosfet.ParticipantRole.SOURCE)
+
+    async def run() -> list[processing.InputData]:
+        communication_ability, conversation_ability, speaking_ability = _text_communication()
+        processor = CountingProcessor()
+        store = memory.Memory()
+        cognitive = cognition.Cognition(
+            intuition=cognition.Intuition(processor=processor),
+            reasoning=cognition.Reasoning(processor=CountingProcessor()),
+            reflection=cognition.Reflection(processor=CountingProcessor(), memory=store),
+            memory=store,
+            associative=memory.Associative(memory=store),
+        )
+        listening_ability = listening.Listening(voice_activity_classifier=_VoiceThenSilence(), speech_decoder=None)
+
+        class Probe(Bot):
+            def __init__(self) -> None:
+                super().__init__(
+                    devices=(Device(id="phone"),),
+                    cognition=cognitive,
+                    input=(listening_ability,),
+                    output=(speaking_ability,),
+                    acquired_abilities=(communication_ability,),
+                )
+
+        probe = Probe()
+        environment = Environment()
+        await probe.attach(environment)
+        await _wait_until(lambda: (probe.state() or "").endswith("/unfocused"))
+        await _wait_until(lambda: (conversation_ability.state() or "").endswith("/behavior/inactive"))
+        await hsm.dispatch(
+            environment,
+            probe,
+            SoundEvent.with_data(
+                SoundData(
+                    audio=b"pcm-chunk",
+                    media_type="audio/pcm",
+                    sample_rate_hz=16_000,
+                    channels=1,
+                    participants=(stranger,),
+                )
+            ),
+        )
+        await _wait_until(lambda: len(processor.inputs) == 1, timeout=10.0)
+        return processor.inputs
+
+    (frame,) = asyncio.run(run())
+
+    recalled = frame.recalled
+    assert isinstance(recalled, memory.AssociationsData)
+    (present,) = recalled.people
+    assert (present.ref, present.part, present.known) == (stranger.ref, mosfet.ParticipantRole.SOURCE, False)
+    assert recalled.you.id == memory.SELF
+    assert present.person in {person.id for person in recalled.persons}

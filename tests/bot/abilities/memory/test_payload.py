@@ -132,7 +132,11 @@ def test_associations_are_ranked_head_budgeted_and_carry_placeholders_only() -> 
     )
     surfaced = memory.AssociationsData(items=(association,) * 3, omitted=2)
 
-    assert memory.AssociationsData.__model_facing_budgeted_fields__ == {"items": "head"}
+    assert memory.AssociationsData.__model_facing_budgeted_fields__ == {
+        "people": "head",
+        "persons": "head",
+        "items": "head",
+    }
     assert surfaced.omitted == 2
     with pytest.raises(pydantic.ValidationError):
         _ = memory.AssociationsData(items=(association,) * (memory.MAX_ASSOCIATIONS + 1))
@@ -331,3 +335,21 @@ def test_a_person_statement_reply_carries_the_person_and_its_refs() -> None:
     )
     with pytest.raises(pydantic.ValidationError):
         _ = memory.PersonDoneData.model_validate({"op": "rename"})
+
+
+def test_who_is_present_is_a_resolved_typed_fact() -> None:
+    present = memory.Present(
+        ref="voice:3f2a9c", part=mosfet.ParticipantRole.SOURCE, person="3f2a9c0d4b5e6f708192a3b4c5d6e7f8", known=False
+    )
+    assert present.known is False
+    assert memory.Present.model_json_schema()["properties"]["known"]["description"]
+    with pytest.raises(pydantic.ValidationError):
+        _ = memory.Present.model_validate({"ref": "voice:a", "part": "speaker", "person": "self", "known": True})
+    surfaced = memory.AssociationsData(people=(present,) * 32, persons=(memory.Person(id=memory.SELF),) * 17)
+    assert surfaced.you == memory.Person(id=memory.SELF)
+    with pytest.raises(pydantic.ValidationError):
+        _ = memory.AssociationsData(people=(present,) * 33)
+    with pytest.raises(pydantic.ValidationError):
+        _ = memory.AssociationsData(persons=(memory.Person(id=memory.SELF),) * 18)
+    found = memory.FoundData(people=(present,), persons=(memory.Person(id=memory.SELF),))
+    assert found.you == memory.Person(id=memory.SELF)

@@ -124,7 +124,9 @@ person `self` (created when Memory opens), and `PersonEvent` declares the owner'
 links, unlinks, names, forgets and lists persons, refusing `conflict`, `declared` or `not_found`
 with nothing changed. The owner's declaration wins every ref it names except the bot's own (those stay
 `self`'s and are answered `refused`), and an owner ref a member no longer lists is unlinked (answered `dropped` unless another member now lists it). `SearchEvent` runs the nearest, recent, present, and
-one-link lanes at once; `FetchEvent` reads nodes in full (image bytes on request) and can
+one-link lanes at once and says who is here (each participant resolved to its person, `known`
+false for someone nobody has named or declared, those persons, and the bot itself as `you`),
+which `Associative` hands the turn as `AssociationsData.people`/`persons`/`you`; `FetchEvent` reads nodes in full (image bytes on request) and can
 reinforce them; `RecentEvent` reads the latest episodes oldest first. Consolidation leases a
 unit (`LeaseEvent`, nodes named by unit aliases), the model decides with the one model-callable
 `ConsolidateEvent` (links, merges into concept nodes, hard-delete forgets), and Memory applies

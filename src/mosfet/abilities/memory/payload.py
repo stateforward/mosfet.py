@@ -642,6 +642,42 @@ class PersonDoneData(pydantic.BaseModel):
     )
 
 
+MAX_PRESENT_PERSONS: typing.Final = 17
+"""Most persons one turn shows: everyone its participants belong to (at most 16) and the bot itself."""
+
+
+class Present(pydantic.BaseModel):
+    """One participant of the turn, resolved to the person memory knows it as."""
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
+        frozen=True,
+        extra="forbid",
+        json_schema_extra={
+            "description": (
+                "Someone taking part in this turn: the ref the producer stamped, the part it plays (source: "
+                "speaking, or seen in view; target: addressed), whose it is, and whether that person is known."
+            ),
+            "examples": [
+                {"ref": "voice:3f2a9c", "part": "source", "person": "3f2a9c0d4b5e6f708192a3b4c5d6e7f8", "known": False}
+            ],
+        },
+    )
+
+    ref: Ref
+    part: mosfet.ParticipantRole = pydantic.Field(
+        description="source: speaking now or seen in view; target: who the turn was addressed to.",
+        examples=["source"],
+    )
+    person: PersonId
+    known: bool = pydantic.Field(
+        description=(
+            "False when nobody has named or declared this person: memory has perceived them but does not know "
+            "who they are. True for the bot itself and for anyone named or declared."
+        ),
+        examples=[False],
+    )
+
+
 class SearchData(pydantic.BaseModel):
     """Find candidate memories for a cue through every mechanical lane at once."""
 
@@ -671,7 +707,10 @@ class SearchData(pydantic.BaseModel):
     participants: tuple[mosfet.Participant, ...] = pydantic.Field(
         default=(),
         max_length=MAX_PARTICIPANTS,
-        description="Who is present now; episodes involving them surface in the present lane.",
+        description=(
+            "Who is present now; episodes involving them surface in the present lane, and memory says who each one "
+            "is (a ref seen for the first time gets a provisional person)."
+        ),
     )
     nearest: int = pydantic.Field(default=12, ge=0, le=64, description="Most candidates from the nearest lane.")
     recent: int = pydantic.Field(default=6, ge=0, le=64, description="Most candidates from the recent lane.")
@@ -718,6 +757,15 @@ class FoundData(pydantic.BaseModel):
         default=False,
         description="True when the nearest lane did not run: no embedder, no cue, or the cue could not be embedded.",
     )
+    people: tuple[Present, ...] = pydantic.Field(
+        default=(), max_length=MAX_PARTICIPANTS, description="Each participant of the cue, resolved, in stamp order."
+    )
+    persons: tuple[Person, ...] = pydantic.Field(
+        default=(),
+        max_length=MAX_PRESENT_PERSONS,
+        description="Every person named in people, in order of appearance, and the bot itself.",
+    )
+    you: Person = pydantic.Field(default=Person(id=SELF), description="The bot itself, with its own refs.")
 
 
 class FetchData(pydantic.BaseModel):
@@ -1187,12 +1235,36 @@ class Association(pydantic.BaseModel):
 
 
 class AssociationsData(pydantic.BaseModel):
-    """What memory surfaced for one turn, best first."""
+    """What memory surfaced for one turn, best first, and who is here: who is speaking, who is present, who you are.
+
+    ``people`` and ``persons`` render before the memories and are left out only after every memory
+    is; ``you`` is never left out. A person who is ``known=False`` is someone the bot has perceived
+    but nobody has named or declared: what to do about that is the bot's to decide.
+    """
 
     model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(frozen=True, extra="forbid")
-    # Ranked best first: a prompt that cannot hold them all keeps the best.
-    __model_facing_budgeted_fields__: typing.ClassVar[dict[str, typing.Literal["head", "tail"]]] = {"items": "head"}
+    # Who is here comes first; the memories are ranked best first. A prompt that cannot hold them
+    # all keeps who is here and the best memories.
+    __model_facing_budgeted_fields__: typing.ClassVar[dict[str, typing.Literal["head", "tail"]]] = {
+        "people": "head",
+        "persons": "head",
+        "items": "head",
+    }
 
+    you: Person = pydantic.Field(
+        default=Person(id=SELF),
+        description="You, the bot, as your memory knows you: your refs are your own voices (and faces).",
+    )
+    people: tuple[Present, ...] = pydantic.Field(
+        default=(),
+        max_length=MAX_PARTICIPANTS,
+        description="Who takes part in this turn, in the order the producers stamped them, each resolved to a person.",
+    )
+    persons: tuple[Person, ...] = pydantic.Field(
+        default=(),
+        max_length=MAX_PRESENT_PERSONS,
+        description="Every person named in people, and you: names, the owner's facts (role, born), and refs.",
+    )
     items: tuple[Association, ...] = pydantic.Field(
         default=(), max_length=MAX_ASSOCIATIONS, description="The memories surfaced, best first."
     )
@@ -1327,6 +1399,7 @@ __all__ = [
     "MAX_PARTICIPANTS",
     "MAX_PERSONS",
     "MAX_PERSON_REFS",
+    "MAX_PRESENT_PERSONS",
     "PERSON_DATA",
     "SELF",
     "Act",
@@ -1367,6 +1440,7 @@ __all__ = [
     "PersonNameData",
     "PersonOp",
     "PersonUnlinkData",
+    "Present",
     "RecallData",
     "RecentData",
     "RecollectionData",

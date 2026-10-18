@@ -76,3 +76,43 @@ def test_a_ref_belongs_to_exactly_one_person() -> None:
             )
     finally:
         engine.dispose()
+
+
+def test_a_search_resolves_who_is_present_in_its_own_transaction() -> None:
+    """A ref never seen before is somebody already: a provisional person, unknown until named or declared."""
+
+    import datetime
+
+    import mosfet
+
+    engine = memory.store.open_sqlite_engine()
+    try:
+        stranger = mosfet.Participant(ref="voice:new", role=mosfet.ParticipantRole.SOURCE)
+        mouth = mosfet.Participant(ref="voice:mouth", role=mosfet.ParticipantRole.TARGET, own=True)
+        found, created, conflicts = memory.graph.search(
+            engine,
+            memory.ExactIndex(),
+            memory.SearchData(participants=(stranger, mouth)),
+            space=None,
+            cue=None,
+            at=datetime.datetime(2026, 10, 18, tzinfo=datetime.UTC),
+        )
+        again, created_again, _ = memory.graph.search(
+            engine,
+            memory.ExactIndex(),
+            memory.SearchData(participants=(stranger,)),
+            space=None,
+            cue=None,
+            at=datetime.datetime(2026, 10, 18, tzinfo=datetime.UTC),
+        )
+    finally:
+        engine.dispose()
+
+    assert [(present.ref, present.part, present.known) for present in found.people] == [
+        ("voice:new", mosfet.ParticipantRole.SOURCE, False),
+        ("voice:mouth", mosfet.ParticipantRole.TARGET, True),
+    ]
+    assert found.people[1].person == memory.SELF
+    assert found.you == memory.Person(id=memory.SELF, refs=("voice:mouth",))
+    assert (created, conflicts) == (2, 0)
+    assert again.people[0].person == found.people[0].person and created_again == 0

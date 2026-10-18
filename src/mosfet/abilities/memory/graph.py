@@ -794,6 +794,33 @@ def _candidates(
     )
 
 
+def _who(
+    connection: Connection,
+    participants: collections.abc.Sequence[mosfet.Participant],
+    persons: dict[str, int],
+    stamp: str,
+) -> tuple[tuple[payload.Present, ...], tuple[payload.Person, ...], payload.Person]:
+    """Who is here: each participant resolved, the persons they are (and ``self``), and ``self``."""
+
+    self_seq, _ = _self_seq(connection, stamp)
+    rows: dict[int, _PersonRow] = {}
+    for seq in dict.fromkeys(persons.values()):
+        rows[seq] = _person_by_seq(connection, seq)
+    people = tuple(
+        payload.Present(
+            ref=participant.ref,
+            part=participant.role,
+            person=rows[persons[participant.ref]].id,
+            known=not _provisional(rows[persons[participant.ref]]),
+        )
+        for participant in participants
+    )
+    shown = [seq for seq in dict.fromkeys(persons[participant.ref] for participant in participants) if seq != self_seq]
+    you = _person(connection, _person_by_seq(connection, self_seq))
+    others = tuple(_person(connection, rows[seq]) for seq in shown[: payload.MAX_PRESENT_PERSONS - 1])
+    return people, (*others, you), you
+
+
 def search(
     engine: Engine,
     idx: index.Index,
@@ -801,13 +828,24 @@ def search(
     *,
     space: embedding_payload.Space | None,
     cue: collections.abc.Sequence[float] | None,
-) -> payload.FoundData:
-    """Every mechanical lane at once: nearest, recent, present, and one link away. One read transaction."""
+    at: datetime.datetime,
+) -> tuple[payload.FoundData, int, int]:
+    """Every mechanical lane at once, and who is here. One transaction.
+
+    Nearest, recent, present, and one link away; and each participant resolved to its person (a
+    ref first seen gets a provisional one, an own ref is ``self``'s), with ``self``. Returns what
+    was found, the persons created minus merged, and own-ref conflicts.
+    """
 
     hits: dict[int, _Hit] = collections.defaultdict(_Hit)
     kinds = list(data.kinds)
     kind_values = [kind.value for kind in kinds]
+    stamp = utc_text(at)
     with engine.begin() as connection:
+        _, made = _self_seq(connection, stamp)
+        resolved, created, conflicts = _resolve(connection, data.participants, stamp)
+        created += made
+        people, persons_here, you = _who(connection, data.participants, resolved, stamp)
         if space is not None and cue is not None and data.nearest:
             for neighbor in idx.nearest(connection, space, cue, k=data.nearest, kinds=kinds):
                 hit = hits[neighbor.seq]
@@ -816,8 +854,7 @@ def search(
         if data.recent:
             for seq in connection.execute(recent_clause(kinds=kinds, limit=data.recent)).scalars():
                 hits[int(seq)].lanes.add(payload.Lane.RECENT)
-        refs = list(dict.fromkeys(participant.ref for participant in data.participants))
-        persons = [int(seq) for seq, _ in connection.execute(persons_select_clause(refs)).all()] if refs else []
+        persons = list(dict.fromkeys(resolved.values()))
         if persons and data.present:
             present = connection.execute(
                 select(_EDGES.c.source_seq)
@@ -849,7 +886,14 @@ def search(
             for seq in involving:
                 hits[int(seq)].present = True
         candidates = _candidates(connection, hits, space=space)
-    return payload.FoundData(candidates=candidates[:256], nearest_skipped=cue is None or space is None)
+    found = payload.FoundData(
+        candidates=candidates[:256],
+        nearest_skipped=cue is None or space is None,
+        people=people,
+        persons=persons_here,
+        you=you,
+    )
+    return found, created, conflicts
 
 
 def fetch(
