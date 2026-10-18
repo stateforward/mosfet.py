@@ -728,16 +728,27 @@ def _same_typed_completion_value(value: object, validated: object) -> bool:
     return False
 
 
+_ToolChoice: typing.TypeAlias = typing.Literal[
+    text.generation.ToolSelectionPolicy.REQUIRED, text.generation.ToolSelectionPolicy.AUTO
+]
+"""The tool choices an owner may give a :class:`Processor`: a required ``dispatch`` call, or the model's choice."""
+
+
 class Processor(processing.Processor):
     """OpenAI-compatible transport: input (+ stamped instructions) → events array.
 
     ``image_capacity`` is stamped once from the generator, so the projection attaches exactly the
     images that generator accepts. ``stream`` is the owner's: ``False`` for an endpoint that cannot stream
     a tool call (a proxy that sends only keep-alives), so every call is made whole and nothing is drafted.
+    ``tool_choice`` is the owner's too: the tool choice sent whenever events are offered. ``REQUIRED`` (the
+    default) makes the endpoint call ``dispatch``; ``AUTO`` lets the model answer in content as well, for an
+    endpoint whose guided decoding of a required call degrades what the model writes (one that drops the
+    line breaks in code). An answer in content is read as the same events array.
     """
 
     _generator: text.generation.TextGenerator
     _stream: bool
+    _tool_choice: _ToolChoice
     image_capacity: mosfet.media.ImageCapacity
 
     def __init__(
@@ -748,6 +759,7 @@ class Processor(processing.Processor):
         provider: str | None = "openai_compat",
         extra_body: collections.abc.Mapping[str, object] | None = None,
         stream: bool = True,
+        tool_choice: _ToolChoice = text.generation.ToolSelectionPolicy.REQUIRED,
     ) -> None:
         if generator is not None and client is not None:
             raise ValueError("Provide either generator or client, not both.")
@@ -761,6 +773,7 @@ class Processor(processing.Processor):
             )
         self._generator = generator
         self._stream = stream
+        self._tool_choice = tool_choice
         self.image_capacity = generator.image_capacity
 
     @typing.override
@@ -796,11 +809,7 @@ class Processor(processing.Processor):
                 ),
             ),
             tools=operation_tools,
-            tool_selection=(
-                text.generation.ToolSelectionPolicy.REQUIRED
-                if operation_tools
-                else text.generation.ToolSelectionPolicy.NONE
-            ),
+            tool_selection=self._tool_choice if operation_tools else text.generation.ToolSelectionPolicy.NONE,
         )
         parser = processing.DraftParser(input.schemas)
 

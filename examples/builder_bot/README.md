@@ -17,6 +17,7 @@ builder = bot.define(
             client=openai_compat.ChatClient(model=settings.model, base_url=settings.base_url, api_key=...),
             provider="builder_bot",
             stream=settings.stream,
+            tool_choice=settings.tool_choice,
         ),
         memory=memory.Memory(database=str(process.data_dir / "memory.sqlite3")),
         associative=True,
@@ -130,6 +131,7 @@ chmod 0600 examples/builder_bot/secrets/*
 |---|---|---|---|
 | `OPENAI_BASE_URL`, `OPENAI_MODEL` | env, required | | The local OpenAI-compatible endpoint and the model it serves |
 | `OPENAI_STREAM` | env | `true` | `false` for an endpoint that cannot stream a tool call (a proxy that sends only keep-alives); then nothing the bot writes reaches the screen until the call ends |
+| `OPENAI_TOOL_CHOICE` | env | `required` | The tool choice each call sends: `auto` for an endpoint whose guided decoding of a required tool call degrades what the model writes (one that drops the line breaks in code); then the model may also answer in content, which is read as the same events array |
 | `openai_api_key` | secret, required | | The endpoint's key; a placeholder for a keyless server |
 | `BUILDER_SANDBOX_SOCKET` | env, required | | The rootless Docker or Podman API socket |
 | `BUILDER_SANDBOX_IMAGE` | env | `localhost/mosfet-bench:2` | The one image the bench may use |

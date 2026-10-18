@@ -58,6 +58,13 @@ chunk), so their owner makes the processor with `Processor(..., stream=False)`: 
 `drafts` is never called.
 `ResponsesTextGenerator` does not stream; it ignores `deltas`.
 
+Whenever events are offered, `Processor` sends `tool_choice: "required"`, so the endpoint must call `dispatch`. On
+some endpoints the guided decoding of a required call degrades what the model writes (one served model dropped
+every line break in the code it wrote). Their owner makes the processor with
+`Processor(..., tool_choice=text.ToolSelectionPolicy.AUTO)`: the call sends `"auto"`, and the model may answer
+with the `dispatch` call or with the same events array in content. Without offered events the call offers no tool
+and sends no tool choice.
+
 Local models often send a nested array or object as a JSON string, for example `{"events": "[{...}]"}`. Tool call
 arguments, and every `dispatch` value whose schema takes only an array or object (the `events` array, its items, and
 each event's data down through nested fields), are decoded from such a string once; a string field stays as sent.

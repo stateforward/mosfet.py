@@ -26,6 +26,7 @@ import builder_bot_example
 import pydantic
 import pytest
 from mosfet.abilities import persona
+from mosfet.abilities.language import text
 
 _REQUIRED = {
     "OPENAI_BASE_URL": "http://127.0.0.1:9/v1",
@@ -173,6 +174,7 @@ def test_the_required_settings_alone_take_every_default() -> None:
         pathlib.Path("/nonexistent/podman.sock"),
     )
     assert settings.stream is True
+    assert settings.tool_choice == text.ToolSelectionPolicy.REQUIRED
     # Bench image 2 has mosfet installed, so the bot can write and test bots on it (W7-14).
     assert settings.image == builder_bot_example.DEFAULT_IMAGE == "localhost/mosfet-bench:2"
     assert (settings.egress_network, settings.runtime) == (None, "runc")
@@ -192,6 +194,7 @@ def test_every_owner_setting_has_a_working_value() -> None:
         {
             **_REQUIRED,
             "OPENAI_STREAM": "false",
+            "OPENAI_TOOL_CHOICE": "auto",
             "BUILDER_SANDBOX_IMAGE": "localhost/mosfet-bench:3",
             "BUILDER_SANDBOX_EGRESS_NETWORK": "builder-egress",
             "BUILDER_SANDBOX_RUNTIME": "runsc",
@@ -205,6 +208,8 @@ def test_every_owner_setting_has_a_working_value() -> None:
 
     # Live (builder check round 2, E1): the owner's proxy never streams a tool call, so the owner turns it off.
     assert settings.stream is False
+    # Live (builder check round 3, H1): under "required" the Spark's model wrote code with no line breaks.
+    assert settings.tool_choice == text.ToolSelectionPolicy.AUTO
     assert settings.image == "localhost/mosfet-bench:3"
     assert (settings.egress_network, settings.runtime) == ("builder-egress", "runsc")
     assert (settings.host, settings.port, settings.peer, settings.person_id) == ("0.0.0.0", 9000, "desk-2", "person-1")
@@ -239,6 +244,8 @@ def test_each_required_setting_is_named_when_it_is_missing(unset: str) -> None:
     ("variable", "value"),
     [
         ("OPENAI_STREAM", "sometimes"),
+        ("OPENAI_TOOL_CHOICE", "none"),
+        ("OPENAI_TOOL_CHOICE", "dispatch"),
         ("BUILDER_COMPUTER_PORT", "0"),
         ("BUILDER_COMPUTER_PORT", "65536"),
         ("BUILDER_COMPUTER_PORT", "eighty"),

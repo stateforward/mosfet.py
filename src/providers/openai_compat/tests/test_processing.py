@@ -498,6 +498,57 @@ def test_processor_an_owner_runs_unstreamed_calls_without_drafts() -> None:
     assert [(item.event, item.data) for item in output] == [(_SayEvent.name, {"text": "Whole."})]
 
 
+def test_processor_an_owner_lets_the_model_answer_without_a_tool_call() -> None:
+    # Live (builder check round 3, H1): under tool_choice "required" the Spark's guided decoding made
+    # Qwen3.8-Flash-Next write every file with no line breaks; under "auto" its files kept them.
+    generator = RecordingGenerator(
+        content="",
+        tool_calls=(
+            text.TextToolCall(
+                id="tc1",
+                name=processing.DISPATCH_TOOL_NAME,
+                args={"events": [{"event": "tests.openai_compat.say", "data": {"text": "line one\nline two"}}]},
+            ),
+        ),
+    )
+
+    output = asyncio.run(
+        Processor(generator=generator, tool_choice=text.ToolSelectionPolicy.AUTO).process(
+            processing.InputData(input="hello", schemas=(_SayEvent,), instructions="Select events from schemas.")
+        )
+    )
+
+    assert [call.tool_selection for call in generator.inputs] == [text.ToolSelectionPolicy.AUTO]
+    assert [(item.event, item.data) for item in output] == [(_SayEvent.name, {"text": "line one\nline two"})]
+
+
+def test_processor_an_owner_lets_the_model_answer_in_content() -> None:
+    generator = RecordingGenerator(
+        content=json.dumps({"events": [{"event": "tests.openai_compat.say", "data": {"text": "In content."}}]})
+    )
+
+    output = asyncio.run(
+        Processor(generator=generator, tool_choice=text.ToolSelectionPolicy.AUTO).process(
+            processing.InputData(input="hello", schemas=(_SayEvent,), instructions="Select events from schemas.")
+        )
+    )
+
+    assert [(item.event, item.data) for item in output] == [(_SayEvent.name, {"text": "In content."})]
+
+
+def test_processor_without_schemas_offers_no_tool_whatever_its_owner_chose() -> None:
+    generator = RecordingGenerator(content="")
+
+    output = asyncio.run(
+        Processor(generator=generator, tool_choice=text.ToolSelectionPolicy.AUTO).process(
+            processing.InputData(input="hello", instructions="Select events from schemas.")
+        )
+    )
+
+    assert output == ()
+    assert [call.tool_selection for call in generator.inputs] == [text.ToolSelectionPolicy.NONE]
+
+
 class _SlotData(pydantic.BaseModel):
     """One appointment slot."""
 

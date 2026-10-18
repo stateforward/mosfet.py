@@ -30,6 +30,7 @@ import urllib.parse
 import mosfet
 import pydantic
 from mosfet.abilities import persona, sandbox
+from mosfet.abilities.language import text
 from mosfet.devices import computer
 from mosfet.providers import docker
 
@@ -174,6 +175,15 @@ class Settings(pydantic.BaseModel):
             + " off for an endpoint that cannot stream a tool call."
         ),
         examples=[True, False],
+    )
+    tool_choice: typing.Literal[text.ToolSelectionPolicy.REQUIRED, text.ToolSelectionPolicy.AUTO] = pydantic.Field(
+        default=text.ToolSelectionPolicy.REQUIRED,
+        alias="OPENAI_TOOL_CHOICE",
+        description=(
+            "The tool choice sent with each of the model's calls: `required`, or `auto` for an endpoint whose"
+            + " guided decoding of a required call degrades what the model writes (drops the line breaks in code)."
+        ),
+        examples=["required", "auto"],
     )
     socket: pathlib.Path = pydantic.Field(
         alias="BUILDER_SANDBOX_SOCKET",
