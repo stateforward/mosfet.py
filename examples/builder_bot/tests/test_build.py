@@ -112,9 +112,18 @@ def test_mosfet_commit_outside_a_checkout_is_refused_naming_where_it_looked(tmp_
     assert str(tmp_path) in str(raised.value)
 
 
-def test_a_bench_image_built_for_this_commit_passes_the_check() -> None:
-    with _daemon({_IMAGE: {_LABEL: _HEAD, "org.opencontainers.image.version": "2"}}) as socket:
-        builder_bot_example.check_bench(socket=socket, image=_IMAGE, commit=_HEAD)
+def test_a_bench_image_built_for_this_commit_passes_the_check_and_says_what_it_holds() -> None:
+    # Live (builder check round 2, E4): nothing the bot was offered said its bench has mosfet. The image's own
+    # description label is what the owner says the bench holds.
+    holds = "python 3.13, uv, git, pytest; mosfet installed (`from mosfet import bot`)"
+    labels = {_LABEL: _HEAD, "org.opencontainers.image.version": "2", builder_bot_example.DESCRIPTION_LABEL: holds}
+    with _daemon({_IMAGE: labels}) as socket:
+        described = builder_bot_example.check_bench(socket=socket, image=_IMAGE, commit=_HEAD)
+    with _daemon({_IMAGE: {_LABEL: _HEAD}}) as socket:
+        undescribed = builder_bot_example.check_bench(socket=socket, image=_IMAGE, commit=_HEAD)
+
+    assert builder_bot_example.DESCRIPTION_LABEL == "org.opencontainers.image.description"
+    assert (described, undescribed) == (holds, None)
 
 
 def test_a_stale_bench_image_is_refused_naming_both_commits_and_the_rebuild() -> None:

@@ -2353,3 +2353,72 @@ def test_a_drafted_response_is_heard_before_the_processor_has_finished_writing_i
     assert heard_before_return
     # "Sure. I can" while the rest was being written, then " help." once it was: nothing said twice.
     assert marks == ["u1.0", "u1.1", "u1.2", "u1.3"]
+
+
+class _BenchData(pydantic.BaseModel):
+    """Run one thing on the bench."""
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
+        frozen=True, extra="forbid", json_schema_extra={"examples": [{"thing": "pytest"}]}
+    )
+
+    thing: str
+
+
+_BenchEvent = hsm.Event[_BenchData](name="tests.processing.bench", kind=processing.EventKind, schema=_BenchData)
+
+
+class _DescribedBench(hsm.Instance):
+    """An actor whose snapshot declares what the capacity its event reaches holds."""
+
+    received: list[hsm.Event[typing.Any]]
+
+    @staticmethod
+    def _describe(ctx: hsm.Context, instance: "_DescribedBench", event: hsm.Event[typing.Any]) -> None:
+        del ctx, event
+        _ = instance.set(processing.DESCRIPTION_ATTRIBUTE, "It holds python and pytest.")
+
+    @staticmethod
+    def _keep(ctx: hsm.Context, instance: "_DescribedBench", event: hsm.Event[typing.Any]) -> None:
+        del ctx
+        instance.received.append(event)
+
+    model: typing.ClassVar[hsm.Model | None] = mosfet.define(
+        "ProcessingDescribedBench",
+        hsm.attribute(processing.DESCRIPTION_ATTRIBUTE),
+        hsm.initial(hsm.target("/ProcessingDescribedBench/ready")),
+        hsm.state("ready", hsm.entry(_describe), hsm.transition(hsm.on(_BenchEvent), hsm.effect(_keep))),
+    )
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.received = []
+
+
+def test_an_offered_event_is_described_with_what_its_enabler_declares_and_dispatches_its_own_payload() -> None:
+    async def run() -> tuple[processing.InputData, _DescribedBench]:
+        ctx = shared_hsm_context()
+        bench = _DescribedBench()
+        assert bench.model is not None
+        _ = await mosfet.started(ctx, bench, bench.model)
+        schemas, actor_events = processing.collect_offered_events({"bench": bench})
+        input = processing.InputData(input="x", schemas=schemas, actors={"bench": bench}, actor_events=actor_events)
+        await processing.dispatch_selected_events(
+            ctx,
+            input,
+            (processing.SelectedEvent(event=_BenchEvent.name, target="bench", data={"thing": "pytest"}),),
+            operation_id="described",
+            source=bench,
+        )
+        await asyncio.sleep(0)
+        return input, bench
+
+    input, bench = asyncio.run(run())
+
+    (offered,) = input.schemas
+    schema = processing.model_facing_event_json_schema(offered)
+    assert schema["description"] == "Run one thing on the bench.\n\nIt holds python and pytest."
+    assert schema["examples"] == [{"thing": "pytest"}]
+    assert processing.model_facing_event_json_schema(_BenchEvent)["description"] == "Run one thing on the bench."
+    (received,) = bench.received
+    assert type(received.data) is _BenchData

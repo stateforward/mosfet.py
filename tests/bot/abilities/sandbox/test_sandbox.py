@@ -489,6 +489,36 @@ def test_while_provisioning_no_tool_is_offered_and_requests_wait_for_the_bench()
     assert [stimulus.name for stimulus in answered] == [sandbox.RanEvent.name]
 
 
+_BENCH = "python 3.13, uv, git, pytest; mosfet installed (`from mosfet import bot`); guides in /usr/share/doc/mosfet/"
+
+
+def test_each_offered_request_describes_what_the_owners_bench_holds() -> None:
+    """Live check round 2 (E4): the bot read "mosfet" as the transistor and wrote a fake, because nothing it
+    was offered said its bench has mosfet. The owner's description of the bench is part of the capacity
+    each request reaches: a fact about the bench, not an instruction."""
+
+    async def run() -> tuple[dict[str, str], dict[str, str]]:
+        described = await _harness(spec=sandbox.Spec(image=_SPEC.image, description=_BENCH))
+        plain = await _harness()
+        await described.ready()
+        await plain.ready()
+
+        def descriptions(harness: Harness) -> dict[str, str]:
+            schemas, _ = processing.collect_offered_events({"sandbox": harness.sandbox})
+            return {
+                offered.name: str(processing.model_facing_event_json_schema(offered).get("description", ""))
+                for offered in schemas
+            }
+
+        return descriptions(described), descriptions(plain)
+
+    described, plain = asyncio.run(run())
+
+    assert set(described) == set(plain) == _TOOLS
+    for name, description in described.items():
+        assert description == f"{plain[name]}\n\nEach machine of this sandbox has: {_BENCH}"
+
+
 # Requests and observations
 
 

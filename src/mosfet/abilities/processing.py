@@ -20,6 +20,8 @@ import collections.abc
 import copy
 import dataclasses
 import enum
+import functools
+import inspect
 import json
 import logging
 import re
@@ -381,6 +383,68 @@ def _object_schema_required_names(schema: collections.abc.Mapping[str, object]) 
     return []
 
 
+DESCRIPTION_ATTRIBUTE: typing.Final[str] = "description"
+"""The snapshot attribute an actor declares to describe the capacity its offered events reach.
+
+A fact about the capacity (what a sandbox's machines hold, for example), never an instruction:
+:func:`collect_offered_events` appends it to the model-facing description of each event the actor offers.
+"""
+
+_MAX_DESCRIBED_SCHEMAS: typing.Final = 64
+
+
+def _declared_description(instance: hsm.Instance) -> str | None:
+    """What ``instance``'s snapshot declares under :data:`DESCRIPTION_ATTRIBUTE`, when it declares a text."""
+
+    attributes = instance.take_snapshot().Attributes
+    if not attributes:
+        return None
+    for key, value in typing.cast(collections.abc.Mapping[str, object], attributes).items():
+        if key.rpartition("/")[2] == DESCRIPTION_ATTRIBUTE and isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+@functools.lru_cache(maxsize=_MAX_DESCRIBED_SCHEMAS)
+def _described_model(base: type[pydantic.BaseModel], description: str) -> type[pydantic.BaseModel]:
+    """``base`` whose JSON schema description ends with ``description``, as its own paragraph.
+
+    Cached so a capacity described on every turn keeps one payload model (and one validator) per text.
+    """
+
+    parent = base.model_config.get("json_schema_extra")
+
+    def extra(schema: dict[str, pydantic.JsonValue], model: type[object]) -> None:
+        if isinstance(parent, dict):
+            schema.update(copy.deepcopy(parent))
+        elif callable(parent):
+            if len(inspect.signature(parent).parameters) == 1:
+                typing.cast(collections.abc.Callable[[dict[str, pydantic.JsonValue]], None], parent)(schema)
+            else:
+                typing.cast(collections.abc.Callable[[dict[str, pydantic.JsonValue], type[object]], None], parent)(
+                    schema, model
+                )
+        own = schema.get("description")
+        schema["description"] = f"{own}\n\n{description}" if isinstance(own, str) and own.strip() else description
+
+    namespace: dict[str, object] = {
+        "__doc__": base.__doc__,
+        "__module__": base.__module__,
+        "__qualname__": base.__qualname__,
+        "model_config": pydantic.ConfigDict(json_schema_extra=extra),
+    }
+    return typing.cast(type[pydantic.BaseModel], type(base.__name__, (base,), namespace))
+
+
+def _described(event: Event[typing.Any], description: str) -> Event[typing.Any]:
+    """``event`` offered with ``description`` after its own; an event whose payload is no model is kept as is."""
+
+    base = _payload_base_model(event)
+    if base is None:
+        return event
+    return dataclasses.replace(event, schema=_described_model(base, description))
+
+
 def collect_offered_events(
     actors: collections.abc.Mapping[str, hsm.Instance],
 ) -> tuple[tuple[Event[typing.Any], ...], collections.abc.Mapping[str, tuple[str, ...]]]:
@@ -390,13 +454,18 @@ def collect_offered_events(
     names. One canonical ``Event`` object is kept per name. When actors declare the same
     name with conflicting payload contracts, the mismatch is recorded and the contract
     shared by the most enablers is selected (``actor_key`` ties broken deterministically);
-    iteration order never decides the offered contract.
+    iteration order never decides the offered contract. When an enabler's snapshot declares a
+    :data:`DESCRIPTION_ATTRIBUTE`, the offered event's model-facing description ends with it.
     """
 
     candidates_by_name: dict[str, list[tuple[str, Event[typing.Any]]]] = {}
+    descriptions: dict[str, str] = {}
     for actor_key in sorted(actors):
         instance = actors[actor_key]
-        for event in enabled_call_events(instance):
+        offered = enabled_call_events(instance)
+        if offered and (description := _declared_description(instance)) is not None:
+            descriptions[actor_key] = description
+        for event in offered:
             if not event.name:
                 continue
             candidates_by_name.setdefault(event.name, []).append((actor_key, event))
@@ -411,8 +480,9 @@ def collect_offered_events(
             _LOG.warning("Offered event contract mismatch for %r; selecting the shared authoritative contract.", name)
         ordered = sorted(by_contract.values(), key=lambda group: (-len(group), group[0][0]))
         selected = ordered[0]
-        events_by_name[name] = selected[0][1]
         targets = tuple(actor_key for actor_key, _event in selected)
+        described = tuple(dict.fromkeys(descriptions[key] for key in targets if key in descriptions))
+        events_by_name[name] = _described(selected[0][1], "\n\n".join(described)) if described else selected[0][1]
         if targets:
             actor_events[name] = targets
 
@@ -2605,6 +2675,7 @@ __all__ = [
     "CONFIDENCE_MIN",
     "CompletionData",
     "FailureData",
+    "DESCRIPTION_ATTRIBUTE",
     "DISPATCH_TOOL_NAME",
     "DispatchTrust",
     "Draft",

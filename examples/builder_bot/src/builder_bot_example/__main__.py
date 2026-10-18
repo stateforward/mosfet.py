@@ -13,10 +13,11 @@ Then one ``bot.define`` constructs every part of the bot inline: its model, its 
 ``computer`` and its bench. The bench is the owner's: the settings' image on the default limits (one CPU,
 1 GiB without swap, 256 pids and a 512 MiB workspace at ``/workspace``, which is ``HOME``, since the machine's
 root is read-only), no network unless the owner names an egress network, Python writing no bytecode and pip
-never prompting, and no secret in its environment. Two variables come first. The websocket server the computer
-is served by, because ``bot.run`` starts it first, as a shared actor, and then the bot. And the desk the
-computer sits on, an ``environment.Object``: it does nothing and is never given to the bot, and the computer is
-placed on it (``placement=desk.surface()``), so the bot sees the desk as its computer's ``on="desk"``.
+never prompting, no secret in its environment, and described with what the image's own description label says
+it holds. Two variables come first. The websocket server the computer is served by, because ``bot.run`` starts
+it first, as a shared actor, and then the bot. And the desk the computer sits on, an ``environment.Object``: it
+does nothing and is never given to the bot, and the computer is placed on it (``placement=desk.surface()``), so
+the bot sees the desk as its computer's ``on="desk"``.
 """
 
 import datetime
@@ -43,7 +44,7 @@ if __name__ == "__main__":
         )
         raise SystemExit(f"builder_bot_example: {problems}") from None
     try:
-        check_bench(socket=settings.socket, image=settings.image, commit=mosfet_commit())
+        holds = check_bench(socket=settings.socket, image=settings.image, commit=mosfet_commit())
     except BenchError as error:
         raise SystemExit(f"builder_bot_example: {error}") from None
     server = websocket.Server(
@@ -94,6 +95,7 @@ if __name__ == "__main__":
                     image=settings.image,
                     network=sandbox.Network.NONE if settings.egress_network is None else sandbox.Network.EGRESS,
                     env={"PYTHONDONTWRITEBYTECODE": "1", "PIP_NO_INPUT": "1"},
+                    description=holds,
                 ),
                 max_output_chars=MAX_OUTPUT_CHARS,
             )

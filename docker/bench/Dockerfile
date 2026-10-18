@@ -6,7 +6,9 @@
 # `from mosfet import bot`, and test it with pytest, reading bot.define's diagnostics.
 # Built locally into the rootless daemon and never pushed or pulled. The build context is the repository root,
 # because mosfet is installed from its source and its uv.lock. The image is built for one mosfet commit and
-# labeled with it (org.opencontainers.image.revision), so the build needs that commit:
+# labeled with it (org.opencontainers.image.revision), so the build needs that commit. Its description label
+# (org.opencontainers.image.description) says what it holds, as plain facts: the builder bot describes each of
+# its bench requests with it, so keep it true to this file and never phrase it as a task.
 #
 #   podman build --build-arg MOSFET_COMMIT=$(git rev-parse HEAD) --tag localhost/mosfet-bench:2 \
 #     --file docker/bench/Dockerfile .
@@ -48,7 +50,7 @@ COPY --from=build /opt/mosfet/venv /opt/mosfet/venv
 ENV PATH=/opt/mosfet/venv/bin:$PATH \
     VIRTUAL_ENV=/opt/mosfet/venv
 LABEL org.opencontainers.image.title="mosfet bench" \
-      org.opencontainers.image.description="The builder bot's sandbox bench: python with mosfet, uv, git and pytest" \
+      org.opencontainers.image.description="python 3.13, uv, git, pytest; mosfet installed (from mosfet import bot); guides in /usr/share/doc/mosfet/ (bot.md, bot_diagnostics.md)" \
       org.opencontainers.image.version="2" \
       org.opencontainers.image.source="https://github.com/stateforward/mosfet.py" \
       org.opencontainers.image.licenses="MIT"

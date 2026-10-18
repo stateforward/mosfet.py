@@ -32,6 +32,7 @@ NO_NUL_PATTERN: typing.Final = r"^[^\x00]*$"
 
 _ENV_NAME_PATTERN: typing.Final = r"^[A-Za-z_][A-Za-z0-9_]{0,127}$"
 _MAX_ENV: typing.Final = 32
+_MAX_DESCRIPTION: typing.Final = 512
 _COMPONENT: typing.Final = r"[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*"
 _DOMAIN: typing.Final = r"[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)*"
 _IMAGE_PATTERN: typing.Final = (
@@ -204,6 +205,17 @@ class Spec(pydantic.BaseModel):
         le=datetime.timedelta(hours=24),
         description="How old a machine may get; an older one is replaced the next time it is idle.",
         examples=["PT8H"],
+    )
+    description: str | None = pydantic.Field(
+        default=None,
+        min_length=1,
+        max_length=_MAX_DESCRIPTION,
+        description=(
+            "What every machine of the bench holds, in the owner's words, for example the bench image's "
+            "org.opencontainers.image.description label. It describes each request the bot is offered, as a "
+            "fact about the bench, never an instruction; never a secret."
+        ),
+        examples=["python 3.13, uv, git, pytest; mosfet installed (`from mosfet import bot`)"],
     )
 
     @pydantic.field_validator("env", mode="after")

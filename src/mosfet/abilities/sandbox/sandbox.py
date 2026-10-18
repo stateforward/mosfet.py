@@ -3,7 +3,9 @@
 The bot chooses what to run, what to write and read, and when to start over (``run``, ``write``, ``read``,
 ``reset``); nothing here runs tests after a write, retries a failing build or resets after a failure. The owner
 fixes the bench (``spec.Spec``) and declares what the host can offer (``spec.Capacity``); a bench beyond it is
-refused at construction.
+refused at construction. The owner's ``Spec.description`` of what the bench holds is declared on the snapshot
+(``processing.DESCRIPTION_ATTRIBUTE``), so each request the bench offers is described with it: a fact about the
+bench, never an instruction.
 
 The ability owns an unstarted sandbox host HSM (any HSM that answers the ``host`` event protocol). It starts the
 host under its own lifetime context when it is attached and stops it after releasing; those are the only direct
@@ -88,7 +90,7 @@ from opentelemetry import metrics
 from pydantic.json_schema import SkipJsonSchema
 
 from mosfet import event, lifecycle
-from mosfet.abilities import cognition
+from mosfet.abilities import cognition, processing
 from mosfet.protocols import attachment
 from mosfet.start import bound_model
 from mosfet.telemetry import span
@@ -918,6 +920,15 @@ class Sandbox(ability.Ability[command.RunData, cognition.InputData]):
         instance._host_serving = False
 
     @staticmethod
+    def _describe(ctx: hsm.Context, instance: "Sandbox", event: hsm.Event[typing.Any]) -> None:
+        """Declare what the owner's bench holds, which describes each request this bench offers."""
+
+        del ctx, event
+        held = instance._spec.description
+        if held is not None:
+            _ = instance.set(processing.DESCRIPTION_ATTRIBUTE, f"Each machine of this sandbox has: {held}")
+
+    @staticmethod
     def _host_went_down(ctx: hsm.Context, instance: "Sandbox", event: hsm.Event[typing.Any]) -> None:
         """The host stopped serving while this bench held a machine: it is lost, and the next one is told fresh."""
 
@@ -1017,10 +1028,12 @@ class Sandbox(ability.Ability[command.RunData, cognition.InputData]):
 
     submodel: typing.ClassVar[hsm.Model | None] = mosfet.define(
         "Sandbox",
+        # Observed through the snapshot: processing.collect_offered_events folds it into each offered request.
+        hsm.attribute(processing.DESCRIPTION_ATTRIBUTE),
         hsm.initial(hsm.target("/Sandbox/initializing")),
         hsm.state(
             "initializing",
-            hsm.entry(_heard_down),
+            hsm.entry(_heard_down, _describe),
             hsm.defer(attachment.AttachEvent, attachment.DetachEvent, *_REQUEST_EVENTS),
             hsm.activity(ability.Ability._attach_composite_group),
             hsm.transition(

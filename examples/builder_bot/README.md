@@ -47,6 +47,7 @@ builder = bot.define(
                 image=settings.image,
                 network=sandbox.Network.NONE if settings.egress_network is None else sandbox.Network.EGRESS,
                 env={"PYTHONDONTWRITEBYTECODE": "1", "PIP_NO_INPUT": "1"},
+                description=holds,  # what check_bench read from the image's description label
             ),
             max_output_chars=MAX_OUTPUT_CHARS,
         )
@@ -67,8 +68,10 @@ bot.run(builder, actors=(server,), process=process)
 
 Nothing tells it what to do. The bot gets no seeded behavior, no skill and no instruction text. It learns
 about its computer and its bench only from the tools they offer on each turn: `computer.show`, and
-`bot.ability.sandbox.run`, `write`, `read` and `reset`, which are offered only while the bench is ready. It also
-learns from what it sees. Whether it shows anything, uses the bench or answers a line is up to the bot. Doing
+`bot.ability.sandbox.run`, `write`, `read` and `reset`, which are offered only while the bench is ready. Each
+bench request is described with what the bench holds, as the image's `org.opencontainers.image.description`
+label says it (`sandbox.Spec(description=)`): a fact about the bench, not a task. It also learns from what it
+sees. Whether it shows anything, uses the bench or answers a line is up to the bot. Doing
 nothing is a choice it may make too. Its owner sets only its traits (`careful, curious, candid` unless
 `BUILDER_TRAITS` gives others) and its bench.
 
@@ -102,10 +105,12 @@ docker/bench/smoke.sh --socket "$BUILDER_SANDBOX_SOCKET" --python examples/build
 ```
 
 The bench also has the guide to writing a bot file and every diagnostic's explanation, at
-`/usr/share/doc/mosfet/bot.md` and `/usr/share/doc/mosfet/bot_diagnostics.md`. Nothing tells the bot they are
-there. If you ask it to write a bot, you can tell it.
+`/usr/share/doc/mosfet/bot.md` and `/usr/share/doc/mosfet/bot_diagnostics.md`. The image's description label
+says so, with what else it holds, and the bot's bench requests are described with that label; nothing tells the
+bot to read them or to use mosfet.
 
-Rebuild it after every pull or commit. The builder checks the label when it starts. If the image was built for
+Rebuild it after every pull or commit. The builder checks the revision label when it starts, and reads the
+description label. If the image was built for
 another commit, has no label, or is not in the daemon, or the daemon does not answer, the builder exits `1`
 before anything starts. The message names both commits and the command above.
 

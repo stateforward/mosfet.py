@@ -38,6 +38,8 @@ from mosfet.telemetry.hsm import Traced
 
 PEER = "builder-desk"
 TOKENS = websocket.HmacTokens(pydantic.SecretStr("computer-secret"))
+BENCH = "python 3.13, uv, git, pytest; mosfet installed (`from mosfet import bot`); guides in /usr/share/doc/mosfet/"
+"""What the owner says the bench holds, as the bench image's description label says it."""
 TOOLS = frozenset(
     {
         "computer.show",
@@ -246,7 +248,7 @@ async def bring_up(
             sandbox.Sandbox(
                 host=ScriptedHost(requests, run),
                 capacity=CAPACITY,
-                spec=sandbox.Spec(image=builder_bot_example.DEFAULT_IMAGE),
+                spec=sandbox.Spec(image=builder_bot_example.DEFAULT_IMAGE, description=BENCH),
                 max_output_chars=builder_bot_example.MAX_OUTPUT_CHARS,
             )
         ),
@@ -289,6 +291,15 @@ def test_the_link_up_turn_offers_the_computer_and_the_bench_and_a_silent_bot_doe
         re.search(r'<device ref="computer" id="[^"]+" state="[^"]+" on="desk"', call.instructions or "")
         for call in link_up_calls
     )
+    # Live (builder check round 2, E4): each bench request describes what the owner's bench holds.
+    for call in link_up_calls:
+        for schema in call.schemas:
+            if schema.name in {
+                event.name for event in (sandbox.RunEvent, sandbox.WriteEvent, sandbox.ReadEvent, sandbox.ResetEvent)
+            }:
+                description = processing.model_facing_event_json_schema(schema).get("description")
+                assert isinstance(description, str)
+                assert description.endswith(f"\n\nEach machine of this sandbox has: {BENCH}")
     # Nothing chose to show anything or to use the bench, so nothing did.
     assert [screen.strip() for screen in screens] == [""]
     assert requests == [host.SweepEvent.name, host.CreateEvent.name]

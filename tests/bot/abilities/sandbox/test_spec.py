@@ -209,3 +209,13 @@ def test_capacity_declares_at_least_one_network_and_is_frozen() -> None:
     assert capacity.networks == frozenset({sandbox.Network.NONE, sandbox.Network.EGRESS})
     with pytest.raises(pydantic.ValidationError):
         capacity.files = False
+
+
+def test_spec_description_is_the_owners_bounded_words_for_what_the_bench_holds() -> None:
+    holds = "python 3.13, uv, git, pytest; mosfet installed"
+
+    assert sandbox.Spec(image="localhost/bench:2").description is None
+    assert sandbox.Spec(image="localhost/bench:2", description=holds).description == holds
+    for refused in ("", "x" * 513):
+        with pytest.raises(pydantic.ValidationError):
+            _ = sandbox.Spec(image="localhost/bench:2", description=refused)

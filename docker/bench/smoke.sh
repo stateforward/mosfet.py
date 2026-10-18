@@ -62,6 +62,9 @@ podman_remote build --build-arg "MOSFET_COMMIT=$commit" --file docker/bench/Dock
 echo "bench_smoke: $image is labeled with mosfet $commit" >&2
 revision="$(podman_remote image inspect --format '{{index .Labels "org.opencontainers.image.revision"}}' "$image")"
 [[ "$revision" == "$commit" ]] || fail "$image is labeled with mosfet '$revision', not $commit"
+# The builder describes its bench requests with this label, so it must say the bench holds mosfet.
+description="$(podman_remote image inspect --format '{{index .Labels "org.opencontainers.image.description"}}' "$image")"
+[[ "$description" == *"mosfet installed"* ]] || fail "$image's description label does not say it holds mosfet"
 
 echo "bench_smoke: docker.Host's live check on $image" >&2
 "$python" src/providers/docker/scripts/live_check.py --socket "$socket" --image "$image"

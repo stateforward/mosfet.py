@@ -14,8 +14,9 @@ socket. Its mind is the full cognition (memory, reflection, its persona and the 
 OpenAI-compatible local model.
 
 Nothing here tells the bot what to do. It is given no seeded behavior, no skill and no instruction text: what
-it can do comes from the tools its computer and its bench offer on each turn, and what it does with them is
-its own to choose, including nothing. The owner fixes only who it is (its traits) and its bench.
+it can do comes from the tools its computer and its bench offer on each turn, each bench request described with
+what the bench image says it holds, and what it does with them is its own to choose, including nothing. The
+owner fixes only who it is (its traits) and its bench.
 """
 
 import collections.abc
@@ -37,6 +38,8 @@ DEFAULT_IMAGE: typing.Final = "localhost/mosfet-bench:2"
 mosfet installed, so the bot can write a bot file and test it there."""
 REVISION_LABEL: typing.Final = "org.opencontainers.image.revision"
 """The label bench image 2 carries: the mosfet commit it was built from (``--build-arg MOSFET_COMMIT``)."""
+DESCRIPTION_LABEL: typing.Final = "org.opencontainers.image.description"
+"""The label that says what the bench image holds; the bench's ``sandbox.Spec`` is described with it."""
 _REBUILD: typing.Final = (
     "rebuild it from the repository root: podman build --build-arg MOSFET_COMMIT=$(git rev-parse HEAD)"
     + " --tag {image} --file docker/bench/Dockerfile ."
@@ -91,8 +94,9 @@ class _Image(pydantic.BaseModel):
     config: _ImageConfig = pydantic.Field(default_factory=_ImageConfig, alias="Config")
 
 
-def check_bench(*, socket: pathlib.Path, image: str, commit: str) -> None:
-    """Check that the daemon on ``socket`` has the bench ``image``, built for mosfet ``commit``.
+def check_bench(*, socket: pathlib.Path, image: str, commit: str) -> str | None:
+    """Check that the daemon on ``socket`` has the bench ``image``, built for mosfet ``commit``, and return what
+    the image says it holds (its ``DESCRIPTION_LABEL``), or ``None`` when it says nothing.
 
     The image's ``REVISION_LABEL`` must be ``commit``: a bench built from another commit has another mosfet,
     and a bot file the bot writes there is tested against an API this host does not run. The daemon is asked
@@ -139,6 +143,7 @@ def check_bench(*, socket: pathlib.Path, image: str, commit: str) -> None:
         raise BenchError(
             f"bench image {image} was built for mosfet {built_for}, but this host runs mosfet {commit}; {rebuild}"
         )
+    return labels.get(DESCRIPTION_LABEL) or None
 
 
 class Settings(pydantic.BaseModel):
@@ -248,6 +253,7 @@ class Settings(pydantic.BaseModel):
 
 __all__ = [
     "DEFAULT_IMAGE",
+    "DESCRIPTION_LABEL",
     "DEFAULT_TRAITS",
     "MAX_OUTPUT_CHARS",
     "REVISION_LABEL",
