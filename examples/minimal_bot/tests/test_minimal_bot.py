@@ -1,8 +1,9 @@
-"""``minimal_bot_example``: the bot it defines, and ``python -m minimal_bot_example`` run as written.
+"""``minimal_bot_example``: a bot of its shape, and its bot file, ``python -m minimal_bot_example``, run as written.
 
-The child test runs the bot file from this project's environment in a temporary directory with no
-``PYTHONPATH``, so it is imported exactly as the README documents. Its endpoint is a closed local port:
-the bot gets no input, so it never calls the model.
+The first test writes its own ``bot.define`` of a bot of the same shape on a scripted model. The child tests run
+the bot file from this project's environment in a temporary directory with no ``PYTHONPATH``, so it is imported
+exactly as the README documents. Its endpoint is a closed local port: the bot gets no input, so it never calls
+the model.
 """
 
 import asyncio
@@ -13,7 +14,6 @@ import subprocess
 import sys
 import time
 
-import minimal_bot_example
 from mosfet import bot
 from mosfet.abilities import memory
 from mosfet.bot import testing
@@ -25,24 +25,22 @@ _START_BOUND = 60.0
 _STOP_BOUND = 10.5
 
 
-def test_the_minimal_bot_is_one_device_free_bot_whose_faculties_share_one_memory() -> None:
-    store = memory.Memory()
-    model = minimal_bot_example.minimal(processor=testing.Scripted(), store=store)
-
-    (outline,) = bot.describe(model).bots
-    assert outline.name == "minimal"
-    assert outline.faculties == ("intuition", "reasoning", "reflection", "associative", "consolidation")
-    assert outline.parts == ()
-    assert bot.check(model) == ()
-
-
-def test_it_starts_activates_and_stops_with_a_scripted_model() -> None:
+def test_a_device_free_bot_on_one_memory_starts_activates_and_stops_with_a_scripted_model() -> None:
     model = testing.Scripted()
+    minimal = bot.define(
+        "minimal",
+        bot.cognition(model, memory=memory.Memory(), associative=True, consolidation=True),
+        bot.allow("no_devices"),
+    )
 
     async def run() -> None:
-        async with testing.running(minimal_bot_example.minimal(processor=model, store=memory.Memory())) as running:
+        async with testing.running(minimal) as running:
             assert testing.snapshot(running.bot).State.startswith("/minimal/active")
 
+    (outline,) = bot.describe(minimal).bots
+    assert outline.faculties == ("intuition", "reasoning", "reflection", "associative", "consolidation")
+    assert outline.parts == ()
+    assert bot.check(minimal) == ()
     asyncio.run(run())
 
     # Nothing reached it, so nothing woke it.

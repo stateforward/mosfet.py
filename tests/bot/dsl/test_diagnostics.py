@@ -23,14 +23,14 @@ from mosfet.devices import computer, phone
 
 API_KEY = "sk-SENTINEL-NEIGHBOUR"
 
+processor, server = object(), object()
 
-def greeter(processor, server):
-    return bot.define(
-        "greeter",
-        bot.cognition(processor),
-        bot.attach(computer.Computer(id="desk", transport=server)),
-        bot.attach(phone.Phone(id="desk")), bot.traits("sk-SENTINEL-SAME-LINE", 4242),
-    )
+greeter = bot.define(
+    "greeter",
+    bot.cognition(processor),
+    bot.attach(computer.Computer(id="desk", transport=server)),
+    bot.attach(phone.Phone(id="desk")), bot.traits("sk-SENTINEL-SAME-LINE", 4242),
+)
 '''
 
 
@@ -215,8 +215,8 @@ def test_a_span_without_columns_underlines_its_whole_line(greeter: pathlib.Path)
 
     lines = diagnostics.render(diagnostic).splitlines()
 
-    assert "12 |         bot.cognition(processor)," in lines
-    assert "   |         ^^^^^^^^^^^^^^^^^^^^^^^^^ hsm says so" in lines
+    assert "12 |     bot.cognition(processor)," in lines
+    assert "   |     ^^^^^^^^^^^^^^^^^^^^^^^^^ hsm says so" in lines
 
 
 def test_without_source_only_the_header_and_location_print() -> None:
@@ -239,7 +239,7 @@ def test_every_rendered_diagnostic_ends_with_its_explain_line(greeter: pathlib.P
 def test_a_file_outside_the_directory_prints_its_whole_path(greeter: pathlib.Path) -> None:
     rendered = diagnostics.render(_duplicate(greeter), relative_to=pathlib.Path("/nonexistent"))
 
-    assert f"  --> {greeter}:14:9" in rendered
+    assert f"  --> {greeter}:14:5" in rendered
 
 
 @pytest.mark.parametrize(

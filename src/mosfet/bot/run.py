@@ -5,7 +5,11 @@ machines::
 
     if __name__ == "__main__":
         process = bot.process()
-        bot.run(greeter(processor=...), actors=(server,), process=process)
+        server = websocket.Server(verifier=websocket.HmacTokens(process.secrets.get("computer_token_secret")))
+        greeter = bot.define(
+            "greeter", bot.cognition(processor), bot.attach(computer.Computer(id="desk", transport=server))
+        )
+        bot.run(greeter, actors=(server,), process=process)
 
 ``bot.run`` is synchronous and never returns: it ends the process with its exit code.
 
@@ -102,7 +106,9 @@ def _main(
     options = process() if given is None else given
     for model in models:
         if not isinstance(typing.cast(object, model), elements.Model):
-            raise TypeError(f"bot.run takes bot.Models, not {type(model).__name__}: call the function that defines it")
+            raise TypeError(
+                f"bot.run takes bot.Models, not {type(model).__name__}: pass the model `bot.define` returned"
+            )
     if not 1 <= len(models) <= runtime.MAX_BOTS:
         print(f"error: bot.run runs 1 to {runtime.MAX_BOTS} bots, not {len(models)}", file=sys.stderr)
         return _CONFIG

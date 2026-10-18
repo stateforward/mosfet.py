@@ -3,30 +3,27 @@
     python -m builder_bot_example --ready-file /tmp/ready
     builder-terminal --url ws://127.0.0.1:8765 --peer builder-desk --secret-file secrets/computer_token_secret
 
-:func:`builder` defines one bot, ``builder``, for one person, with ``bot.define``. The person reaches it through a
-``computer.Computer``, ``desk``, served by a ``websocket.Server`` on this host; :mod:`builder_bot_example.terminal`
-is that computer's far side in a terminal. The bot builds and tests on a ``sandbox.Sandbox`` bench backed by a
-``docker.Host`` on a rootless Docker or Podman socket. Its mind is the full cognition (memory, reflection, its
-persona and the routines it authors) on one OpenAI-compatible local model. ``__main__`` reads the owner's
-:class:`Settings` and the process's secrets, builds those parts, and runs the bot with ``bot.run``.
+``__main__`` is the bot file. It reads the owner's :class:`Settings` and the process's secrets, then defines one
+bot, ``builder``, for one person, with one ``bot.define`` that constructs every part inline, and runs it with
+``bot.run``. The person reaches the bot through a ``computer.Computer``, ``desk``, served by a ``websocket.Server``
+on this host; :mod:`builder_bot_example.terminal` is that computer's far side in a terminal. The bot builds and
+tests on a ``sandbox.Sandbox`` bench backed by a ``docker.Host`` on a rootless Docker or Podman socket. Its mind
+is the full cognition (memory, reflection, its persona and the routines it authors) on one OpenAI-compatible
+local model.
 
 Nothing here tells the bot what to do. It is given no seeded behavior, no skill and no instruction text: what
 it can do comes from the tools its computer and its bench offer on each turn, and what it does with them is
-its own to choose, including nothing. The owner fixes only who it is (its traits) and its bench (``bench``).
+its own to choose, including nothing. The owner fixes only who it is (its traits) and its bench.
 """
 
 import collections.abc
 import pathlib
 import typing
 
-import hsm
 import pydantic
-from mosfet import bot
-from mosfet.abilities import memory, persona, processing, sandbox
-from mosfet.behavior import schedule
+from mosfet.abilities import persona, sandbox
 from mosfet.devices import computer
 from mosfet.providers import docker
-from mosfet.providers import websocket
 
 DEFAULT_IMAGE: typing.Final = "localhost/mosfet-bench:2"
 """Bench image 2, which ``docker/bench/Dockerfile`` builds into the rootless daemon; nothing is pulled. It has
@@ -36,60 +33,6 @@ DEFAULT_TRAITS: typing.Final = persona.Traits(traits=("careful", "curious", "can
 MAX_OUTPUT_CHARS: typing.Final = 8_192
 """Most characters the bench keeps of each output stream and file read, so a turn's observations fit a local
 model's context."""
-
-_WORKSPACE = "/workspace"
-
-
-def bench(*, image: str, network: sandbox.Network) -> sandbox.Spec:
-    """The owner's bench: ``image`` on the default limits, ``network``, and a writable home in the workspace.
-
-    The limits are one CPU, 1 GiB without swap, 256 pids and a 512 MiB workspace at ``/workspace``, which the
-    spec makes ``HOME``, since the machine's root is read-only. Python writes no bytecode and pip never prompts.
-    No secret goes into this environment. A machine lives at most the spec's default eight hours.
-    """
-
-    return sandbox.Spec(
-        image=image,
-        resources=sandbox.Resources(),
-        network=network,
-        workspace=_WORKSPACE,
-        env={"PYTHONDONTWRITEBYTECODE": "1", "PIP_NO_INPUT": "1"},
-    )
-
-
-def builder(
-    *,
-    processor: processing.Processor,
-    server: websocket.Server,
-    host: hsm.Instance,
-    capacity: sandbox.Capacity,
-    spec: sandbox.Spec,
-    peer: str,
-    person_id: str | None,
-    traits: tuple[persona.Trait, ...],
-    store: memory.Memory,
-    clock: schedule.WallClock,
-) -> bot.Model:
-    """The builder: one person's computer as ``desk``, a bench to build on, and the full cognition.
-
-    ``processor`` is the one model every faculty thinks with. ``server`` carries the person's computer, ``desk``,
-    whose remote machine the server knows as ``peer``; ``person_id`` is who uses it, when the owner knows. ``host``
-    is an unstarted sandbox host the bench owns from here on, declaring ``capacity``; ``spec`` is the owner's bench
-    on it. ``traits`` are the owner's seed of who the bot is, ``store`` is where its memory is kept, and ``clock``
-    is the UTC wall time the routines the bot authors are scheduled by. Nothing is started here: ``bot.run``
-    starts the server as a shared actor, then the bot.
-
-    Raises:
-        ValueError: ``spec`` asks for a network or limit beyond ``capacity``, or ``host`` is already started.
-    """
-
-    return bot.define(
-        "builder",
-        bot.traits(*traits),
-        bot.cognition(processor, memory=store, associative=True, consolidation=True, autonomy=True, routines=clock),
-        bot.attach(computer.Computer(id="desk", transport=server, peer_id=peer, person_id=person_id)),
-        bot.attach(sandbox.Sandbox(host=host, capacity=capacity, spec=spec, max_output_chars=MAX_OUTPUT_CHARS)),
-    )
 
 
 class Settings(pydantic.BaseModel):
@@ -188,4 +131,4 @@ class Settings(pydantic.BaseModel):
         return persona.Traits(traits=given)
 
 
-__all__ = ["DEFAULT_IMAGE", "DEFAULT_TRAITS", "MAX_OUTPUT_CHARS", "Settings", "bench", "builder"]
+__all__ = ["DEFAULT_IMAGE", "DEFAULT_TRAITS", "MAX_OUTPUT_CHARS", "Settings"]

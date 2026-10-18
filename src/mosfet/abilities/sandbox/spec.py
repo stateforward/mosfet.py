@@ -3,7 +3,7 @@
 A ``Spec`` is the owner's bench: which image a machine is created from, its resource limits, its network, its
 workspace and its environment. It is given at construction and is never model-callable; the bot decides what to
 do at the bench, never which bench it gets. A ``Capacity`` is what one host can offer (its isolation kind, the
-networks it can give, its resource ceilings, whether it moves files), declared once by the factory and injected
+networks it can give, its resource ceilings, whether it moves files), declared once by the bot file and injected
 into both the host and the ability, so a spec beyond it is refused before anything runs.
 
 Nothing here names a provider: a container host reads ``image`` as an OCI reference, a microVM host as a rootfs.
@@ -236,7 +236,7 @@ class Spec(pydantic.BaseModel):
 
 
 class Capacity(pydantic.BaseModel):
-    """What one host can offer, declared once by the factory and injected into both the host and the ability.
+    """What one host can offer, declared once by the bot file and injected into both the host and the ability.
 
     It is a plain value, never an HSM field read by a peer. A spec beyond it is refused at construction, and the host
     refuses an out-of-capacity create on its own as ``unsupported``.

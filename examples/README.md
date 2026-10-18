@@ -5,9 +5,10 @@ Each single-file example is a `uv` script with its own inline metadata, which ke
 example-only dependencies out of the root project and provider packages.
 
 `builder_bot` is the first example: one bot, for one person, reached through a computer, that builds and tests
-software on a sandbox bench of its own. `builder_bot_example.builder` defines it with `bot.define`: a
-`computer.Computer` served by a `websocket.Server`, a `sandbox.Sandbox` on a rootless Docker or Podman socket, and
-the full cognition on one local OpenAI-compatible model. The person sits at the computer's far side,
+software on a sandbox bench of its own. Its bot file, `builder_bot_example/__main__.py`, defines it with one
+`bot.define` that constructs every part inline: a `computer.Computer` served by a `websocket.Server`, a
+`sandbox.Sandbox` on a rootless Docker or Podman socket, and the full cognition on one local OpenAI-compatible
+model. The person sits at the computer's far side,
 `builder-terminal`. Nothing is scripted: what the bot shows, runs, or leaves alone is its own choice. See
 [`builder_bot/README.md`](builder_bot/README.md) for the bench image, the settings and the security posture:
 

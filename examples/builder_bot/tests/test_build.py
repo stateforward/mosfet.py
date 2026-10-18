@@ -1,25 +1,24 @@
-"""``builder_bot_example``: the bot ``builder`` defines, the owner's ``Settings``, and ``python -m builder_bot_example``.
+"""``builder_bot_example``: the owner's ``Settings``, and its bot file, ``python -m builder_bot_example``, run as written.
 
-Every setting is given in the test; nothing reads the process environment. The child test runs the bot file
+Every setting is given in the test; nothing reads the process environment. The child tests run the bot file
 from this project's environment in a temporary directory with no ``PYTHONPATH``, so it is imported exactly as
-the README documents.
+the README documents. Its endpoint is a closed local port and its bench socket does not exist: nothing reaches
+the bot, so it never calls the model, and its bench waits for a host that never serves.
 """
 
-import datetime
-import functools
 import os
 import pathlib
+import signal
+import socket as sockets
 import subprocess
 import sys
+import time
+import typing
 
 import builder_bot_example
 import pydantic
 import pytest
-from mosfet import bot
-from mosfet.abilities import memory, persona, sandbox
-from mosfet.bot import testing
-from mosfet.providers import docker
-from mosfet.providers import websocket
+from mosfet.abilities import persona
 
 _REQUIRED = {
     "OPENAI_BASE_URL": "http://127.0.0.1:9/v1",
@@ -29,90 +28,8 @@ _REQUIRED = {
 _SECRETS = {"OPENAI_API_KEY": "key-5d1a", "COMPUTER_TOKEN_SECRET": "secret-8e3f"}
 # Starting the child imports mosfet and the providers before the bot file runs; that is not under test.
 _RUN_BOUND = 60.0
-
-
-def _builder(
-    tmp_path: pathlib.Path, *, capacity: sandbox.Capacity | None = None, spec: sandbox.Spec | None = None
-) -> bot.Model:
-    spec = spec or builder_bot_example.bench(image=builder_bot_example.DEFAULT_IMAGE, network=sandbox.Network.NONE)
-    return builder_bot_example.builder(
-        processor=testing.Scripted(),
-        server=websocket.Server(verifier=websocket.HmacTokens(pydantic.SecretStr("secret"))),
-        host=docker.Host(
-            socket=pathlib.Path("/nonexistent/podman.sock"),
-            images=frozenset({spec.image}),
-            owner="builder_bot_example/test-1",
-        ),
-        capacity=capacity or docker.capacity(max_resources=sandbox.Resources()),
-        spec=spec,
-        peer="builder-desk",
-        person_id=None,
-        traits=builder_bot_example.DEFAULT_TRAITS.traits,
-        store=memory.Memory(database=str(tmp_path / "memory.sqlite3")),
-        clock=functools.partial(datetime.datetime.now, datetime.UTC),
-    )
-
-
-def test_the_builder_holds_the_desk_and_has_the_bench_and_the_full_cognition(tmp_path: pathlib.Path) -> None:
-    model = _builder(tmp_path)
-
-    (outline,) = bot.describe(model).bots
-    assert outline.name == "builder"
-    assert outline.traits == ("careful", "curious", "candid")
-    assert outline.faculties == (
-        "intuition",
-        "reasoning",
-        "reflection",
-        "associative",
-        "consolidation",
-        "autonomy",
-        "routines",
-    )
-    assert [(part.id, part.kind, part.constructor) for part in outline.parts] == [
-        ("desk", "device", "Computer"),
-        ("sandbox", "ability", "Sandbox"),
-    ]
-    assert bot.check(model) == ()
-    # Defining constructs, and constructing opens nothing: the store opens its database on start (DSL-29).
-    assert not (tmp_path / "memory.sqlite3").exists()
-
-
-def test_a_bench_beyond_the_hosts_capacity_fails_at_construction(tmp_path: pathlib.Path) -> None:
-    spec = builder_bot_example.bench(image=builder_bot_example.DEFAULT_IMAGE, network=sandbox.Network.NONE)
-    small = sandbox.Capacity(
-        isolation=sandbox.Isolation.CONTAINER,
-        networks=frozenset({sandbox.Network.NONE}),
-        max_resources=sandbox.Resources(memory_bytes=512 * 1024 * 1024),
-        files=True,
-    )
-    no_egress = small.model_copy(update={"max_resources": sandbox.Resources()})
-
-    with pytest.raises(ValueError, match="memory_bytes"):
-        _ = _builder(tmp_path, capacity=small, spec=spec)
-    with pytest.raises(ValueError, match="egress"):
-        _ = _builder(
-            tmp_path,
-            capacity=no_egress,
-            spec=builder_bot_example.bench(image=spec.image, network=sandbox.Network.EGRESS),
-        )
-
-
-def test_the_bench_is_the_owners_fixed_policy() -> None:
-    closed = builder_bot_example.bench(image="localhost/mosfet-bench:2", network=sandbox.Network.NONE)
-    open_ = builder_bot_example.bench(image="localhost/mosfet-bench:2", network=sandbox.Network.EGRESS)
-
-    assert closed == sandbox.Spec(
-        image="localhost/mosfet-bench:2",
-        resources=sandbox.Resources(),
-        network=sandbox.Network.NONE,
-        workspace="/workspace",
-        env={"PYTHONDONTWRITEBYTECODE": "1", "PIP_NO_INPUT": "1"},
-    )
-    assert closed.env["HOME"] == "/workspace"
-    assert open_.network is sandbox.Network.EGRESS
-    # Bench image 2 has mosfet installed, so the bot can write and test bots on it (W7-14).
-    assert builder_bot_example.DEFAULT_IMAGE == "localhost/mosfet-bench:2"
-    assert builder_bot_example.DEFAULT_TRAITS == persona.Traits(traits=("careful", "curious", "candid"))
+# Stop grace (8 s default) plus the 1.5 s bounded process exit and scheduling slack.
+_STOP_BOUND = 10.5
 
 
 def test_the_required_settings_alone_take_every_default() -> None:
@@ -123,7 +40,8 @@ def test_the_required_settings_alone_take_every_default() -> None:
         "local-model",
         pathlib.Path("/nonexistent/podman.sock"),
     )
-    assert settings.image == builder_bot_example.DEFAULT_IMAGE
+    # Bench image 2 has mosfet installed, so the bot can write and test bots on it (W7-14).
+    assert settings.image == builder_bot_example.DEFAULT_IMAGE == "localhost/mosfet-bench:2"
     assert (settings.egress_network, settings.runtime) == (None, "runc")
     assert (settings.host, settings.port, settings.peer, settings.person_id) == (
         "127.0.0.1",
@@ -131,7 +49,9 @@ def test_the_required_settings_alone_take_every_default() -> None:
         "builder-desk",
         None,
     )
-    assert settings.traits == builder_bot_example.DEFAULT_TRAITS
+    assert (
+        settings.traits == builder_bot_example.DEFAULT_TRAITS == persona.Traits(traits=("careful", "curious", "candid"))
+    )
 
 
 def test_every_owner_setting_has_a_working_value() -> None:
@@ -198,22 +118,75 @@ def test_a_bad_setting_is_refused_and_named_without_its_value(variable: str, val
     assert value.strip() not in message or not value.strip()
 
 
-def test_python_m_names_a_missing_setting_and_exits_1_without_a_secret(tmp_path: pathlib.Path) -> None:
+def _environ(**given: str) -> dict[str, str]:
+    """This process's environment for the child, without its telemetry, endpoint, builder and mosfet variables."""
+
     environ = {
         name: value
         for name, value in os.environ.items()
         if not name.startswith(("OTEL_", "BOT_OTEL_", "OPENAI_", "BUILDER_", "MOSFET_"))
     }
     _ = environ.pop("PYTHONPATH", None)
-    environ.update(
-        {name: value for name, value in {**_REQUIRED, **_SECRETS}.items() if name != "BUILDER_SANDBOX_SOCKET"},
-        BOT_OTEL_DISABLED="1",
-    )
+    environ.update(given, BOT_OTEL_DISABLED="1")
+    return environ
 
+
+def _free_port() -> int:
+    with sockets.socket(sockets.AF_INET, sockets.SOCK_STREAM) as probe:
+        probe.bind(("127.0.0.1", 0))
+        return typing.cast(tuple[str, int], probe.getsockname())[1]
+
+
+def test_python_m_defines_the_builder_and_serves_it_until_sigterm(tmp_path: pathlib.Path) -> None:
+    ready = tmp_path / "ready"
+    child = subprocess.Popen(
+        [
+            sys.executable,
+            "-m",
+            "builder_bot_example",
+            "--data-dir",
+            str(tmp_path / "data"),
+            "--secrets-dir",
+            str(tmp_path / "absent"),
+            "--ready-file",
+            str(ready),
+        ],
+        cwd=tmp_path,
+        env=_environ(**_REQUIRED, **_SECRETS, BUILDER_COMPUTER_PORT=str(_free_port())),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    try:
+        deadline = time.monotonic() + _RUN_BOUND
+        while not ready.exists():
+            if child.poll() is not None:
+                raise AssertionError(f"the bot exited {child.returncode} early: {child.communicate()[1].decode()}")
+            if time.monotonic() > deadline:
+                raise AssertionError("the bot did not become ready")
+            time.sleep(0.02)
+
+        child.send_signal(signal.SIGTERM)
+        stdout, stderr = child.communicate(timeout=_STOP_BOUND)
+    finally:
+        if child.poll() is None:
+            child.kill()
+            _ = child.communicate()
+
+    assert child.returncode == 0, stderr.decode(errors="replace")
+    assert stdout == b""
+    assert not ready.exists()
+    assert (tmp_path / "data" / "memory.sqlite3").exists()
+    for secret in _SECRETS.values():
+        assert secret.encode() not in stderr
+
+
+def test_python_m_names_a_missing_setting_and_exits_1_without_a_secret(tmp_path: pathlib.Path) -> None:
     finished = subprocess.run(
         [sys.executable, "-m", "builder_bot_example", "--data-dir", str(tmp_path / "data")],
         cwd=tmp_path,
-        env=environ,
+        env=_environ(
+            **{name: value for name, value in {**_REQUIRED, **_SECRETS}.items() if name != "BUILDER_SANDBOX_SOCKET"}
+        ),
         capture_output=True,
         timeout=_RUN_BOUND,
         check=False,

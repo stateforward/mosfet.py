@@ -5,7 +5,7 @@ Usage::
     from mosfet.abilities import sandbox
 
     bench = sandbox.Spec(image="ghcr.io/stateforward/builder:1.0")
-    capacity.check(bench)  # the factory's host capacity; raises ValueError beyond it
+    capacity.check(bench)  # the host's capacity; raises ValueError beyond it
     request = sandbox.RunData(argv=("python", "-c", "print(1 + 1)"))
     bench_ability = sandbox.Sandbox(host=unstarted_host, capacity=capacity, spec=bench)
 

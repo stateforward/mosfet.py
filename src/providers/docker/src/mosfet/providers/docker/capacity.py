@@ -1,4 +1,4 @@
-"""What a Docker Engine host can offer, declared once by the factory and injected into the host and the ability."""
+"""What a Docker Engine host can offer, declared once by the bot file and injected into the host and the ability."""
 
 import typing
 

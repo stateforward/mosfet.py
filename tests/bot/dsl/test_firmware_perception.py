@@ -73,16 +73,9 @@ def _record(ctx: hsm.Context, instance: bot.Firmware, event: hsm.Event[typing.An
     _seen.append(event)
 
 
-def _kitchen(*devices: Device, processor: testing.Scripted | None = None) -> bot.Model:
+@pytest.fixture(autouse=True)
+def forget_what_the_firmware_saw() -> None:
     _seen.clear()
-    return bot.define(
-        "kitchen",
-        bot.cognition(processor or testing.Scripted()),
-        *(bot.attach(device) for device in devices),
-        bot.initial(bot.target("dark")),
-        bot.state("dark", bot.transition(bot.on(SwitchedEvent), bot.effect(_record), bot.target("../lit"))),
-        bot.state("lit"),
-    )
 
 
 def _firmware_id(running: testing.Run) -> str:
@@ -100,8 +93,18 @@ async def _until(condition: collections.abc.Callable[[], bool]) -> None:
 def test_the_firmware_is_a_second_holder_of_every_device_the_bot_holds() -> None:
     lamp, spare = Lamp(), Lamp(id="spare")
 
+    kitchen = bot.define(
+        "kitchen",
+        bot.cognition(testing.Scripted()),
+        bot.attach(lamp),
+        bot.attach(spare),
+        bot.initial(bot.target("dark")),
+        bot.state("dark", bot.transition(bot.on(SwitchedEvent), bot.effect(_record), bot.target("../lit"))),
+        bot.state("lit"),
+    )
+
     async def run() -> tuple[list[list[str]], str, str]:
-        async with testing.running(_kitchen(lamp, spare)) as running:
+        async with testing.running(kitchen) as running:
             holders = [[hsm.id(holder) for holder in device_bots(device)] for device in (lamp, spare)]
             return holders, hsm.id(running.bot), _firmware_id(running)
 
@@ -113,8 +116,17 @@ def test_the_firmware_is_a_second_holder_of_every_device_the_bot_holds() -> None
 def test_the_firmware_lets_go_of_the_devices_before_it_stops() -> None:
     lamp = Lamp()
 
+    kitchen = bot.define(
+        "kitchen",
+        bot.cognition(testing.Scripted()),
+        bot.attach(lamp),
+        bot.initial(bot.target("dark")),
+        bot.state("dark", bot.transition(bot.on(SwitchedEvent), bot.effect(_record), bot.target("../lit"))),
+        bot.state("lit"),
+    )
+
     async def run() -> tuple[list[hsm.Instance], hsm.Instance]:
-        async with testing.running(_kitchen(lamp)) as running:
+        async with testing.running(kitchen) as running:
             body = running.bot
         return list(device_bots(lamp)), body
 
@@ -128,8 +140,17 @@ def test_a_device_event_reaches_the_firmware_as_the_devices_own_typed_event_in_i
     lamp = Lamp()
     processor = testing.Scripted()
 
+    kitchen = bot.define(
+        "kitchen",
+        bot.cognition(processor),
+        bot.attach(lamp),
+        bot.initial(bot.target("dark")),
+        bot.state("dark", bot.transition(bot.on(SwitchedEvent), bot.effect(_record), bot.target("../lit"))),
+        bot.state("lit"),
+    )
+
     async def run() -> tuple[str, str]:
-        async with testing.running(_kitchen(lamp, processor=processor)) as running:
+        async with testing.running(kitchen) as running:
             lamp.switch(SwitchedEvent.with_data(SwitchedData(on=True)), id="switch-1")
             await _until(lambda: bool(_seen) and bool(processor.woken_by(SwitchedEvent.name)))
             world = running.environment.model_snapshot(running.bot) or ""
@@ -151,8 +172,17 @@ def test_an_event_the_firmwares_model_does_not_name_is_ignored() -> None:
     lamp = Lamp()
     processor = testing.Scripted()
 
+    kitchen = bot.define(
+        "kitchen",
+        bot.cognition(processor),
+        bot.attach(lamp),
+        bot.initial(bot.target("dark")),
+        bot.state("dark", bot.transition(bot.on(SwitchedEvent), bot.effect(_record), bot.target("../lit"))),
+        bot.state("lit"),
+    )
+
     async def run() -> str:
-        async with testing.running(_kitchen(lamp, processor=processor)) as running:
+        async with testing.running(kitchen) as running:
             lamp.switch(FlickeredEvent.with_data(SwitchedData(on=False)), id="flicker-1")
             await _until(lambda: bool(processor.woken_by(FlickeredEvent.name)))
             return running.environment.model_snapshot(running.bot) or ""
@@ -179,9 +209,18 @@ def test_a_bot_without_firmware_is_its_devices_one_holder() -> None:
 def test_a_device_that_allows_one_holder_fails_the_firmwares_start_and_so_the_activation() -> None:
     lamp = OneHolderLamp()
 
+    kitchen = bot.define(
+        "kitchen",
+        bot.cognition(testing.Scripted()),
+        bot.attach(lamp),
+        bot.initial(bot.target("dark")),
+        bot.state("dark", bot.transition(bot.on(SwitchedEvent), bot.effect(_record), bot.target("../lit"))),
+        bot.state("lit"),
+    )
+
     async def run() -> str:
         environment = Environment()
-        started = await bot.start(environment, _kitchen(lamp))
+        started = await bot.start(environment, kitchen)
         try:
             return started.state()
         finally:

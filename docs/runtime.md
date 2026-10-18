@@ -5,10 +5,18 @@ them from its `__main__` with `bot.run`, the way an hsm program defines and star
 
 ```python
 from mosfet import bot
+from mosfet.devices import computer
+from mosfet.providers import openai_compat, websocket
 
 if __name__ == "__main__":
     process = bot.process()
-    bot.run(greeter(processor=...), actors=(server,), process=process)
+    server = websocket.Server(verifier=websocket.HmacTokens(process.secrets.get("computer_token_secret")))
+    greeter = bot.define(
+        "greeter",
+        bot.cognition(openai_compat.Processor(client=openai_compat.ChatClient(model="qwen3-coder"))),
+        bot.attach(computer.Computer(id="desk", transport=server)),
+    )
+    bot.run(greeter, actors=(server,), process=process)
 ```
 
 `bot.run` runs one process's bots: it builds them from their models, keeps each one running within a

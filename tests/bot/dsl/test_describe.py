@@ -39,30 +39,29 @@ def _clock() -> datetime.datetime:
     return datetime.datetime.now(datetime.UTC)
 
 
-def _greeter() -> bot.Model:
-    senses = memory.Memory(id="senses", database=f"/tmp/{_SECRET}.sqlite3")
-    return bot.define(
-        "greeter",
-        bot.traits("curious", "patient"),
-        bot.cognition(
-            support.Silent(),
-            memory=memory.Memory(database=f"/tmp/{_SECRET}-mind.sqlite3"),
-            associative=True,
-            routines=_clock,
-        ),
-        bot.attach(phone.Phone(id="desk")),
-        bot.attach(senses),
-        bot.input(senses),
-        bot.output(memory.Memory(id="voice")),
-        bot.attach(audio.Speaker()),
-        bot.register(memory.StmMemory(database=f"/tmp/{_SECRET}-register.sqlite3")),
-        bot.timeouts(processing=datetime.timedelta(seconds=17)),
-        bot.allow("ability_without_tools"),
-    )
+_SENSES = memory.Memory(id="senses", database=f"/tmp/{_SECRET}.sqlite3")
+GREETER = bot.define(
+    "greeter",
+    bot.traits("curious", "patient"),
+    bot.cognition(
+        support.Silent(),
+        memory=memory.Memory(database=f"/tmp/{_SECRET}-mind.sqlite3"),
+        associative=True,
+        routines=_clock,
+    ),
+    bot.attach(phone.Phone(id="desk")),
+    bot.attach(_SENSES),
+    bot.input(_SENSES),
+    bot.output(memory.Memory(id="voice")),
+    bot.attach(audio.Speaker()),
+    bot.register(memory.StmMemory(database=f"/tmp/{_SECRET}-register.sqlite3")),
+    bot.timeouts(processing=datetime.timedelta(seconds=17)),
+    bot.allow("ability_without_tools"),
+)
 
 
 def test_describe_shows_each_bot_its_traits_faculties_and_parts_in_order() -> None:
-    description = bot.describe(_greeter())
+    description = bot.describe(GREETER)
 
     assert json.loads(description.model_dump_json()) == json.loads(support.golden("describe"))
 
@@ -90,28 +89,27 @@ def _minutes(ctx: hsm.Context, instance: bot.Firmware, event: hsm.Event[typing.A
     return datetime.timedelta(minutes=1)
 
 
-def _timer() -> bot.Model:
-    return bot.define(
-        "timer",
-        bot.cognition(support.Silent()),
-        bot.attach(phone.Phone()),
-        bot.attribute("minutes", int, 17),
-        bot.initial(bot.target("idle")),
-        bot.state("idle", bot.transition(bot.on(SetEvent), bot.target("../running"))),
-        bot.state(
-            "running",
-            bot.initial(bot.target("counting")),
-            bot.state("counting"),
-            bot.transition(bot.on(CancelEvent), bot.target("../idle")),
-            bot.transition(bot.on(RangEvent), bot.target("../idle")),
-            bot.transition(bot.after(_minutes), bot.target("../done")),
-        ),
-        bot.final("done"),
-    )
+TIMER = bot.define(
+    "timer",
+    bot.cognition(support.Silent()),
+    bot.attach(phone.Phone()),
+    bot.attribute("minutes", int, 17),
+    bot.initial(bot.target("idle")),
+    bot.state("idle", bot.transition(bot.on(SetEvent), bot.target("../running"))),
+    bot.state(
+        "running",
+        bot.initial(bot.target("counting")),
+        bot.state("counting"),
+        bot.transition(bot.on(CancelEvent), bot.target("../idle")),
+        bot.transition(bot.on(RangEvent), bot.target("../idle")),
+        bot.transition(bot.after(_minutes), bot.target("../done")),
+    ),
+    bot.final("done"),
+)
 
 
 def test_describe_shows_the_firmware_its_commands_and_its_states() -> None:
-    (outline,) = bot.describe(_timer()).bots
+    (outline,) = bot.describe(TIMER).bots
 
     assert outline.firmware == bot.FirmwareOutline(
         commands=("timer.set", "timer.cancel"),
@@ -125,7 +123,7 @@ def test_describe_shows_the_firmware_its_commands_and_its_states() -> None:
 
 
 def test_a_firmware_description_round_trips_and_carries_no_value() -> None:
-    description = bot.describe(_timer())
+    description = bot.describe(TIMER)
     text = description.model_dump_json()
 
     assert bot.Description.model_validate_json(text) == description
@@ -142,13 +140,13 @@ def test_describe_takes_many_models_in_order_and_none() -> None:
 
 
 def test_a_description_round_trips_through_json() -> None:
-    description = bot.describe(_greeter())
+    description = bot.describe(GREETER)
 
     assert bot.Description.model_validate_json(description.model_dump_json()) == description
 
 
 def test_no_value_given_to_a_part_is_described() -> None:
-    text = bot.describe(_greeter()).model_dump_json()
+    text = bot.describe(GREETER).model_dump_json()
 
     assert _SECRET not in text
     assert "17" not in text
@@ -167,7 +165,7 @@ def test_describe_constructs_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_a_description_is_frozen_and_every_field_is_described() -> None:
-    description = bot.describe(_greeter())
+    description = bot.describe(GREETER)
     with pytest.raises(pydantic.ValidationError):
         description.bots = ()
 

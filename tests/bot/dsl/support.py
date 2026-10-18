@@ -48,15 +48,17 @@ def copy(name: str, directory: pathlib.Path) -> pathlib.Path:
     return path
 
 
-def run(path: pathlib.Path) -> types.ModuleType:
-    """Run the bot file at ``path`` as a fresh module, as importing it would.
+def run(path: pathlib.Path, **given: object) -> types.ModuleType:
+    """Run the bot file at ``path`` as a fresh module, as importing it would, with the names ``given``.
 
     It is compiled from its source every time: a rewrite within one second of the same size would
-    otherwise reuse the bytecode cached for the version before it.
+    otherwise reuse the bytecode cached for the version before it. ``given`` are globals the file
+    finds already bound, such as an instance the test started for it.
     """
 
     module = types.ModuleType("greeter")
     module.__file__ = str(path)
+    module.__dict__.update(given)
     exec(compile(path.read_text(encoding="utf-8"), str(path), "exec"), module.__dict__)
     return module
 

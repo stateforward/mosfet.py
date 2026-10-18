@@ -4,8 +4,12 @@ A bot file is a plain Python file that defines its bots and runs them::
 
     if __name__ == "__main__":
         process = bot.process()
-        model = greeter(processor=..., store=memory.Memory(database=str(process.data_dir / "memory.sqlite3")))
-        bot.run(model, process=process)
+        greeter = bot.define(
+            "greeter",
+            bot.cognition(processor, memory=memory.Memory(database=str(process.data_dir / "memory.sqlite3"))),
+            bot.attach(computer.Computer(id="desk")),
+        )
+        bot.run(greeter, process=process)
 
 ``bot.process()`` reads the ``MOSFET_*`` environment variables, then the flags after the bot's module
 (``python -m greeter --ready-file /tmp/ready``); a flag wins over its variable:

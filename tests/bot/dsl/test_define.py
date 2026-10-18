@@ -22,10 +22,6 @@ def here(tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> pathlib.Pat
     return tmp_path
 
 
-def _greeter() -> bot.Model:
-    return bot.define("greeter", bot.cognition(support.Silent()), bot.attach(phone.Phone(id="desk")))
-
-
 def test_define_returns_the_bot_model_with_its_members_in_order() -> None:
     model = bot.define(
         "greeter",
@@ -61,7 +57,7 @@ def test_define_is_the_redefinable_bot_walk_with_its_validator_and_finalizer() -
 
 
 def test_redefine_makes_a_new_model_and_leaves_the_old_one_alone() -> None:
-    model = _greeter()
+    model = bot.define("greeter", bot.cognition(support.Silent()), bot.attach(phone.Phone(id="desk")))
 
     more = bot.redefine(model, bot.attach(audio.Speaker()), bot.traits("patient"))
 
@@ -83,7 +79,7 @@ def _member(model: bot.Model, key: str) -> object:
 
 
 def test_an_id_given_again_by_redefine_is_a_duplicate_with_both_places() -> None:
-    model = _greeter()
+    model = bot.define("greeter", bot.cognition(support.Silent()), bot.attach(phone.Phone(id="desk")))
 
     with pytest.raises(bot.DefinitionError) as caught:
         _ = bot.redefine(model, bot.attach(audio.Speaker(id="desk")))
@@ -120,8 +116,7 @@ def test_each_validator_error_renders_its_golden(code: str, here: pathlib.Path) 
 
 
 def test_an_already_started_instance_renders_its_golden(here: pathlib.Path) -> None:
-    module = support.run(support.copy("B0005", here))
-    greeter = typing.cast(typing.Callable[[phone.Phone], bot.Model], module.greeter)
+    path = support.copy("B0005", here)
 
     async def run() -> bot.DefinitionError:
         environment = Environment()
@@ -129,7 +124,7 @@ def test_an_already_started_instance_renders_its_golden(here: pathlib.Path) -> N
         _ = await mosfet.started(environment, handset, typing.cast(hsm.Model, handset.model))
         try:
             with pytest.raises(bot.DefinitionError) as caught:
-                _ = greeter(handset)
+                _ = support.run(path, handset=handset)
         finally:
             await hsm.stop(handset, environment)
         return caught.value

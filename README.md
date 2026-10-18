@@ -32,17 +32,15 @@ bot's behalf.
 ```python
 from mosfet import bot
 from mosfet.devices import computer
+from mosfet.providers import openai_compat
 
-
-def greeter(*, processor) -> bot.Model:
-    """Reached at its desk; what it does about what is typed there is its own."""
-
-    return bot.define(
-        "greeter",
-        bot.traits("warm", "curious"),
-        bot.cognition(processor),
-        bot.attach(computer.Computer(id="desk")),
-    )
+# Reached at its desk; what it does about what is typed there is its own.
+greeter = bot.define(
+    "greeter",
+    bot.traits("warm", "curious"),
+    bot.cognition(openai_compat.Processor(client=openai_compat.ChatClient(model="qwen3-coder"))),
+    bot.attach(computer.Computer(id="desk")),
+)
 ```
 
 `bot.define` returns the bot as data. `bot.start` (or `bot.run`, for a process) builds its body,
@@ -76,31 +74,36 @@ A bot file is a plain Python file. It defines the bot with `bot.define` and runs
 person, reached through a computer, that builds and tests software on a sandbox bench of its own:
 
 ```python
-from mosfet import bot
-from mosfet.abilities import sandbox
-from mosfet.devices import computer
-
-
-def builder(*, processor, server, host, capacity, spec, peer, person_id, traits, store, clock) -> bot.Model:
-    return bot.define(
-        "builder",
-        bot.traits(*traits),
-        bot.cognition(processor, memory=store, associative=True, consolidation=True, autonomy=True, routines=clock),
-        bot.attach(computer.Computer(id="desk", transport=server, peer_id=peer, person_id=person_id)),
-        bot.attach(sandbox.Sandbox(host=host, capacity=capacity, spec=spec, max_output_chars=MAX_OUTPUT_CHARS)),
-    )
-```
-
-Its `__main__` reads its settings and secrets, builds the parts, and runs the bot with the
-websocket server its computer is served by as a shared actor:
-
-```python
 if __name__ == "__main__":
     process = bot.process()
     settings = Settings.model_validate(os.environ)
-    ...
-    bot.run(builder(processor=..., server=server, ...), actors=(server,), process=process)
+    server = websocket.Server(verifier=websocket.HmacTokens(process.secrets.get("computer_token_secret")))
+    builder = bot.define(
+        "builder",
+        bot.traits(*settings.traits.traits),
+        bot.cognition(
+            openai_compat.Processor(client=openai_compat.ChatClient(model=settings.model, base_url=settings.base_url)),
+            memory=memory.Memory(database=str(process.data_dir / "memory.sqlite3")),
+            associative=True,
+            consolidation=True,
+            autonomy=True,
+            routines=functools.partial(datetime.datetime.now, datetime.UTC),
+        ),
+        bot.attach(computer.Computer(id="desk", transport=server, peer_id=settings.peer)),
+        bot.attach(
+            sandbox.Sandbox(
+                host=docker.Host(socket=settings.socket, images=frozenset({settings.image}), owner=process.name),
+                capacity=docker.capacity(max_resources=sandbox.Resources()),
+                spec=sandbox.Spec(image=settings.image),
+            )
+        ),
+    )
+    bot.run(builder, actors=(server,), process=process)
 ```
+
+Its `__main__` reads its settings and secrets, then has one `bot.define` that constructs every part
+inline. `bot.define` is the only function that defines a bot. The websocket server its computer is
+served by is the one variable, because `bot.run` also starts it as a shared actor.
 
 ```bash
 uv sync --project examples/builder_bot

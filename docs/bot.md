@@ -34,9 +34,11 @@ opens and reads nothing; the model holds the very instances the file built.
 ```
 
 `testing.Scripted()` stands in for a model here; a bot file passes a real one, such as
-`openai_compat.Processor(client=openai_compat.ChatClient(model=...))`. A bot that needs injected
-values (a processor, a server, a store) is defined by a plain function that returns its model, which
-`__main__` and the bot's tests both call. A bot that needs none is a module-level `bot.define(...)`.
+`openai_compat.Processor(client=openai_compat.ChatClient(model=...))`. `bot.define` is the only
+function that defines a bot: a bot file writes one `bot.define(...)` and constructs every part inline
+in it, from literals and the settings and secrets it read. A bot that needs values only its process
+has (a secret, the data dir) defines itself under `if __name__ == "__main__":`, after reading them. A
+bot's tests write their own small `bot.define`, with `testing.Scripted` and fake parts.
 
 `bot.describe(*models)` is the JSON view of defined bots, read from their models alone. It names
 what each bot is made of, and never a value given to a part:
@@ -340,12 +342,18 @@ if __name__ == "__main__":
     process = bot.process()
     settings = Settings.model_validate(os.environ)
     server = websocket.Server(verifier=websocket.HmacTokens(process.secrets.get("computer_token_secret")))
-    bot.run(greeter(processor=..., server=server), actors=(server,), process=process)
+    greeter = bot.define(
+        "greeter",
+        bot.cognition(openai_compat.Processor(client=openai_compat.ChatClient(model=settings.model))),
+        bot.attach(computer.Computer(id="desk", transport=server)),
+    )
+    bot.run(greeter, actors=(server,), process=process)
 ```
 
-The file reads its own settings and secrets with plain code at that boundary and passes the values in.
-`actors` are machines several bots or parts share, such as the websocket server a computer is served
-by: the process starts them before the bots and stops them after. [`runtime.md`](runtime.md) has every
+The file reads its own settings and secrets with plain code at that boundary and constructs the parts
+with them inline, in its one `bot.define`. `actors` are machines several bots or parts share, such as
+the websocket server a computer is served by: the process starts them before the bots and stops them
+after, so a shared actor is the one part the file names as a variable, to give it to both. [`runtime.md`](runtime.md) has every
 option, the exit codes, the stop bound, the restart policy and the container recipe that runs any bot
 project with `python -m`. [`examples/builder_bot`](../examples/builder_bot/README.md) is the flagship
 bot file, and [`examples/minimal_bot`](../examples/minimal_bot/README.md) the smallest.

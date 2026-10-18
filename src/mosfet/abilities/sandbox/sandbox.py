@@ -363,7 +363,7 @@ class Sandbox(ability.Ability[command.RunData, cognition.InputData]):
     ) -> None:
         """Keep a bench from ``spec`` on ``host``, an unstarted sandbox host this ability owns from here on.
 
-        ``capacity`` is the value the factory declared for that host (and injected into it as well).
+        ``capacity`` is the value the bot file declared for that host (and injected into it as well).
         ``max_run_timeout`` is the longest timeout a ``run`` may ask for. A run is backstopped at its timeout plus
         ``kill_grace`` (the host's own bound) plus ``reply_grace``; a write or read at ``io_timeout``. Making a
         machine is bounded by ``create_timeout``, destroying one by ``destroy_timeout``, and starting the host by

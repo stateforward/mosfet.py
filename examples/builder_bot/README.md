@@ -1,17 +1,48 @@
 # builder_bot
 
 One bot, for one person, that the person reaches through a computer and that builds and tests software on a
-sandbox bench of its own. `builder_bot_example.builder` defines that bot, `builder`, with `bot.define`, and
-`python -m builder_bot_example` runs it with `bot.run`:
+sandbox bench of its own. Its bot file is `builder_bot_example/__main__.py`: it reads the owner's settings and
+secrets, then has one `bot.define` of the bot, `builder`, that constructs every part inline, and
+`python -m builder_bot_example` runs it with `bot.run`. The websocket server is the one variable, because it is
+also a shared actor of `bot.run`:
 
 ```python
-return bot.define(
+server = websocket.Server(host=settings.host, port=settings.port, verifier=websocket.HmacTokens(token_secret))
+builder = bot.define(
     "builder",
-    bot.traits(*traits),
-    bot.cognition(processor, memory=store, associative=True, consolidation=True, autonomy=True, routines=clock),
-    bot.attach(computer.Computer(id="desk", transport=server, peer_id=peer, person_id=person_id)),
-    bot.attach(sandbox.Sandbox(host=host, capacity=capacity, spec=spec, max_output_chars=MAX_OUTPUT_CHARS)),
+    bot.traits(*settings.traits.traits),
+    bot.cognition(
+        openai_compat.Processor(
+            client=openai_compat.ChatClient(model=settings.model, base_url=settings.base_url, api_key=...),
+            provider="builder_bot",
+        ),
+        memory=memory.Memory(database=str(process.data_dir / "memory.sqlite3")),
+        associative=True,
+        consolidation=True,
+        autonomy=True,
+        routines=functools.partial(datetime.datetime.now, datetime.UTC),
+    ),
+    bot.attach(computer.Computer(id="desk", transport=server, peer_id=settings.peer, person_id=settings.person_id)),
+    bot.attach(
+        sandbox.Sandbox(
+            host=docker.Host(
+                socket=settings.socket,
+                images=frozenset({settings.image}),
+                owner=f"{process.name}/{process.instance_id}",
+                egress_network=settings.egress_network,
+                runtime=settings.runtime,
+            ),
+            capacity=docker.capacity(max_resources=sandbox.Resources(), runtime=settings.runtime),
+            spec=sandbox.Spec(
+                image=settings.image,
+                network=sandbox.Network.NONE if settings.egress_network is None else sandbox.Network.EGRESS,
+                env={"PYTHONDONTWRITEBYTECODE": "1", "PIP_NO_INPUT": "1"},
+            ),
+            max_output_chars=MAX_OUTPUT_CHARS,
+        )
+    ),
 )
+bot.run(builder, actors=(server,), process=process)
 ```
 
 * **Its computer** is a `computer.Computer`, `desk`, served on this host by a `websocket.Server`. The
@@ -85,7 +116,7 @@ chmod 0600 examples/builder_bot/secrets/*
 
 `builder_bot_example.Settings` reads the variables; an empty one is unset. A secret is read from `--secrets-dir`
 (`MOSFET_SECRETS_DIR`), then from the file `<NAME>_FILE` names, then from `<NAME>`. The bench is fixed by the bot
-file (`builder_bot_example.bench`). It gets the default limits: one CPU, 1 GiB without swap, 256
+file's `sandbox.Spec`. It gets the default limits: one CPU, 1 GiB without swap, 256
 pids and a 512 MiB workspace at `/workspace`, which is also `HOME`. Each output stream and file read is kept to
 8 Ki characters, so a turn's observations fit a local model's context.
 
@@ -149,9 +180,10 @@ a pass condition. A bot that shows nothing has not failed the check. The questio
 uv run --project examples/builder_bot python -m pytest examples/builder_bot/tests -q
 ```
 
-`test_build.py` checks the settings and the bot `builder` defines, and runs `python -m builder_bot_example` as a
-child process. `test_terminal.py` runs the terminal against a real loopback server and computer. `test_builder.py`
-runs the bot with `testing.running`, a scripted model (`testing.Scripted`) and a scripted sandbox host. The
+`test_build.py` checks the settings and runs the bot file, `python -m builder_bot_example`, as a child process
+until it is ready and then stopped. `test_terminal.py` runs the terminal against a real loopback server and
+computer. `test_builder.py` writes its own `bot.define` of the builder's shape on a scripted model
+(`testing.Scripted`) and a scripted sandbox host, and runs it with `testing.running`. The
 terminal connects, and the model's choices reach the screen, the bench and the next turn. A model that chooses
 nothing changes nothing. `test_writes_bots.py` proves the bot can fix a bot file it wrote from `bot.define`'s
 diagnostics alone: the scripted host runs the real `bot.define` on the written file, and the rewrite made by

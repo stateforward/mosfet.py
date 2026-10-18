@@ -79,16 +79,15 @@ def _firmware(model: bot.Model) -> firmware.FirmwareElement:
     return found[0]
 
 
-def _timer() -> bot.Model:
-    return bot.define(
-        "timer",
-        bot.traits("attentive"),
-        bot.cognition(support.Silent()),
-        bot.attribute("minutes", int, 0),
-        bot.initial(bot.target("idle")),
-        bot.state("idle", bot.transition(bot.on(SetEvent), bot.target("../running"))),
-        bot.state("running", bot.transition(bot.after(_minutes), bot.target("../idle"))),
-    )
+TIMER = bot.define(
+    "timer",
+    bot.traits("attentive"),
+    bot.cognition(support.Silent()),
+    bot.attribute("minutes", int, 0),
+    bot.initial(bot.target("idle")),
+    bot.state("idle", bot.transition(bot.on(SetEvent), bot.target("../running"))),
+    bot.state("running", bot.transition(bot.after(_minutes), bot.target("../idle"))),
+)
 
 
 @pytest.mark.parametrize("name", ALIASES)
@@ -107,20 +106,18 @@ def test_hsms_define_and_runtime_functions_are_not_aliased() -> None:
 
 
 def test_partials_mixed_with_bot_elements_compile_into_one_firmware() -> None:
-    model = _timer()
-
-    compiled = _firmware(model).model
-    assert _firmware(model).qualified_name == "/timer/.firmware"
+    compiled = _firmware(TIMER).model
+    assert _firmware(TIMER).qualified_name == "/timer/.firmware"
     assert compiled.qualified_name == "/timer_firmware"
     assert {"/timer_firmware/idle", "/timer_firmware/running", "/timer_firmware/minutes"} <= set(compiled.members)
     assert compiled.initial == "/timer_firmware/.initial"
-    assert "/timer/.cognition" in model.members
-    assert "/timer/.traits" in model.members
-    assert not any(isinstance(member, hsm.StateElement) for member in model.members.values() if member is not model)
+    assert "/timer/.cognition" in TIMER.members
+    assert "/timer/.traits" in TIMER.members
+    assert not any(isinstance(member, hsm.StateElement) for member in TIMER.members.values() if member is not TIMER)
 
 
 def test_the_firmware_offers_only_its_tool_events_as_commands() -> None:
-    commands = _firmware(_timer()).commands()
+    commands = _firmware(TIMER).commands()
 
     assert [command.name for command in commands] == ["timer.set"]
     assert commands[0] is SetEvent
@@ -133,18 +130,16 @@ def test_a_bot_with_no_partials_has_no_firmware() -> None:
 
 
 def test_redefine_with_more_partials_recompiles_one_firmware_and_keeps_the_old() -> None:
-    model = _timer()
+    more = bot.redefine(TIMER, bot.state("ringing"), bot.allow("unreachable_state"))
 
-    more = bot.redefine(model, bot.state("ringing"), bot.allow("unreachable_state"))
-
-    assert set(_firmware(more).model.members) > set(_firmware(model).model.members)
+    assert set(_firmware(more).model.members) > set(_firmware(TIMER).model.members)
     assert "/timer_firmware/ringing" in _firmware(more).model.members
-    assert "/timer_firmware/ringing" not in _firmware(model).model.members
+    assert "/timer_firmware/ringing" not in _firmware(TIMER).model.members
 
 
 def test_redefine_of_a_state_already_defined_is_hsms_duplicate() -> None:
     with pytest.raises(bot.DefinitionError) as caught:
-        _ = bot.redefine(_timer(), bot.state("idle"))
+        _ = bot.redefine(TIMER, bot.state("idle"))
 
     (found,) = caught.value.diagnostics
     assert found.code == "B0014"
@@ -154,29 +149,32 @@ def test_redefine_of_a_state_already_defined_is_hsms_duplicate() -> None:
 def test_the_bodys_own_model_is_never_touched() -> None:
     before = dict(mosfet.Bot.model.members)
 
-    _ = _timer()
+    _ = bot.define(
+        "timer",
+        bot.cognition(support.Silent()),
+        bot.initial(bot.target("idle")),
+        bot.state("idle", bot.transition(bot.on(SetEvent), bot.target("../idle"))),
+    )
 
     assert mosfet.Bot.model.members == before
 
 
 def test_the_firmware_is_a_finalized_hsm_model_of_its_own() -> None:
-    compiled = _firmware(_timer()).model
+    compiled = _firmware(TIMER).model
 
     assert isinstance(compiled, hsm.FinalizedModel)
     assert compiled.qualified_name == "/timer_firmware"
 
 
 def test_partials_are_kept_as_elements_so_the_model_redefines() -> None:
-    model = _timer()
-
-    partials = [element for element in model.owned_elements if isinstance(element, firmware.Partial)]
+    partials = [element for element in TIMER.owned_elements if isinstance(element, firmware.Partial)]
     assert [type(partial.partial).__name__ for partial in partials] == [
         "RedefinableAttribute",
         "RedefinableInitial",
         "RedefinableState",
         "RedefinableState",
     ]
-    assert all(isinstance(element, elements.Element | firmware.Partial) for element in model.owned_elements)
+    assert all(isinstance(element, elements.Element | firmware.Partial) for element in TIMER.owned_elements)
 
 
 def test_compiling_leaves_the_partials_where_hsm_put_them() -> None:
@@ -189,11 +187,11 @@ def test_compiling_leaves_the_partials_where_hsm_put_them() -> None:
 
 
 def test_a_firmware_state_carries_where_it_was_written() -> None:
-    model = _timer()
-
-    running = _firmware(model).model.members["/timer_firmware/running"]
+    running = _firmware(TIMER).model.members["/timer_firmware/running"]
+    lines = pathlib.Path(__file__).read_text(encoding="utf-8").splitlines()
+    written = lines.index('    bot.state("running", bot.transition(bot.after(_minutes), bot.target("../idle"))),') + 1
     assert running.location.filename == __file__
-    assert running.location.lineno == _timer.__code__.co_firstlineno + 8
+    assert running.location.lineno == written
 
 
 @pytest.mark.parametrize("code", ["B0012", "B0013", "B0014"])

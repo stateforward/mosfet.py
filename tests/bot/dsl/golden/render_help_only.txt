@@ -1,8 +1,8 @@
 error[B0004]: `bot.attach` takes a constructed device or ability, not a class
-  --> greeter.py:13:20
+  --> greeter.py:13:16
    |
-13 |         bot.attach(computer.Computer(id="…", transport=server)),
-   |                    ^^^^^^^^^^^^^^^^^ this is the class `computer.Computer`
+13 |     bot.attach(computer.Computer(id="…", transport=server)),
+   |                ^^^^^^^^^^^^^^^^^ this is the class `computer.Computer`
    |
 help: construct it
    = explain: bot.explain("B0004")

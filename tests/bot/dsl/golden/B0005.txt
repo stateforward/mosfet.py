@@ -1,8 +1,8 @@
 error[B0005]: device `phone` is already started
-  --> greeter.py:10:67
+  --> greeter.py:10:64
    |
-10 |     return bot.define("…", bot.cognition(support.Silent()), bot.attach(handset))
-   |                                                             ^^^^^^^^^^^^^^^^^^^ started before it was given
+10 | model = bot.define("…", bot.cognition(support.Silent()), bot.attach(handset))
+   |                                                          ^^^^^^^^^^^^^^^^^^^ started before it was given
    |
    = note: the bot starts the parts it is given, once, as one body
 help: give the bot a new, unstarted `Phone(...)`

@@ -1,9 +1,10 @@
 """The builder, end to end: a person at the terminal, the bot's computer, its mind and its bench.
 
-``builder_bot_example.builder`` is given a scripted model (``testing.Scripted``), a loopback ``websocket.Server``
-and a scripted sandbox host; the person sits at the real ``builder_bot_example.terminal``. The bot runs the way
-``bot.run`` runs it, through ``testing.running``: the server first, as a shared actor, then the bot started in
-the same environment with ``bot.start``, and both stopped when the test is done.
+The test writes its own ``bot.define`` of the builder's shape: the full cognition on a scripted model
+(``testing.Scripted``), the computer ``desk`` on a loopback ``websocket.Server``, and a bench on a scripted
+sandbox host; the person sits at the real ``builder_bot_example.terminal``. The bot runs the way ``bot.run``
+runs it, through ``testing.running``: the server first, as a shared actor, then the bot started in the same
+environment with ``bot.start``, and both stopped when the test is done.
 
 These tests pin capacities and perception: what the bot is given to perceive and what it is offered to do.
 Every choice is the scripted processor's. With a processor that chooses nothing, nothing happens.
@@ -25,6 +26,7 @@ import hsm
 import mosfet
 import pydantic
 from builder_bot_example import terminal
+from mosfet import bot
 from mosfet.abilities import cognition, memory, processing, sandbox
 from mosfet.abilities.sandbox import host
 from mosfet.bot import testing
@@ -218,17 +220,26 @@ async def bring_up(
     port = free_port()
     requests = Requests() if requests is None else requests
     server = websocket.Server(host="127.0.0.1", port=port, verifier=TOKENS)
-    defined = builder_bot_example.builder(
-        processor=model,
-        server=server,
-        host=ScriptedHost(requests, run),
-        capacity=CAPACITY,
-        spec=builder_bot_example.bench(image=builder_bot_example.DEFAULT_IMAGE, network=sandbox.Network.NONE),
-        peer=PEER,
-        person_id="person-1",
-        traits=builder_bot_example.DEFAULT_TRAITS.traits,
-        store=memory.Memory(database=str(tmp_path / "memory.sqlite3")),
-        clock=functools.partial(datetime.datetime.now, datetime.UTC),
+    defined = bot.define(
+        "builder",
+        bot.traits(*builder_bot_example.DEFAULT_TRAITS.traits),
+        bot.cognition(
+            model,
+            memory=memory.Memory(database=str(tmp_path / "memory.sqlite3")),
+            associative=True,
+            consolidation=True,
+            autonomy=True,
+            routines=functools.partial(datetime.datetime.now, datetime.UTC),
+        ),
+        bot.attach(computer.Computer(id="desk", transport=server, peer_id=PEER, person_id="person-1")),
+        bot.attach(
+            sandbox.Sandbox(
+                host=ScriptedHost(requests, run),
+                capacity=CAPACITY,
+                spec=sandbox.Spec(image=builder_bot_example.DEFAULT_IMAGE),
+                max_output_chars=builder_bot_example.MAX_OUTPUT_CHARS,
+            )
+        ),
     )
     async with testing.running(defined, actors=(server,)):
         await wait_until(lambda: bool(requests.named(host.CreateEvent)))

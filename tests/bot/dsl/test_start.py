@@ -428,7 +428,9 @@ def test_start_takes_a_bot_model() -> None:
     async def run() -> None:
         _ = await bot.start(Environment(), typing.cast(bot.Model, object()))
 
-    with pytest.raises(TypeError, match="bot.start takes a bot.Model"):
+    with pytest.raises(
+        TypeError, match=r"^bot.start takes a bot.Model, not object: pass the model `bot.define` returned$"
+    ):
         asyncio.run(run())
 
 

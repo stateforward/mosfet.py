@@ -10,18 +10,17 @@
 * :func:`snapshot` is the running body's own snapshot, for assertions and observation only: a
   snapshot never drives a bot or a test's progression.
 
-There is no factory seam and no configuration helper: a test imports the model, or the function that
-defines it, and passes its doubles as plain arguments:
+There is no factory seam and no configuration helper: a test writes its own small ``bot.define``, with
+its doubles constructed inline:
 
 >>> import asyncio
 >>> from mosfet import bot
 >>> from mosfet.bot import testing
 >>> from mosfet.devices import computer
->>> def greeter(*, processor: testing.Scripted) -> bot.Model:
-...     return bot.define("greeter", bot.cognition(processor), bot.attach(computer.Computer(id="desk")))
 >>> model = testing.Scripted()
+>>> greeter = bot.define("greeter", bot.cognition(model), bot.attach(computer.Computer(id="desk")))
 >>> async def run() -> str:
-...     async with testing.running(greeter(processor=model)) as running:
+...     async with testing.running(greeter) as running:
 ...         return testing.snapshot(running.bot).State
 >>> asyncio.run(run())
 '/greeter/active/unfocused'

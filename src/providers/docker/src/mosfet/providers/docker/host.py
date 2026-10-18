@@ -326,7 +326,7 @@ class Host(Traced):
     ) -> None:
         """Serve sandboxes on the Engine API at the unix ``socket``, which must be a rootless daemon's.
 
-        ``capacity`` is the value the factory declared (``docker.capacity``) and injected into the ability as well;
+        ``capacity`` is the value the bot file declared (``docker.capacity``) and injected into the ability as well;
         by default it is ``docker.capacity(max_resources=sandbox.Resources(), runtime=runtime)``, this host's own
         runtime with the default ceilings.
         ``images`` is the owner's allowlist: nothing is ever pulled, and a create for another image is refused

@@ -155,7 +155,9 @@ async def _start(
     location: diagnostics.Location,
 ) -> body.Bot:
     if not isinstance(typing.cast(object, model), elements.Model):
-        raise TypeError(f"bot.start takes a bot.Model, not {type(model).__name__}: call the function that defines it")
+        raise TypeError(
+            f"bot.start takes a bot.Model, not {type(model).__name__}: pass the model `bot.define` returned"
+        )
     name = model.qualified_name[1:]
     try:
         with span.operation("bot.model.start", scope=_SCOPE, component="mosfet.Bot", stage="start") as active:

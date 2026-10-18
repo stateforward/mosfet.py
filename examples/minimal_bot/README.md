@@ -1,15 +1,25 @@
 # minimal_bot
 
-The smallest bot: `minimal_bot_example.minimal` defines one bot, `minimal`, with no devices and a
-cognition (intuition, reasoning, reflection, recall and consolidation on one memory) on any
-OpenAI-compatible endpoint, and `python -m minimal_bot_example` runs it with `bot.run`:
+The smallest bot: one bot, `minimal`, with no devices and a cognition (intuition, reasoning, reflection,
+recall and consolidation on one memory) on any OpenAI-compatible endpoint. Its bot file is
+`minimal_bot_example/__main__.py`: it reads the endpoint and the secret, then has one `bot.define` that
+constructs every part inline, and `python -m minimal_bot_example` runs it with `bot.run`:
 
 ```python
-bot.define(
+minimal = bot.define(
     "minimal",
-    bot.cognition(processor, memory=store, associative=True, consolidation=True),
+    bot.cognition(
+        openai_compat.Processor(
+            client=openai_compat.ChatClient(model=model, base_url=base_url, api_key=...),
+            provider="minimal_bot",
+        ),
+        memory=memory.Memory(database=str(process.data_dir / "memory.sqlite3")),
+        associative=True,
+        consolidation=True,
+    ),
     bot.allow("no_devices"),
 )
+bot.run(minimal, process=process)
 ```
 
 With no devices nothing reaches the bot, so it activates, stays ready, and stops cleanly; add a device
@@ -34,7 +44,8 @@ The process stays up until SIGTERM or SIGINT and exits `0`. A missing variable o
 before anything starts. Memory is kept in `<data dir>/memory.sqlite3`.
 [`docs/runtime.md`](../../docs/runtime.md) has every `bot.process` option and exit code.
 
-Test it, including the command above run as a child process:
+Test it, including the command above run as a child process. The tests write their own `bot.define` of a bot of
+the same shape on a scripted model (`testing.Scripted`):
 
 ```bash
 uv run --project examples/minimal_bot python -m pytest examples/minimal_bot/tests -q
