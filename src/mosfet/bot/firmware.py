@@ -31,6 +31,12 @@ its own initiative: :func:`send` sends a typed event to one of the bot's devices
 and :func:`report` hands an observation to the body, which wakes cognition with it. What cognition does
 about a report is its own choice.
 
+It perceives what is attached to the bot: once it starts, it is a second holder of every device the
+bot holds, through the attachment protocol, beside the body, and it lets go of them before it stops. A
+device tells every holder what happened to it as ``bot.input``; the firmware takes that back as the
+device's own typed event, so ``bot.on(computer.TextEnteredEvent)`` matches it, and an event its model
+does not name is ignored. Cognition perceives the same devices through the body, as before.
+
 Telemetry (scope ``bot.firmware``): ``bot.firmware.send.count`` by ``bot.outcome`` {delivered,
 dropped}: two series. No id, name or payload is an attribute.
 """
@@ -38,18 +44,22 @@ dropped}: two series. No id, name or payload is an attribute.
 import ast
 import collections.abc
 import dataclasses
+import datetime
 import logging
 import posixpath
 import re
 import typing
 import uuid
+import weakref
 
 import hsm
 from opentelemetry import metrics
 
 import mosfet
-from mosfet import event, lifecycle, telemetry
+from mosfet import abilities, event, lifecycle, scope, telemetry
 from mosfet.abilities import cognition
+from mosfet.device import Device
+from mosfet.protocols import attachment
 from mosfet.telemetry import observer
 from mosfet.telemetry.hsm import Traced
 
@@ -57,6 +67,8 @@ from . import diagnostics, elements
 
 _LOG = logging.getLogger(__name__)
 _SCOPE = "bot.firmware"
+# The body's own default attachment bound: how long the firmware may take to take or let go of its devices.
+_DEFAULT_ATTACHMENT_TIMEOUT = datetime.timedelta(seconds=30)
 _SENDS = metrics.get_meter(_SCOPE).create_counter(
     "bot.firmware.send.count",
     unit="{event}",
@@ -178,15 +190,124 @@ class Firmware(Traced):
     ``bot.attribute``\\ s with ``instance.get`` and ``instance.set``, act with :meth:`send`, and report
     with :meth:`report`. ``peers`` are the bot's devices and abilities by id: addresses it sends to,
     never reads.
+
+    It holds every device among its peers while it runs, a second holder beside the body: it takes
+    them once its model has started, within ``attachment_timeout`` (the body's own default bound when
+    ``None``), and lets go of them before it stops. A device that will not be held fails its start
+    with the typed attach failure, and the firmware stops again.
     """
 
     model: hsm.Model
     _peers: dict[str, hsm.Instance]
+    # The bot's devices, which this firmware holds as one group while it runs.
+    _devices: attachment.Group
+    _attachment_timeout: datetime.timedelta
 
-    def __init__(self, *, model: hsm.Model, peers: collections.abc.Mapping[str, hsm.Instance]) -> None:
+    def __init__(
+        self,
+        *,
+        model: hsm.Model,
+        peers: collections.abc.Mapping[str, hsm.Instance],
+        attachment_timeout: datetime.timedelta | None = None,
+    ) -> None:
         super().__init__()
         self.model = model
         self._peers = dict(peers)
+        self._devices = attachment.Group(*(peer for peer in self._peers.values() if isinstance(peer, Device)))
+        self._attachment_timeout = attachment_timeout or _DEFAULT_ATTACHMENT_TIMEOUT
+
+    @typing.override
+    async def start(self, ctx: hsm.Context, data: object = None) -> typing.Self:
+        """Run the firmware's model, then hold the bot's devices beside the body.
+
+        Raises:
+            RuntimeError: If a device would not be held (the typed attach failure's message); the
+                firmware has stopped again.
+            TimeoutError: If the devices did not answer within the attachment bound; likewise.
+        """
+
+        started = await super().start(ctx, data)
+        try:
+            _ = await mosfet.started(
+                hsm.Context(
+                    parent=self.context(),
+                    values=scope.mark_private({hsm.Keys.Instances: weakref.WeakValueDictionary[str, hsm.Instance]()}),
+                ),
+                self._devices,
+                self._devices.model,
+            )
+            answer = await Firmware._hold(self, attach=True)
+            if isinstance(answer.data, attachment.FailedData):
+                raise RuntimeError(f"the firmware could not hold the bot's devices: {answer.data.message}")
+        except BaseException:
+            await hsm.stop(self._devices, self.context())
+            await super().stop(self.context())
+            raise
+        return started
+
+    @typing.override
+    async def stop(self, ctx: hsm.Context) -> None:
+        """Let go of the bot's devices, then stop; a firmware that never held them just stops."""
+
+        if lifecycle.is_started(self._devices):
+            try:
+                answer = await Firmware._hold(self, attach=False)
+                if isinstance(answer.data, attachment.FailedData):
+                    _LOG.warning("firmware detach failed kind=%s", answer.data.kind)
+            except TimeoutError:
+                _LOG.warning("firmware detach timed out")
+            await hsm.stop(self._devices, ctx)
+        await super().stop(ctx)
+
+    @staticmethod
+    async def _hold(instance: "Firmware", *, attach: bool) -> hsm.Event[typing.Any]:
+        """Ask the device group to take (``attach``) or let go of this firmware; its correlated answer."""
+
+        request_id = f"{hsm.id(instance)}:devices:{uuid.uuid4().hex}"
+
+        def request(reply: hsm.Instance) -> hsm.Event[typing.Any]:
+            asked = (
+                attachment.AttachEvent.with_data(
+                    attachment.AttachData(actor=instance, reply_to=reply, timeout=instance._attachment_timeout)
+                )
+                if attach
+                else attachment.DetachEvent.with_data(
+                    attachment.DetachData(actor=instance, reply_to=reply, timeout=instance._attachment_timeout)
+                )
+            )
+            return dataclasses.replace(asked, id=request_id)
+
+        return await abilities.run_terminal_operation(
+            instance.context(),
+            child=instance._devices,
+            request=request,
+            terminals=(attachment.AttachCompleteEvent, attachment.AttachFailedEvent)
+            if attach
+            else (attachment.DetachedEvent, attachment.DetachFailedEvent),
+            timeout=instance._attachment_timeout,
+        )
+
+    @typing.override
+    def dispatch(self, ctx: hsm.Context, event: hsm.Event[typing.Any]) -> collections.abc.Awaitable[bool]:
+        """Deliver ``event``; a held device's ``bot.input`` arrives as the device's own typed event.
+
+        The device event is the one the firmware's model names (its ``events``), carrying the
+        payload, id and source the device stamped, and the ``bot.input``'s trace. One its model does
+        not name is delivered as it came, and ignored as hsm ignores any unhandled event.
+        """
+
+        data = event.data
+        observed = data.observation if isinstance(data, mosfet.InputEventData) else None
+        named = None if observed is None else self.model.events.get(observed.event)
+        if observed is not None and named is not None:
+            event = dataclasses.replace(
+                named.with_data(observed.data),
+                id=observed.id or event.id,
+                source=observed.source or event.source,
+                target=hsm.id(self),
+                metadata=dict(event.metadata),
+            )
+        return super().dispatch(ctx, event)
 
     @staticmethod
     def send(

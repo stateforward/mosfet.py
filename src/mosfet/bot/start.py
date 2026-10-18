@@ -269,9 +269,18 @@ def _body(model: elements.Model, name: str, location: diagnostics.Location) -> b
         mind = _mind(declared, traits)
     except Exception as error:
         raise _raised(name, declared.location, "cognition", error, location) from error
-    # A firmware of its own for every body: it starts fresh with each start of the model.
+    # A firmware of its own for every body: it starts fresh with each start of the model, and takes
+    # and lets go of the bot's devices within the body's own attachment bound.
     try:
-        machine = None if compiled is None else firmware.Firmware(model=compiled.model, peers=_peers(devices, roles))
+        machine = (
+            None
+            if compiled is None
+            else firmware.Firmware(
+                model=compiled.model,
+                peers=_peers(devices, roles),
+                attachment_timeout=None if timeouts is None else timeouts.attachment,
+            )
+        )
         return body.Bot(
             devices,
             cognition=mind,

@@ -259,7 +259,7 @@ def _sends(points: tuple[metric_reader.Point, ...], outcome: str) -> float:
 def test_send_stamps_the_event_as_the_firmwares_in_its_triggers_trace_and_counts_it(
     tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    lamp, unplugged = Lamp(), Lamp(id="spare")
+    lamp, unplugged = Lamp(), Bell()
 
     async def run() -> tuple[str, str]:
         environment = Environment()
