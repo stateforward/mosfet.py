@@ -2121,7 +2121,7 @@ class Bot(Traced):
                     hsm.on(_ProcessingCancelTimedOutEvent),
                     hsm.guard(_matches_processing_timeout),
                     hsm.effect(_dispatch_processing_timeout_failure, _dispatch_degraded_processing_cancel),
-                    # Relative so redefines (e.g. PhoneBot(Bot.model, ...)) keep a valid target.
+                    # Relative so redefines (a body named for its bot) keep a valid target.
                     hsm.target("../../degraded"),
                 ),
             ),

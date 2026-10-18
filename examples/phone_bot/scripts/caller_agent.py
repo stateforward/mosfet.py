@@ -42,7 +42,6 @@ sys.path.insert(0, str(_EXAMPLE_ROOT / "src"))
 from phone_bot_example import (  # noqa: E402
     DEFAULT_GEMINI_TTS_MODEL,
     DEFAULT_GEMINI_TTS_VOICE,
-    AppConfig,
     mint_livekit_access_token,
 )
 
@@ -576,12 +575,18 @@ def _looks_like_placeholder_secret(value: str) -> bool:
 def _resolve_gemini_api_key(explicit: str | None) -> str | None:
     if explicit and not _looks_like_placeholder_secret(explicit):
         return explicit
-    # Prefer example/.env + repo .env (AppConfig) over shell placeholders like GEMINI_API_KEY=your-api-key.
+    # Prefer the example's .env over shell placeholders like GEMINI_API_KEY=your-api-key.
     env_path = _EXAMPLE_ROOT / ".env"
     if env_path.is_file():
-        speech_key = AppConfig.from_env_file(env_path).speech.api_key
-        if speech_key and not _looks_like_placeholder_secret(speech_key):
-            return speech_key
+        assignments: dict[str, str] = {}
+        for line in env_path.read_text(encoding="utf-8").splitlines():
+            key, equals, value = line.strip().partition("=")
+            if equals and key and not key.startswith("#"):
+                assignments[key.strip()] = value.strip().strip("'\"")
+        for name in ("BOT_GEMINI_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY"):
+            speech_key = assignments.get(name)
+            if speech_key and not _looks_like_placeholder_secret(speech_key):
+                return speech_key
     for name in ("BOT_GEMINI_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY"):
         value = os.environ.get(name)
         if value and not _looks_like_placeholder_secret(value):

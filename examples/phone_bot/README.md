@@ -1,53 +1,54 @@
 # phone_bot example
 
-stateforward.mosfet phone bot against a real LiveKit SFU: core `Phone` + LiveKit `PhoneService`,
-with Mercury 2 intuition, OpenAI Terra reasoning/reflection, **local Silero VAD**,
-**local pyannote voice identity**, and **off-device Gemini** STT/TTS.
+A stateforward.mosfet bot holding a telephone on a real LiveKit SFU: the core `Phone` on a LiveKit
+`PhoneService` line, **local Silero VAD**, **local pyannote voice identity**, **off-device Gemini** STT/TTS, and
+one model to think with, OpenAI's reasoning model (`gpt-5.6-terra` by default).
 
-## Local run (turnkey)
+Its bot file, `src/phone_bot_example/__main__.py`, reads the owner's `Settings` from the environment and has one
+`bot.define` that constructs every part inline: its cognition, its phone (the earpiece at the robot's ear, the
+close-talk mouthpiece at its mouth, the LiveKit line its service), its ear (**Listening**), its mouth
+(**Speaking**) and **Communication** with its **Conversation**. `bot.run` runs it until it is told to stop, with
+the person standing in front of it as a shared actor and an observer that logs what it does.
+
+## Local run
 
 ```bash
 cd examples/phone_bot
-uv run phone-bot --json
+docker compose up -d                 # a local LiveKit SFU (livekit-server --dev), if none is running
+cp .env.example .env                 # then set BOT_OPENAI_API_KEY and BOT_GEMINI_API_KEY
+set -a; . ./.env; set +a
+uv run python -m phone_bot_example --ready-file /tmp/phone-bot.ready
 ```
 
-That single command will:
-
-1. Create `.env` from `.env.example` if missing (local LiveKit dev defaults)  
-2. Start LiveKit via `docker compose` if nothing is listening on `:7880`  
-3. Mint a join JWT (`devkey` / `secret`) when no token is configured  
-4. Run the bot with `--connect-livekit` and print a readiness summary  
-
-Exit code `2` if the room join did not get a local track SID.
+The settings are read from the process environment; the process options (`--ready-file`, `--data-dir`,
+`--secrets-dir`, the restart policy, each also a `MOSFET_*` variable) are `bot.run`'s. A missing or malformed
+setting exits `1`, naming the variable, before anything starts. The ready file exists exactly while the bot runs.
+`SIGTERM` or `Ctrl+C` hangs up and stops it, exit `0`. Stdout stays empty; logs go to stderr, at INFO, or DEBUG
+with `BOT_VERBOSE=1`.
 
 ### Prerequisites
 
-- Docker (only if LiveKit is not already running)  
-- `uv` + Python 3.13  
-- Optional for full `can_talk`: `BOT_OPENAI_API_KEY`, `BOT_MERCURY_API_KEY`, and
-  `BOT_GEMINI_API_KEY` in `.env` (speech is off-device Gemini)
+- Docker, or `livekit-server --dev`, for the local SFU
+- `uv` + Python 3.13
+- `BOT_OPENAI_API_KEY` (or `OPENAI_API_KEY`) and `BOT_GEMINI_API_KEY` (or `GEMINI_API_KEY` / `GOOGLE_API_KEY`)
+- macOS `say` and `afconvert`, for saying something to the bot in its room
 
-### Manual pieces (optional)
+### The line
 
-```bash
-# SFU only
-docker compose up -d
-# or: livekit-server --dev
-
-# Token only
-uv run mint-livekit-token --identity human --room bot-phone-bot
-
-# App only (expects URL+token already in env)
-uv run phone-bot-example --env .env --connect-livekit --json
-```
+`BOT_LIVEKIT_URL` puts the phone on a line. Its token is `BOT_LIVEKIT_TOKEN`, or one minted for the line's
+identity and room from `BOT_LIVEKIT_API_KEY` and `BOT_LIVEKIT_API_SECRET` (the dev SFU's are `devkey` and
+`secret`). Without a URL the phone has no line, and the bot can still be talked to in its room.
 
 ### Second participant
 
-`uv run phone-bot` (without `--once`) joins the LiveKit room and prints a **prefilled** Meet link:
+Mint a token for yourself and open LiveKit Meet with it, on **this machine** (a local SFU is not reachable from
+other devices as-is):
 
-`https://meet.livekit.io/custom?liveKitUrl=ws://127.0.0.1:7880&token=…`
+```bash
+uv run mint-livekit-token --identity human --room bot-phone-bot
+# https://meet.livekit.io/custom?liveKitUrl=ws://127.0.0.1:7880&token=<that token>
+```
 
-Open that URL on **this machine** (local SFU is not reachable from other devices as-is).  
 Bare `https://meet.livekit.io/custom` shows “Missing LiveKit URL” — Meet reads the query params only.
 
 Joining the room makes you reachable; it does not ring the bot. A phone rings when somebody
@@ -72,20 +73,18 @@ service plane as `phone.no_call`. What the bot does about a busy tone is its own
 ## Saying something to the bot
 
 ```bash
-uv run phone-bot
+uv run python -m phone_bot_example
 # ...
 Call Bob at 555-0142.              # type it, press enter
 ```
 
-Every line you type is **said out loud** in the robot's room. A mouth — the same
-`bot.devices.audio.Speaker` the robot uses for its own voice — stands a metre in front of it,
-renders your words locally with macOS `say`, and broadcasts them through `Environment.broadcast`
-at 60 dB from where it is standing. The robot hears them the way it hears anything: environment
-sound → its ears (its placement's `threshold_db`) → Listening (VAD + pyannote voice embeddings, identified
-as `voice:<id>` source refs by a voice registry) → participant-owned TurnDetector TurnStart/TurnUpdate/TurnPause/TurnEnd + STT while
-the turn is open → TurnComplete Conversation product → cognition when the turn closes. Step far enough away,
-or raise its hearing floor, and it genuinely does not hear you. Nothing is dispatched at the
-body.
+Every line you type is **said out loud** in the robot's room. A person (`person.Person`, a shared actor of the
+run) stands a metre in front of it, with a mouth — the same `audio.Speaker` the robot uses for its own voice —
+renders your words locally with macOS `say`, and broadcasts them through `Environment.broadcast` at 60 dB from
+where they are standing. The robot hears them the way it hears anything: environment sound → Listening (VAD +
+pyannote voice embeddings, identified as `voice:<id>` source refs by a voice registry) → the speech seed takes the
+turn into its Conversation, whose turns Gemini decodes → cognition when the turn closes. Nothing is dispatched at
+the body. The end of input (or no terminal) is an empty room: whoever was standing there walked away.
 
 A number is digits, because that is what makes it sayable out loud and pressable on a keypad.
 On this LiveKit fiction the **participant identity is the phone number** (normalized digits, e.g.
@@ -107,27 +106,19 @@ do Y". A bot that hears `Call Bob at 555-0142.` and decides this is not the mome
 decided, and that is a legitimate outcome. Answering, declining, dialing, and hanging up all stay
 the bot's decisions — nothing in the wiring makes them.
 
-Requires macOS (`say` and `afconvert`); the readiness summary warns by name if they are missing.
-Any other `vocal.speech.SpeechEncoder` drops in — the Moonshine `SpeechEncoder` in
+Any other `vocal.speech.SpeechEncoder` drops in for the person's voice — the Moonshine `SpeechEncoder` in
 `src/providers/moonshine` is the same contract.
 
-## What “connected” means
+## Speech
 
-| Summary field | Meaning |
-|---|---|
-| `livekit_room_audio_attempted` | `--connect-livekit` and URL+token present |
-| `livekit_room_audio_connected` | Local audio track SID assigned after room join |
-| `can_talk` | Room connected **and** OpenAI + Mercury cognition keys **and** Gemini speech key |
-
-Room join alone does not require model keys; full agent talk does. VAD is local Silero
-(`mlx-community/silero-vad` via `mosfet-provider-mlx-audio`). Voice identity is local pyannote
+VAD is local Silero (`mlx-community/silero-vad` via `mosfet-provider-mlx-audio`). Voice identity is local pyannote
 speaker embeddings (`pyannote/wespeaker-voxceleb-resnet34-LM` via `mosfet-provider-pyannote`), identified by
 an in-process voice `identification.Registry`, so Listening speech products carry `voice:<id>` `source_ids`
-into Conversation. STT/TTS stay off-device
-Gemini (`gemini-3.5-flash` STT + `gemini-3.1-flash-tts-preview` TTS by default; override with
-`BOT_GEMINI_STT_MODEL` / `BOT_GEMINI_TTS_MODEL` / `BOT_SILERO_VAD_MODEL` /
-`BOT_PYANNOTE_VOICE_IDENTITY_MODEL`). Live pyannote weights use the Hugging Face/pyannote auth
-already required by that provider package.
+into Conversation. STT/TTS stay off-device Gemini (`gemini-3.5-flash` STT + `gemini-3.1-flash-tts-preview` TTS by
+default; override with `BOT_GEMINI_STT_MODEL` / `BOT_GEMINI_TTS_MODEL` / `BOT_GEMINI_TTS_VOICE` /
+`BOT_SILERO_VAD_MODEL` / `BOT_PYANNOTE_VOICE_IDENTITY_MODEL`). Live pyannote weights use the Hugging Face/pyannote
+auth already required by that provider package. One rate decides the robot's voice: `BOT_GEMINI_OUTPUT_SAMPLE_RATE_HZ`
+(24 kHz) is the TTS encoder's, Speaking's label and the LiveKit uplink's.
 
 ## Layout
 
@@ -135,9 +126,11 @@ already required by that provider package.
 |---|---|
 | `docker-compose.yml` | Local LiveKit SFU (`--dev`) |
 | `.env.example` | Env template |
+| `src/phone_bot_example/__main__.py` | The bot file: one `bot.define`, run with `bot.run` |
+| `src/phone_bot_example/__init__.py` | `Settings`, `GeminiVoiceDecoder`, the token mint, the run's observer `log` |
+| `src/phone_bot_example/person.py` | The person in the room |
 | `scripts/mint_livekit_token.py` | JWT mint (no extra deps) |
-| `scripts/phone-bot.sh` | Thin wrapper around `uv run phone-bot` |
-| `src/phone_bot_example/` | Example app |
+| `scripts/phone-bot.sh` | Thin wrapper around `uv run python -m phone_bot_example` |
 
 ## Blackbox dual agent (LiveKit only)
 
@@ -146,33 +139,34 @@ Both sides use **off-device Gemini** for speech so dual talk does not load local
 
 | Side | Process | Speech |
 |---|---|---|
-| Agent A | `phone-bot` | Silero VAD + pyannote identity (local) + Gemini STT + Gemini TTS |
+| Agent A | `python -m phone_bot_example` | Silero VAD + pyannote identity (local) + Gemini STT + Gemini TTS |
 | Agent B | blackbox / `caller_agent` | Gemini TTS (default; `--tts say` for offline) |
 
 ```bash
 # terminal 1
-uv run phone-bot -v
+set -a; . ./.env; set +a
+BOT_VERBOSE=1 uv run python -m phone_bot_example 2> /tmp/phone-bot-live.log
 
 # terminal 2 — agent B publishes Gemini TTS audio via LiveKit RTC
 uv run python scripts/blackbox_livekit_dual_agent.py \
   --line "Hello agent A, can you hear me through LiveKit?"
 ```
 
-Or one-shot (spawns agent A):
+Or one-shot (spawns agent A with this example's `.env`):
 
 ```bash
 uv run python scripts/blackbox_livekit_dual_agent.py --start-phone-bot \
   --line "Hello agent A, can you hear me through LiveKit?"
 ```
 
-Requires `BOT_GEMINI_API_KEY` in `.env` (plus cognition keys for full agent A replies).
+Requires `BOT_GEMINI_API_KEY` in `.env` (plus the OpenAI key for agent A's replies).
 Verdict uses LiveKit media plus optional scrapes of `/tmp/phone-bot-live.log`
 (DecodingSpeech). Silero VAD loads are expected; local Whisper/Qwen STT/TTS loads fail the harness.
 
 ## Blackbox two bots (caller and callee)
 
-Two real `phone-bot` processes, two lines on one exchange. Identities are the line numbers
-(normalized digits); no dial plan is required:
+Two real phone bots, two lines on one exchange. Identities are the line numbers (normalized digits); no dial plan
+is required:
 
 ```bash
 uv run python scripts/blackbox_livekit_two_bots.py \
@@ -180,7 +174,7 @@ uv run python scripts/blackbox_livekit_two_bots.py \
 ```
 
 Somebody walks up to the caller and says `Call Bob at 555-0142.` out loud; nobody says anything to
-the callee. The harness writes the sentence to the caller's stdin once it is awake, and the bot
+the callee. The harness writes the sentence to the caller's stdin once its ready file exists, and the bot
 hears it as sound. Both join the same room as their number identities and can dial each other by
 number. Whether the caller dials, and whether the callee answers, stay theirs to decide. The
 verdict prints `dialed=` for the caller, `rang=` for the callee and `decoded=` for whoever turned
@@ -193,13 +187,17 @@ file is how a single sound is followed from the LiveKit frame it arrived on, thr
 assembly, voice detection and speech decoding, to the phone delivering it — or to the reason it
 was dropped instead. Disable both with `BOT_OTEL_DISABLED=1`.
 
-The dual-agent script does not set those paths, so its phone-bot writes `otel-logs.jsonl` and
+The dual-agent script does not set those paths, so its phone bot writes `otel-logs.jsonl` and
 `otel-spans.jsonl` at the example root instead.
 
-## Unit tests (no LiveKit)
+## Tests (no LiveKit)
 
-From repo root:
+From the repository root, in this example's environment:
 
 ```bash
-uv run python -m pytest tests/examples/test_phone_bot.py
+uv run --locked --project examples/phone_bot python -m pytest tests/examples/test_phone_bot.py -m "not live" -q
 ```
+
+Each test writes its own small `bot.define` of this shape on a scripted model (`testing.Scripted`), with fakes at
+the provider seams only. They pin what the bot hears and is offered — its phone, whether or not anybody spoke to
+it — never what it chooses.

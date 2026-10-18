@@ -11,6 +11,9 @@ mouth and a robot's mouth are the same object acoustically: a transducer at a po
 level. Every utterance leaves through ``Environment.broadcast`` with a real ``amplitude_db`` from
 a real ``space.Placement``, so a bot standing too far away, or with too high a ``threshold_db``,
 genuinely does not hear it. Nothing here dispatches at a body.
+
+A :class:`Person` is a shared actor of ``bot.run``: started, they walk into the room; each line their
+``lines`` gives is said out loud; stopped, they walk back out.
 """
 
 from __future__ import annotations
@@ -21,6 +24,7 @@ import logging
 import pathlib
 import shutil
 import subprocess
+import sys
 import tempfile
 import typing
 import uuid
@@ -43,6 +47,9 @@ _LOG = logging.getLogger("phone_bot_example.hsm")
 
 VOICE_SAMPLE_RATE_HZ = 16_000
 """Rate the synthesized utterance is rendered at. 16 kHz is what speech models want."""
+
+type Lines = collections.abc.Callable[[], collections.abc.AsyncIterator[str]]
+"""Where the words a person says come from: each item is one line, already chosen, said as it is."""
 
 
 def require_local_speech_tools() -> None:
@@ -71,6 +78,34 @@ def _run_quietly(command: list[str]) -> None:
         raise RuntimeError(f"{command[0]} failed with exit status {completed.returncode}")
 
 
+async def terminal() -> collections.abc.AsyncIterator[str]:
+    """Every non-blank line typed at this process's terminal (stdin), stripped, until the end of input.
+
+    The terminal is the person: they choose the words. Nothing here reads a line beyond stripping it — its
+    length is logged, never its content. No terminal to read, or the end of input, is an empty room: whoever
+    was standing there walked away. ``connect_read_pipe`` puts stdin in non-blocking mode for the whole
+    process, so it is handed back when the lines end, or whatever reads the terminal after this gets a
+    ``BlockingIOError`` instead of a line.
+    """
+
+    loop = asyncio.get_running_loop()
+    reader = asyncio.StreamReader()
+    try:
+        transport, _protocol = await loop.connect_read_pipe(lambda: asyncio.StreamReaderProtocol(reader), sys.stdin)
+    except (OSError, ValueError) as error:
+        _LOG.info("nobody can walk into the robot's room here reason=%s", type(error).__name__)
+        return
+    try:
+        while line := await reader.readline():
+            text = line.decode("utf-8", errors="replace").strip()
+            if text:
+                _LOG.info("someone in the room says something characters=%d", len(text))
+                yield text
+        _LOG.info("nobody left in the room to talk to the robot")
+    finally:
+        transport.close()
+
+
 class SayEncoder(vocal.speech.SpeechEncoder):
     """Local text-to-speech: macOS ``say`` rendered to 16-bit mono PCM, one chunk per utterance.
 
@@ -81,8 +116,8 @@ class SayEncoder(vocal.speech.SpeechEncoder):
     """
 
     def __init__(self, *, voice: str | None = None, sample_rate_hz: int = VOICE_SAMPLE_RATE_HZ) -> None:
-        self.format = vocal.speech.Format(sample_rate_hz=sample_rate_hz, channels=1)
-        self.voice = voice
+        self.format: vocal.speech.Format = vocal.speech.Format(sample_rate_hz=sample_rate_hz, channels=1)
+        self.voice: str | None = voice
 
     @typing.override
     async def encode(
@@ -115,21 +150,23 @@ class SayEncoder(vocal.speech.SpeechEncoder):
 class Person(hsm.Instance):
     """Someone in the environment with a mouth, a place to stand, and a voice.
 
-    ``enter`` puts them in the room and ``say`` is the only thing they can do. They cannot hear,
-    cannot see, and cannot act on anything, because none of that is theirs to do — the only party
-    in this room deciding anything is the bot.
+    Started, they are ``here``: they power their mouth where they stand and take up their voice, and once it is
+    theirs they are ``present`` and say, out loud, each line ``lines`` gives (none when ``lines`` is ``None``: they
+    stand there quietly). A voice somebody else holds leaves them ``voiceless``. Stopped, they let go of their voice
+    and their mouth leaves the room with them. :meth:`enter` starts them and waits until they can speak,
+    :meth:`say` says one line, and :meth:`leave` stops them. They cannot hear, cannot see, and cannot act on
+    anything, because none of that is theirs to do — the only party in this room deciding anything is the bot.
     """
 
     _mouth: audio.Speaker
     _voice: speaking.Speaking
+    _lines: Lines | None
     # Resolved when this person's voice is theirs to use, so entering a room is something a
     # caller can await rather than probe state for.
     _arrived: asyncio.Future[None] | None
-    # Which arrival the outcome above belongs to. ``leave`` and ``enter`` are both public, so a
-    # person can walk out with an attach still outstanding and walk back in on a fresh id — and
-    # the reply the first arrival never waited for must not settle the second one. The attachment
-    # protocol stamps the request id on success and on timeout alike, so this guard now holds on
-    # both paths rather than quietly discarding one of them.
+    # Which arrival the outcome above belongs to. A person can walk out with an attach still outstanding and walk
+    # back in on a fresh id — and the reply the first arrival never waited for must not settle the second one. The
+    # attachment protocol stamps the request id on success and on failure alike, so this guard holds on both paths.
     _arriving_id: str | None
 
     def __init__(
@@ -138,17 +175,58 @@ class Person(hsm.Instance):
         encoder: vocal.speech.SpeechEncoder,
         position: space.Position,
         amplitude_db: float,
+        lines: Lines | None = None,
     ) -> None:
         super().__init__()
         # No threshold on the mouth: a mouth does not listen. The placement is here so the
         # environment knows where the sound came from when it works out who is close enough.
         self._mouth = audio.Speaker(placement=space.Placement(position=position), amplitude_db=amplitude_db)
-        self._voice = speaking.Speaking(
-            encoder=encoder,
-            speaker=self._mouth,
-        )
+        self._voice = speaking.Speaking(encoder=encoder, speaker=self._mouth)
+        self._lines = lines
         self._arrived = None
         self._arriving_id = None
+
+    @staticmethod
+    async def _stand(ctx: hsm.Context, instance: "Person", event: hsm.Event[typing.Any]) -> None:
+        """Walk in, and stay until stopped: then let go of the voice and take the mouth out of the room.
+
+        The voice is attached to *this person*, and that ownership is the whole reason a person is a machine here
+        rather than a bare mouth: an ability with no owner drops every terminal it produces, so a mouth nobody owns
+        is a mouth whose failures are silent, which is indistinguishable from a bot that heard nothing.
+        """
+
+        del ctx, event
+        # The person's own lifetime scope, not this activity's: the mouth and the voice outlive each state inside.
+        environment = Environment.from_context(instance.context())
+        instance._arriving_id = uuid.uuid4().hex
+        try:
+            mouth_model = instance._mouth.model
+            if mouth_model is None:
+                raise RuntimeError("A mouth with no lifecycle model cannot be powered.")
+            # The voice may already have powered it — Speaking starts an unstarted mouth it is given — so power it
+            # only when nobody has.
+            if not lifecycle.is_started(instance._mouth):
+                _ = await mosfet.started(environment, instance._mouth, mouth_model)
+            _ = await instance._voice.attach(
+                environment,
+                attachment.AttachEvent.with_data_and_id(attachment.AttachData(actor=instance), instance._arriving_id),
+            )
+            _ = await asyncio.Event().wait()
+        finally:
+            await instance._voice.stop(environment)
+            await instance._mouth.stop(environment)
+
+    @staticmethod
+    async def _speak(ctx: hsm.Context, instance: "Person", event: hsm.Event[typing.Any]) -> None:
+        """Say each line, in order, as it comes; when the lines end, stand there quietly."""
+
+        del ctx, event
+        if instance._lines is None:
+            return
+        # Said from where this person stands, in their own room: not from inside this activity.
+        environment = Environment.from_context(instance.context())
+        async for line in instance._lines():
+            _ = await instance.say(line, ctx=environment)
 
     @staticmethod
     def _is_this_arrival(ctx: hsm.Context, instance: "Person", event: hsm.Event[typing.Any]) -> bool:
@@ -197,78 +275,62 @@ class Person(hsm.Instance):
 
     model: typing.ClassVar[hsm.Model] = mosfet.define(
         "Person",
-        hsm.initial(hsm.target("arriving")),
+        hsm.initial(hsm.target("here")),
         hsm.state(
-            "arriving",
-            hsm.transition(
-                hsm.on(attachment.AttachCompleteEvent),
-                hsm.guard(_is_this_arrival),
-                hsm.effect(_finish_arriving),
-                hsm.target("../present"),
+            "here",
+            hsm.activity(_stand),
+            hsm.initial(hsm.target("arriving")),
+            hsm.state(
+                "arriving",
+                hsm.transition(
+                    hsm.on(attachment.AttachCompleteEvent),
+                    hsm.guard(_is_this_arrival),
+                    hsm.effect(_finish_arriving),
+                    hsm.target("../present"),
+                ),
+                hsm.transition(
+                    hsm.on(attachment.AttachFailedEvent),
+                    hsm.guard(_is_this_arrival),
+                    hsm.effect(_fail_arriving),
+                    hsm.target("../voiceless"),
+                ),
             ),
-            hsm.transition(
-                hsm.on(attachment.AttachFailedEvent),
-                hsm.guard(_is_this_arrival),
-                hsm.effect(_fail_arriving),
-                hsm.target("../voiceless"),
+            hsm.state(
+                "present",
+                hsm.activity(_speak),
+                hsm.transition(
+                    hsm.on(speaking.Speaking.failed_event),
+                    hsm.effect(_log_utterance_failure),
+                ),
+                hsm.transition(
+                    hsm.on(speaking.OutputEvent),
+                    hsm.guard(_is_unfinished_utterance),
+                    hsm.effect(_log_unfinished_utterance),
+                ),
             ),
+            hsm.state("voiceless"),
         ),
-        hsm.state(
-            "present",
-            hsm.transition(
-                hsm.on(speaking.Speaking.failed_event),
-                hsm.effect(_log_utterance_failure),
-            ),
-            hsm.transition(
-                hsm.on(speaking.OutputEvent),
-                hsm.guard(_is_unfinished_utterance),
-                hsm.effect(_log_unfinished_utterance),
-            ),
-        ),
-        hsm.state("voiceless"),
         hsm.observe(observer),
     )
 
     async def enter(self, environment: Environment) -> typing.Self:
-        """Walk into the room: power the mouth where this person stands, and take up the voice.
+        """Walk into the room: start this person in ``environment``, and wait until their voice is theirs.
 
-        The voice is attached to *this person*, and that ownership is the whole reason a person is
-        a machine here rather than a bare mouth. An ability with no owner attached drops every
-        terminal it produces on the floor — ``Ability._forward_terminal_event`` returns early when
-        ``_attachments`` is empty — so a mouth nobody owns is a mouth whose failures are silent,
-        which is indistinguishable from a bot that heard nothing. Somebody has to be the one who
-        spoke, or nobody finds out that nothing was said.
+        Both outcomes of taking up the voice are modelled and correlated to this arrival, so this waits on the
+        topology rather than on a clock of its own or on a probe of the machine's state.
+
+        Raises:
+            RuntimeError: If the voice is somebody else's.
         """
 
         self._arrived = asyncio.get_running_loop().create_future()
-        self._arriving_id = uuid.uuid4().hex
         _ = await mosfet.started(environment, self, self.model)
-        mouth_model = self._mouth.model
-        if mouth_model is None:
-            raise RuntimeError("A mouth with no lifecycle model cannot be powered.")
-        # hsm.started, not Speaker.start: starting a device is what binds its model, and
-        # Device.start is the override that runs inside it and joins environment presence. The
-        # voice may already have powered it — Speaking starts an unstarted mouth it is given —
-        # so power it only when nobody has.
-        if not lifecycle.is_started(self._mouth):
-            _ = await mosfet.started(environment, self._mouth, mouth_model)
-        _ = await self._voice.attach(
-            environment,
-            attachment.AttachEvent.with_data_and_id(
-                attachment.AttachData(actor=self),
-                self._arriving_id,
-            ),
-        )
-        # Both outcomes are modelled and correlated to this arrival, so this waits on the topology
-        # rather than on a clock of its own or on a probe of the machine's state.
         await self._arrived
         return self
 
     async def leave(self, environment: Environment) -> typing.Self:
-        """Walk back out: the voice releases the mouth, and the mouth leaves the room with it."""
+        """Walk back out: the voice is let go of, and the mouth leaves the room with this person."""
 
-        await self._voice.stop(environment)
-        await self._mouth.stop(environment)
         if lifecycle.is_started(self):
             await hsm.stop(self, environment)
         return self
@@ -285,8 +347,10 @@ class Person(hsm.Instance):
 
 
 __all__ = [
+    "Lines",
     "Person",
     "SayEncoder",
     "VOICE_SAMPLE_RATE_HZ",
     "require_local_speech_tools",
+    "terminal",
 ]

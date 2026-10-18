@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Blackbox dual-agent talk through LiveKit only (no shared Environment / direct sound wiring).
 
-Agent A: already-running ``phone-bot`` (or started by this script) on room ``bot-phone-bot``
+Agent A: an already-running ``python -m phone_bot_example`` (or one started by this script) on room ``bot-phone-bot``
 with local Silero VAD + off-device Gemini STT/TTS (no local Whisper/Qwen).
 Agent B: this process as a LiveKit RTC peer using **Gemini TTS** by default
 (macOS ``say`` only with ``--tts say``).
@@ -97,7 +97,7 @@ async def _main() -> int:
     _ = parser.add_argument(
         "--start-phone-bot",
         action="store_true",
-        help="Spawn ``uv run phone-bot -v`` if nothing is listening as bot (subprocess).",
+        help="Spawn ``python -m phone_bot_example`` with this example's .env and DEBUG logs (subprocess).",
     )
     default_record = _SCRIPTS.parent / "recordings" / f"dual_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
     _ = parser.add_argument(
@@ -139,8 +139,17 @@ async def _main() -> int:
         example_root = _SCRIPTS.parent
         log_path.parent.mkdir(parents=True, exist_ok=True)
         log_handle = log_path.open("w", encoding="utf-8")
+        values: dict[str, str] = {}
+        env_file = example_root / ".env"
+        if env_file.is_file():
+            for line in env_file.read_text(encoding="utf-8").splitlines():
+                key, equals, value = line.strip().partition("=")
+                if equals and key and not key.startswith("#"):
+                    values[key.strip()] = value.strip()
+        ready_file = log_path.with_suffix(".ready")
+        ready_file.unlink(missing_ok=True)
         phone_proc = subprocess.Popen(
-            ["uv", "run", "phone-bot", "-v"],
+            ["uv", "run", "python", "-m", "phone_bot_example", "--ready-file", str(ready_file)],
             cwd=str(example_root),
             # Nobody is standing in the room with this bot — agent B reaches it by telephone. An
             # empty room, not this harness's terminal, which the bot would otherwise read from.
@@ -150,8 +159,10 @@ async def _main() -> int:
             text=True,
             env={
                 **os.environ,
-                # Unbuffered so readiness lines appear in the log immediately.
+                **values,
+                # Unbuffered and DEBUG, so the log shows each stage a sound goes through as it happens.
                 "PYTHONUNBUFFERED": "1",
+                "BOT_VERBOSE": "1",
                 # Silero VAD local; Gemini STT/TTS off-device (never Whisper/Qwen).
                 "BOT_GEMINI_STT_MODEL": os.environ.get("BOT_GEMINI_STT_MODEL", "gemini-3.5-flash"),
                 "BOT_GEMINI_TTS_MODEL": os.environ.get("BOT_GEMINI_TTS_MODEL", "gemini-3.1-flash-tts-preview"),
@@ -159,23 +170,14 @@ async def _main() -> int:
                 "BOT_SILERO_VAD_MODEL": os.environ.get("BOT_SILERO_VAD_MODEL", "mlx-community/silero-vad"),
             },
         )
-        print(f"[blackbox] started phone-bot pid={phone_proc.pid} log={log_path}", flush=True)
-        # Wait for readiness banner or timeout.
-        # Accept Status: ready (stdout summary) or hold-line banner (stderr join text).
-        ready_markers = (
-            "Status: ready",
-            "LiveKit room audio connected: True",
-            "Bot is holding the line",
-            "local_track_sid=TR_",
-        )
+        print(f"[blackbox] started phone_bot_example pid={phone_proc.pid} log={log_path}", flush=True)
+        # Ready once bot.run's ready file exists: it exists exactly while the bot runs.
         deadline = time.time() + 90
         ready = False
         while time.time() < deadline:
-            if log_path.is_file():
-                text = log_path.read_text(errors="replace")
-                if any(marker in text for marker in ready_markers):
-                    ready = True
-                    break
+            if ready_file.exists():
+                ready = True
+                break
             if phone_proc.poll() is not None:
                 print(f"[blackbox] FAIL phone-bot exited early code={phone_proc.returncode}", flush=True)
                 return 3

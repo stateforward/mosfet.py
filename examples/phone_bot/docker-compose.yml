@@ -2,7 +2,7 @@
 # Dev credentials: API key `devkey`, API secret `secret`.
 #
 #   docker compose up -d
-#   uv run phone-bot
+#   set -a; . ./.env; set +a; uv run python -m phone_bot_example
 #
 services:
   livekit:

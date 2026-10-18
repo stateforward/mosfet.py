@@ -46,7 +46,8 @@ The other examples run as programs from the repository root:
 
 ```bash
 uv run --project examples/listen_speak_bot python -m listen_speak_bot_example
-uv run --project examples/phone_bot phone-bot-example
+set -a; . examples/phone_bot/.env; set +a
+uv run --project examples/phone_bot python -m phone_bot_example
 ```
 
 `listen_speak_bot` is its own example package (macOS only, device-free). Its bot file,
@@ -69,50 +70,23 @@ with a reason instead of failing collection):
 uv run --project examples/listen_speak_bot python -m pytest tests/examples/test_listen_speak_bot.py -q -m 'not live'
 ```
 
-`phone_bot` is its own example package because it depends on real provider
-packages: LiveKit for the phone device and room audio, OpenAI-compatible
-cognition, Gemini STT/TTS, and SQLite memory codecs. Its package metadata
-declares `mosfet-provider-livekit`, `mosfet-provider-openai-compat`,
-`mosfet-provider-gemini`, and `mosfet-provider-sqlite-memory`. It can read a
-local provider env file passed with `--env`, constructs one phone-capable agent,
-and reports which provider credentials were loaded without printing secret
-values. The JSON summary separates constructed provider components from
-`provider_chain_live_proof`, which is only true after an env-backed LiveKit
-connection, remote audio turn, provider-backed voice response, and room-audio
-publish all complete in one run.
-
-Run it with a local provider env:
+`phone_bot` is its own example package because it depends on real provider packages: LiveKit for the phone's
+line, Gemini STT/TTS, MLX Audio's Silero VAD and pyannote voice identity, and an OpenAI-compatible model. Its bot
+file, `phone_bot_example/__main__.py`, reads its `Settings` from the environment and has one `bot.define`: the core
+`phone.Phone` on a LiveKit `PhoneService` line whose identity is the line's number, an ear and a mouth, and
+Communication with its Conversation, on one model. `bot.run` holds the line until it is stopped, with a person
+standing in front of the bot who says out loud each line typed at the terminal. Answering, declining, dialing and
+hanging up are the bot's own; nothing in the example reads what is said to it. See
+[`phone_bot/README.md`](phone_bot/README.md) for the local SFU, the second participant and the blackbox harnesses:
 
 ```bash
-uv run --project examples/phone_bot phone-bot-example --env path/to/provider.env --json
+cd examples/phone_bot && docker compose up -d && cp .env.example .env   # then set the two keys
+set -a; . ./.env; set +a
+uv run python -m phone_bot_example --ready-file /tmp/phone-bot.ready
 ```
 
-Passing `--connect-livekit` explicitly attempts the configured LiveKit room
-join; the default command only constructs the bot and reports configuration
-state. The example reports `can_talk` when the LiveKit room is connected and
-cognition + Gemini speech credentials are loaded. Unit tests cover package
-contracts and configuration summaries; they are not live room proof.
-
-Remote LiveKit PCM frames are batched into utterance-sized chunks at the LiveKit
-provider boundary before Listening. A LiveKit SIP call-control gateway remains
-out of scope for this example.
-
-`phone_bot/learning_say_lesson.py` is part of the `phone_bot` project (same
-`pyproject.toml`/`uv.lock`, same `--project examples/phone_bot`): it is a live
-Learning proof in three phases (experience a real ring, hear a spoken lesson,
-answer the next ring) that needs the phone device plus OpenAI cognition and
-macOS `say`, so it lives with the project that already declares those
-dependencies instead of piggybacking from `examples/`. Run it from the
-repository root:
-
-```bash
-uv run --project examples/phone_bot examples/phone_bot/learning_say_lesson.py
-```
-
-It reads credentials from the repo `.env` or `examples/phone_bot/.env`
-(`BOT_OPENAI_API_KEY` / `OPENAI_API_KEY`, optional `BOT_REFLECTION_MODEL`);
-`.env` files stay untracked and `recordings/` plus per-example `.venv/` are
-ignored (see `examples/phone_bot/.gitignore`).
+Unit tests cover its settings, its bot file, the person in its room and a phone bot's perception and capacity;
+they are not live room proof.
 
 Executable examples use this shebang:
 

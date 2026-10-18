@@ -27,13 +27,12 @@ its own behalf.
 
 ```sh
 uv run --project examples/listen_speak_bot python -m listen_speak_bot_example
-uv run --project examples/phone_bot phone-bot --json
+uv run --project examples/phone_bot python -m phone_bot_example
 ```
 
 Each example is its own `uv` package so example-only dependencies never leak into core.
 Provider credentials come from ordinary environment variables read by the provider
-packages (`BOT_GEMINI_API_KEY` / `GEMINI_API_KEY`, `BOT_MERCURY_API_KEY`,
-`BOT_OPENAI_API_KEY`, …).
+packages (`BOT_GEMINI_API_KEY` / `GEMINI_API_KEY`, `BOT_OPENAI_API_KEY`, …).
 
 ## Toolchain
 

@@ -1,7 +1,7 @@
 [project]
 name = "bot-example-phone-bot"
 version = "0.1.0"
-description = "Phone-capable stateforward.mosfet bots backed by LiveKit, Silero VAD, pyannote voice identity, OpenAI Terra, and Gemini STT/TTS."
+description = "A stateforward.mosfet phone bot, one bot.define: a LiveKit line, Silero VAD, pyannote voice identity, an OpenAI reasoning model, and Gemini STT/TTS."
 requires-python = ">=3.13"
 dependencies = [
   "stateforward.mosfet",
@@ -15,8 +15,6 @@ dependencies = [
 ]
 
 [project.scripts]
-phone-bot = "phone_bot_example.cli:main"
-phone-bot-example = "phone_bot_example:main"
 mint-livekit-token = "phone_bot_example.token_cli:main"
 
 [tool.uv.sources]
@@ -53,12 +51,6 @@ docstring-code-format = true
 include = ["src"]
 extraPaths = [
   "src",
-  "../../src/providers/openai_compat/src",
-  "../../src/providers/livekit/src",
-  "../../src/providers/sqlite_memory/src",
-  "../../src/providers/gemini/src",
-  "../../src/providers/mlx_audio/src",
-  "../../src/providers/pyannote/src",
   "../../src",
 ]
 pythonVersion = "3.13"

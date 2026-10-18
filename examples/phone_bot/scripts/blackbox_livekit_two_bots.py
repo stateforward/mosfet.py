@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Two full bots holding a phone conversation with each other over LiveKit.
 
-Both sides are real ``phone-bot`` processes with their own cognition, speech and Environment.
+Both sides are real ``python -m phone_bot_example`` processes with their own cognition, speech and Environment.
 Nothing is scripted: there is no TTS peer playing canned lines, so every utterance on the wire
 came from a bot deciding to speak.
 
@@ -57,13 +57,6 @@ from livekit import rtc  # noqa: E402
 from blackbox_livekit_dual_agent import _count_log_stages, _port_open  # noqa: E402
 from phone_bot_example import mint_livekit_access_token  # noqa: E402
 
-_READY_MARKERS = (
-    "Status: ready",
-    "LiveKit room audio connected: True",
-    "Bot is holding the line",
-    "local_track_sid=TR_",
-)
-
 
 def _pcm_peak(pcm: bytes) -> int:
     if not pcm:
@@ -96,14 +89,14 @@ def _digits(number: str) -> str:
     return number.translate(str.maketrans("", "", " \t\u00a0-‐‑‒–—―−.()/"))
 
 
-def _bot_env_file(
+def _bot_env(
     base: pathlib.Path,
     target: pathlib.Path,
     *,
     identity: str,
     room: str,
-) -> pathlib.Path:
-    """One env file per bot: same room, identity = line number (normalized digits).
+) -> dict[str, str]:
+    """One environment per bot, also kept as ``target``: same room, identity = line number (normalized digits).
 
     Identity has to differ or the two processes collide on the SFU; track name differs so each
     bot's audio is attributable to it in the observer's capture. No dial plan: dialing addresses
@@ -132,17 +125,19 @@ def _bot_env_file(
     values["BOT_OTEL_SPAN_FILE"] = str(target.with_name(f"{identity}-otel-spans.jsonl").resolve())
     # A token minted for the other identity would silently rejoin as the wrong participant.
     _ = values.pop("BOT_LIVEKIT_TOKEN", None)
+    # DEBUG logs: every machine's observer, so the verdict can count the stages a sound went through.
+    values["BOT_VERBOSE"] = "1"
     target.write_text("\n".join(f"{key}={value}" for key, value in values.items()) + "\n", encoding="utf-8")
-    return target
+    return values
 
 
-async def _await_ready(log_path: pathlib.Path, process: subprocess.Popen[str], *, timeout: float) -> bool:
+async def _await_ready(ready: pathlib.Path, process: subprocess.Popen[str], *, timeout: float) -> bool:
+    """Whether the bot's ready file appeared (``bot.run`` keeps it exactly while the bot runs) within ``timeout``."""
+
     deadline = time.time() + timeout
     while time.time() < deadline:
-        if log_path.is_file():
-            text = log_path.read_text(errors="replace")
-            if any(marker in text for marker in _READY_MARKERS):
-                return True
+        if ready.exists():
+            return True
         if process.poll() is not None:
             return False
         await asyncio.sleep(0.5)
@@ -259,9 +254,10 @@ async def _main() -> int:
     }
     processes: dict[str, subprocess.Popen[str]] = {}
     logs: dict[str, pathlib.Path] = {}
+    readies: dict[str, pathlib.Path] = {}
     try:
         for identity in identities:
-            env_file = _bot_env_file(
+            values = _bot_env(
                 base_env,
                 record_dir / f"{identity}.env",
                 identity=identity,
@@ -270,9 +266,20 @@ async def _main() -> int:
             utterance = said[identity]
             log_path = record_dir / f"{identity}.log"
             logs[identity] = log_path
+            readies[identity] = record_dir / f"{identity}.ready"
             handle = log_path.open("w", encoding="utf-8")
             processes[identity] = subprocess.Popen(
-                ["uv", "run", "phone-bot", "-v", "--env", str(env_file)],
+                [
+                    "uv",
+                    "run",
+                    "python",
+                    "-m",
+                    "phone_bot_example",
+                    "--ready-file",
+                    str(readies[identity]),
+                    "--data-dir",
+                    str(record_dir / f"{identity}-data"),
+                ],
                 cwd=str(example_root),
                 # A pipe only for the bot somebody speaks to. Nobody is standing in front of the
                 # other one, so there is nothing to say into it and no stdin to say it on.
@@ -280,7 +287,7 @@ async def _main() -> int:
                 stdout=handle,
                 stderr=subprocess.STDOUT,
                 text=True,
-                env={**os.environ, "PYTHONUNBUFFERED": "1"},
+                env={**os.environ, **values, "PYTHONUNBUFFERED": "1"},
             )
             print(
                 f"[two-bots] started {identity} pid={processes[identity].pid} log={log_path} "
@@ -289,7 +296,7 @@ async def _main() -> int:
             )
 
         for identity in identities:
-            if not await _await_ready(logs[identity], processes[identity], timeout=float(args.ready_timeout)):
+            if not await _await_ready(readies[identity], processes[identity], timeout=float(args.ready_timeout)):
                 print(f"[two-bots] FAIL {identity} not ready in time", flush=True)
                 return 3
             print(f"[two-bots] {identity} ready", flush=True)
