@@ -584,6 +584,31 @@ EXPLANATIONS: tuple[Explanation, ...] = (
         ),
     ),
     Explanation(
+        code="B0020",
+        level="error",
+        title="a `people.People` knows people in a memory that is not the cognition's",
+        meaning=(
+            "`people.People(memory=...)` is given the bot's one memory, the cognition's: the same `memory.Memory` "
+            "instance as `bot.cognition(memory=...)`. A cognition without `memory=` remembers in a fresh memory "
+            "of its own, so People can never be given it. When the cognition's memory is written as a name, the "
+            "help gives People that name."
+        ),
+        why=(
+            "Who is who lives in the bot's memory, and every turn's associations say who is speaking from it. A "
+            "person People links in another memory is someone the bot would never know."
+        ),
+        wrong=(
+            "mind = memory.Memory()\n"
+            'model = bot.define(\n    "house",\n    bot.cognition(processor, memory=mind, associative=True),\n'
+            "    bot.attach(phone.Phone()),\n    bot.attach(people.People(memory=memory.Memory())),\n)"
+        ),
+        right=(
+            "mind = memory.Memory()\n"
+            'model = bot.define(\n    "house",\n    bot.cognition(processor, memory=mind, associative=True),\n'
+            "    bot.attach(phone.Phone()),\n    bot.attach(people.People(memory=mind)),\n)"
+        ),
+    ),
+    Explanation(
         code="B0021",
         level="error",
         title="`bot.cognition` is given seeds but no autonomy",
@@ -885,6 +910,30 @@ EXPLANATIONS: tuple[Explanation, ...] = (
         right='model = bot.define("greeter", bot.cognition(processor), bot.attach(phone.Phone()))',
     ),
     Explanation(
+        code="people_without_associative",
+        level="warning",
+        title="a `people.People` on a cognition without associations",
+        meaning=(
+            "A bot with `people.People` knows who is who, and the model is told so only through every turn's "
+            "associations: who is speaking, who is present, and who the bot is. A cognition without "
+            "`associative=True` has none, so the bot is never told whom it knows. The help switches them on."
+        ),
+        why=(
+            "People facts reach the model through associations alone; nothing else puts them in front of it. "
+            "Without them, whom the bot has come to know would never shape a turn."
+        ),
+        wrong=(
+            "mind = memory.Memory()\n"
+            'model = bot.define(\n    "house",\n    bot.cognition(processor, memory=mind),\n'
+            "    bot.attach(phone.Phone()),\n    bot.attach(people.People(memory=mind)),\n)"
+        ),
+        right=(
+            "mind = memory.Memory()\n"
+            'model = bot.define(\n    "house",\n    bot.cognition(processor, memory=mind, associative=True),\n'
+            "    bot.attach(phone.Phone()),\n    bot.attach(people.People(memory=mind)),\n)"
+        ),
+    ),
+    Explanation(
         code="unreachable_state",
         level="warning",
         title="a firmware state is never entered",
@@ -928,7 +977,7 @@ EXPLANATIONS: tuple[Explanation, ...] = (
 """Every code and lint, in code order. A retired code keeps its entry and is never reused.
 
 The examples assume ``from mosfet import bot``, ``from mosfet.devices import phone``,
-``from mosfet.abilities import communication, memory, speaking``, ``import hsm``, ``import mosfet``,
+``from mosfet.abilities import communication, memory, people, speaking``, ``import hsm``, ``import mosfet``,
 ``import datetime``, ``import pydantic``, a ``processor`` (a ``processing.Processor``), an
 ``environment`` (an ``Environment``), a ``catalog`` (a ``vocal.voice.Catalog``) and ``voices`` (an
 encoder factory ``(key, description) -> vocal.speech.SpeechEncoder``); a test runs every one of them.
@@ -981,7 +1030,7 @@ def document() -> str:
         'warnings. `bot.explain("<code>")` prints any entry below.',
         "",
         "The examples assume `from mosfet import bot`, `from mosfet.devices import phone`,",
-        "`from mosfet.abilities import communication, memory, speaking`, `import hsm`, `import mosfet`,",
+        "`from mosfet.abilities import communication, memory, people, speaking`, `import hsm`, `import mosfet`,",
         "`import datetime`, `import pydantic`, a `processor` (a `processing.Processor`), an `environment`, a",
         "`catalog` (a `vocal.voice.Catalog`) and `voices` (an encoder factory `(key, description) -> encoder`).",
         "",

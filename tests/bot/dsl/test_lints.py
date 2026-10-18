@@ -10,8 +10,8 @@ import pydantic
 import pytest
 
 from mosfet import bot, event
-from mosfet.abilities import memory
-from mosfet.bot import lints
+from mosfet.abilities import memory, people
+from mosfet.bot import diagnostics, lints
 from mosfet.devices import phone
 from tests.bot.dsl import support
 
@@ -23,6 +23,7 @@ LINTED = [
     "unused_register",
     "unreachable_state",
     "command_without_examples",
+    "people_without_associative",
 ]
 
 
@@ -210,6 +211,50 @@ def test_an_input_ability_is_a_sense_for_no_devices_and_unused_register() -> Non
             bot.input(memory.Memory(id="senses")),
             bot.register(memory.StmMemory()),
         )
+
+
+def test_people_on_a_cognition_with_associations_is_not_linted() -> None:
+    """W8-9: with `associative=True` every turn's associations tell the bot who is speaking and who is present."""
+
+    mind = memory.Memory()
+    model = bot.define(
+        "house",
+        bot.cognition(support.Silent(), memory=mind, associative=False),
+        bot.attach(phone.Phone()),
+        bot.attach(people.People(memory=mind)),
+        bot.allow("people_without_associative"),
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        heard = bot.define(
+            "house",
+            bot.cognition(support.Silent(), memory=mind, associative=True),
+            bot.attach(phone.Phone()),
+            bot.attach(people.People(memory=mind)),
+        )
+
+    assert bot.check(model) == ()
+    assert bot.check(heard) == ()
+
+
+def test_people_without_associative_rewrites_a_written_flag() -> None:
+    mind = memory.Memory()
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        model = bot.define(
+            "house",
+            bot.cognition(support.Silent(), memory=mind, associative=False),
+            bot.attach(phone.Phone()),
+            bot.attach(people.People(memory=mind)),
+        )
+
+    (found,) = bot.check(model)
+    assert found.code == "people_without_associative"
+    assert found.help is not None
+    assert found.help.suggestion is not None
+    assert (found.help.suggestion.replacement, found.help.suggestion.applicability) == ("True", "machine-applicable")
+    assert diagnostics.text(found.help.suggestion.span) == "False"
 
 
 def test_an_ability_with_tools_is_not_linted() -> None:

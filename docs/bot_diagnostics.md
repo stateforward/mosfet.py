@@ -9,7 +9,7 @@ code, the source span, notes on why, and a `help:` that shows the rewrite. Error
 warnings. `bot.explain("<code>")` prints any entry below.
 
 The examples assume `from mosfet import bot`, `from mosfet.devices import phone`,
-`from mosfet.abilities import communication, memory, speaking`, `import hsm`, `import mosfet`,
+`from mosfet.abilities import communication, memory, people, speaking`, `import hsm`, `import mosfet`,
 `import datetime`, `import pydantic`, a `processor` (a `processing.Processor`), an `environment`, a
 `catalog` (a `vocal.voice.Catalog`) and `voices` (an encoder factory `(key, description) -> encoder`).
 
@@ -32,6 +32,7 @@ The examples assume `from mosfet import bot`, `from mosfet.devices import phone`
 - [`B0017`](#b0017) (error): `bot.define` is given something that is not a bot element
 - [`B0018`](#b0018) (error): `bot.allow` names a lint that does not exist
 - [`B0019`](#b0019) (error): an object is given to the bot
+- [`B0020`](#b0020) (error): a `people.People` knows people in a memory that is not the cognition's
 - [`B0021`](#b0021) (error): `bot.cognition` is given seeds but no autonomy
 - [`B0022`](#b0022) (error): `bot.voice` is given to a bot with no traits
 - [`B0023`](#b0023) (error): `bot.voice` is given to a bot without exactly one `speaking.Speaking` in `bot.output`
@@ -47,6 +48,7 @@ The examples assume `from mosfet import bot`, `from mosfet.devices import phone`
 - [`empty_timeouts`](#empty_timeouts) (warning): `bot.timeouts()` sets no timeout
 - [`instruction_like_traits`](#instruction_like_traits) (warning): a trait reads as an instruction
 - [`no_devices`](#no_devices) (warning): the bot can perceive nothing
+- [`people_without_associative`](#people_without_associative) (warning): a `people.People` on a cognition without associations
 - [`unreachable_state`](#unreachable_state) (warning): a firmware state is never entered
 - [`unused_register`](#unused_register) (warning): a sensory register on a bot that perceives nothing
 
@@ -529,6 +531,38 @@ model = bot.define(
 )
 ```
 
+## B0020
+
+**error:** a `people.People` knows people in a memory that is not the cognition's
+
+`people.People(memory=...)` is given the bot's one memory, the cognition's: the same `memory.Memory` instance as `bot.cognition(memory=...)`. A cognition without `memory=` remembers in a fresh memory of its own, so People can never be given it. When the cognition's memory is written as a name, the help gives People that name.
+
+Why: Who is who lives in the bot's memory, and every turn's associations say who is speaking from it. A person People links in another memory is someone the bot would never know.
+
+Wrong:
+
+```python
+mind = memory.Memory()
+model = bot.define(
+    "house",
+    bot.cognition(processor, memory=mind, associative=True),
+    bot.attach(phone.Phone()),
+    bot.attach(people.People(memory=memory.Memory())),
+)
+```
+
+Right:
+
+```python
+mind = memory.Memory()
+model = bot.define(
+    "house",
+    bot.cognition(processor, memory=mind, associative=True),
+    bot.attach(phone.Phone()),
+    bot.attach(people.People(memory=mind)),
+)
+```
+
 ## B0021
 
 **error:** `bot.cognition` is given seeds but no autonomy
@@ -916,6 +950,38 @@ Right:
 
 ```python
 model = bot.define("greeter", bot.cognition(processor), bot.attach(phone.Phone()))
+```
+
+## people_without_associative
+
+**warning:** a `people.People` on a cognition without associations
+
+A bot with `people.People` knows who is who, and the model is told so only through every turn's associations: who is speaking, who is present, and who the bot is. A cognition without `associative=True` has none, so the bot is never told whom it knows. The help switches them on.
+
+Why: People facts reach the model through associations alone; nothing else puts them in front of it. Without them, whom the bot has come to know would never shape a turn.
+
+Wrong:
+
+```python
+mind = memory.Memory()
+model = bot.define(
+    "house",
+    bot.cognition(processor, memory=mind),
+    bot.attach(phone.Phone()),
+    bot.attach(people.People(memory=mind)),
+)
+```
+
+Right:
+
+```python
+mind = memory.Memory()
+model = bot.define(
+    "house",
+    bot.cognition(processor, memory=mind, associative=True),
+    bot.attach(phone.Phone()),
+    bot.attach(people.People(memory=mind)),
+)
 ```
 
 ## unreachable_state

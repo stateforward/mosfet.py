@@ -904,6 +904,17 @@ class People(ability.Ability[LinkData, cognition.InputData]):
         ),
     )
 
+    # Last in the class body: from here on, ``memory`` in it is this method, not the memory package.
+    def memory(self) -> memory.Memory:
+        """The memory People knows people in, fixed when it was built.
+
+        Like :meth:`identity`, it is a construction-time fact a peer may ask for (``bot.define`` checks it
+        is the cognition's own, B0020); it reads no machine state, and People still reaches that memory
+        only by its request events.
+        """
+
+        return self._memory
+
 
 __all__ = [
     "ChangedData",

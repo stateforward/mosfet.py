@@ -1,0 +1,17 @@
+error[B0020]: ability `people` knows people in a memory that is not the cognition's
+  --> greeter.py:14:37
+   |
+12 |     bot.cognition(support.Silent(), memory=mind, associative=True),
+   |                                            ---- the cognition's memory
+...
+14 |     bot.attach(people.People(memory=memory.Memory())),
+   |                                     ^^^^^^^^^^^^^^^ not the cognition's memory
+   |
+   = note: the bot knows people in its one memory, the cognition's: who People links there is who every turn's associations say is speaking; in any other memory, nobody would ever be known
+help: give both the same `memory.Memory`: `bot.cognition(..., memory=mind)` and `people.People(memory=mind)`
+   |
+14 |     bot.attach(people.People(memory=mind)),
+   |                                     ~~~~
+   = explain: bot.explain("B0020")
+
+error: could not define bot `greeter`: 1 error

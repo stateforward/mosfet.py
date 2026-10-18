@@ -1,0 +1,15 @@
+"""people_without_associative: a people capacity on a cognition with no associations to tell the bot of it."""
+
+from mosfet import bot
+from mosfet.abilities import memory, people
+from mosfet.devices import phone
+
+from tests.bot.dsl import support
+
+mind = memory.Memory()
+model = bot.define(
+    "greeter",
+    bot.cognition(support.Silent(), memory=mind),
+    bot.attach(phone.Phone()),
+    bot.attach(people.People(memory=mind)),
+)

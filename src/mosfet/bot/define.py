@@ -34,6 +34,7 @@ firmware: they compile after the walk, together, into a machine of its own
 Defining starts, opens and reads nothing: it holds the instances the bot file constructed.
 """
 
+import ast
 import collections.abc
 import dataclasses
 import datetime
@@ -48,7 +49,7 @@ import pydantic
 import mosfet.device
 
 from mosfet import behavior, event, lifecycle, runtime
-from mosfet.abilities import memory, persona, processing, speaking, vocal
+from mosfet.abilities import memory, people, persona, processing, speaking, vocal
 from mosfet.abilities.communication.conversation.conversation import snake_case
 
 from . import diagnostics, elements, firmware, lints
@@ -196,6 +197,62 @@ class Validator(hsm.ModelValidator):
                     ),
                 )
             )
+        if isinstance(member.instance, people.People):
+            self._acquainted(model, member, member.instance)
+
+    def _acquainted(self, model: elements.Model, member: elements.AttachmentElement, known: people.People) -> None:
+        """B0020: ``known``, given to the bot as ``member``, knows people in a memory that is not the cognition's.
+
+        A cognition without ``memory=`` remembers in a fresh memory of its own, which People cannot be
+        given. A cognition whose ``memory=`` is no memory is B0006 alone. When the cognition's memory is
+        written as a name and People's ``memory=`` is written in the attachment, the help gives People
+        that name.
+        """
+
+        mind = next((item for item in model.members.values() if isinstance(item, elements.CognitionElement)), None)
+        if mind is None or (mind.memory is not None and not isinstance(mind.memory, memory.Memory)):
+            return
+        if known.memory() is mind.memory:
+            return
+        attachment = diagnostics.Span.of(member.location)
+        constructed = diagnostics.argument(attachment, 0)
+        given = None if constructed is None else diagnostics.argument(constructed[0], "memory")
+        thinking = diagnostics.Span.of(mind.location)
+        written = diagnostics.argument(thinking, "memory")
+        if written is None:
+            secondary = diagnostics.head(thinking, "remembers in a fresh memory of its own")
+            notes: tuple[str, ...] = (
+                "a cognition without `memory=` remembers in a fresh memory of its own, which nothing else is given",
+            )
+        else:
+            secondary = written[0].model_copy(update={"label": "the cognition's memory"})
+            notes = ()
+        suggestion = (
+            diagnostics.Suggestion(span=given[0], replacement=written[1].id, applicability="machine-applicable")
+            if given is not None and written is not None and isinstance(written[1], ast.Name)
+            else None
+        )
+        model.findings.append(
+            diagnostics.Diagnostic(
+                code="B0020",
+                level="error",
+                message=f"ability `{member.name()}` knows people in a memory that is not the cognition's",
+                primary=(attachment if given is None else given[0]).model_copy(
+                    update={"label": "not the cognition's memory"}
+                ),
+                secondary=(secondary,),
+                notes=(
+                    *notes,
+                    "the bot knows people in its one memory, the cognition's: who People links there is who "
+                    + "every turn's associations say is speaking; in any other memory, nobody would ever be known",
+                ),
+                help=diagnostics.Help(
+                    message="give both the same `memory.Memory`: `bot.cognition(..., memory=mind)` and "
+                    + "`people.People(memory=mind)`",
+                    suggestion=suggestion,
+                ),
+            )
+        )
 
     def _validate_traits(self, model: elements.Model, member: elements.TraitsElement) -> None:
         try:

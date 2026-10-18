@@ -210,6 +210,11 @@ registries the ears and eyes own, it offers the bot `people.link`, `people.unlin
 
 ```
 
+People is given the very memory the cognition is: another one, or a cognition with no `memory=` (which
+remembers in a fresh one of its own), is [`B0020`](bot_diagnostics.md#b0020). And without
+`associative=True` the bot is never told whom it knows, which the
+[`people_without_associative`](bot_diagnostics.md#people_without_associative) lint warns of.
+
 Whether to ask who an unknown voice is, which voice is whose, what someone is called and whom to
 forget are the bot's choices; nothing asks, links or names for it. The household is the owner's: it
 is declared to memory each time the bot starts (a member left out of it is no longer declared), no

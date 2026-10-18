@@ -29,7 +29,7 @@ import hsm
 import pydantic
 
 from mosfet import abilities, event
-from mosfet.abilities import memory
+from mosfet.abilities import memory, people
 
 import mosfet.device
 
@@ -313,6 +313,43 @@ def command_without_examples(model: elements.Model) -> list[diagnostics.Diagnost
     return found
 
 
+def people_without_associative(model: elements.Model) -> list[diagnostics.Diagnostic]:
+    """A people capacity on a cognition without associations, the one way people facts reach the model."""
+
+    minds = _members(model, elements.CognitionElement)
+    if not minds or minds[0].associative:
+        return []
+    call = diagnostics.Span.of(minds[0].location)
+    # The rewrite switches associations on: a written `associative=False` becomes True, or the flag is added.
+    written = diagnostics.argument(call, "associative")
+    added = diagnostics.append(call, "associative=True") if written is None else None
+    suggestion = (
+        diagnostics.Suggestion(span=written[0], replacement="True", applicability="machine-applicable")
+        if written is not None
+        else None
+        if added is None
+        else added.model_copy(update={"applicability": "machine-applicable"})
+    )
+    return [
+        _warning(
+            "people_without_associative",
+            f"ability `{member.name()}` knows people the bot is never told of",
+            diagnostics.head(call, "no associations"),
+            secondary=(diagnostics.Span.of(member.location, "knows who is who"),),
+            notes=(
+                "who is speaking, who is present and who the bot is reach the model only through every turn's "
+                + "associations, which `associative=True` gives the cognition",
+            ),
+            help=diagnostics.Help(
+                message="give the cognition its associations: `associative=True`",
+                suggestion=suggestion,
+            ),
+        )
+        for member in _members(model, elements.AttachmentElement)
+        if isinstance(member.instance, people.People)
+    ]
+
+
 LINTS: dict[str, collections.abc.Callable[[elements.Model], list[diagnostics.Diagnostic]]] = {
     "no_devices": no_devices,
     "ability_without_tools": ability_without_tools,
@@ -321,6 +358,7 @@ LINTS: dict[str, collections.abc.Callable[[elements.Model], list[diagnostics.Dia
     "unused_register": unused_register,
     "unreachable_state": unreachable_state,
     "command_without_examples": command_without_examples,
+    "people_without_associative": people_without_associative,
 }
 """Every lint by name, each on by default."""
 
@@ -373,6 +411,7 @@ __all__ = [
     "instruction_like_traits",
     "lint",
     "no_devices",
+    "people_without_associative",
     "unreachable_state",
     "unused_register",
 ]

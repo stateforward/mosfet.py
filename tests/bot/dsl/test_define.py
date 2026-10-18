@@ -10,7 +10,7 @@ import pytest
 
 import mosfet
 from mosfet import bot
-from mosfet.abilities import speaking
+from mosfet.abilities import memory, people, speaking
 from mosfet.bot import diagnostics, elements
 from mosfet.devices import audio, phone
 from mosfet.environment import Environment
@@ -103,7 +103,7 @@ def test_a_definition_error_is_hsms_validation_error_and_the_bots() -> None:
     assert str(error).endswith("error: could not define bot `greeter`: 1 error")
 
 
-@pytest.mark.parametrize("code", ["B0001", "B0002", "B0010", "B0011", "B0021", "B0022", "B0023"])
+@pytest.mark.parametrize("code", ["B0001", "B0002", "B0010", "B0011", "B0020", "B0021", "B0022", "B0023"])
 def test_each_validator_error_renders_its_golden(code: str, here: pathlib.Path) -> None:
     path = support.copy(code, here)
 
@@ -114,6 +114,74 @@ def test_each_validator_error_renders_its_golden(code: str, here: pathlib.Path) 
     assert support.rendered(error, name) == support.golden(code)
     first = error.diagnostics[0].primary
     assert str(error) == f"{path}:{first.lineno}: {support.golden(code)}"
+
+
+def test_people_on_the_cognitions_own_memory_defines() -> None:
+    """W8-9: People knows people in the bot's one memory, so the same instance given to both is no error."""
+
+    mind = memory.Memory()
+
+    model = bot.define(
+        "house",
+        bot.cognition(support.Silent(), memory=mind, associative=True),
+        bot.attach(phone.Phone()),
+        bot.attach(people.People(memory=mind)),
+    )
+
+    assert model.findings == []
+
+
+def test_people_beside_a_cognition_with_no_memory_is_b0020_naming_the_fresh_one() -> None:
+    """D-W8-17: a cognition without `memory=` remembers in a fresh memory nothing else is given."""
+
+    with pytest.raises(bot.DefinitionError) as caught:
+        _ = bot.define(
+            "house",
+            bot.cognition(support.Silent(), associative=True),
+            bot.attach(phone.Phone()),
+            bot.attach(people.People(memory=memory.Memory())),
+        )
+
+    (diagnostic,) = caught.value.diagnostics
+    assert diagnostic.code == "B0020"
+    assert [span.label for span in diagnostic.secondary] == ["remembers in a fresh memory of its own"]
+    assert diagnostic.help is not None
+    assert diagnostic.help.suggestion is None
+
+
+def test_people_given_by_name_is_b0020_at_its_attachment() -> None:
+    folks = people.People(memory=memory.Memory())
+
+    with pytest.raises(bot.DefinitionError) as caught:
+        _ = bot.define(
+            "house",
+            bot.cognition(support.Silent(), memory=memory.Memory(), associative=True),
+            bot.attach(phone.Phone()),
+            bot.attach(folks),
+        )
+
+    (diagnostic,) = caught.value.diagnostics
+    assert diagnostic.code == "B0020"
+    assert diagnostic.primary.label == "not the cognition's memory"
+    assert diagnostics.text(diagnostic.primary) == "bot.attach(folks)"
+    # The cognition's memory is no name the rewrite could give People.
+    assert diagnostic.help is not None
+    assert diagnostic.help.suggestion is None
+
+
+def test_a_cognition_memory_that_is_no_memory_is_b0006_only() -> None:
+    # A bot file's mistake, which the annotation would refuse: what is given is checked, not promised.
+    mind = typing.cast(memory.Memory, typing.cast(object, "mind"))
+
+    with pytest.raises(bot.DefinitionError) as caught:
+        _ = bot.define(
+            "house",
+            bot.cognition(support.Silent(), memory=mind, associative=True),
+            bot.attach(phone.Phone()),
+            bot.attach(people.People(memory=memory.Memory())),
+        )
+
+    assert [diagnostic.code for diagnostic in caught.value.diagnostics] == ["B0006"]
 
 
 def test_a_voice_with_two_speakings_names_each_of_them(here: pathlib.Path) -> None:
@@ -314,6 +382,7 @@ def test_each_explanation_shows_its_mistake_and_the_fix(explanation: diagnostics
         "B0017",
         "B0018",
         "B0019",
+        "B0020",
         "B0021",
         "B0022",
         "B0023",

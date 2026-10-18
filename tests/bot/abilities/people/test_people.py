@@ -285,6 +285,7 @@ def test_constructing_people_starts_nothing_and_refuses_what_it_cannot_serve() -
     built = people.People(memory=store, registries=(voices,), household=(_ADA,))
 
     assert built.identity() == "people"
+    assert built.memory() is store
     assert not lifecycle.is_started(built)
     assert not lifecycle.is_started(store)
     assert not lifecycle.is_started(voices)
