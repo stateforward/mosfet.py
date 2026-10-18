@@ -9,7 +9,7 @@ import pydantic
 import pytest
 
 from mosfet import bot, event
-from mosfet.abilities import memory
+from mosfet.abilities import communication, memory, speaking
 from mosfet.devices import audio, phone
 from tests.bot.dsl import support
 
@@ -75,6 +75,7 @@ def test_a_bot_without_traits_memory_register_timeouts_or_allow_says_so() -> Non
         name="plain",
         traits=(),
         faculties=("intuition", "reasoning", "reflection"),
+        seeds=(),
         memory=None,
         parts=(bot.Part(id="phone", kind="device", roles=("attach",), constructor="Phone"),),
         sensory_register=None,
@@ -82,6 +83,25 @@ def test_a_bot_without_traits_memory_register_timeouts_or_allow_says_so() -> Non
         allowed=(),
         firmware=None,
     )
+
+
+def test_describe_lists_the_voice_among_the_faculties_and_the_seeds_by_name() -> None:
+    """W8-10: a bot born with a voice has the voice faculty, and its seeds are named, never their machines."""
+
+    model = bot.define(
+        "greeter",
+        bot.traits("warm"),
+        bot.voice(support.Shelf()),
+        bot.cognition(support.Silent(), autonomy=True, seeds=(communication.speech_heard_seed(),)),
+        bot.output(speaking.Speaking(encoder=support.Voices())),
+        bot.attach(phone.Phone()),
+    )
+
+    (outline,) = bot.describe(model).bots
+
+    assert outline.faculties == ("intuition", "reasoning", "reflection", "autonomy", "voice")
+    assert outline.seeds == ("SpeechHeard",)
+    assert [(part.id, part.roles) for part in outline.parts] == [("speaking", ("output",)), ("phone", ("attach",))]
 
 
 def _minutes(ctx: hsm.Context, instance: bot.Firmware, event: hsm.Event[typing.Any]) -> datetime.timedelta:

@@ -1,0 +1,13 @@
+"""B0021: a seed given to a cognition with no autonomy to run it."""
+
+from mosfet import bot
+from mosfet.abilities import communication
+from mosfet.devices import phone
+
+from tests.bot.dsl import support
+
+model = bot.define(
+    "greeter",
+    bot.cognition(support.Silent(), seeds=(communication.speech_heard_seed(),)),
+    bot.attach(phone.Phone()),
+)

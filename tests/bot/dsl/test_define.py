@@ -10,6 +10,7 @@ import pytest
 
 import mosfet
 from mosfet import bot
+from mosfet.abilities import speaking
 from mosfet.bot import diagnostics, elements
 from mosfet.devices import audio, phone
 from mosfet.environment import Environment
@@ -102,7 +103,7 @@ def test_a_definition_error_is_hsms_validation_error_and_the_bots() -> None:
     assert str(error).endswith("error: could not define bot `greeter`: 1 error")
 
 
-@pytest.mark.parametrize("code", ["B0001", "B0002", "B0010", "B0011"])
+@pytest.mark.parametrize("code", ["B0001", "B0002", "B0010", "B0011", "B0021", "B0022", "B0023"])
 def test_each_validator_error_renders_its_golden(code: str, here: pathlib.Path) -> None:
     path = support.copy(code, here)
 
@@ -113,6 +114,49 @@ def test_each_validator_error_renders_its_golden(code: str, here: pathlib.Path) 
     assert support.rendered(error, name) == support.golden(code)
     first = error.diagnostics[0].primary
     assert str(error) == f"{path}:{first.lineno}: {support.golden(code)}"
+
+
+def test_a_voice_with_two_speakings_names_each_of_them(here: pathlib.Path) -> None:
+    """W8-10: the voice inception gives is the one mouth's, so two Speakings given to bot.output are B0023."""
+
+    error = support.failure(support.copy("two_mouths", here))
+
+    (diagnostic,) = error.diagnostics
+    assert diagnostic.code == "B0023"
+    assert [span.label for span in diagnostic.secondary] == ["a `speaking.Speaking`", "a `speaking.Speaking`"]
+    assert support.rendered(error) == support.golden("two_mouths")
+
+
+def test_a_speaking_only_acquired_is_not_the_voices_mouth() -> None:
+    with pytest.raises(bot.DefinitionError) as caught:
+        _ = bot.define(
+            "greeter",
+            bot.traits("warm"),
+            bot.voice(support.Shelf()),
+            bot.cognition(support.Silent()),
+            bot.attach(speaking.Speaking(encoder=support.Voices())),
+            bot.attach(phone.Phone()),
+        )
+
+    errors = [diagnostic.code for diagnostic in caught.value.diagnostics if diagnostic.level == "error"]
+    assert errors == ["B0023"]
+
+
+def test_one_speaking_given_to_bot_output_twice_is_still_one_mouth() -> None:
+    mouth = speaking.Speaking(encoder=support.Voices())
+
+    with pytest.raises(bot.DefinitionError) as caught:
+        _ = bot.define(
+            "greeter",
+            bot.traits("warm"),
+            bot.voice(support.Shelf()),
+            bot.cognition(support.Silent()),
+            bot.output(mouth),
+            bot.output(mouth),
+            bot.attach(phone.Phone()),
+        )
+
+    assert [diagnostic.code for diagnostic in caught.value.diagnostics] == ["B0003"]
 
 
 def test_an_already_started_instance_renders_its_golden(here: pathlib.Path) -> None:
@@ -270,6 +314,9 @@ def test_each_explanation_shows_its_mistake_and_the_fix(explanation: diagnostics
         "B0017",
         "B0018",
         "B0019",
+        "B0021",
+        "B0022",
+        "B0023",
     ],
 )
 def test_every_define_code_has_an_explanation(code: str) -> None:

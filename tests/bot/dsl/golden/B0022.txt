@@ -1,0 +1,14 @@
+error[B0022]: `bot.voice` is given to a bot with no `bot.traits`
+  --> greeter.py:11:5
+   |
+11 |     bot.voice(support.Shelf()),
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^ conceived from traits the bot does not have
+   |
+   = note: the bot's voice is conceived at its inception from its traits, the owner's seed of its nature; with none, there is nothing to conceive it from
+help: give the bot its traits, which are the owner's to choose
+   |
+14 |     bot.attach(phone.Phone()), bot.traits("warm"),
+   |                              ~~~~~~~~~~~~~~~~~~~~
+   = explain: bot.explain("B0022")
+
+error: could not define bot `greeter`: 1 error

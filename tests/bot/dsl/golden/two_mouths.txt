@@ -1,0 +1,16 @@
+error[B0023]: `bot.voice` is given to a bot with 2 `speaking.Speaking`s in `bot.output`
+  --> greeter.py:12:5
+   |
+12 |     bot.voice(support.Shelf()),
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^ a voice for one mouth
+...
+14 |     bot.output(speaking.Speaking(id="near", encoder=support.Voices())),
+   |     ------------------------------------------------------------------ a `speaking.Speaking`
+15 |     bot.output(speaking.Speaking(id="far", encoder=support.Voices())),
+   |     ----------------------------------------------------------------- a `speaking.Speaking`
+   |
+   = note: the voice inception gives is said by the bot's one `speaking.Speaking`, its mouth, given to `bot.output`
+help: give `bot.output` one `speaking.Speaking`, the mouth the voice is for
+   = explain: bot.explain("B0023")
+
+error: could not define bot `greeter`: 1 error

@@ -1,5 +1,5 @@
-"""Shared helpers for the bot DSL tests: a processor that selects nothing, the wrong bot files, and
-the runner for the explanations' examples.
+"""Shared helpers for the bot DSL tests: a processor that selects nothing, a voice source and a mouth
+for a bot born with a voice, the wrong bot files, and the runner for the explanations' examples.
 
 Each file under ``wrong/`` is a deliberately wrong bot file, kept as ``.py.txt`` so the type checker
 does not reject the mistakes on purpose. :func:`copy` puts one into a directory as a ``.py`` file and
@@ -20,7 +20,7 @@ import pydantic
 
 import mosfet
 from mosfet import bot
-from mosfet.abilities import memory, processing
+from mosfet.abilities import communication, memory, processing, speaking, vocal
 from mosfet.bot import diagnostics
 from mosfet.devices import phone
 from mosfet.environment import Environment
@@ -38,6 +38,78 @@ class Silent(processing.Processor):
     ) -> processing.Events:
         del input, drafts
         return ()
+
+
+WARM = vocal.voice.Entry(
+    ref=vocal.voice.Ref(source="lab", key="warm"),
+    name="warm",
+    description="A warm, unhurried voice.",
+    languages=("en",),
+)
+"""The one voice :class:`Shelf` holds."""
+
+
+class Shelf(vocal.voice.Catalog):
+    """A voice source that holds one voice, :data:`WARM`, and remembers every time it is asked for its voices."""
+
+    def __init__(self) -> None:
+        self.source: str = "lab"
+        self.asked: list[tuple[vocal.speech.Locale, ...]] = []
+
+    @typing.override
+    async def voices(
+        self, *, languages: tuple[vocal.speech.Locale, ...] = (), descriptors: vocal.voice.Descriptors | None = None
+    ) -> tuple[vocal.voice.Entry, ...]:
+        del descriptors
+        self.asked.append(languages)
+        return (WARM,)
+
+
+class Mute(vocal.speech.SpeechEncoder):
+    """A speech encoder that reads everything it is given and says it as a moment of silence."""
+
+    def __init__(self) -> None:
+        self.format: vocal.speech.Format = vocal.speech.Format(sample_rate_hz=24_000, channels=1)
+
+    @typing.override
+    async def encode(
+        self, input: collections.abc.AsyncIterable[vocal.speech.Piece]
+    ) -> collections.abc.AsyncIterator[vocal.speech.Audio]:
+        words = "".join([piece.words async for piece in input])
+        yield vocal.speech.Audio(pcm=b"\x00\x00", text=words)
+
+
+class Voices:
+    """Speaking's encoder factory: a :class:`Mute` in whichever voice it is given, every call remembered."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str | None]] = []
+
+    def __call__(self, key: str, description: str | None) -> vocal.speech.SpeechEncoder:
+        self.calls.append((key, description))
+        return Mute()
+
+
+class Conceiving(processing.Processor):
+    """A model that conceives the bot's voice as :data:`WARM` when it is asked to, and otherwise selects nothing.
+
+    It stands in for the makers' inception model, the one place a test may write what is chosen: being given
+    a voice at birth is the bot's making, not its choice. ``conceived`` counts the conceptions it made.
+    """
+
+    def __init__(self) -> None:
+        self.conceived: int = 0
+
+    @typing.override
+    async def process(
+        self, input: processing.InputData, *, drafts: processing.DraftSink | None = None
+    ) -> processing.Events:
+        del drafts
+        if vocal.voice.ConceiveEvent.name not in {schema.name for schema in input.schemas}:
+            return ()
+        self.conceived += 1
+        shortlisted = {"conception": {"kind": "shortlisted", "ref": WARM.ref.model_dump()}}
+        return (processing.SelectedEvent(event=vocal.voice.ConceiveEvent.name, data=shortlisted),)
 
 
 def copy(name: str, directory: pathlib.Path) -> pathlib.Path:
@@ -106,6 +178,8 @@ _NAMESPACE_MODULES = {
     "bot": bot,
     "phone": phone,
     "memory": memory,
+    "communication": communication,
+    "speaking": speaking,
     "hsm": hsm,
     "mosfet": mosfet,
     "datetime": datetime,
@@ -117,7 +191,13 @@ async def execute(source: str) -> None:
     """Run an explanation's example (top-level ``await`` allowed), then stop whatever it started."""
 
     environment = Environment()
-    namespace: dict[str, object] = {**_NAMESPACE_MODULES, "processor": Silent(), "environment": environment}
+    namespace: dict[str, object] = {
+        **_NAMESPACE_MODULES,
+        "processor": Silent(),
+        "environment": environment,
+        "catalog": Shelf(),
+        "voices": Voices(),
+    }
     code = typing.cast(types.CodeType, compile(source, "<explanation>", "exec", flags=ast.PyCF_ALLOW_TOP_LEVEL_AWAIT))
     try:
         # The examples are this repository's own code, documented in docs/bot_diagnostics.md.

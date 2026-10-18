@@ -10,7 +10,7 @@ import hsm
 import pytest
 
 from mosfet import bot, environment
-from mosfet.abilities import memory
+from mosfet.abilities import communication, memory, speaking
 from mosfet.bot import elements
 from mosfet.devices import audio, phone
 from tests.bot.dsl import support
@@ -37,6 +37,7 @@ def _written(location: hsm.Location) -> str:
         bot.traits("curious"),
         bot.cognition(support.Silent()),
         bot.timeouts(),
+        bot.voice(support.Shelf()),
     ],
 )
 def test_every_element_is_an_hsm_redefinable_element(element: bot.Element[hsm.Element]) -> None:
@@ -129,6 +130,62 @@ def test_the_singular_elements_register_at_their_keys() -> None:
     )
     assert isinstance(timeouts, elements.TimeoutsElement) and timeouts.processing == datetime.timedelta(seconds=5)
     assert isinstance(sensory, elements.RegisterElement) and sensory.store is register
+
+
+def test_the_voice_and_the_seeds_register_as_written() -> None:
+    """W8-10: ``bot.voice`` is the bot's one voice source, and ``seeds=`` the cognition's native behaviors."""
+
+    shelf, heard, mouth = (
+        support.Shelf(),
+        communication.speech_heard_seed(),
+        speaking.Speaking(encoder=support.Voices()),
+    )
+    model = bot.define(
+        "greeter",
+        bot.traits("warm"),
+        bot.voice(shelf, languages=("en", "fr")),
+        bot.cognition(support.Silent(), autonomy=True, seeds=(heard,)),
+        bot.output(mouth),
+        bot.attach(phone.Phone()),
+    )
+
+    voice = model.members["/greeter/.voice"]
+    cognition = model.members["/greeter/.cognition"]
+    assert isinstance(voice, elements.VoiceElement)
+    assert (voice.catalog, voice.designer, voice.languages) == (shelf, None, ("en", "fr"))
+    assert isinstance(cognition, elements.CognitionElement)
+    assert cognition.seeds == (heard,)
+
+
+def test_a_voice_speaks_english_by_default_and_has_no_designer() -> None:
+    model = bot.define(
+        "greeter",
+        bot.traits("warm"),
+        bot.voice(support.Shelf()),
+        bot.cognition(support.Silent()),
+        bot.output(speaking.Speaking(encoder=support.Voices())),
+        bot.attach(phone.Phone()),
+    )
+
+    voice = model.members["/greeter/.voice"]
+    assert isinstance(voice, elements.VoiceElement)
+    assert (voice.designer, voice.languages) == (None, ("en",))
+
+
+def test_a_bot_has_one_voice() -> None:
+    with pytest.raises(bot.DefinitionError) as caught:
+        _ = bot.define(
+            "greeter",
+            bot.traits("warm"),
+            bot.voice(support.Shelf()),
+            bot.voice(support.Shelf()),
+            bot.cognition(support.Silent()),
+            bot.output(speaking.Speaking(encoder=support.Voices())),
+            bot.attach(phone.Phone()),
+        )
+
+    (duplicate,) = caught.value.diagnostics
+    assert (duplicate.code, duplicate.message) == ("B0009", "`bot.voice` is given twice")
 
 
 def test_hsm_define_rejects_a_bot_element_as_hsm_rejects_a_misplaced_attribute() -> None:
@@ -254,12 +311,13 @@ _PREAMBLE = """\
 import datetime
 
 from mosfet import bot
-from mosfet.abilities import memory
+from mosfet.abilities import communication, memory
 from mosfet.devices import phone
 
 from tests.bot.dsl import support
 
 processor = support.Silent()
+catalog = support.Shelf()
 """
 
 
@@ -342,6 +400,42 @@ processor = support.Silent()
             'bot.define("greeter", bot.cognition(processor, routines=3), bot.attach(phone.Phone()))',
             "B0006",
             "`bot.cognition(routines=)` takes a wall clock, not `int`",
+            None,
+        ),
+        (
+            'bot.define("greeter", bot.cognition(processor, autonomy=True, seeds=(3,)), bot.attach(phone.Phone()))',
+            "B0006",
+            "`bot.cognition(seeds=)` takes `behavior.Seed`s, not `int`",
+            None,
+        ),
+        (
+            'bot.define("greeter", bot.cognition(processor), bot.attach(phone.Phone()), bot.attach(catalog))',
+            "B0006",
+            "`bot.attach` does not take a voice catalog",
+            "bot.voice(catalog)",
+        ),
+        (
+            'bot.define("greeter", bot.cognition(processor), bot.attach(phone.Phone()), bot.voice(processor))',
+            "B0006",
+            "`bot.voice` does not take a processor",
+            None,
+        ),
+        (
+            'bot.define("greeter", bot.cognition(processor), bot.attach(phone.Phone()), bot.voice(catalog, designer=3))',
+            "B0006",
+            "`bot.voice(designer=)` takes a `vocal.voice.Designer`, not `int`",
+            None,
+        ),
+        (
+            'bot.define("greeter", bot.cognition(processor), bot.attach(phone.Phone()), bot.voice(catalog, languages="en"))',
+            "B0006",
+            '`bot.voice(languages=)` takes language tags such as `("en",)`, not `str`',
+            None,
+        ),
+        (
+            'bot.define("greeter", bot.cognition(processor), bot.attach(phone.Phone()), communication.speech_heard_seed())',
+            "B0017",
+            "`bot.define` does not take a seed",
             None,
         ),
     ],

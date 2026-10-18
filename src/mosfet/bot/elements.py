@@ -8,8 +8,8 @@ as a :class:`~mosfet.bot.diagnostics.Diagnostic`. The walk never raises for a mi
 file, so ``bot.define`` reports every mistake in one pass.
 
 Members are keyed like hsm's: a device or an ability, in any role, at ``/<bot>/<id>`` (one namespace
-of ids, which the bot's firmware sends by), and the bot's one traits, cognition, timeouts and
-sensory register at ``/<bot>/.traits``, ``.cognition``, ``.timeouts`` and ``.register``.
+of ids, which the bot's firmware sends by), and the bot's one traits, cognition, voice, timeouts and
+sensory register at ``/<bot>/.traits``, ``.cognition``, ``.voice``, ``.timeouts`` and ``.register``.
 A second member at a key is a duplicate, caught exactly as hsm catches a second state of one name.
 """
 
@@ -25,8 +25,8 @@ import typing
 import hsm
 
 import mosfet.device
-from mosfet import abilities, environment
-from mosfet.abilities import memory, persona, processing
+from mosfet import abilities, behavior, environment
+from mosfet.abilities import memory, persona, processing, vocal
 from mosfet.abilities.communication.conversation.conversation import snake_case
 from mosfet.behavior import schedule
 
@@ -43,6 +43,7 @@ AttachmentKind = hsm.kind.Make(MemberKind)
 TraitsKind = hsm.kind.Make(MemberKind)
 CognitionKind = hsm.kind.Make(MemberKind, hsm.NamespaceKind)
 TimeoutsKind = hsm.kind.Make(MemberKind)
+VoiceKind = hsm.kind.Make(MemberKind)
 RegisterKind = hsm.kind.Make(MemberKind)
 AllowKind = hsm.kind.Make(MemberKind)
 
@@ -107,6 +108,7 @@ class CognitionElement(Member, hsm.NamespaceElement, kind=CognitionKind):
     associative: bool = False
     consolidation: bool = False
     autonomy: bool = False
+    seeds: object = ()
     routines: object = None
 
     def faculties(self) -> tuple[str, ...]:
@@ -119,6 +121,16 @@ class CognitionElement(Member, hsm.NamespaceElement, kind=CognitionKind):
             ("routines", self.routines is not None),
         )
         return ("intuition", "reasoning", "reflection", *(name for name, given in flags if given))
+
+
+@dataclasses.dataclass(kw_only=True)
+class VoiceElement(Member, kind=VoiceKind):
+    """The voice source the bot is given its voice from at inception, as written (checked by the validator)."""
+
+    function: typing.ClassVar[str] = "bot.voice"
+    catalog: object = None
+    designer: object = None
+    languages: object = ()
 
 
 @dataclasses.dataclass(kw_only=True)
@@ -383,6 +395,10 @@ def misplaced(
         return found("a sensory register", "bot.register", single(RedefinableRegister, "bot.register"))
     if isinstance(value, memory.Memory):
         return found("a memory", "bot.cognition(processor, memory=...)", None)
+    if isinstance(value, vocal.voice.Catalog):
+        return found("a voice catalog", "bot.voice", single(RedefinableVoice, "bot.voice"))
+    if isinstance(value, behavior.Seed):
+        return found("a seed", "bot.cognition(processor, autonomy=True, seeds=(...))", None)
     if isinstance(value, abilities.Ability):
         return found("an ability", "bot.attach", attached())
     if isinstance(value, str):
@@ -608,6 +624,7 @@ class RedefinableCognition(_Single[CognitionElement]):
     associative: bool = False
     consolidation: bool = False
     autonomy: bool = False
+    seeds: object = ()
     routines: object = None
 
     @typing.override
@@ -619,6 +636,7 @@ class RedefinableCognition(_Single[CognitionElement]):
             associative=self.associative,
             consolidation=self.consolidation,
             autonomy=self.autonomy,
+            seeds=self.seeds,
             routines=self.routines,
             location=self.location,
         )
@@ -648,6 +666,27 @@ class RedefinableCognition(_Single[CognitionElement]):
                 )
             )
         return registered
+
+
+@dataclasses.dataclass(kw_only=True)
+class RedefinableVoice(_Single[VoiceElement]):
+    """``bot.voice``: the voice source the bot is given its voice from, as written."""
+
+    function: typing.ClassVar[str] = "bot.voice"
+    catalog: object = None
+    designer: object = None
+    languages: object = ()
+
+    @typing.override
+    def _redefine(self, model: Model, stack: list[hsm.Element]) -> VoiceElement | None:
+        member = VoiceElement(
+            qualified_name=posixpath.join(model.qualified_name, ".voice"),
+            catalog=self.catalog,
+            designer=self.designer,
+            languages=self.languages,
+            location=self.location,
+        )
+        return self._register(model, member)
 
 
 @dataclasses.dataclass(kw_only=True)
@@ -801,7 +840,7 @@ class Stray(Element[Member]):
                 primary=primary.model_copy(update={"label": "not a bot element"}),
                 notes=(
                     "a bot is defined from `bot.attach`, `bot.input`, `bot.output`, `bot.register`, `bot.traits`, "
-                    + "`bot.cognition`, `bot.timeouts` and `bot.allow`",
+                    + "`bot.cognition`, `bot.voice`, `bot.timeouts` and `bot.allow`",
                 ),
                 help=diagnostics.Help(
                     message=f"did you mean `bot.{nearest[0]}(...)`?"
@@ -859,6 +898,7 @@ def cognition(
     associative: bool = False,
     consolidation: bool = False,
     autonomy: bool = False,
+    seeds: collections.abc.Sequence[behavior.Seed] = (),
     routines: schedule.WallClock | None = None,
 ) -> RedefinableCognition:
     """The bot's cognition, thinking with ``processor`` (``bot.cognition(processor, associative=True)``).
@@ -869,7 +909,10 @@ def cognition(
         memory: The memory every faculty shares; a fresh in-memory one when omitted.
         associative: Whether it recalls associations before it decides.
         consolidation: Whether it consolidates what it remembers.
-        autonomy: Whether it can wake itself.
+        autonomy: Whether it can wake itself, and run the behaviors it has before it deliberates.
+        seeds: Native behaviors its autonomy runs beside the ones it learns, such as
+            ``communication.speech_heard_seed()``, which takes heard speech into a conversation; they need
+            ``autonomy=True``.
         routines: The wall clock its routines run on; no routines when omitted.
     """
 
@@ -879,6 +922,7 @@ def cognition(
         associative=associative,
         consolidation=consolidation,
         autonomy=autonomy,
+        seeds=seeds,
         routines=routines,
         owned_elements=list(faculties),
         location=diagnostics.Location.capture(),
@@ -898,6 +942,31 @@ def timeouts(
         deactivation=deactivation,
         attachment=attachment,
         location=diagnostics.Location.capture(),
+    )
+
+
+def voice(
+    catalog: vocal.voice.Catalog,
+    /,
+    *,
+    designer: vocal.voice.Designer | None = None,
+    languages: collections.abc.Sequence[vocal.speech.Locale] = ("en",),
+) -> RedefinableVoice:
+    """The source the bot is given its voice from when it is born (``bot.voice(catalog, languages=("en",))``).
+
+    The first time the bot starts, its inception conceives a voice from the bot's traits, in ``languages``:
+    one ``catalog`` holds, or a new one ``designer`` makes (of the catalog's own source). Its one
+    ``speaking.Speaking`` given to ``bot.output`` speaks in it from then on, on every start after, and
+    cognition is told the voice it was given. The bot needs ``bot.traits`` to conceive it from.
+
+    Args:
+        catalog: The voices the source holds.
+        designer: What makes a new voice from a description, at the same source; none when omitted.
+        languages: The languages the voice speaks, as language tags.
+    """
+
+    return RedefinableVoice(
+        catalog=catalog, designer=designer, languages=languages, location=diagnostics.Location.capture()
     )
 
 
@@ -931,6 +1000,7 @@ _ELEMENT_FUNCTIONS: tuple[tuple[object, str], ...] = (
     (register, "register"),
     (traits, "traits"),
     (cognition, "cognition"),
+    (voice, "voice"),
     (timeouts, "timeouts"),
     (allow, "allow"),
 )
@@ -951,11 +1021,13 @@ __all__ = [
     "RedefinableRegister",
     "RedefinableTimeouts",
     "RedefinableTraits",
+    "RedefinableVoice",
     "RegisterElement",
     "Role",
     "Stray",
     "TimeoutsElement",
     "TraitsElement",
+    "VoiceElement",
     "allow",
     "attach",
     "cognition",
@@ -967,4 +1039,5 @@ __all__ = [
     "register",
     "timeouts",
     "traits",
+    "voice",
 ]

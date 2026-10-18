@@ -1,0 +1,17 @@
+"""B0023: a voice given to a bot with two Speakings, so neither is the one its voice is given to."""
+
+from mosfet import bot
+from mosfet.abilities import speaking
+from mosfet.devices import phone
+
+from tests.bot.dsl import support
+
+model = bot.define(
+    "greeter",
+    bot.traits("warm", "patient"),
+    bot.voice(support.Shelf()),
+    bot.cognition(support.Silent()),
+    bot.output(speaking.Speaking(id="near", encoder=support.Voices())),
+    bot.output(speaking.Speaking(id="far", encoder=support.Voices())),
+    bot.attach(phone.Phone()),
+)

@@ -1,8 +1,9 @@
 """``bot.describe``: what defined bots are, as JSON, read from their models alone.
 
 ``bot.describe(*models)`` reads each model's members and constructs, starts and opens nothing. It
-names what each bot is made of: its traits, its faculties, its parts by id, kind, role and the
-class each was constructed from, and its firmware's commands and states. No value given to a part's
+names what each bot is made of: its traits, its faculties (``voice`` among them when it is born with
+one), its seeds by name, its parts by id, kind, role and the class each was constructed from, and its
+firmware's commands and states. No value given to a part's
 constructor, a timeout, a faculty or a firmware attribute appears in it:
 
 >>> from mosfet import bot
@@ -22,12 +23,14 @@ constructor, a timeout, a faculty or a firmware attribute appears in it:
 ``bot.describe(*models).model_dump_json(indent=2)`` is the same as JSON.
 """
 
+import collections.abc
 import typing
 
 import hsm
 import pydantic
 
 import mosfet.device
+from mosfet import behavior
 from mosfet.abilities import memory
 
 from . import elements, firmware
@@ -89,8 +92,18 @@ class Outline(pydantic.BaseModel):
         examples=[["curious", "patient"]],
     )
     faculties: tuple[str, ...] = pydantic.Field(
-        description="Its cognition's faculties: intuition, reasoning and reflection, then each one it was given.",
-        examples=[["intuition", "reasoning", "reflection", "associative"]],
+        description=(
+            "Its cognition's faculties: intuition, reasoning and reflection, then each one it was given, and "
+            "`voice` last when `bot.voice` gives it a voice at inception."
+        ),
+        examples=[
+            ["intuition", "reasoning", "reflection", "associative"],
+            ["intuition", "reasoning", "reflection", "voice"],
+        ],
+    )
+    seeds: tuple[str, ...] = pydantic.Field(
+        description="The names of the native behaviors its autonomy is seeded with, in the order given.",
+        examples=[["SpeechHeard"], []],
     )
     memory: str | None = pydantic.Field(
         description="The class of the memory its faculties share, or null for a fresh in-memory one.",
@@ -128,6 +141,8 @@ def describe(*models: elements.Model) -> Description:
 def _outline(model: elements.Model) -> Outline:
     traits: tuple[str, ...] = ()
     faculties: tuple[str, ...] = ()
+    seeds: tuple[str, ...] = ()
+    voiced = False
     store: str | None = None
     parts: list[Part] = []
     sensory_register: str | None = None
@@ -141,9 +156,13 @@ def _outline(model: elements.Model) -> Outline:
                 parts.append(Part(id=member.name(), kind=kind, roles=tuple(roles), constructor=type(instance).__name__))
             case elements.TraitsElement(traits=given):
                 traits = tuple(str(trait) for trait in given)
-            case elements.CognitionElement(memory=given):
+            case elements.CognitionElement(memory=given, seeds=seeded):
                 faculties = member.faculties()
                 store = type(given).__name__ if isinstance(given, memory.Memory) else None
+                # A defined model's seeds are behavior.Seed descriptors, as the validator checked.
+                seeds = tuple(seed.name for seed in typing.cast(collections.abc.Sequence[behavior.Seed], seeded))
+            case elements.VoiceElement():
+                voiced = True
             case elements.RegisterElement(store=given):
                 sensory_register = type(given).__name__
             case elements.TimeoutsElement():
@@ -169,7 +188,8 @@ def _outline(model: elements.Model) -> Outline:
     return Outline(
         name=model.qualified_name[1:],
         traits=traits,
-        faculties=faculties,
+        faculties=(*faculties, "voice") if voiced else faculties,
+        seeds=seeds,
         memory=store,
         parts=tuple(parts),
         sensory_register=sensory_register,

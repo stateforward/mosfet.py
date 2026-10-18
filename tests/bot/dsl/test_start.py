@@ -20,9 +20,12 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanE
 import mosfet
 from mosfet import bot, lifecycle
 from mosfet import abilities
-from mosfet.abilities import cognition, memory, persona
+from mosfet.abilities import cognition, communication, listening, memory, persona, speaking, vocal
+from mosfet.abilities.communication import conversation
+from mosfet.abilities.communication.conversation import turn_detector
+from mosfet.abilities.hearing import voice
 from mosfet.behavior import schedule
-from mosfet.bot import body, diagnostics, elements
+from mosfet.bot import body, diagnostics, elements, testing
 from mosfet.device import Device
 from mosfet.devices import audio, phone
 from mosfet.environment import Environment
@@ -54,6 +57,7 @@ def built(monkeypatch: pytest.MonkeyPatch) -> Built:
         (memory, memory.Consolidation),
         (memory, memory.Memory),
         (persona, persona.Persona),
+        (vocal.voice, vocal.voice.Inception),
     ):
         monkeypatch.setattr(owner, cls.__name__, _recorded(cls, found))
     return found
@@ -357,6 +361,157 @@ def test_without_traits_there_is_no_persona(built: Built) -> None:
     assert [name for name, _ in built if name == "Persona"] == []
     ((_, reflection),) = [entry for entry in built if entry[0] == "Reflection"]
     assert reflection["persona"] is None
+
+
+# Seeds and the voice given at inception (W8-10)
+
+
+async def _until(done: collections.abc.Callable[[], bool], *, seconds: float = 5.0) -> None:
+    """Yield to the bot until ``done()``; the bound is the test's, for a wait that never ends."""
+
+    async with asyncio.timeout(seconds):
+        while not done():
+            await asyncio.sleep(0.01)
+
+
+def test_the_seeds_reach_autonomy_as_given(built: Built) -> None:
+    heard = communication.speech_heard_seed()
+    model = bot.define(
+        "greeter", bot.cognition(support.Silent(), autonomy=True, seeds=(heard,)), bot.attach(phone.Phone())
+    )
+    built.clear()
+
+    async def run() -> None:
+        started, _ = await _started(model)
+        await bot.stop(started)
+
+    asyncio.run(run())
+
+    ((_, given),) = [entry for entry in built if entry[0] == "Autonomy"]
+    seeded = given["seeded_behaviors"]
+    assert isinstance(seeded, tuple) and seeded == (heard,)
+    assert typing.cast(tuple[object, ...], seeded)[0] is heard
+
+
+def test_without_seeds_autonomy_runs_only_what_it_learns(built: Built) -> None:
+    model = bot.define("greeter", bot.cognition(support.Silent(), autonomy=True), bot.attach(phone.Phone()))
+    built.clear()
+
+    async def run() -> None:
+        started, _ = await _started(model)
+        await bot.stop(started)
+
+    asyncio.run(run())
+
+    ((_, given),) = [entry for entry in built if entry[0] == "Autonomy"]
+    assert given["seeded_behaviors"] == ()
+
+
+@pytest.mark.parametrize("seeded", [True, False])
+def test_the_speech_seed_takes_a_heard_turn_into_the_conversation(seeded: bool) -> None:
+    """With ``communication.speech_heard_seed()``, heard speech goes to the conversation before the model is
+    asked about it; without it, the turn is the model's to deliberate. Neither pins what the bot says."""
+
+    model = testing.Scripted()
+    talk = conversation.Conversation(
+        turn_detector=turn_detector.TurnDetector(participant_ref="bot", conversation_ref="ambient")
+    )
+    mouth = speaking.Speaking(encoder=support.Mute(), conversation=(talk,))
+    greeter = bot.define(
+        "greeter",
+        bot.cognition(model, autonomy=seeded, seeds=(communication.speech_heard_seed(),) if seeded else ()),
+        bot.output(mouth),
+        bot.attach(communication.Communication(conversations=(talk,), speaking=mouth)),
+        bot.attach(phone.Phone()),
+    )
+    speech = listening.SpeechData(
+        content=bytes([0, 1]) * 160,
+        voice_detection=voice.detection.ApplyData(
+            segments=(voice.detection.VoiceDetectionSegment(start_seconds=0.0, end_seconds=0.02, confidence=0.9),)
+        ),
+        sample_rate_hz=16_000,
+        channels=1,
+        media_type="audio/pcm",
+        source_ids=frozenset({"voice:3f2a9c"}),
+    )
+
+    async def run() -> str:
+        async with testing.running(greeter) as running:
+            # What Listening hands the body: a heard product, as a cognition input.
+            heard = cognition.InputEvent.with_data(
+                cognition.InputData(stimulus=listening.SpeechEvent.with_data(speech))
+            )
+            _ = await hsm.dispatch(running.environment, running.bot, heard)
+            if seeded:
+                await _until(lambda: "/behavior/active" in (talk.state() or ""))
+            else:
+                await _until(lambda: bool(model.woken_by(listening.SpeechEvent.name)))
+            return talk.state()
+
+    state = asyncio.run(run())
+
+    if seeded:
+        assert "/behavior/active" in state
+        assert model.woken_by(listening.SpeechEvent.name) == ()
+    else:
+        assert "/behavior/inactive" in state
+
+
+def test_a_voice_is_given_once_at_inception_from_the_traits_and_the_bot_is_born(built: Built) -> None:
+    store, shelf, voices, conceiving = memory.Memory(), support.Shelf(), support.Voices(), support.Conceiving()
+    mouth = speaking.Speaking(encoder=voices)
+    model = bot.define(
+        "greeter",
+        bot.traits("warm", "patient"),
+        bot.voice(shelf, languages=("en",)),
+        bot.cognition(conceiving, memory=store),
+        bot.output(mouth),
+        bot.attach(phone.Phone()),
+    )
+    built.clear()
+
+    async def run() -> None:
+        started, _ = await _started(model)
+        try:
+            await _until(lambda: bool(voices.calls))
+        finally:
+            await bot.stop(started)
+
+    asyncio.run(run())
+
+    ((_, given),) = [entry for entry in built if entry[0] == "Inception"]
+    assert given == {
+        "traits": persona.Traits(traits=("warm", "patient")),
+        "languages": ("en",),
+        "speaking": mouth,
+        "processor": conceiving,
+        "catalog": shelf,
+        "designer": None,
+        "memory": store,
+    }
+    assert given["speaking"] is mouth and given["memory"] is store
+    # Born: the one conception made, and Speaking told the voice it was given, once.
+    assert conceiving.conceived == 1
+    assert voices.calls == [("warm", support.WARM.description)]
+
+
+def test_without_a_voice_there_is_no_inception(built: Built) -> None:
+    model = bot.define(
+        "greeter",
+        bot.traits("warm"),
+        bot.cognition(support.Silent()),
+        bot.output(speaking.Speaking(encoder=support.Voices())),
+        bot.attach(phone.Phone()),
+    )
+    built.clear()
+
+    async def run() -> None:
+        started, _ = await _started(model)
+        await bot.stop(started)
+
+    asyncio.run(run())
+
+    assert [name for name, _ in built if name == "Inception"] == []
 
 
 # Boundary observers (DSL-26)

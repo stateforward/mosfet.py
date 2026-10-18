@@ -1,0 +1,15 @@
+"""B0022: a voice given to a bot with no traits to conceive it from."""
+
+from mosfet import bot
+from mosfet.abilities import speaking
+from mosfet.devices import phone
+
+from tests.bot.dsl import support
+
+model = bot.define(
+    "greeter",
+    bot.voice(support.Shelf()),
+    bot.cognition(support.Silent()),
+    bot.output(speaking.Speaking(encoder=support.Voices())),
+    bot.attach(phone.Phone()),
+)

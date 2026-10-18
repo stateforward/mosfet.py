@@ -58,6 +58,7 @@ what each bot is made of, and never a value given to a part:
         "reasoning",
         "reflection"
       ],
+      "seeds": [],
       "memory": null,
       "parts": [
         {
@@ -87,7 +88,8 @@ what each bot is made of, and never a value given to a part:
 | Element | What it gives the bot |
 |---|---|
 | `bot.traits(*traits)` | The owner's fixed seed of the bot's nature: short descriptors such as `"curious"`, never instructions. With traits, the bot has a persona that it develops itself. At most one. |
-| `bot.cognition(processor, /, *, memory=None, associative=False, consolidation=False, autonomy=False, routines=None)` | Its mind: intuition, reasoning and reflection on `processor`, plus each faculty switched on, all on one memory (a fresh in-memory `memory.Memory()` when none is given). `routines` is the wall clock routines keep time on. Exactly one. |
+| `bot.cognition(processor, /, *, memory=None, associative=False, consolidation=False, autonomy=False, seeds=(), routines=None)` | Its mind: intuition, reasoning and reflection on `processor`, plus each faculty switched on, all on one memory (a fresh in-memory `memory.Memory()` when none is given). `seeds` are native behaviors its autonomy runs, and need `autonomy=True`. `routines` is the wall clock routines keep time on. Exactly one. |
+| `bot.voice(catalog, /, *, designer=None, languages=("en",))` | The source it is given its voice from when it is born (see [Hearing, speaking and a voice](#hearing-speaking-and-a-voice)). At most one. |
 | `bot.attach(instance)` | A device it holds, keyed by its `id`, or an ability it acquires. |
 | `bot.input(ability)` | A sense organ: the body fans every environment stimulus out to its input abilities, in parallel. |
 | `bot.output(ability)` | An effector port, off the stimulus fan-out. |
@@ -141,6 +143,47 @@ Placement(position=Position(x=2.5, y=1.0, z=0.0), threshold_db=None, on='desk')
 The bot's world block shows the desk only through what sits on it: the computer's own element reads
 `<device ref="computer" id="…" state="…" on="desk">`. Giving the object itself to `bot.attach`,
 `bot.input` or `bot.output` is [`B0019`](bot_diagnostics.md#b0019), whose help deletes that element.
+
+## Hearing, speaking and a voice
+
+A bot that listens and speaks has ears given to `bot.input` (a `listening.Listening`) and a mouth given
+to `bot.output` (a `speaking.Speaking`). Heard speech is taken into a conversation by a native
+behavior its autonomy runs before it deliberates, `communication.speech_heard_seed()`, given as
+`seeds=` with `autonomy=True`; what it then says, if anything, is its own.
+
+`bot.voice(catalog)` gives the bot its voice the first time it starts: its inception conceives one
+from its traits, on its cognition's processor, as a voice the `catalog` holds or one its `designer`
+makes, and its one `speaking.Speaking` speaks in it from then on, on every start after (memory keeps
+it). The Speaking's `encoder` is then a factory, `(key, description) -> encoder`, called with the voice
+the bot was given. `bot.describe` lists `voice` among its faculties and the seeds by name:
+
+```pycon
+>>> from mosfet.abilities import communication, speaking, vocal
+>>> class Shelf(vocal.voice.Catalog):
+...     """The voices a source holds: a provider's catalog in a real bot file."""
+...     source = "lab"
+...     async def voices(self, *, languages=(), descriptors=None):
+...         return ()
+>>> def encoder(key, description):
+...     """A speech encoder in the voice `key`: a provider's in a real bot file."""
+...     raise NotImplementedError
+>>> talker = bot.define(
+...     "talker",
+...     bot.traits("warm", "patient"),
+...     bot.voice(Shelf(), languages=("en",)),
+...     bot.cognition(testing.Scripted(), autonomy=True, seeds=(communication.speech_heard_seed(),)),
+...     bot.output(speaking.Speaking(encoder=encoder)),
+...     bot.attach(computer.Computer(id="kitchen")),
+... )
+>>> outline = bot.describe(talker).bots[0]
+>>> outline.faculties, outline.seeds
+(('intuition', 'reasoning', 'reflection', 'autonomy', 'voice'), ('SpeechHeard',))
+
+```
+
+Seeds without autonomy are [`B0021`](bot_diagnostics.md#b0021); a voice needs the bot's traits
+([`B0022`](bot_diagnostics.md#b0022)) and exactly one `speaking.Speaking` in `bot.output`
+([`B0023`](bot_diagnostics.md#b0023)).
 
 ## Knowing people
 

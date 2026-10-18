@@ -9,8 +9,9 @@ code, the source span, notes on why, and a `help:` that shows the rewrite. Error
 warnings. `bot.explain("<code>")` prints any entry below.
 
 The examples assume `from mosfet import bot`, `from mosfet.devices import phone`,
-`from mosfet.abilities import memory`, `import hsm`, `import mosfet`, `import datetime`, `import pydantic`,
-a `processor` (a `processing.Processor`) and an `environment`.
+`from mosfet.abilities import communication, memory, speaking`, `import hsm`, `import mosfet`,
+`import datetime`, `import pydantic`, a `processor` (a `processing.Processor`), an `environment`, a
+`catalog` (a `vocal.voice.Catalog`) and `voices` (an encoder factory `(key, description) -> encoder`).
 
 - [`B0001`](#b0001) (error): the bot's name is missing or not lower snake case
 - [`B0002`](#b0002) (error): the bot has no `bot.cognition`
@@ -31,6 +32,9 @@ a `processor` (a `processing.Processor`) and an `environment`.
 - [`B0017`](#b0017) (error): `bot.define` is given something that is not a bot element
 - [`B0018`](#b0018) (error): `bot.allow` names a lint that does not exist
 - [`B0019`](#b0019) (error): an object is given to the bot
+- [`B0021`](#b0021) (error): `bot.cognition` is given seeds but no autonomy
+- [`B0022`](#b0022) (error): `bot.voice` is given to a bot with no traits
+- [`B0023`](#b0023) (error): `bot.voice` is given to a bot without exactly one `speaking.Speaking` in `bot.output`
 - [`B0101`](#b0101) (error): a model is started again while its parts run
 - [`B0102`](#b0102) (error): a part raised while `bot.start` built the bot
 - [`B0103`](#b0103) (error): `bot.start` is given something that is not an `Environment`
@@ -161,7 +165,7 @@ model = bot.define("greeter", bot.cognition(processor), bot.attach(phone.Phone()
 
 **error:** an element is given something it does not take
 
-`bot.attach` takes a device or an ability; `bot.input` and `bot.output` take an ability; `bot.register` takes a `memory.StmMemory`; `bot.cognition` takes a `processing.Processor` first, and `memory=` takes a `memory.Memory`. The help names the element that takes what was given.
+`bot.attach` takes a device or an ability; `bot.input` and `bot.output` take an ability; `bot.register` takes a `memory.StmMemory`; `bot.cognition` takes a `processing.Processor` first, `memory=` takes a `memory.Memory` and `seeds=` takes `behavior.Seed`s; `bot.voice` takes a `vocal.voice.Catalog` first, `designer=` takes a `vocal.voice.Designer` and `languages=` takes language tags. The help names the element that takes what was given.
 
 Why: Each element is one part of the body: a device is held, a sense organ is an input, a processor is cognition's. Giving a part to the wrong element would wire it where it cannot work.
 
@@ -221,7 +225,7 @@ model = bot.define("greeter", bot.cognition(processor), bot.attach(phone.Phone()
 
 **error:** an element a bot has once is given twice
 
-A bot has at most one `bot.traits`, `bot.cognition`, `bot.timeouts`, `bot.register` and `bot.allow`.
+A bot has at most one `bot.traits`, `bot.cognition`, `bot.voice`, `bot.timeouts`, `bot.register` and `bot.allow`.
 
 Why: Each is one thing about the bot. Merge the two into one, for example one `bot.traits` with every trait.
 
@@ -458,7 +462,7 @@ model = bot.define("greeter", bot.cognition(processor), bot.attach(Lamp()))
 
 **error:** `bot.define` is given something that is not a bot element
 
-`bot.define` takes the bot's name, then elements: `bot.attach`, `bot.input`, `bot.output`, `bot.register`, `bot.traits`, `bot.cognition` and `bot.timeouts`. A device, a processor or a tuple of elements given directly is this error, and the help says which element takes it.
+`bot.define` takes the bot's name, then elements: `bot.attach`, `bot.input`, `bot.output`, `bot.register`, `bot.traits`, `bot.cognition`, `bot.voice`, `bot.timeouts` and `bot.allow`. A device, a processor, a seed or a tuple of elements given directly is this error, and the help says which element takes it.
 
 Why: Each element says what a part is to the body; a bare part has no place in it until it is given to one.
 
@@ -522,6 +526,100 @@ model = bot.define(
     "greeter",
     bot.cognition(processor),
     bot.attach(phone.Phone(placement=desk.surface())),
+)
+```
+
+## B0021
+
+**error:** `bot.cognition` is given seeds but no autonomy
+
+`seeds=` are native behaviors, such as `communication.speech_heard_seed()`, which takes heard speech into a conversation. Autonomy runs them, beside the behaviors the bot learns, before the bot deliberates; `bot.cognition` without `autonomy=True` has nothing to run them. The help switches autonomy on.
+
+Why: A seed nothing runs is machinery for nothing: the speech it was given for would never reach the conversation.
+
+Wrong:
+
+```python
+model = bot.define(
+    "listener",
+    bot.cognition(processor, seeds=(communication.speech_heard_seed(),)),
+    bot.attach(phone.Phone()),
+)
+```
+
+Right:
+
+```python
+model = bot.define(
+    "listener",
+    bot.cognition(processor, autonomy=True, seeds=(communication.speech_heard_seed(),)),
+    bot.attach(phone.Phone()),
+)
+```
+
+## B0022
+
+**error:** `bot.voice` is given to a bot with no traits
+
+The first time a bot with `bot.voice` starts, its inception conceives its voice from its traits. A bot without `bot.traits` has none to conceive it from. The traits are the owner's to give, so the help's trait is only an example.
+
+Why: A voice is part of who the bot is, so it comes from the owner's seed of its nature, never from a default; the bot keeps the voice it is given for life.
+
+Wrong:
+
+```python
+model = bot.define(
+    "greeter",
+    bot.voice(catalog),
+    bot.cognition(processor),
+    bot.output(speaking.Speaking(encoder=voices)),
+    bot.attach(phone.Phone()),
+)
+```
+
+Right:
+
+```python
+model = bot.define(
+    "greeter",
+    bot.traits("warm", "patient"),
+    bot.voice(catalog),
+    bot.cognition(processor),
+    bot.output(speaking.Speaking(encoder=voices)),
+    bot.attach(phone.Phone()),
+)
+```
+
+## B0023
+
+**error:** `bot.voice` is given to a bot without exactly one `speaking.Speaking` in `bot.output`
+
+The voice inception gives is said by the bot's mouth: the one `speaking.Speaking` given to `bot.output`. A bot with none has nothing to speak in it, and a bot with two has no one mouth for it. The Speaking's `encoder` is a factory `(key, description) -> encoder`, so it speaks in the voice it is given.
+
+Why: A bot has one voice, and one mouth says it; which of two Speakings would be the bot's is not the DSL's to guess.
+
+Wrong:
+
+```python
+model = bot.define(
+    "greeter",
+    bot.traits("warm", "patient"),
+    bot.voice(catalog),
+    bot.cognition(processor),
+    bot.attach(phone.Phone()),
+)
+```
+
+Right:
+
+```python
+model = bot.define(
+    "greeter",
+    bot.traits("warm", "patient"),
+    bot.voice(catalog),
+    bot.cognition(processor),
+    bot.output(speaking.Speaking(encoder=voices)),
+    bot.attach(phone.Phone()),
 )
 ```
 

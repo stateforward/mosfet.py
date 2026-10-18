@@ -47,13 +47,14 @@ import pydantic
 
 import mosfet.device
 
-from mosfet import event, lifecycle, runtime
-from mosfet.abilities import memory, persona, processing
+from mosfet import behavior, event, lifecycle, runtime
+from mosfet.abilities import memory, persona, processing, speaking, vocal
 from mosfet.abilities.communication.conversation.conversation import snake_case
 
 from . import diagnostics, elements, firmware, lints
 
 _NAME: pydantic.TypeAdapter[str] = pydantic.TypeAdapter(runtime.BotName)
+_LANGUAGES: pydantic.TypeAdapter[tuple[str, ...]] = pydantic.TypeAdapter(tuple[vocal.speech.Locale, ...])
 
 
 class Error(hsm.ErrorValidatingModel):
@@ -216,6 +217,10 @@ class Validator(hsm.ModelValidator):
 
     def _validate_cognition(self, model: elements.Model, member: elements.CognitionElement) -> None:
         call = diagnostics.Span.of(member.location)
+        # The seeds as written: the first that is not a seed, or what was given when it is no sequence of them.
+        given = member.seeds
+        seeds = given if isinstance(given, collections.abc.Sequence) and not isinstance(given, str | bytes) else None
+        stray = given if seeds is None else next((seed for seed in seeds if not isinstance(seed, behavior.Seed)), None)
         checks: tuple[tuple[int | str, object, bool, str], ...] = (
             (0, member.processor, isinstance(member.processor, processing.Processor), "a `processing.Processor`"),
             (
@@ -225,15 +230,36 @@ class Validator(hsm.ModelValidator):
                 "a `memory.Memory`",
             ),
             ("routines", member.routines, member.routines is None or callable(member.routines), "a wall clock"),
+            ("seeds", stray, stray is None, "`behavior.Seed`s"),
         )
+        self._arguments(model, call, "bot.cognition", checks)
+        if seeds and stray is None and not member.autonomy:
+            model.findings.append(self._unrun(call))
+
+    def _arguments(
+        self,
+        model: elements.Model,
+        call: diagnostics.Span,
+        function: str,
+        checks: tuple[tuple[int | str, object, bool, str], ...],
+    ) -> None:
+        """B0006 for each argument of ``function``'s call at ``call`` that ``checks`` finds is not what it takes.
+
+        Each check is the argument's position or keyword, the value found wrong in it, whether it is
+        valid, and what the argument takes.
+        """
+
         for key, value, valid, takes in checks:
             if valid:
                 continue
             found = diagnostics.argument(call, key)
             primary = call if found is None else found[0]
             written = "..." if found is None else diagnostics.text(primary)
-            where = "bot.cognition" if key == 0 else f"bot.cognition({key}=)"
-            misplacement = elements.misplaced(value, primary, written, where)
+            where = function if key == 0 else f"{function}({key}=)"
+            # A string is a trait's, which no keyword argument is given in place of.
+            misplacement = (
+                elements.misplaced(value, primary, written, where) if key == 0 or not isinstance(value, str) else None
+            )
             model.findings.append(
                 misplacement.model_copy(
                     update={
@@ -251,6 +277,115 @@ class Validator(hsm.ModelValidator):
                     help=diagnostics.Help(message=f"pass {takes}"),
                 )
             )
+
+    def _unrun(self, call: diagnostics.Span) -> diagnostics.Diagnostic:
+        """B0021: ``bot.cognition``, written at ``call``, is given seeds and no autonomy to run them.
+
+        The help switches autonomy on: it rewrites a written ``autonomy=False``, or writes
+        ``autonomy=True`` before ``seeds=``.
+        """
+
+        node = diagnostics.call(call)
+        given = None if node is None else next((item for item in node.keywords if item.arg == "seeds"), None)
+        written = diagnostics.argument(call, "autonomy")
+        if written is not None:
+            suggestion = diagnostics.Suggestion(span=written[0], replacement="True", applicability="machine-applicable")
+        elif given is not None:
+            start = diagnostics.node_span(call, given)
+            suggestion = diagnostics.Suggestion(
+                span=start.model_copy(update={"end_lineno": start.lineno, "end_col": start.col}),
+                replacement="autonomy=True, ",
+                applicability="machine-applicable",
+            )
+        else:
+            suggestion = None
+        seeds = diagnostics.argument(call, "seeds")
+        return diagnostics.Diagnostic(
+            code="B0021",
+            level="error",
+            message="`bot.cognition` is given seeds but no autonomy to run them",
+            primary=(call if seeds is None else seeds[0]).model_copy(update={"label": "these never run"}),
+            notes=(
+                "a seed is a native behavior that autonomy runs before the bot deliberates; without autonomy "
+                + "nothing runs it",
+            ),
+            help=diagnostics.Help(message="give the cognition its autonomy: `autonomy=True`", suggestion=suggestion),
+        )
+
+    def _validate_voice(self, model: elements.Model, member: elements.VoiceElement) -> None:
+        call = diagnostics.Span.of(member.location)
+        given = member.languages
+        try:
+            spoken = not isinstance(given, str | bytes) and bool(
+                _LANGUAGES.validate_python(tuple(typing.cast(collections.abc.Iterable[object], given)))
+            )
+        except (TypeError, pydantic.ValidationError):
+            spoken = False
+        checks: tuple[tuple[int | str, object, bool, str], ...] = (
+            (0, member.catalog, isinstance(member.catalog, vocal.voice.Catalog), "a `vocal.voice.Catalog`"),
+            (
+                "designer",
+                member.designer,
+                member.designer is None or isinstance(member.designer, vocal.voice.Designer),
+                "a `vocal.voice.Designer`",
+            ),
+            ("languages", given, spoken, 'language tags such as `("en",)`'),
+        )
+        self._arguments(model, call, "bot.voice", checks)
+        # What the bot file wrote, so a part another diagnostic refused still counts as given.
+        written = model.owned_elements
+        if not any(isinstance(element, elements.RedefinableTraits) for element in written):
+            model.findings.append(
+                diagnostics.Diagnostic(
+                    code="B0022",
+                    level="error",
+                    message="`bot.voice` is given to a bot with no `bot.traits`",
+                    primary=diagnostics.Span.of(member.location, "conceived from traits the bot does not have"),
+                    notes=(
+                        "the bot's voice is conceived at its inception from its traits, the owner's seed of its "
+                        + "nature; with none, there is nothing to conceive it from",
+                    ),
+                    help=diagnostics.Help(
+                        message="give the bot its traits, which are the owner's to choose",
+                        suggestion=diagnostics.append(diagnostics.Span.of(model.location), 'bot.traits("warm")'),
+                    ),
+                )
+            )
+        mouths: list[elements.RedefinableAttachment] = []
+        for element in written:
+            if (
+                isinstance(element, elements.RedefinableAttachment)
+                and element.role == "output"
+                and isinstance(element.instance, speaking.Speaking)
+                and not any(known.instance is element.instance for known in mouths)
+            ):
+                mouths.append(element)
+        if len(mouths) == 1:
+            return
+        notes = (
+            "the voice inception gives is said by the bot's one `speaking.Speaking`, its mouth, given to "
+            + "`bot.output`",
+        )
+        if mouths:
+            message = f"`bot.voice` is given to a bot with {len(mouths)} `speaking.Speaking`s in `bot.output`"
+            help = diagnostics.Help(message="give `bot.output` one `speaking.Speaking`, the mouth the voice is for")
+        else:
+            message = "`bot.voice` is given to a bot with no `speaking.Speaking` in `bot.output`"
+            help = diagnostics.Help(
+                message="give the bot its mouth: `bot.output(speaking.Speaking(encoder=...))`, with an encoder "
+                + "factory `(key, description) -> encoder` for the voice it is given"
+            )
+        model.findings.append(
+            diagnostics.Diagnostic(
+                code="B0023",
+                level="error",
+                message=message,
+                primary=diagnostics.Span.of(member.location, "a voice for one mouth"),
+                secondary=tuple(diagnostics.Span.of(mouth.location, "a `speaking.Speaking`") for mouth in mouths),
+                notes=notes,
+                help=help,
+            )
+        )
 
     def _validate_firmware(self, model: elements.Model, member: firmware.FirmwareElement) -> None:
         offered: dict[str, elements.AttachmentElement] = {}

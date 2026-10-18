@@ -1,0 +1,14 @@
+"""B0023: a voice given to a bot with no Speaking to say anything in it."""
+
+from mosfet import bot
+from mosfet.devices import phone
+
+from tests.bot.dsl import support
+
+model = bot.define(
+    "greeter",
+    bot.traits("warm", "patient"),
+    bot.voice(support.Shelf()),
+    bot.cognition(support.Silent()),
+    bot.attach(phone.Phone()),
+)

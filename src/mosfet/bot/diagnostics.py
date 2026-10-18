@@ -348,7 +348,9 @@ EXPLANATIONS: tuple[Explanation, ...] = (
         meaning=(
             "`bot.attach` takes a device or an ability; `bot.input` and `bot.output` take an ability; "
             "`bot.register` takes a `memory.StmMemory`; `bot.cognition` takes a `processing.Processor` first, "
-            "and `memory=` takes a `memory.Memory`. The help names the element that takes what was given."
+            "`memory=` takes a `memory.Memory` and `seeds=` takes `behavior.Seed`s; `bot.voice` takes a "
+            "`vocal.voice.Catalog` first, `designer=` takes a `vocal.voice.Designer` and `languages=` takes "
+            "language tags. The help names the element that takes what was given."
         ),
         why=(
             "Each element is one part of the body: a device is held, a sense organ is an input, a processor is "
@@ -383,7 +385,8 @@ EXPLANATIONS: tuple[Explanation, ...] = (
         level="error",
         title="an element a bot has once is given twice",
         meaning=(
-            "A bot has at most one `bot.traits`, `bot.cognition`, `bot.timeouts`, `bot.register` and `bot.allow`."
+            "A bot has at most one `bot.traits`, `bot.cognition`, `bot.voice`, `bot.timeouts`, `bot.register` and "
+            "`bot.allow`."
         ),
         why="Each is one thing about the bot. Merge the two into one, for example one `bot.traits` with every trait.",
         wrong=(
@@ -539,7 +542,8 @@ EXPLANATIONS: tuple[Explanation, ...] = (
         title="`bot.define` is given something that is not a bot element",
         meaning=(
             "`bot.define` takes the bot's name, then elements: `bot.attach`, `bot.input`, `bot.output`, "
-            "`bot.register`, `bot.traits`, `bot.cognition` and `bot.timeouts`. A device, a processor or a "
+            "`bot.register`, `bot.traits`, `bot.cognition`, `bot.voice`, `bot.timeouts` and `bot.allow`. A device, "
+            "a processor, a seed or a "
             "tuple of elements given directly is this error, and the help says which element takes it."
         ),
         why="Each element says what a part is to the body; a bare part has no place in it until it is given to one.",
@@ -577,6 +581,72 @@ EXPLANATIONS: tuple[Explanation, ...] = (
             'desk = mosfet.environment.Object(id="desk")\n'
             'model = bot.define(\n    "greeter",\n    bot.cognition(processor),\n'
             "    bot.attach(phone.Phone(placement=desk.surface())),\n)"
+        ),
+    ),
+    Explanation(
+        code="B0021",
+        level="error",
+        title="`bot.cognition` is given seeds but no autonomy",
+        meaning=(
+            "`seeds=` are native behaviors, such as `communication.speech_heard_seed()`, which takes heard speech "
+            "into a conversation. Autonomy runs them, beside the behaviors the bot learns, before the bot "
+            "deliberates; `bot.cognition` without `autonomy=True` has nothing to run them. The help switches "
+            "autonomy on."
+        ),
+        why="A seed nothing runs is machinery for nothing: the speech it was given for would never reach the conversation.",
+        wrong=(
+            'model = bot.define(\n    "listener",\n'
+            "    bot.cognition(processor, seeds=(communication.speech_heard_seed(),)),\n"
+            "    bot.attach(phone.Phone()),\n)"
+        ),
+        right=(
+            'model = bot.define(\n    "listener",\n'
+            "    bot.cognition(processor, autonomy=True, seeds=(communication.speech_heard_seed(),)),\n"
+            "    bot.attach(phone.Phone()),\n)"
+        ),
+    ),
+    Explanation(
+        code="B0022",
+        level="error",
+        title="`bot.voice` is given to a bot with no traits",
+        meaning=(
+            "The first time a bot with `bot.voice` starts, its inception conceives its voice from its traits. A bot "
+            "without `bot.traits` has none to conceive it from. The traits are the owner's to give, so the help's "
+            "trait is only an example."
+        ),
+        why=(
+            "A voice is part of who the bot is, so it comes from the owner's seed of its nature, never from a "
+            "default; the bot keeps the voice it is given for life."
+        ),
+        wrong=(
+            'model = bot.define(\n    "greeter",\n    bot.voice(catalog),\n    bot.cognition(processor),\n'
+            "    bot.output(speaking.Speaking(encoder=voices)),\n    bot.attach(phone.Phone()),\n)"
+        ),
+        right=(
+            'model = bot.define(\n    "greeter",\n    bot.traits("warm", "patient"),\n    bot.voice(catalog),\n'
+            "    bot.cognition(processor),\n    bot.output(speaking.Speaking(encoder=voices)),\n"
+            "    bot.attach(phone.Phone()),\n)"
+        ),
+    ),
+    Explanation(
+        code="B0023",
+        level="error",
+        title="`bot.voice` is given to a bot without exactly one `speaking.Speaking` in `bot.output`",
+        meaning=(
+            "The voice inception gives is said by the bot's mouth: the one `speaking.Speaking` given to "
+            "`bot.output`. A bot with none has nothing to speak in it, and a bot with two has no one mouth for it. "
+            "The Speaking's `encoder` is a factory `(key, description) -> encoder`, so it speaks in the voice it "
+            "is given."
+        ),
+        why="A bot has one voice, and one mouth says it; which of two Speakings would be the bot's is not the DSL's to guess.",
+        wrong=(
+            'model = bot.define(\n    "greeter",\n    bot.traits("warm", "patient"),\n    bot.voice(catalog),\n'
+            "    bot.cognition(processor),\n    bot.attach(phone.Phone()),\n)"
+        ),
+        right=(
+            'model = bot.define(\n    "greeter",\n    bot.traits("warm", "patient"),\n    bot.voice(catalog),\n'
+            "    bot.cognition(processor),\n    bot.output(speaking.Speaking(encoder=voices)),\n"
+            "    bot.attach(phone.Phone()),\n)"
         ),
     ),
     Explanation(
@@ -858,10 +928,10 @@ EXPLANATIONS: tuple[Explanation, ...] = (
 """Every code and lint, in code order. A retired code keeps its entry and is never reused.
 
 The examples assume ``from mosfet import bot``, ``from mosfet.devices import phone``,
-``from mosfet.abilities import memory``, ``import hsm``, ``import mosfet``, ``import datetime``,
-``import pydantic``, a
-``processor`` (a ``processing.Processor``) and an ``environment`` (an ``Environment``); a test runs
-every one of them.
+``from mosfet.abilities import communication, memory, speaking``, ``import hsm``, ``import mosfet``,
+``import datetime``, ``import pydantic``, a ``processor`` (a ``processing.Processor``), an
+``environment`` (an ``Environment``), a ``catalog`` (a ``vocal.voice.Catalog``) and ``voices`` (an
+encoder factory ``(key, description) -> vocal.speech.SpeechEncoder``); a test runs every one of them.
 """
 
 
@@ -911,8 +981,9 @@ def document() -> str:
         'warnings. `bot.explain("<code>")` prints any entry below.',
         "",
         "The examples assume `from mosfet import bot`, `from mosfet.devices import phone`,",
-        "`from mosfet.abilities import memory`, `import hsm`, `import mosfet`, `import datetime`, `import pydantic`,",
-        "a `processor` (a `processing.Processor`) and an `environment`.",
+        "`from mosfet.abilities import communication, memory, speaking`, `import hsm`, `import mosfet`,",
+        "`import datetime`, `import pydantic`, a `processor` (a `processing.Processor`), an `environment`, a",
+        "`catalog` (a `vocal.voice.Catalog`) and `voices` (an encoder factory `(key, description) -> encoder`).",
         "",
     ]
     lines.extend(

@@ -3,8 +3,10 @@
 ``bot.start(ctx, model, data)`` follows ``hsm.start(ctx, instance, data)``. It builds the bot's body,
 ``mosfet.Bot``, around the very parts the bot file constructed and gave to ``bot.define``: its
 devices by id, its abilities in their roles, its sensory register and timeouts, and a cognition
-built once from ``bot.cognition``'s processor and flags on one shared memory (a fresh in-memory
-``memory.Memory()`` when none was given), with a persona when the model has traits. The body takes
+built once from ``bot.cognition``'s processor, flags and seeds on one shared memory (a fresh in-memory
+``memory.Memory()`` when none was given), with a persona when the model has traits and, with
+``bot.voice``, the inception that gives the bot its voice: conceived on cognition's processor from the
+traits, said by the one ``speaking.Speaking`` given to ``bot.output``, and kept in that memory. The body takes
 the bot's name, so it runs as ``/<name>`` and its devices as ``/<name><DeviceClass>``. It then starts
 the body in ``ctx`` with ``data`` as its start data, joins it to the environment, and awaits the
 body's answer to its activation:
@@ -76,8 +78,8 @@ import hsm
 from opentelemetry import metrics
 
 import mosfet
-from mosfet import abilities, lifecycle
-from mosfet.abilities import cognition, memory, persona, processing
+from mosfet import abilities, behavior, lifecycle
+from mosfet.abilities import cognition, memory, persona, processing, speaking, vocal
 from mosfet.behavior import schedule
 from mosfet.device import Device
 from mosfet.environment import Environment
@@ -201,7 +203,16 @@ async def _start(
         name,
         sum(isinstance(part, Device) for part in held),
         sum(isinstance(part, abilities.Ability) for part in held),
-        ",".join(_cognition(model).faculties()),
+        ",".join(
+            (
+                *_cognition(model).faculties(),
+                *(
+                    ["voice"]
+                    if any(isinstance(member, elements.VoiceElement) for member in model.members.values())
+                    else []
+                ),
+            )
+        ),
         "yes" if any(isinstance(member, firmware.FirmwareElement) for member in model.members.values()) else "no",
     )
     return instance
@@ -305,6 +316,7 @@ def _body(
         "output": [],
     }
     traits: elements.TraitsElement | None = None
+    voice: elements.VoiceElement | None = None
     timeouts: elements.TimeoutsElement | None = None
     register: memory.StmMemory | None = None
     compiled: firmware.FirmwareElement | None = None
@@ -317,6 +329,8 @@ def _body(
                     roles[role].append(ability)
             case elements.TraitsElement():
                 traits = member
+            case elements.VoiceElement():
+                voice = member
             case elements.TimeoutsElement():
                 timeouts = member
             case elements.RegisterElement(store=store):
@@ -326,8 +340,29 @@ def _body(
             case _:
                 pass
     declared = _cognition(model)
+    # bot.define's validator has checked each value's type; the elements keep them as written.
+    processor = typing.cast(processing.Processor, declared.processor)
+    given = typing.cast(memory.Memory | None, declared.memory)
+    store = memory.Memory() if given is None else given
+    nature = None if traits is None else persona.Traits(traits=typing.cast(tuple[str, ...], traits.traits))
+    born: vocal.voice.Inception | None = None
+    # With a voice, the validator has checked the bot has traits and exactly one Speaking in bot.output.
+    if voice is not None and nature is not None:
+        (mouth,) = [ability for ability in roles["output"] if isinstance(ability, speaking.Speaking)]
+        try:
+            born = vocal.voice.Inception(
+                traits=nature,
+                languages=tuple(typing.cast(collections.abc.Sequence[str], voice.languages)),
+                speaking=mouth,
+                processor=processor,
+                catalog=typing.cast(vocal.voice.Catalog, voice.catalog),
+                designer=typing.cast(vocal.voice.Designer | None, voice.designer),
+                memory=store,
+            )
+        except Exception as error:
+            raise _raised(name, voice.location, "voice", error, location) from error
     try:
-        mind = _mind(declared, traits)
+        mind = _mind(declared, processor, store, nature, born)
     except Exception as error:
         raise _raised(name, declared.location, "cognition", error, location) from error
     # A firmware of its own for every body: it starts fresh with each start of the model, and takes
@@ -382,29 +417,36 @@ def _peers(
     return peers
 
 
-def _mind(declared: elements.CognitionElement, traits: elements.TraitsElement | None) -> cognition.Cognition:
-    """Cognition, its faculties and its persona, all on one memory, from ``bot.cognition`` and ``bot.traits``."""
+def _mind(
+    declared: elements.CognitionElement,
+    processor: processing.Processor,
+    store: memory.Memory,
+    nature: persona.Traits | None,
+    voice: vocal.voice.Inception | None,
+) -> cognition.Cognition:
+    """Cognition, its faculties, its persona and the ``voice`` it is given at inception, all on ``store``.
 
-    # bot.define's validator has checked each value's type; the element keeps them as written.
-    processor = typing.cast(processing.Processor, declared.processor)
-    given = typing.cast(memory.Memory | None, declared.memory)
-    store = memory.Memory() if given is None else given
+    ``declared`` is ``bot.cognition`` as written, ``processor`` its processor, and ``nature`` the traits
+    of ``bot.traits``, which give the bot a persona.
+    """
+
     now = typing.cast(schedule.WallClock | None, declared.routines)
-    self_knowledge = (
-        None
-        if traits is None
-        else persona.Persona(traits=persona.Traits(traits=typing.cast(tuple[str, ...], traits.traits)), memory=store)
-    )
+    self_knowledge = None if nature is None else persona.Persona(traits=nature, memory=store)
     return cognition.Cognition(
         intuition=cognition.Intuition(processor=processor),
         reasoning=cognition.Reasoning(processor=processor),
         reflection=cognition.Reflection(processor=processor, memory=store, persona=self_knowledge),
-        autonomy=cognition.Autonomy(memory=store) if declared.autonomy else None,
+        autonomy=cognition.Autonomy(
+            memory=store, seeded_behaviors=tuple(typing.cast(collections.abc.Sequence[behavior.Seed], declared.seeds))
+        )
+        if declared.autonomy
+        else None,
         routines=None if now is None else cognition.Routines(memory=store, now=now),
         memory=store,
         associative=memory.Associative(memory=store) if declared.associative else None,
         consolidation=memory.Consolidation(memory=store, processor=processor) if declared.consolidation else None,
         persona=self_knowledge,
+        voice=voice,
     )
 
 

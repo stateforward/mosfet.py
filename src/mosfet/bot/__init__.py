@@ -71,7 +71,20 @@ model, a bot running for an ``async with`` block, and its snapshot. ``docs/bot.m
 from .define import DefinitionError, Error, Finalizer, RedefinableBot, Validator, define, redefine
 from .describe import Description, FirmwareOutline, Outline, Part, describe
 from .diagnostics import Diagnostic, Help, Location, Span, Suggestion, explain
-from .elements import Element, Model, allow, attach, cognition, input, output, register, timeouts, traits
+from .elements import (
+    Element,
+    Model,
+    RedefinableVoice,
+    allow,
+    attach,
+    cognition,
+    input,
+    output,
+    register,
+    timeouts,
+    traits,
+    voice,
+)
 from .firmware import (
     Firmware,
     activity,
@@ -127,6 +140,7 @@ __all__ = [
     "Part",
     "Process",
     "RedefinableBot",
+    "RedefinableVoice",
     "Span",
     "StartError",
     "Suggestion",
@@ -177,5 +191,6 @@ __all__ = [
     "timeouts",
     "traits",
     "transition",
+    "voice",
     "when",
 ]
