@@ -1063,6 +1063,48 @@ def test_a_daemon_lost_mid_request_is_answered_unavailable_and_the_host_reopens(
     _within(scenario)
 
 
+@pytest.mark.parametrize("step", ["exec_create", "exec_start"])
+def test_a_daemon_lost_mid_request_is_logged_with_its_step_and_transport_error_types_never_their_messages(
+    step: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    engine = Engine()
+    lost = {"now": False}
+    path = {"exec_create": "/exec", "exec_start": "/start"}[step]
+
+    def transport() -> httpx.AsyncBaseTransport:
+        served = engine.transport()
+
+        async def reset(request: httpx.Request) -> httpx.Response:
+            if not (lost["now"] and request.url.path.endswith(path)):
+                return await served.handle_async_request(request)
+            try:
+                raise ConnectionResetError(54, f"reset by {_SECRET}")
+            except ConnectionResetError as error:
+                raise httpx.ReadError(f"read failed for {_SECRET}", request=request) from error
+
+        return httpx.MockTransport(reset)
+
+    async def scenario() -> None:
+        harness = await _harness(_host(transport=transport))
+        try:
+            await harness.opened()
+            machine = await harness.create()
+            lost["now"] = True
+            answered = await harness.run(machine, sandbox.RunData(argv=("true",)))
+            assert isinstance(answered, sandbox.HostFailureData) and answered.kind is sandbox.FailureKind.UNAVAILABLE
+        finally:
+            await harness.stop()
+
+    with caplog.at_level(logging.WARNING, logger="mosfet.providers.docker.host"):
+        _within(scenario)
+
+    lost_records = [record.getMessage() for record in caplog.records if "lost the daemon" in record.getMessage()]
+    assert len(lost_records) == 1
+    assert f"during its {step} step" in lost_records[0]
+    assert "ReadError from ConnectionResetError" in lost_records[0]
+    assert _SECRET not in lost_records[0]
+
+
 def test_requests_that_arrive_while_one_is_served_wait_in_line_and_are_served_in_order(
     tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

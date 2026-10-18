@@ -60,6 +60,8 @@ Telemetry (scope ``bot.providers.docker``; every attribute value comes from a cl
 * ``bot.provider.docker.deferred.count`` — requests that waited in line, no attributes: 1.
 * One ``bot.docker.exchange`` span per exchange, with ``bot.docker.step`` and, on failure, ``bot.failure.kind``.
 * A refusal at open is logged once per kind (``mapping.Refusal``).
+* A daemon lost mid-request is logged with the step and the types of the transport error and its causes
+  (``ReadError from ConnectionResetError``), never their messages.
 
 Never used as attributes, logs or messages: argv, paths, file text, output, environment values, image
 references, container, exec or request ids, or exit codes.
@@ -117,6 +119,7 @@ _OK: typing.Final = frozenset({200})
 _MAX_LINE: typing.Final = 16
 _MAX_BACKOFF_DOUBLINGS: typing.Final = 30
 _MESSAGE_CHARS: typing.Final = 1024
+_MAX_CAUSES: typing.Final = 8
 _TIMED_OUT_EXITS: typing.Final = frozenset({124, 137})
 _KILLED_EXIT: typing.Final = 137
 _MIN_DURATION: typing.Final = datetime.timedelta(0)
@@ -234,6 +237,10 @@ class _ExchangeFailedData(pydantic.BaseModel):
     request_id: str | None
     step: Step
     kind: sandbox.FailureKind
+    transport_error: tuple[str, ...] = pydantic.Field(
+        default=(),
+        description="The failed transport's error type and its causes' types, outermost first; never messages.",
+    )
     carry: _Carry = pydantic.Field(default_factory=_Carry)
 
 
@@ -434,10 +441,20 @@ class Host(Traced):
         kind: sandbox.FailureKind | None = None,
         refusal: mapping.Refusal | None = None,
         too_large: bool = False,
+        error: BaseException | None = None,
     ) -> None:
         if status is None:
+            transport_error: tuple[str, ...] = ()
+            cause = error
+            while cause is not None and len(transport_error) < _MAX_CAUSES:
+                transport_error += (type(cause).__name__,)
+                cause = cause.__cause__ if cause.__cause__ is not None else cause.__context__
             failure = _ExchangeFailedData(
-                request_id=request_id, step=step, kind=kind or sandbox.FailureKind.FAILED, carry=carry
+                request_id=request_id,
+                step=step,
+                kind=kind or sandbox.FailureKind.FAILED,
+                transport_error=transport_error,
+                carry=carry,
             )
             _ = hsm.dispatch(ctx, instance, _ExchangeFailedEvent.with_data(failure))
             return
@@ -464,6 +481,7 @@ class Host(Traced):
         started = time.monotonic()  # telemetry only; hsm.after owns the deadline
         answered: int | None = None
         kind: sandbox.FailureKind | None = None
+        failed: httpx.TransportError | None = None
         refusal: mapping.Refusal | None = None
         with span.operation(
             "bot.docker.exchange", scope=_SCOPE, component=_COMPONENT, stage=step, attributes={_STEP_ATTR: step}
@@ -480,8 +498,9 @@ class Host(Traced):
                         carry = read(answered, body, carry)
                     if refuse is not None:
                         refusal = refuse(body)
-            except httpx.TransportError:
+            except httpx.TransportError as error:
                 kind = sandbox.FailureKind.UNAVAILABLE
+                failed = error
             except (_BodyTooLargeError, httpx.HTTPError, httpx.StreamError, ValueError):
                 # An answer that could not be read or parsed: the step failed, and the host stays up.
                 kind = sandbox.FailureKind.FAILED
@@ -489,7 +508,7 @@ class Host(Traced):
                 span.record_failure(active, kind.value)
         Host._count(step, Host._label(answered, kind), started)
         status = answered if kind is None else None
-        Host._complete(ctx, instance, step, request_id, carry, status=status, kind=kind, refusal=refusal)
+        Host._complete(ctx, instance, step, request_id, carry, status=status, kind=kind, refusal=refusal, error=failed)
 
     @staticmethod
     def _label(answered: int | None, kind: sandbox.FailureKind | None) -> str:
@@ -832,8 +851,15 @@ class Host(Traced):
     def _lose(ctx: hsm.Context, instance: "Host", event: hsm.Event[typing.Any]) -> None:
         """The daemon was lost mid-request; leaving ``open`` answers the request and the rest of the line."""
 
-        del ctx, instance, event
+        del ctx, instance
+        data = event.data
+        assert isinstance(data, _ExchangeFailedData)
         _OPENS.add(1, {"outcome": "down_unavailable"})
+        _LOGGER.warning(
+            "The Docker Engine sandbox host lost the daemon during its %s step (%s); it answers unavailable and reopens.",
+            data.step,
+            " from ".join(data.transport_error),
+        )
 
     @staticmethod
     def _answer_broken(ctx: hsm.Context, instance: "Host", event: hsm.Event[typing.Any]) -> None:
@@ -1039,6 +1065,7 @@ class Host(Traced):
             started = time.monotonic()  # measures RanData.duration only; hsm.after owns every deadline
             answered: int | None = None
             kind: sandbox.FailureKind | None = None
+            failed: httpx.TransportError | None = None
             too_large = False
             with span.operation(
                 "bot.docker.exchange",
@@ -1065,8 +1092,9 @@ class Host(Traced):
                                 demux.close()
                         else:
                             _ = await Host._capped(response)
-                except httpx.TransportError:
+                except httpx.TransportError as error:
                     kind = sandbox.FailureKind.UNAVAILABLE
+                    failed = error
                 except (stream.StreamError, _BodyTooLargeError, httpx.HTTPError, httpx.StreamError):
                     kind = sandbox.FailureKind.FAILED
                 if kind is not None:
@@ -1095,7 +1123,15 @@ class Host(Traced):
                     )
                     carry = carry.model_copy(update={"output": output, "duration": duration})
             Host._complete(
-                ctx, instance, "exec_start", request_id, carry, status=status, kind=kind, too_large=too_large
+                ctx,
+                instance,
+                "exec_start",
+                request_id,
+                carry,
+                status=status,
+                kind=kind,
+                too_large=too_large,
+                error=failed,
             )
 
         return activity
