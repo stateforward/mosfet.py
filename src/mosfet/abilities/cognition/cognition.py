@@ -3,6 +3,7 @@ from .. import memory
 from .. import persona
 from .. import processing
 from .. import vocal
+from ..language import text
 
 import dataclasses
 import datetime
@@ -61,6 +62,10 @@ _MEMORY_IMAGES: typing.Final = media.ImageCapacity(
 # Bounds of what one remembered act keeps (memory.Act's own limits).
 _MAX_ACTS: typing.Final = 32
 _MAX_ACT_REASON: typing.Final = 4000
+# What an episode keeps of the turn's own output, rendered after what was perceived: text only (an image the bot
+# showed is kept as its placeholder), within a quarter of the episode's text, so the stimulus keeps the rest.
+_OUTPUT_IMAGES: typing.Final = media.ImageCapacity()
+_MAX_OUTPUT_BYTES: typing.Final = memory.MAX_EPISODE_TEXT_BYTES // 4
 
 _LOG = logging.getLogger(__name__)
 
@@ -326,7 +331,8 @@ class Cognition(ability.Ability[InputData, OutputData]):
     without associations.
 
     With ``memory`` composed, Cognition attaches it and remembers every turn it settles —
-    completed, failed, or cancelled — as one ``memory.RememberEvent`` it does not wait on. With
+    completed, failed, or cancelled — as one ``memory.RememberEvent`` it does not wait on: what it
+    perceived, then its own output (``OutputEvent``), so recall covers what it did as well. With
     ``associative`` composed too, a turn autonomy leaves unhandled first asks it what memory
     associates with the stimulus; the associations ride the turn to intuition and reasoning (as
     their frames' ``recalled`` context) and to reflection. An association that fails or times out
@@ -483,24 +489,44 @@ class Cognition(ability.Ability[InputData, OutputData]):
         """Send memory the turn just settled, stamped here, where the turn is owned; never waited on.
 
         Every outcome carries the turn's input: a completed or failed turn from its terminal, a
-        cancelled or rebooted one from its ``_TurnOpenedEvent``. Memory's reply is not awaited:
-        Memory counts its own outcome, and no transition here consumes it.
+        cancelled or rebooted one from its ``_TurnOpenedEvent``. The episode's parts are what the bot
+        perceived, then, when the turn selected anything, its own output (``OutputEvent``: what it
+        showed, said and asked of its tools), so what it did is recalled with what it perceived; a
+        tool's result is perceived on a later turn and kept as that turn's. Memory's reply is not
+        awaited: Memory counts its own outcome, and no transition here consumes it.
         """
 
         store = instance._memory
         if store is None:
             return
+        acts = output[:_MAX_ACTS]
+        did = (
+            projection.memory_content(
+                OutputEvent.with_data(acts), capacity=_OUTPUT_IMAGES, budget_bytes=_MAX_OUTPUT_BYTES
+            )
+            if acts
+            else ()
+        )
+        # One newline joins the output to the last text of what was perceived.
+        spent = sum(len(part.text.encode()) + 1 for part in did if isinstance(part, text.TextPart))
+        perceived = projection.memory_content(
+            cognition_input.stimulus, capacity=_MEMORY_IMAGES, budget_bytes=memory.MAX_EPISODE_TEXT_BYTES - spent
+        )
+        last = perceived[-1] if perceived else None
+        parts = (
+            (*perceived[:-1], text.TextPart(text="\n".join(part.text for part in (last, *did) if part.kind == "text")))
+            if isinstance(last, text.TextPart) and did
+            else (*perceived, *did)
+        )
         try:
             episode = memory.EpisodeData(
                 turn_id=operation_id,
                 stimulus=input.stimulus_name(cognition_input.stimulus),
-                parts=projection.memory_content(
-                    cognition_input.stimulus, capacity=_MEMORY_IMAGES, budget_bytes=memory.MAX_EPISODE_TEXT_BYTES
-                ),
+                parts=parts,
                 participants=cognition_input.participants,
                 focus=cognition_input.focus,
                 focus_candidates=cognition_input.focus_candidates[:_MAX_ACTS],
-                acts=tuple(_act(selection) for selection in output[:_MAX_ACTS]),
+                acts=tuple(_act(selection) for selection in acts),
                 outcome=outcome,
             )
         except pydantic.ValidationError as error:

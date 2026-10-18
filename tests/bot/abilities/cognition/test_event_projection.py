@@ -453,6 +453,22 @@ def test_memory_content_keeps_only_memory_fields_including_the_causal_parent() -
     assert "an older line" in prompt
 
 
+def test_a_json_list_of_objects_renders_every_object_and_nested_list() -> None:
+    selection = cognition.types.EventData(
+        event="computer.show",
+        target="desk",
+        data={"elements": [{"kind": "text", "id": "reply", "text": "fib.py passes 3 tests"}, [1, "two"]]},
+    )
+
+    for rendered in (
+        _text(cognition.event.model_facing_content(selection, capacity=_TEXT_ONLY)),
+        _text(cognition.event.memory_content(selection, capacity=_TEXT_ONLY)),
+    ):
+        assert 'key="text"' in rendered
+        assert "fib.py passes 3 tests" in rendered
+        assert "<item>two</item>" in rendered
+
+
 def test_memory_content_without_the_marker_matches_the_prompt_projection() -> None:
     stimulus = SoundEvent.with_data(SoundData(audio=b"ring", kind="phone.ringing"))
 

@@ -3958,6 +3958,43 @@ def test_cognition_associates_before_intuition_and_remembers_the_completed_turn(
     assert kept.text
 
 
+def test_cognition_remembers_what_it_did_alongside_what_it_perceived_and_recalls_both() -> None:
+    """A completed turn's episode is what was perceived, then cognition's own output; a later turn recalls both."""
+
+    async def run() -> tuple[tuple[memory.Episode, ...], list[processing.InputData]]:
+        store = memory.Memory()
+        intuition_processor = RecordingIntuitionProcessor(focus_output("phone", "the phone is ringing"))
+        ability = RecordingCognition(
+            intuition_processor=intuition_processor,
+            reflection=cognition.Reflection(processor=FixedProcessor(no_output("observed")), memory=store),
+            store=store,
+            associative=memory.Associative(memory=store),
+        )
+        ctx = await start_cognition_ability_for_test(ability)
+        await wait_until(lambda: ability.state().endswith("/idle"))
+        _ = await dispatch_ability_for_test(ability, ctx, await started_cognition_input(ctx))
+        await wait_until(lambda: ability.state().endswith("/idle"))
+        # Memory serves in order, so the turn's remember (sent first) is kept before this read.
+        episodes = await _remembered(ctx, store)
+        _ = await dispatch_ability_for_test(ability, ctx, await started_cognition_input(ctx))
+        await wait_until(lambda: ability.state().endswith("/idle"))
+        return episodes, intuition_processor.calls
+
+    episodes, intuition_calls = asyncio.run(run())
+
+    (kept,) = episodes
+    perceived = kept.text.index("<events:input_event")
+    did = kept.text.index(f'stimulus:event="{cognition.OutputEvent.name}"')
+    assert perceived < did
+    assert mosfet.FocusDeviceEvent.name in kept.text[did:]
+    assert "the phone is ringing" in kept.text[did:]
+    assert [act.event for act in kept.acts] == [mosfet.FocusDeviceEvent.name]
+    _, later = intuition_calls
+    assert isinstance(later.recalled, memory.AssociationsData)
+    (recalled,) = later.recalled.items
+    assert recalled.text == kept.text
+
+
 def test_an_association_that_fails_leaves_the_turn_without_associations_not_failed() -> None:
     async def run() -> tuple[cognition.types.OutputData, list[processing.InputData], str]:
         store = memory.Memory()

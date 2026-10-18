@@ -474,6 +474,9 @@ def _fill_field(
                 text = str(serialized_item).lower() if isinstance(serialized_item, bool) else str(serialized_item)
                 budget.consume_scalar(text)
                 _subelement(child, "item", budget).text = text
+            elif isinstance(serialized_item, collections.abc.Mapping | list | tuple):
+                # A JSON object or list among the items (a selection's untyped data) renders as one item.
+                _fill_field(child, "item", item, serialized_items[index], budget)
         return
     if isinstance(value, enum.Enum):
         _set_attribute(element, name, str(serialized), budget)

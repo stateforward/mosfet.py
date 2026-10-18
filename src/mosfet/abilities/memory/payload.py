@@ -1,7 +1,8 @@
 """Typed payloads of the episodic ``Memory``: what is remembered, searched, fetched, and consolidated.
 
 An episode is one cognition turn as its producer stamped it: the memory rendering of the stimulus
-(text and image parts), who took part, what the bot chose to do, and how the turn ended. Memory
+(text and image parts) followed by the bot's own output on that turn, who took part, what the bot chose
+to do, and how the turn ended. Memory
 keeps every episode as a node of a graph (episodes, the persons they involve, and the concepts
 consolidation merges them into), with a canonical vector per node in the embedder's space.
 
@@ -207,7 +208,8 @@ class EpisodeData(pydantic.BaseModel):
         default=(),
         max_length=MAX_EPISODE_PARTS,
         description=(
-            "The memory rendering of the stimulus: text parts and at most 8 image parts, in order. Text totals "
+            "The memory rendering of the turn: the stimulus (text parts and at most 8 image parts, in order), then "
+            "what the bot output, when it selected anything. Text totals "
             f"at most {MAX_EPISODE_TEXT_BYTES} UTF-8 bytes."
         ),
         examples=[[{"kind": "text", "text": "Ada: can you call me back at noon?"}]],
