@@ -471,6 +471,33 @@ def test_processor_without_a_draft_sink_does_not_stream() -> None:
     assert [(item.event, item.data) for item in output] == [(_SayEvent.name, {"text": "Whole."})]
 
 
+def test_processor_an_owner_runs_unstreamed_calls_without_drafts() -> None:
+    # Live (builder check round 2, E1): reasoning passes a draft sink, so the call streamed, and the owner's
+    # proxy never streams a tool call (only ": ping"), so every reasoning step stalled until its bound.
+    generator = RecordingGenerator(
+        content="",
+        tool_calls=(
+            text.TextToolCall(
+                id="tc1",
+                name=processing.DISPATCH_TOOL_NAME,
+                args={"events": [{"event": "tests.openai_compat.say", "data": {"text": "Whole."}}]},
+            ),
+        ),
+    )
+    drafts: list[processing.DraftData] = []
+
+    output = asyncio.run(
+        Processor(generator=generator, stream=False).process(
+            processing.InputData(input="hello", schemas=(_SayEvent,), instructions="Select events from schemas."),
+            drafts=drafts.append,
+        )
+    )
+
+    assert generator.deltas == [False]
+    assert drafts == []
+    assert [(item.event, item.data) for item in output] == [(_SayEvent.name, {"text": "Whole."})]
+
+
 class _SlotData(pydantic.BaseModel):
     """One appointment slot."""
 

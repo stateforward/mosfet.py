@@ -161,6 +161,15 @@ class Settings(pydantic.BaseModel):
     model: str = pydantic.Field(
         alias="OPENAI_MODEL", min_length=1, description="The model that endpoint serves.", examples=["qwen3-coder"]
     )
+    stream: bool = pydantic.Field(
+        default=True,
+        alias="OPENAI_STREAM",
+        description=(
+            "Whether the model's calls are streamed, so what the bot is writing reaches the screen as it writes;"
+            + " off for an endpoint that cannot stream a tool call."
+        ),
+        examples=[True, False],
+    )
     socket: pathlib.Path = pydantic.Field(
         alias="BUILDER_SANDBOX_SOCKET",
         description="The rootless Docker or Podman API socket the bench runs on; it has no safe default.",

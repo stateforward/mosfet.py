@@ -704,10 +704,12 @@ class Processor(processing.Processor):
     """OpenAI-compatible transport: input (+ stamped instructions) → events array.
 
     ``image_capacity`` is stamped once from the generator, so the projection attaches exactly the
-    images that generator accepts.
+    images that generator accepts. ``stream`` is the owner's: ``False`` for an endpoint that cannot stream
+    a tool call (a proxy that sends only keep-alives), so every call is made whole and nothing is drafted.
     """
 
     _generator: text.generation.TextGenerator
+    _stream: bool
     image_capacity: mosfet.media.ImageCapacity
 
     def __init__(
@@ -717,6 +719,7 @@ class Processor(processing.Processor):
         client: ChatCompletionClient | None = None,
         provider: str | None = "openai_compat",
         extra_body: collections.abc.Mapping[str, object] | None = None,
+        stream: bool = True,
     ) -> None:
         if generator is not None and client is not None:
             raise ValueError("Provide either generator or client, not both.")
@@ -729,6 +732,7 @@ class Processor(processing.Processor):
                 extra_body=extra_body or {},
             )
         self._generator = generator
+        self._stream = stream
         self.image_capacity = generator.image_capacity
 
     @typing.override
@@ -739,7 +743,8 @@ class Processor(processing.Processor):
 
         With ``drafts``, the call is streamed and its arguments are read as they arrive
         (:class:`processing.DraftParser`), so marked fields reach ``drafts`` while the model is still writing them.
-        The selection returned is parsed from the whole call, exactly as without drafts.
+        The selection returned is parsed from the whole call, exactly as without drafts. A processor its owner
+        made with ``stream=False`` never streams, so ``drafts`` is never called.
         """
 
         instructions = (input.instructions or "").strip()
@@ -778,7 +783,7 @@ class Processor(processing.Processor):
                     drafts(written)
 
         output = await self._generator.generate(
-            generation_input, deltas=draft if drafts is not None and operation_tools else None
+            generation_input, deltas=draft if self._stream and drafts is not None and operation_tools else None
         )
         try:
             if output.tool_calls:

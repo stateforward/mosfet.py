@@ -163,6 +163,7 @@ def test_the_required_settings_alone_take_every_default() -> None:
         "local-model",
         pathlib.Path("/nonexistent/podman.sock"),
     )
+    assert settings.stream is True
     # Bench image 2 has mosfet installed, so the bot can write and test bots on it (W7-14).
     assert settings.image == builder_bot_example.DEFAULT_IMAGE == "localhost/mosfet-bench:2"
     assert (settings.egress_network, settings.runtime) == (None, "runc")
@@ -181,6 +182,7 @@ def test_every_owner_setting_has_a_working_value() -> None:
     settings = builder_bot_example.Settings.model_validate(
         {
             **_REQUIRED,
+            "OPENAI_STREAM": "false",
             "BUILDER_SANDBOX_IMAGE": "localhost/mosfet-bench:3",
             "BUILDER_SANDBOX_EGRESS_NETWORK": "builder-egress",
             "BUILDER_SANDBOX_RUNTIME": "runsc",
@@ -192,6 +194,8 @@ def test_every_owner_setting_has_a_working_value() -> None:
         }
     )
 
+    # Live (builder check round 2, E1): the owner's proxy never streams a tool call, so the owner turns it off.
+    assert settings.stream is False
     assert settings.image == "localhost/mosfet-bench:3"
     assert (settings.egress_network, settings.runtime) == ("builder-egress", "runsc")
     assert (settings.host, settings.port, settings.peer, settings.person_id) == ("0.0.0.0", 9000, "desk-2", "person-1")
@@ -225,6 +229,7 @@ def test_each_required_setting_is_named_when_it_is_missing(unset: str) -> None:
 @pytest.mark.parametrize(
     ("variable", "value"),
     [
+        ("OPENAI_STREAM", "sometimes"),
         ("BUILDER_COMPUTER_PORT", "0"),
         ("BUILDER_COMPUTER_PORT", "65536"),
         ("BUILDER_COMPUTER_PORT", "eighty"),

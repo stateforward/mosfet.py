@@ -53,7 +53,9 @@ each `text.Delta` as it arrives: new content, or new arguments of one tool call.
 the whole stream and is the same, authoritative result as without `deltas`. `Processor.process(input, drafts=...)` uses
 this to read the streamed `dispatch` arguments with `processing.DraftParser`, so a marked field (for example
 the `words` of each of `communication.respond`'s `parts`) reaches its target as a draft while the model is still
-writing it.
+writing it. Some endpoints cannot stream a tool call (a proxy that sends only `: ping` keep-alives and never a
+chunk), so their owner makes the processor with `Processor(..., stream=False)`: every call is then made whole, and
+`drafts` is never called.
 `ResponsesTextGenerator` does not stream; it ignores `deltas`.
 
 Local models often send a nested array or object as a JSON string, for example `{"events": "[{...}]"}`. Tool call

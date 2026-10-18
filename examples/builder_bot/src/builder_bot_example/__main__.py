@@ -1,9 +1,9 @@
 """The builder bot file: ``python -m builder_bot_example`` runs the builder for one person on this host.
 
 Reads the owner's :class:`~builder_bot_example.Settings` from the environment (``OPENAI_BASE_URL``,
-``OPENAI_MODEL``, ``BUILDER_SANDBOX_SOCKET`` and the optional ``BUILDER_*`` variables) and two secrets:
-``openai_api_key`` (a placeholder for a keyless local server) and ``computer_token_secret``, the key the
-terminal's token is signed with. Each is the Docker secret, the file named by ``<NAME>_FILE``, or
+``OPENAI_MODEL``, ``BUILDER_SANDBOX_SOCKET`` and the optional ``OPENAI_STREAM`` and ``BUILDER_*`` variables) and
+two secrets: ``openai_api_key`` (a placeholder for a keyless local server) and ``computer_token_secret``, the
+key the terminal's token is signed with. Each is the Docker secret, the file named by ``<NAME>_FILE``, or
 ``<NAME>``. The process options (``MOSFET_*`` or flags) are ``bot.process``'s; memory is kept in
 ``<data dir>/memory.sqlite3``. A missing or malformed setting or secret ends the process with exit ``1``,
 naming it, before anything starts. So does a bench image that was not built for the mosfet commit this host
@@ -63,6 +63,7 @@ if __name__ == "__main__":
                     api_key=process.secrets.get("openai_api_key").get_secret_value(),
                 ),
                 provider="builder_bot",
+                stream=settings.stream,
             ),
             memory=memory.Memory(database=str(process.data_dir / "memory.sqlite3")),
             associative=True,
