@@ -46,6 +46,7 @@ from .describe import Description, Outline, Part, describe
 from .diagnostics import Diagnostic, Help, Location, Span, Suggestion, explain
 from .elements import Element, Model, allow, attach, cognition, input, output, register, timeouts, traits
 from .firmware import (
+    Firmware,
     activity,
     after,
     at,
@@ -66,6 +67,8 @@ from .firmware import (
     on_call,
     on_set,
     operation,
+    report,
+    send,
     shallow_history,
     source,
     state,
@@ -86,6 +89,7 @@ __all__ = [
     "Element",
     "Error",
     "Finalizer",
+    "Firmware",
     "Help",
     "LintWarning",
     "Location",
@@ -130,7 +134,9 @@ __all__ = [
     "process",
     "redefine",
     "register",
+    "report",
     "run",
+    "send",
     "shallow_history",
     "source",
     "start",

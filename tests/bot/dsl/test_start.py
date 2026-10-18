@@ -22,7 +22,7 @@ from mosfet import bot, lifecycle
 from mosfet import abilities
 from mosfet.abilities import cognition, memory, persona
 from mosfet.behavior import schedule
-from mosfet.bot import body, diagnostics
+from mosfet.bot import body, diagnostics, elements
 from mosfet.device import Device
 from mosfet.devices import audio, phone
 from mosfet.environment import Environment
@@ -85,6 +85,7 @@ class Recording(body.Bot):
         deactivation_timeout: datetime.timedelta | None = None,
         attachment_timeout: datetime.timedelta | None = None,
         stm_memory: memory.StmMemory | None = None,
+        firmware: hsm.Instance | None = None,
     ) -> None:
         parts: dict[str, object] = {
             "cognition": cognition,
@@ -95,6 +96,7 @@ class Recording(body.Bot):
             "deactivation_timeout": deactivation_timeout,
             "attachment_timeout": attachment_timeout,
             "stm_memory": stm_memory,
+            "firmware": firmware,
         }
         Recording.given.append((tuple(devices), parts))
         super().__init__(
@@ -107,6 +109,7 @@ class Recording(body.Bot):
             deactivation_timeout=deactivation_timeout,
             attachment_timeout=attachment_timeout,
             stm_memory=stm_memory,
+            firmware=firmware,
         )
 
     @typing.override
@@ -489,6 +492,28 @@ def test_a_part_shared_with_a_running_bot_is_b0101() -> None:
     (found,) = asyncio.run(run()).diagnostics
     assert found.code == "B0101"
     assert [span.label for span in found.secondary] == ["this memory is already running"]
+
+
+def test_two_parts_with_one_id_are_never_both_the_firmwares_peer() -> None:
+    """DSL-18: the firmware sends by id, so a model edited past define's B0003 is B0102, not a shadowed part."""
+
+    model = bot.define(
+        "greeter",
+        bot.cognition(support.Silent()),
+        bot.attach(phone.Phone(id="ear")),
+        bot.initial(bot.target("idle")),
+        bot.state("idle"),
+    )
+    model.members["/greeter/voice"] = elements.AttachmentElement(
+        qualified_name="/greeter/voice", instance=memory.Memory(id="ear"), roles=["output"], location=model.location
+    )
+
+    with pytest.raises(bot.StartError) as caught:
+        _ = asyncio.run(_started(model))
+
+    (found,) = caught.value.diagnostics
+    assert found.code == "B0102"
+    assert isinstance(caught.value.__cause__, ValueError)
 
 
 def test_a_part_that_raises_while_the_bot_is_built_is_b0102_chained_to_its_cause(

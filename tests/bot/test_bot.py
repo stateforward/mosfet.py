@@ -6072,3 +6072,360 @@ def test_body_rebuild_of_a_device_report_names_no_participants() -> None:
     (handed,) = asyncio.run(run())
 
     assert handed.participants == ()
+
+
+# The body's one firmware (DSL-14, DSL-17, DSL-20): owned, started last, stopped first, shown and offered.
+
+
+class _ChimeData(pydantic.BaseModel):
+    """Chime once."""
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(frozen=True, extra="forbid")
+
+
+_ChimeEvent = hsm.Event[_ChimeData](name="tests.bot.firmware.chime", kind=event_contract.EventKind, schema=_ChimeData)
+
+
+def _firmware_started(ctx: hsm.Context, instance: "RecordingFirmware", event: hsm.Event[typing.Any]) -> None:
+    del ctx, event
+    instance.started_with.append(tuple(bool(device_bots(device)) for device in instance.devices))
+
+
+def _firmware_stopped(ctx: hsm.Context, instance: "RecordingFirmware", event: hsm.Event[typing.Any]) -> None:
+    del ctx, event
+    instance.stopped_with.append(tuple(bool(device_bots(device)) for device in instance.devices))
+
+
+def _chime(ctx: hsm.Context, instance: "RecordingFirmware", event: hsm.Event[typing.Any]) -> None:
+    del ctx
+    instance.chimes.append(event)
+    (count, _) = typing.cast(tuple[int, bool], instance.get("chimes"))
+    _ = instance.set("chimes", count + 1)
+
+
+_RECORDING_FIRMWARE_MODEL = mosfet.define(
+    "TestFirmware",
+    hsm.attribute("chimes", int, 0),
+    hsm.initial(hsm.target("idle")),
+    hsm.state(
+        "idle",
+        hsm.entry(_firmware_started),
+        hsm.exit(_firmware_stopped),
+        hsm.transition(hsm.on(_ChimeEvent), hsm.effect(_chime), hsm.target("../chimed")),
+    ),
+    hsm.state("chimed", hsm.exit(_firmware_stopped)),
+)
+
+
+class RecordingFirmware(hsm.Instance):
+    """Machinery an owner wrote for a bot: records whether the bot's devices were held when it started and stopped."""
+
+    model: hsm.Model
+    devices: tuple[Device, ...]
+    started_with: list[tuple[bool, ...]]
+    stopped_with: list[tuple[bool, ...]]
+    chimes: list[hsm.Event[typing.Any]]
+
+    def __init__(self, *devices: Device, model: hsm.Model = _RECORDING_FIRMWARE_MODEL) -> None:
+        super().__init__()
+        self.model = model
+        self.devices = devices
+        self.started_with = []
+        self.stopped_with = []
+        self.chimes = []
+
+
+class FailingFirmware(RecordingFirmware):
+    """Firmware whose start raises."""
+
+    @typing.override
+    async def start(self, ctx: hsm.Context, data: object = None) -> typing.Self:
+        del ctx, data
+        raise RuntimeError("firmware failed")
+
+
+class HangingFirmware(RecordingFirmware):
+    """Firmware whose start never answers."""
+
+    @typing.override
+    async def start(self, ctx: hsm.Context, data: object = None) -> typing.Self:
+        del ctx, data
+        _ = await asyncio.Event().wait()
+        return self
+
+
+class FirmwareAgent(Bot):
+    """A body with one device, one ignoring cognition and the firmware it is given."""
+
+    def __init__(
+        self,
+        device: Device,
+        firmware: hsm.Instance,
+        *,
+        cognition: abilities.Ability[typing.Any, typing.Any] | processing.Processing | None = None,
+        attachment_timeout: datetime.timedelta | None = None,
+    ) -> None:
+        super().__init__(
+            devices=(device,),
+            cognition=as_cognition(cognition or IgnoreAbility()),
+            attachment_timeout=attachment_timeout,
+            firmware=firmware,
+        )
+
+
+async def start_firmware_bot(active_bot: Bot) -> Environment:
+    """Start ``active_bot`` and wait past its firmware step, until it is active."""
+
+    environment = await start_bot_with_devices(active_bot)
+    await wait_until(lambda: active_bot.state().startswith("/Bot/active"))
+    return environment
+
+
+def test_bot_starts_its_firmware_once_its_parts_are_attached_and_declares_it_on_its_snapshot() -> None:
+    """DSL-20: the firmware is the last activation step, run in the body's environment."""
+
+    async def run() -> tuple[str, list[tuple[bool, ...]], object, str, bool, str | None]:
+        desk = Device(id="desk")
+        firmware = RecordingFirmware(desk)
+        active_bot = FirmwareAgent(desk, firmware)
+        environment = await start_firmware_bot(active_bot)
+        try:
+            attributes = active_bot.take_snapshot().Attributes or {}
+            return (
+                active_bot.state(),
+                list(firmware.started_with),
+                attributes.get("/Bot/firmware"),
+                hsm.id(firmware),
+                environment.contains(firmware),
+                environment.model_snapshot(active_bot),
+            )
+        finally:
+            _ = await active_bot.detach(environment)
+
+    state, started_with, declared, runtime_id, in_environment, world = asyncio.run(run())
+
+    assert state == "/Bot/active/unfocused"
+    assert started_with == [(True,)]
+    assert declared == runtime_id
+    assert in_environment
+    assert world is not None
+    assert f'<firmware ref="firmware" id="{runtime_id}" state="/TestFirmware/idle">' in world
+    assert "<chimes>0</chimes>" in world
+
+
+def test_bot_offers_its_firmwares_commands_under_firmware_while_a_state_reacts_to_them() -> None:
+    """DSL-17: cognition is offered the firmware's commands under the reserved key, and a selection reaches it."""
+
+    async def run() -> tuple[list[processing.InputData], RecordingFirmware, list[hsm.Event[typing.Any]], str]:
+        ability = IgnoreAbility()
+        desk = Device(id="desk")
+        firmware = RecordingFirmware(desk)
+        active_bot = FirmwareAgent(desk, firmware, cognition=ability)
+        environment = await start_firmware_bot(active_bot)
+        try:
+            _ = await active_bot.dispatch(
+                active_bot.context(),
+                mosfet.InputEvent.with_data(mosfet.InputEventData(target_device="desk", priority=3)),
+            )
+            await wait_until(lambda: len(ability.calls) == 1)
+            _ = await hsm.dispatch(environment, firmware, _ChimeEvent.with_data(_ChimeData()))
+            await wait_until(lambda: firmware.state() == "/TestFirmware/chimed")
+            _ = await active_bot.dispatch(
+                active_bot.context(),
+                mosfet.InputEvent.with_data(mosfet.InputEventData(target_device="desk", priority=3)),
+            )
+            await wait_until(lambda: len(ability.calls) == 2)
+            return ability.calls, firmware, list(firmware.chimes), firmware.state()
+        finally:
+            _ = await active_bot.detach(environment)
+
+    calls, firmware, chimes, state = asyncio.run(run())
+
+    assert calls[0].actors["firmware"] is firmware
+    assert _ChimeEvent.name in {schema.name for schema in calls[0].schemas}
+    assert calls[0].actor_events[_ChimeEvent.name] == ("firmware",)
+    assert len(chimes) == 1
+    assert state == "/TestFirmware/chimed"
+    # Once no active state reacts to it, the command is no longer offered.
+    assert _ChimeEvent.name not in {schema.name for schema in calls[1].schemas}
+
+
+def test_bot_without_firmware_offers_and_declares_none() -> None:
+    async def run() -> tuple[list[processing.InputData], dict[str, object]]:
+        ability = IgnoreAbility()
+        active_bot = AbilityAgent(devices=configured_devices("desk"), cognition=ability)
+        environment = await start_firmware_bot(active_bot)
+        try:
+            _ = await active_bot.dispatch(
+                active_bot.context(),
+                mosfet.InputEvent.with_data(mosfet.InputEventData(target_device="desk", priority=3)),
+            )
+            await wait_until(lambda: len(ability.calls) == 1)
+            return ability.calls, dict(active_bot.take_snapshot().Attributes or {})
+        finally:
+            _ = await active_bot.detach(environment)
+
+    calls, attributes = asyncio.run(run())
+
+    assert "firmware" not in calls[0].actors
+    assert attributes.get("/Bot/firmware") is None
+
+
+@pytest.mark.parametrize(
+    ("firmware_type", "outcome"),
+    [(FailingFirmware, "failed"), (HangingFirmware, "timeout")],
+    ids=["start raises", "start never answers"],
+)
+def test_bot_activation_fails_and_rolls_back_when_its_firmware_does_not_start(
+    firmware_type: type[RecordingFirmware], outcome: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """DSL-20: a firmware that fails or does not start in the attachment bound fails the activation."""
+
+    async def run() -> tuple[list[tuple[str, str]], str, bool]:
+        replies = await started_replies()
+        desk = Device(id="desk")
+        active_bot = FirmwareAgent(desk, firmware_type(desk), attachment_timeout=datetime.timedelta(milliseconds=500))
+        environment = Environment()
+        _ = await active_bot.attach(environment, reply_to=replies, operation_id="op-start")
+        await wait_until(lambda: active_bot.state() == "/Bot/inactive" and len(replies.terminals) == 1)
+        return replies.ledger(), active_bot.state(), mosfet.lifecycle.is_started(desk)
+
+    with metric_reader.recording(tmp_path, monkeypatch) as metrics:
+        before = metrics.points("bot.firmware.start.count")
+        ledger, state, desk_running = asyncio.run(run())
+        after = metrics.points("bot.firmware.start.count")
+
+    assert ledger == [("bot.activating.failed", "op-start")]
+    assert state == "/Bot/inactive"
+    assert not desk_running
+
+    def total(points: tuple[metric_reader.Point, ...], label: str) -> float:
+        return sum(point.value for point in points if point.attributes == {"bot.outcome": label})
+
+    assert total(after, outcome) - total(before, outcome) == 1
+    assert {key for point in after for key in point.attributes} == {"bot.outcome"}
+
+
+def test_bot_counts_a_firmware_that_starts(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    async def run() -> None:
+        desk = Device(id="desk")
+        active_bot = FirmwareAgent(desk, RecordingFirmware(desk))
+        environment = await start_firmware_bot(active_bot)
+        _ = await active_bot.detach(environment)
+
+    with metric_reader.recording(tmp_path, monkeypatch) as metrics:
+        before = metrics.points("bot.firmware.start.count")
+        asyncio.run(run())
+        after = metrics.points("bot.firmware.start.count")
+
+    def total(points: tuple[metric_reader.Point, ...]) -> float:
+        return sum(point.value for point in points if point.attributes == {"bot.outcome": "ok"})
+
+    assert total(after) - total(before) == 1
+
+
+def test_bot_stops_its_firmware_first_and_starts_it_fresh_when_it_activates_again() -> None:
+    """DSL-20: deactivation stops the firmware while its parts are still held; activation restarts it from fresh."""
+
+    async def run() -> tuple[list[tuple[bool, ...]], list[tuple[bool, ...]], str, str, object]:
+        desk = Device(id="desk")
+        firmware = RecordingFirmware(desk)
+        active_bot = FirmwareAgent(desk, firmware)
+        environment = await start_firmware_bot(active_bot)
+        first = hsm.id(firmware)
+        _ = await hsm.dispatch(environment, firmware, _ChimeEvent.with_data(_ChimeData()))
+        await wait_until(lambda: firmware.state() == "/TestFirmware/chimed")
+        _ = await active_bot.detach(environment)
+        await wait_until(lambda: active_bot.state() == "/Bot/inactive")
+        _ = await active_bot.attach(environment)
+        await wait_until(lambda: active_bot.state() == "/Bot/active/unfocused")
+        try:
+            (chimes, _) = typing.cast(tuple[int, bool], firmware.get("chimes"))
+            return list(firmware.stopped_with), list(firmware.started_with), first, hsm.id(firmware), chimes
+        finally:
+            _ = await active_bot.detach(environment)
+
+    stopped_with, started_with, first, second, chimes = asyncio.run(run())
+
+    assert stopped_with[0] == (True,)
+    assert started_with == [(True,), (True,)]
+    assert first != second
+    assert chimes == 0
+
+
+def test_stopping_a_bot_stops_its_firmware_before_its_parts() -> None:
+    async def run() -> tuple[list[tuple[bool, ...]], bool]:
+        desk = Device(id="desk")
+        firmware = RecordingFirmware(desk)
+        active_bot = FirmwareAgent(desk, firmware)
+        environment = await start_firmware_bot(active_bot)
+        await active_bot.stop(environment)
+        return list(firmware.stopped_with), mosfet.lifecycle.is_started(firmware)
+
+    stopped_with, running = asyncio.run(run())
+
+    assert stopped_with == [(True,)]
+    assert not running
+
+
+class _NoticedData(pydantic.BaseModel):
+    """The firmware noticed something as it started."""
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(frozen=True)
+
+
+_NoticedEvent = hsm.Event[_NoticedData](name="tests.bot.firmware.noticed", schema=_NoticedData)
+
+
+def _hand_over_on_start(ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event[typing.Any]) -> None:
+    """What a firmware reporting as it starts does: hand the body that started it a product."""
+
+    del event
+    found = instance.context().value(hsm.Keys.Owner)
+    assert isinstance(found, hsm.HSM)
+    # The owner key holds the starting machine's runtime; which instance it runs is not typed.
+    owner = typing.cast(hsm.HSM[typing.Any], found)
+    stimulus = dataclasses.replace(
+        _NoticedEvent.with_data(_NoticedData()), id=uuid.uuid4().hex, source=hsm.id(instance)
+    )
+    _ = hsm.dispatch(
+        ctx,
+        owner,
+        dataclasses.replace(
+            cognition.InputEvent.with_data_and_id(cognition.InputData(stimulus=stimulus), uuid.uuid4().hex),
+            source=hsm.id(instance),
+            target=owner.id,
+        ),
+    )
+
+
+class ReportingOnStartFirmware(RecordingFirmware):
+    """Firmware that hands the body a product while the body is still starting it."""
+
+    def __init__(self, *devices: Device) -> None:
+        super().__init__(
+            *devices,
+            model=mosfet.define(
+                "ReportingFirmware",
+                hsm.initial(hsm.target("on")),
+                hsm.state("on", hsm.entry(_hand_over_on_start)),
+            ),
+        )
+
+
+def test_a_product_handed_over_while_the_firmware_starts_waits_for_the_body_to_be_active() -> None:
+    async def run() -> list[processing.InputData]:
+        ability = IgnoreAbility()
+        desk = Device(id="desk")
+        active_bot = FirmwareAgent(desk, ReportingOnStartFirmware(desk), cognition=ability)
+        environment = await start_firmware_bot(active_bot)
+        try:
+            await wait_until(lambda: len(ability.calls) == 1)
+            return list(ability.calls)
+        finally:
+            _ = await active_bot.detach(environment)
+
+    (call,) = asyncio.run(run())
+
+    assert isinstance(call.input, hsm.Event)
+    assert typing.cast(hsm.Event[typing.Any], call.input).name == _NoticedEvent.name

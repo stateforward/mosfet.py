@@ -162,6 +162,29 @@ def _render_owned_devices(
     return _element("owned_devices", {}, children, depth)
 
 
+def _render_firmware(
+    value: object,
+    resolve_actor: collections.abc.Callable[[str], hsm.Instance | None],
+    depth: int,
+) -> str | None:
+    """Render a perspective's ``firmware`` declaration, a runtime id, as its live firmware element.
+
+    The firmware is shown exactly as a device is: ``<firmware ref="firmware" id state>`` with its own
+    snapshot attributes as children and no list of what it accepts, since its commands reach the
+    model as tools. ``resolve_actor`` looks the id up in the owning environment's addressing scope,
+    as :func:`_render_owned_devices` does; a firmware it cannot give a live snapshot for renders
+    nothing, as does a value that is not a ``str``.
+    """
+
+    if not isinstance(value, str):
+        return None
+    actor = resolve_actor(value)
+    actor_snapshot = None if actor is None else lifecycle.snapshot_if_started(actor)
+    if actor_snapshot is None:
+        return None
+    return _render_actor_element("firmware", {"ref": "firmware", "id": value}, actor_snapshot, depth)
+
+
 def render_self(
     perspective: hsm.Instance,
     resolve_device: collections.abc.Callable[[str], hsm.Instance | None],
@@ -170,9 +193,10 @@ def render_self(
     """Render ``perspective``'s own live snapshot as ``<self>``, or ``None`` when not honestly observable.
 
     ``perspective``'s state becomes the ``state`` attribute, and its own snapshot attributes
-    become children. ``owned_devices`` is the one attribute rendered by
-    :func:`_render_owned_devices` instead of the generic :func:`_render_attribute` rule, because
-    its values name live actors rather than holding attribute content directly; every other
+    become children. ``owned_devices`` and ``firmware`` are the attributes rendered by
+    :func:`_render_owned_devices` and :func:`_render_firmware` instead of the generic
+    :func:`_render_attribute` rule, because their values name live actors rather than holding
+    attribute content directly; every other
     attribute — including a nested peripheral observation mapping — follows the generic
     scalar/mapping rendering. ``None`` when ``perspective`` has no running HSM to snapshot: an
     unstarted or stopped actor has no honest state to show.
@@ -189,6 +213,8 @@ def render_self(
             child = (
                 _render_owned_devices(value, resolve_device, depth + 1)
                 if leaf == "owned_devices"
+                else _render_firmware(value, resolve_device, depth + 1)
+                if leaf == "firmware"
                 else _render_attribute(key, value, depth + 1)
             )
             if child is not None:

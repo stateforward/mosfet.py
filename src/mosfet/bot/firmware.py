@@ -22,22 +22,49 @@ cognition is offered.
 
 hsm stops at the first mistake in a machine, so the firmware contributes at most one hsm error per
 pass (B0014), with hsm's own message, pointing at the partial as the bot file wrote it.
+
+``bot.start`` runs it as a :class:`Firmware` the body owns: started once the bot's devices and
+abilities are attached, stopped first, and started again, fresh, with the bot. It is shown to
+cognition as one ``<firmware ref="firmware" id state>`` element, the way a device is, and its commands
+are offered under the actor key ``firmware`` while a state that reacts to them is active. It acts on
+its own initiative: :func:`send` sends a typed event to one of the bot's devices or abilities by id,
+and :func:`report` hands an observation to the body, which wakes cognition with it. What cognition does
+about a report is its own choice.
+
+Telemetry (scope ``bot.firmware``): ``bot.firmware.send.count`` by ``bot.outcome`` {delivered,
+dropped}: two series. No id, name or payload is an attribute.
 """
 
 import ast
 import collections.abc
 import dataclasses
+import logging
 import posixpath
 import re
 import typing
+import uuid
 
 import hsm
+from opentelemetry import metrics
 
 import mosfet
-from mosfet import event
+from mosfet import event, lifecycle, telemetry
+from mosfet.abilities import cognition
 from mosfet.telemetry import observer
+from mosfet.telemetry.hsm import Traced
 
 from . import diagnostics, elements
+
+_LOG = logging.getLogger(__name__)
+_SCOPE = "bot.firmware"
+_SENDS = metrics.get_meter(_SCOPE).create_counter(
+    "bot.firmware.send.count",
+    unit="{event}",
+    description=(
+        "Events the bot's firmware sent to its devices and abilities, by outcome: delivered to a running "
+        "peer, or dropped because the peer was not running."
+    ),
+)
 
 state = hsm.state
 initial = hsm.initial
@@ -140,6 +167,100 @@ class Partial(hsm.Element):
 
     partial: hsm.Element
     index: int = 0
+
+
+class Firmware(Traced):
+    """The bot's firmware, running: one machine on the model ``bot.define`` compiled, beside the body.
+
+    The body that starts it owns it (``mosfet.Bot(firmware=)``). ``model`` is the compiled firmware
+    model, the one it runs and the one cognition's tool menu reads its commands from. Its behaviors
+    are ``(ctx, instance, event)`` with ``instance`` this firmware: they keep observable state in its
+    ``bot.attribute``\\ s with ``instance.get`` and ``instance.set``, act with :meth:`send`, and report
+    with :meth:`report`. ``peers`` are the bot's devices and abilities by id: addresses it sends to,
+    never reads.
+    """
+
+    model: hsm.Model
+    _peers: dict[str, hsm.Instance]
+
+    def __init__(self, *, model: hsm.Model, peers: collections.abc.Mapping[str, hsm.Instance]) -> None:
+        super().__init__()
+        self.model = model
+        self._peers = dict(peers)
+
+    @staticmethod
+    def send(
+        ctx: hsm.Context, instance: "Firmware", to: str, event: hsm.Event[typing.Any], *, trigger: hsm.Event[typing.Any]
+    ) -> None:
+        """Send ``event`` to the bot's device or ability ``to`` (its id), on the firmware's own initiative.
+
+        It is stamped from ``trigger``, the event the sending behavior runs for: its id (or the
+        event's own, or a fresh one) and its trace, so what the peer does stays in the trigger's
+        trace. A peer that is not running drops it, counted and logged.
+
+        Raises:
+            LookupError: If ``to`` is not the id of one of the bot's devices or abilities.
+        """
+
+        peer = instance._peers.get(to)
+        if peer is None:
+            known = ", ".join(f"`{name}`" for name in sorted(instance._peers)) or "none"
+            raise LookupError(f"the bot has no device or ability `{to}`; its ids are {known}")
+        if not lifecycle.is_started(peer):
+            _SENDS.add(1, {"bot.outcome": "dropped"})
+            _LOG.warning("firmware send dropped: the peer is not running event=%s", event.name)
+            return
+        sent = dataclasses.replace(
+            event,
+            id=trigger.id or event.id or uuid.uuid4().hex,
+            source=hsm.id(instance),
+            target=hsm.id(peer),
+            metadata=dict(trigger.metadata),
+        )
+        _ = telemetry.capture.record_dispatch(
+            hsm.dispatch(ctx, peer, sent), component="firmware.send", event=sent, source=sent.source, target=sent.target
+        )
+        _SENDS.add(1, {"bot.outcome": "delivered"})
+
+    @staticmethod
+    def report(
+        ctx: hsm.Context, instance: "Firmware", observation: hsm.Event[typing.Any], *, trigger: hsm.Event[typing.Any]
+    ) -> None:
+        """Report ``observation`` to the body that started this firmware, which wakes cognition with it.
+
+        It goes the way an ability's product goes: a ``cognition.InputEvent`` whose stimulus is
+        ``observation``, stamped as the firmware's, with ``trigger``'s id when it has none of its own and
+        ``trigger``'s trace. A firmware started by no machine has no body to tell; the report is logged
+        and dropped.
+        """
+
+        found = instance.context().value(hsm.Keys.Owner)
+        if not isinstance(found, hsm.HSM):
+            _LOG.warning("firmware report dropped: no body started the firmware event=%s", observation.name)
+            return
+        # The owner key holds the starting machine's runtime; which instance it runs is not typed.
+        owner = typing.cast(hsm.HSM[typing.Any], found)
+        stimulus = dataclasses.replace(
+            observation,
+            id=observation.id or trigger.id or uuid.uuid4().hex,
+            source=hsm.id(instance),
+            target="",
+            metadata=dict(trigger.metadata),
+        )
+        _ = hsm.dispatch(
+            ctx,
+            owner,
+            dataclasses.replace(
+                cognition.InputEvent.with_data_and_id(cognition.InputData(stimulus=stimulus), uuid.uuid4().hex),
+                source=hsm.id(instance),
+                target=owner.id,
+                metadata=dict(trigger.metadata),
+            ),
+        )
+
+
+send = Firmware.send
+report = Firmware.report
 
 
 def partial(value: object) -> bool:
@@ -324,6 +445,7 @@ def _rejected(
 
 
 __all__ = [
+    "Firmware",
     "FirmwareElement",
     "FirmwareKind",
     "Partial",
@@ -349,7 +471,9 @@ __all__ = [
     "on_set",
     "operation",
     "partial",
+    "report",
     "shallow_history",
+    "send",
     "source",
     "state",
     "submachine_state",

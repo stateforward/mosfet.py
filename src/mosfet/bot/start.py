@@ -17,7 +17,9 @@ A body that activates answers ``bot.activated``; one whose parts fail to attach 
 asks the body to deactivate, awaits its answer (``bot.deactivated``, or ``bot.degraded`` when its
 teardown could not finish), takes it out of the environment, and stops it, and the body stops every
 part it started: its devices, its abilities, its register, and its cognition with its faculties and
-memory, which closes the database it opened.
+memory, which closes the database it opened. A model with firmware gets a ``bot.Firmware`` of its own
+on each start, sending to the bot's devices and abilities by id; the body starts it last and stops it
+first.
 
 A model holds the instances its bot file built, so it runs one bot at a time: starting it again
 while any of its parts runs is ``B0101``, and once ``bot.stop`` has stopped them it starts again. A part that raises while the bot is built is ``B0102``, and
@@ -50,7 +52,7 @@ from mosfet.device import Device
 from mosfet.environment import Environment
 from mosfet.telemetry import span
 
-from . import body, diagnostics, elements
+from . import body, diagnostics, elements, firmware
 
 # The package's ``define`` is the function; the module is imported by name for its error base.
 from .define import Error
@@ -143,11 +145,12 @@ async def _start(ctx: Environment, model: elements.Model, data: object, location
     _STARTS.add(1, {_OUTCOME: span.Ok, _FAILURE_KIND: "none"})
     held = [member.instance for member in model.members.values() if isinstance(member, elements.AttachmentElement)]
     _LOG.info(
-        "bot started name=%s devices=%d abilities=%d faculties=%s",
+        "bot started name=%s devices=%d abilities=%d faculties=%s firmware=%s",
         name,
         sum(isinstance(part, Device) for part in held),
         sum(isinstance(part, abilities.Ability) for part in held),
         ",".join(_cognition(model).faculties()),
+        "yes" if any(isinstance(member, firmware.FirmwareElement) for member in model.members.values()) else "no",
     )
     return instance
 
@@ -243,6 +246,7 @@ def _body(model: elements.Model, name: str, location: diagnostics.Location) -> b
     traits: elements.TraitsElement | None = None
     timeouts: elements.TimeoutsElement | None = None
     register: memory.StmMemory | None = None
+    compiled: firmware.FirmwareElement | None = None
     for member in model.members.values():
         match member:
             case elements.AttachmentElement(instance=Device() as device):
@@ -256,6 +260,8 @@ def _body(model: elements.Model, name: str, location: diagnostics.Location) -> b
                 timeouts = member
             case elements.RegisterElement(store=store):
                 register = store
+            case firmware.FirmwareElement():
+                compiled = member
             case _:
                 pass
     declared = _cognition(model)
@@ -263,7 +269,9 @@ def _body(model: elements.Model, name: str, location: diagnostics.Location) -> b
         mind = _mind(declared, traits)
     except Exception as error:
         raise _raised(name, declared.location, "cognition", error, location) from error
+    # A firmware of its own for every body: it starts fresh with each start of the model.
     try:
+        machine = None if compiled is None else firmware.Firmware(model=compiled.model, peers=_peers(devices, roles))
         return body.Bot(
             devices,
             cognition=mind,
@@ -274,9 +282,32 @@ def _body(model: elements.Model, name: str, location: diagnostics.Location) -> b
             deactivation_timeout=None if timeouts is None else timeouts.deactivation,
             attachment_timeout=None if timeouts is None else timeouts.attachment,
             stm_memory=register,
+            firmware=machine,
         )
     except Exception as error:
         raise _raised(name, model.location, "body", error, location) from error
+
+
+def _peers(
+    devices: collections.abc.Sequence[Device],
+    roles: collections.abc.Mapping[elements.Role, collections.abc.Sequence[abilities.Ability[typing.Any, typing.Any]]],
+) -> dict[str, hsm.Instance]:
+    """The bot's devices and abilities by id: what its firmware may send to, never its body or its mind.
+
+    An ability in two roles is one peer.
+
+    Raises:
+        ValueError: If two parts share one id, so a send by that id could reach only one of them.
+    """
+
+    peers: dict[str, hsm.Instance] = {}
+    for part in (*devices, *(ability for given in roles.values() for ability in given)):
+        identity = part.identity()
+        if peers.setdefault(identity, part) is not part:
+            raise ValueError(
+                f"Bot parts must have distinct ids; {identity!r} is two parts' id, and the firmware sends by id."
+            )
+    return peers
 
 
 def _mind(declared: elements.CognitionElement, traits: elements.TraitsElement | None) -> cognition.Cognition:

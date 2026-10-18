@@ -23,6 +23,7 @@ from mosfet.protocols import attachment
 from mosfet import events
 
 from mosfet.device import Device
+from mosfet.start import bound_model
 from mosfet import telemetry
 from mosfet.telemetry import observer
 from mosfet.telemetry import span
@@ -37,7 +38,16 @@ _DEFAULT_BOT_ATTACHMENT_TIMEOUT = datetime.timedelta(seconds=30)
 _MIN_BOT_CANCELLATION_TIMEOUT = datetime.timedelta(milliseconds=100)
 _MAX_BOT_CANCELLATION_TIMEOUT = datetime.timedelta(seconds=5)
 _OWNED_DEVICES_ATTRIBUTE = "owned_devices"
+# The body's one firmware, by its runtime id: rendered to cognition like a device, under ref "firmware".
+_FIRMWARE_ATTRIBUTE = "firmware"
 _LIFECYCLE_SCOPE = "bot.lifecycle"
+_FIRMWARE_SCOPE = "bot.firmware"
+# Attributes are a closed set from code: whether the firmware started (ok), failed or timed out.
+_FIRMWARE_STARTS = metrics.get_meter(_FIRMWARE_SCOPE).create_counter(
+    "bot.firmware.start.count",
+    unit="{start}",
+    description="Starts of the bot's firmware during activation, by outcome (ok, failed, timeout).",
+)
 _DEGRADED = metrics.get_meter(_LIFECYCLE_SCOPE).create_counter(
     "bot.lifecycle.degraded.count",
     unit="{transition}",
@@ -62,6 +72,26 @@ _CleanupDoneEvent = hsm.Event[_CleanupData](
     name="bot.lifecycle.cleanup.done",
     kind=hsm.CompletionEventKind,
     schema=_CleanupData,
+)
+
+
+class _FirmwareStepData(pydantic.BaseModel):
+    """Private exact terminal for the activation step that starts the body's firmware."""
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(frozen=True)
+
+    request_id: str = pydantic.Field(min_length=1)
+
+
+_FirmwareStartedEvent = hsm.Event[_FirmwareStepData](
+    name="bot.lifecycle.firmware.started",
+    kind=hsm.CompletionEventKind,
+    schema=_FirmwareStepData,
+)
+_FirmwareFailedEvent = hsm.Event[_FirmwareStepData](
+    name="bot.lifecycle.firmware.failed",
+    kind=hsm.ErrorEventKind,
+    schema=_FirmwareStepData,
 )
 
 
@@ -340,6 +370,8 @@ class Bot(Traced):
     # Guards read it only alongside a live turn operation — never alone.
     _processing_focus_candidates: tuple[str, ...]
     _innate_ability_instances: tuple[abilities.Ability[typing.Any, typing.Any], ...]
+    # The machinery the bot's owner wrote for it: started after every part is attached, stopped first.
+    _firmware: hsm.Instance | None
     _acquired_abilities: tuple[abilities.Ability[typing.Any, typing.Any], ...]
     _input: tuple[abilities.Ability[typing.Any, typing.Any], ...]
     _output: tuple[abilities.Ability[typing.Any, typing.Any], ...]
@@ -365,8 +397,14 @@ class Bot(Traced):
         deactivation_timeout: datetime.timedelta | None = None,
         attachment_timeout: datetime.timedelta | None = None,
         stm_memory: memory.StmMemory | None = None,
+        firmware: hsm.Instance | None = None,
     ) -> None:
         """Build an unstarted body holding ``devices``, each known by its ``Device.identity()``.
+
+        ``firmware``, when given, is the bot's one firmware (``bot.Firmware``): an unstarted machine
+        whose ``model`` it runs on. The body starts it once its devices and abilities are attached,
+        stops it first, and starts it again, fresh, when it activates again. Cognition sees it as
+        ``<firmware ref="firmware">`` and is offered its commands under the key ``firmware``.
 
         Raises:
             ValueError: If two devices share one id (one device given twice included), an innate,
@@ -418,6 +456,7 @@ class Bot(Traced):
                 )
             keys.add(identity)
         self._stm_memory: memory.StmMemory | None = stm_memory
+        self._firmware = firmware
         self._attachments = attachment.Group(*Bot._lifecycle_attachment_members(self))
         self._lifecycle = None
         self._lifecycle_step = 0
@@ -504,7 +543,7 @@ class Bot(Traced):
 
     @typing.override
     async def stop(self, ctx: hsm.Context) -> None:
-        """Stop the body, then every part it started, in reverse: its abilities, cognition and the register among them, then its devices.
+        """Stop its firmware, the body, then every part it started, in reverse: its abilities, cognition and the register among them, then its devices.
 
         Whoever starts a part stops it, and each part stops what it started: a device the
         peripherals it powers, a composite ability its children (cognition its faculties and its
@@ -513,6 +552,8 @@ class Bot(Traced):
         or already stopped, does nothing.
         """
 
+        if self._firmware is not None:
+            await hsm.stop(self._firmware, ctx)
         await hsm.Instance.stop(self, ctx)
         await hsm.stop(self._attachments, ctx)
         for ability in reversed(Bot._lifecycle_abilities(self)):
@@ -630,7 +671,51 @@ class Bot(Traced):
 
     @staticmethod
     async def _deactivate_activity(ctx: hsm.Context, instance: "Bot", event: hsm.Event) -> None:
+        # The firmware is the machinery on top of the body's parts: it stops before they detach.
+        await Bot._stop_firmware(instance)
         await Bot._request_attachment(ctx, instance, event, step_id=instance._lifecycle_step_id, kind="detach")
+
+    @staticmethod
+    async def _stop_firmware(instance: "Bot") -> None:
+        """Stop the body's firmware; one that never started, or already stopped, stops as nothing."""
+
+        if instance._firmware is not None:
+            await hsm.stop(instance._firmware, instance.context())
+
+    @staticmethod
+    async def _start_firmware_activity(ctx: hsm.Context, instance: "Bot", event: hsm.Event) -> None:
+        """Start the body's firmware in the body's own lifetime, now that every part is attached.
+
+        It runs in the body's environment, where cognition's world block can show it; ``hsm.Keys.Owner``
+        in its context is the body, which its reports go to. The step answers itself with the private
+        started or failed terminal under its own step id.
+        """
+
+        step_id = instance._lifecycle_step_id
+        firmware = instance._firmware
+        assert firmware is not None, "the firmware step is entered only for a body with firmware"
+        terminal = _FirmwareStartedEvent
+        try:
+            model = bound_model(firmware)
+            if model is None:
+                raise RuntimeError(f"{type(firmware).__name__} has no model to run.")
+            _ = await mosfet.started(instance.context(), firmware, model)
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            _LOG.warning("Bot firmware start failed kind=%s", span.failure_kind(error, type(error).__name__))
+            terminal = _FirmwareFailedEvent
+        _ = hsm.dispatch(
+            ctx,
+            instance,
+            dataclasses.replace(
+                terminal.with_data(_FirmwareStepData(request_id=step_id)),
+                id=step_id,
+                source=hsm.id(instance),
+                target=hsm.id(instance),
+                metadata=dict(event.metadata),
+            ),
+        )
 
     @staticmethod
     async def _deactivation_cleanup(
@@ -643,6 +728,8 @@ class Bot(Traced):
         step_id = instance._lifecycle_step_id
         lifetime = instance.context()
         environment = Environment.from_context(lifetime)
+        # Stopped already when deactivation ran; when its bound expired first, it stops here.
+        await Bot._stop_firmware(instance)
         if cleanup == "reset":
             for member in Bot._lifecycle_attachment_members(instance):
                 await deliver(
@@ -931,13 +1018,17 @@ class Bot(Traced):
         """Map cognition-visible devices, innate and acquired abilities, and input abilities.
 
         Input abilities are sense organs cognition may direct; what a turn may select from them
-        is only what their live topology enables. Output ports and ability-owned child machines
-        are composition wiring and never enter this map.
+        is only what their live topology enables. The firmware is offered under ``firmware``: its
+        commands while a state that reacts to them is active. Output ports and ability-owned child
+        machines are composition wiring and never enter this map.
         """
 
         actors: dict[str, hsm.Instance] = {"bot": instance, **instance._devices}
         for ability in Bot._addressable_abilities(instance):
             actors[ability.identity()] = ability
+        if instance._firmware is not None:
+            # "firmware" is reserved: no device or ability may take it (bot.define's B0007).
+            actors[_FIRMWARE_ATTRIBUTE] = instance._firmware
         return actors
 
     @staticmethod
@@ -1453,6 +1544,44 @@ class Bot(Traced):
         )
 
     @staticmethod
+    def _matches_attach_terminal_with_firmware(ctx: hsm.Context, instance: "Bot", event: hsm.Event[typing.Any]) -> bool:
+        # One guard: hsm keeps a transition's last guard only, so two would not both hold.
+        return instance._firmware is not None and Bot._matches_attach_terminal(ctx, instance, event)
+
+    @staticmethod
+    def _matches_firmware_terminal(ctx: hsm.Context, instance: "Bot", event: hsm.Event[typing.Any]) -> bool:
+        del ctx
+        data = event.data
+        return (
+            isinstance(data, _FirmwareStepData)
+            and event.id == data.request_id
+            and event.id == instance._lifecycle_step_id
+            and event.source == hsm.id(instance)
+            and event.target == hsm.id(instance)
+        )
+
+    @staticmethod
+    def _count_firmware_started(ctx: hsm.Context, instance: "Bot", event: hsm.Event[typing.Any]) -> None:
+        del ctx, instance, event
+        _FIRMWARE_STARTS.add(1, {"bot.outcome": "ok"})
+
+    @staticmethod
+    def _count_firmware_failed(ctx: hsm.Context, instance: "Bot", event: hsm.Event[typing.Any]) -> None:
+        del ctx, instance, event
+        _FIRMWARE_STARTS.add(1, {"bot.outcome": "failed"})
+
+    @staticmethod
+    def _count_firmware_timeout(ctx: hsm.Context, instance: "Bot", event: hsm.Event[typing.Any]) -> None:
+        del ctx, instance, event
+        _FIRMWARE_STARTS.add(1, {"bot.outcome": "timeout"})
+        _LOG.warning("Bot firmware start timed out")
+
+    @staticmethod
+    def _bot_attachment_timeout(ctx: hsm.Context, instance: "Bot", event: hsm.Event[typing.Any]) -> datetime.timedelta:
+        del ctx, event
+        return instance._attachment_timeout
+
+    @staticmethod
     def _matches_attach_terminal(ctx: hsm.Context, instance: "Bot", event: hsm.Event[typing.Any]) -> bool:
         return Bot._matches_attachment_terminal(ctx, instance, event, kind="attach")
 
@@ -1494,7 +1623,8 @@ class Bot(Traced):
         # Deactivation may cancel activation before the activity can publish its
         # incrementally-started ownership set. Cleanup therefore owns the complete
         # configured lifecycle surface; stopping an actor that never started is
-        # intentionally idempotent at this boundary.
+        # intentionally idempotent at this boundary. The firmware, on top of the parts, goes first.
+        await Bot._stop_firmware(instance)
         await hsm.stop(instance._attachments, environment)
         for ability in reversed(Bot._lifecycle_abilities(instance)):
             await hsm.stop(ability, lifetime)
@@ -1552,7 +1682,8 @@ class Bot(Traced):
         earlier — an id that does not exist yet is not stamped.
 
         Snapshot ``owned_devices`` is configured reference → shell device id (environment
-        presence). ``_device_source_refs`` is the reverse hot-path map: every started actor id
+        presence), and ``firmware`` the firmware's runtime id, which restarts with the bot too.
+        ``_device_source_refs`` is the reverse hot-path map: every started actor id
         in each owned shell's powered tree (shell + peripherals) → configured reference, so
         interrupt and stimulus sources resolve by lookup without walking the tree per event.
         """
@@ -1569,6 +1700,9 @@ class Bot(Traced):
                     source_refs[hsm.id(candidate)] = reference
         instance._device_source_refs = source_refs
         _ = instance.set(_OWNED_DEVICES_ATTRIBUTE, owned)
+        firmware = instance._firmware
+        if firmware is not None and lifecycle.is_started(firmware):
+            _ = instance.set(_FIRMWARE_ATTRIBUTE, hsm.id(firmware))
 
     @staticmethod
     def _clear_owned_device_sources(ctx: hsm.Context, instance: "Bot", event: hsm.Event[typing.Any]) -> None:
@@ -1580,6 +1714,7 @@ class Bot(Traced):
     model: typing.ClassVar[hsm.Model] = mosfet.define(
         "Bot",
         hsm.attribute(_OWNED_DEVICES_ATTRIBUTE),
+        hsm.attribute(_FIRMWARE_ATTRIBUTE),
         hsm.initial(hsm.target("inactive")),
         # Every accepted bot.deactivate gets exactly one public terminal under its id: inactive
         # and degraded answer it at once, the stop states supersede the request they are running
@@ -1611,6 +1746,12 @@ class Bot(Traced):
                 hsm.effect(_accept_deactivate, _clear_focus),
                 hsm.target("../activation_cancelling"),
             ),
+            # Every part attached: a body with firmware starts it next, one without is active.
+            hsm.transition(
+                hsm.on(attachment.AttachCompleteEvent),
+                hsm.guard(_matches_attach_terminal_with_firmware),
+                hsm.target("../firmware_starting"),
+            ),
             hsm.transition(
                 hsm.on(attachment.AttachCompleteEvent),
                 hsm.guard(_matches_attach_terminal),
@@ -1621,6 +1762,43 @@ class Bot(Traced):
                 hsm.on(attachment.AttachFailedEvent),
                 hsm.guard(_matches_attach_terminal),
                 hsm.effect(_dispatch_activating_failed),
+                hsm.target("../activation_cleanup"),
+            ),
+        ),
+        # The last activation step: the firmware starts on top of the attached parts. A failure,
+        # or no answer within the attachment bound, fails the activation and rolls it back. A
+        # product handed over meanwhile (a firmware may report as it starts) waits for active.
+        hsm.state(
+            "firmware_starting",
+            hsm.entry(_enter_lifecycle_step),
+            hsm.activity(_start_firmware_activity),
+            hsm.defer(cognition.InputEvent),
+            hsm.transition(
+                hsm.on(events.RebootEvent),
+                hsm.guard(_reboot_requested_by_cognition),
+                hsm.effect(_clear_focus),
+                hsm.target("../reboot_deactivating"),
+            ),
+            hsm.transition(
+                hsm.on(events.DeactivateEvent),
+                hsm.effect(_accept_deactivate, _clear_focus),
+                hsm.target("../activation_cancelling"),
+            ),
+            hsm.transition(
+                hsm.on(_FirmwareStartedEvent),
+                hsm.guard(_matches_firmware_terminal),
+                hsm.effect(_count_firmware_started, _dispatch_activating_done),
+                hsm.target("../active"),
+            ),
+            hsm.transition(
+                hsm.on(_FirmwareFailedEvent),
+                hsm.guard(_matches_firmware_terminal),
+                hsm.effect(_count_firmware_failed, _dispatch_activating_failed),
+                hsm.target("../activation_cleanup"),
+            ),
+            hsm.transition(
+                hsm.after(_bot_attachment_timeout),
+                hsm.effect(_count_firmware_timeout, _dispatch_activating_failed),
                 hsm.target("../activation_cleanup"),
             ),
         ),
