@@ -104,7 +104,6 @@ def test_hsms_define_and_runtime_functions_are_not_aliased() -> None:
         assert not hasattr(bot, name)
     assert bot.start is not hsm.start
     assert bot.stop is not hsm.stop
-    assert getattr(bot, "observe", None) is not hsm.observe
 
 
 def test_partials_mixed_with_bot_elements_compile_into_one_firmware() -> None:

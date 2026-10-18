@@ -1511,6 +1511,72 @@ def test_an_unnamed_bot_runs_the_body_model_itself() -> None:
     assert device_state.startswith("/Device/")
 
 
+def test_a_bots_observers_watch_its_own_model() -> None:
+    """DSL-26: a body given observers runs them on its own model, and ``Bot.model`` itself keeps none."""
+
+    seen: list[str] = []
+
+    def watch(ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event[typing.Any]) -> None:
+        del ctx, instance
+        seen.append(typing.cast(dict[str, hsm.Event[typing.Any]], event.data)["event"].name)
+
+    async def run() -> str:
+        watched = Bot(
+            (Device(id="desk"),),
+            cognition=as_cognition(IgnoreAbility()),
+            name="greeter",
+            observe=(hsm.observe(mosfet.ActivateEvent, mosfet.DeactivateEvent, watch),),
+        )
+        environment = Environment()
+        _ = await watched.attach(environment)
+        await wait_until(lambda: watched.state().startswith("/greeter/active"))
+        state = watched.state()
+        _ = await watched.detach(environment)
+        await wait_until(lambda: watched.state() == "/greeter/inactive")
+        await hsm.stop(watched)
+        return state
+
+    state = asyncio.run(run())
+
+    assert state.startswith("/greeter/active")
+    assert seen == ["bot.activate", "bot.deactivate"]
+    assert not [member for member in Bot.model.members.values() if member.qualified_name.endswith("/watch")]
+
+
+def test_an_unnamed_bot_with_observers_keeps_the_body_models_name() -> None:
+    """DSL-26: observers alone do not rename the body."""
+
+    seen: list[str] = []
+
+    def watch(ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event[typing.Any]) -> None:
+        del ctx, instance, event
+        seen.append("seen")
+
+    async def run() -> str:
+        watched = Bot((), cognition=as_cognition(IgnoreAbility()), observe=(hsm.observe(mosfet.ActivateEvent, watch),))
+        environment = Environment()
+        _ = await watched.attach(environment)
+        await wait_until(lambda: watched.state().startswith("/Bot/active"))
+        try:
+            return watched.state()
+        finally:
+            await hsm.stop(watched)
+
+    assert asyncio.run(run()).startswith("/Bot/active")
+    assert seen == ["seen"]
+
+
+def test_a_bot_observes_with_observers_only() -> None:
+    """DSL-26: anything but an hsm observer would change what the body does, so it is refused."""
+
+    with pytest.raises(TypeError, match="observe takes hsm observers"):
+        _ = Bot(
+            (),
+            cognition=as_cognition(IgnoreAbility()),
+            observe=typing.cast(collections.abc.Sequence[hsm.ObservationElement[typing.Any]], (hsm.state("extra"),)),
+        )
+
+
 @pytest.mark.parametrize("twice", ["one device twice", "two devices with one id"])
 def test_bot_refuses_two_devices_with_one_id(twice: str) -> None:
     """DSL-30: one id names one device; the body never resolves a duplicate by order."""

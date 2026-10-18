@@ -16,7 +16,8 @@ machines::
 3. It creates ``process.data_dir`` private (``0700``) and configures telemetry once, with ``service.name``
    and ``service.instance.id`` from ``process``; a failure of either exits ``78``.
 4. It builds each bot from its model, as ``bot.start`` does (``B0101``, ``B0102``: exit ``78``, with the
-   traceback only under ``MOSFET_TRACEBACK=1``).
+   traceback only under ``MOSFET_TRACEBACK=1``), each with the boundary observers ``observe=`` gives
+   (``bot.observe(...)``), which watch every bot the process runs, across its restarts, and never act on it.
 5. It starts one ``runtime.Runtime`` in one ``Environment``: the actors in order, then one
    ``runtime.Supervisor`` per bot, which keeps it running within the policy's restart budget. The ready
    file exists exactly while every bot runs. SIGTERM and SIGINT stop it gracefully within one
@@ -50,7 +51,7 @@ from mosfet.telemetry import span
 
 from . import body, diagnostics, elements
 from .process import Process, process
-from .start import StartError, construct
+from .start import Observer, StartError, construct
 
 _LOG = logging.getLogger(__name__)
 _STOP_DURATION = metrics.get_meter("bot.runtime").create_histogram(
@@ -74,23 +75,26 @@ def run(
     *models: elements.Model,
     actors: collections.abc.Sequence[hsm.Instance] = (),
     process: Process | None = None,
+    observe: collections.abc.Sequence[Observer] = (),
 ) -> typing.NoReturn:
     """Run the bots ``models`` define, with the shared ``actors`` they use, until the process is stopped.
 
-    ``process`` is the process's options, read by ``bot.process()`` when omitted. Never returns.
+    ``process`` is the process's options, read by ``bot.process()`` when omitted, and ``observe`` the
+    observers that watch each bot. Never returns.
 
     Raises:
         SystemExit: Always, with the exit code: ``0``, ``1``, ``64``, ``70`` or ``78``.
-        TypeError: If a model is not a ``bot.Model``.
+        TypeError: If a model is not a ``bot.Model``, or something in ``observe`` is not an observer.
     """
 
-    raise SystemExit(_main(models, tuple(actors), process, diagnostics.Location.capture()))
+    raise SystemExit(_main(models, tuple(actors), process, tuple(observe), diagnostics.Location.capture()))
 
 
 def _main(
     models: tuple[elements.Model, ...],
     actors: tuple[hsm.Instance, ...],
     given: Process | None,
+    observers: tuple[Observer, ...],
     location: diagnostics.Location,
 ) -> int:
     """Run the process and return its exit code, or end it with ``os._exit`` when it does not settle."""
@@ -125,7 +129,7 @@ def _main(
         for model in models:
             name = model.qualified_name[1:]
             try:
-                bots[name] = construct(model, location)
+                bots[name] = construct(model, location, observe=observers)
             except StartError as error:
                 kind: runtime.BootFailureKind = (
                     "constructor_raised" if error.failure_kind == "constructor_raised" else "invalid_models"

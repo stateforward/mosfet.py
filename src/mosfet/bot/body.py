@@ -374,6 +374,8 @@ class Bot(Traced):
     _firmware: hsm.Instance | None
     # The bot's name, fixed at construction: the body runs as /<name> and each device as /<name><Device>.
     _name: str | None
+    # Boundary observers the bot's runner gave it: they watch its model and never act on it.
+    _observers: tuple[hsm.ObservationElement[typing.Any], ...]
     _acquired_abilities: tuple[abilities.Ability[typing.Any, typing.Any], ...]
     _input: tuple[abilities.Ability[typing.Any, typing.Any], ...]
     _output: tuple[abilities.Ability[typing.Any, typing.Any], ...]
@@ -401,6 +403,7 @@ class Bot(Traced):
         stm_memory: memory.StmMemory | None = None,
         firmware: hsm.Instance | None = None,
         name: str | None = None,
+        observe: collections.abc.Sequence[hsm.ObservationElement[typing.Any]] = (),
     ) -> None:
         """Build an unstarted body holding ``devices``, each known by its ``Device.identity()``.
 
@@ -409,6 +412,10 @@ class Bot(Traced):
         redefined as ``/<name><DeviceClass>``, so two bots in one process publish distinct topology
         names. ``Bot.model`` itself is never changed. Without one, the body and its devices run their
         own models.
+
+        ``observe`` is the boundary observers (``hsm.observe(...)``) whoever runs the bot opts into, for
+        logs and records: the body runs on ``Bot.model`` redefined with them (under its name, when it
+        has one), so they watch this body only, and they never act on it.
 
         ``firmware``, when given, is the bot's one firmware (``bot.Firmware``): an unstarted machine
         whose ``model`` it runs on. The body starts it once its devices and abilities are attached,
@@ -419,9 +426,13 @@ class Bot(Traced):
             ValueError: If two devices share one id (one device given twice included), an innate,
                 acquired or input ability's id is already the body's (``"bot"``), a device's or another
                 ability's, or a timeout is not positive.
+            TypeError: If something in ``observe`` is not an hsm observer.
         """
 
         super().__init__()
+        for given in observe:
+            if not isinstance(typing.cast(object, given), hsm.ObservationElement):
+                raise TypeError(f"observe takes hsm observers (hsm.observe(...)), not {type(given).__name__}")
         if processing_timeout is not None and processing_timeout <= datetime.timedelta():
             raise ValueError("processing_timeout must be positive.")
         if deactivation_timeout is not None and deactivation_timeout <= datetime.timedelta():
@@ -467,6 +478,7 @@ class Bot(Traced):
         self._stm_memory: memory.StmMemory | None = stm_memory
         self._firmware = firmware
         self._name = name
+        self._observers = tuple(observe)
         self._attachments = attachment.Group(*Bot._lifecycle_attachment_members(self))
         self._lifecycle = None
         self._lifecycle_step = 0
@@ -506,9 +518,11 @@ class Bot(Traced):
         return self
 
     def _model_for_instance(self) -> hsm.Model:
-        """Return the topology model for this runtime bot instance: its own, or ``/<name>``."""
+        """Return the topology model for this runtime bot instance: its own, or ``/<name>`` with its observers."""
 
-        return self.model if self._name is None else hsm.redefine(self.model, self._name)
+        if self._name is None and not self._observers:
+            return self.model
+        return hsm.redefine(self.model, self._name, *self._observers)
 
     def _model_for_device(self, device: Device) -> hsm.Model | None:
         """Return the published model for one configured device: its own, or ``/<name><DeviceClass>``."""

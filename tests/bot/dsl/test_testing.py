@@ -192,6 +192,23 @@ def test_running_stops_the_actors_it_started_when_the_bot_does_not_start() -> No
     assert not lifecycle.is_started(shared)
 
 
+def test_running_starts_the_bot_with_the_observers_it_is_given() -> None:
+    """DSL-26: ``observe=`` goes to ``bot.start``, so the observers watch the bot for the block."""
+
+    seen: list[str] = []
+
+    def watch(ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event[typing.Any]) -> None:
+        del ctx, instance
+        seen.append(typing.cast(dict[str, hsm.Event[typing.Any]], event.data)["event"].name)
+
+    async def run() -> str:
+        async with testing.running(_greeter(), observe=(bot.observe(mosfet.ActivateEvent, watch),)) as running:
+            return running.bot.state()
+
+    assert asyncio.run(run()).startswith("/greeter/active")
+    assert seen == ["bot.activate"]
+
+
 _RING_AFTER = datetime.timedelta(hours=1)
 
 

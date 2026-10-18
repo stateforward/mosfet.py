@@ -357,6 +357,22 @@ def test_an_actor_that_ignores_cancellation_cannot_hold_the_process_past_its_bou
     assert elapsed < grace + _EXIT_BOUND + _SLACK
 
 
+def test_the_observers_run_is_given_watch_each_bot_it_runs(tmp_path: pathlib.Path) -> None:
+    """DSL-26: ``bot.run(observe=)`` adds the observers to each bot's body, which only watches."""
+
+    child = _bot_file(tmp_path, "observed")
+    child.wait_for(child.ready.exists)
+    seen_running = (child.data / "observed").read_text(encoding="utf-8").split()
+
+    child.popen.send_signal(signal.SIGTERM)
+    code, stdout, stderr, _elapsed = child.finish(8 + _EXIT_BOUND + _SLACK)
+
+    assert code == 0, stderr.decode(errors="replace")
+    assert stdout == b""
+    assert seen_running == ["bot.activate"]
+    assert (child.data / "observed").read_text(encoding="utf-8").split() == ["bot.activate", "bot.deactivate"]
+
+
 def test_a_bot_that_exhausts_its_restart_budget_exits_70(tmp_path: pathlib.Path) -> None:
     child = _bot_file(tmp_path, "failing", "--max-restarts", "1", "--backoff-initial", "0.01", "--backoff-max", "0.01")
 

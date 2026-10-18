@@ -80,7 +80,7 @@ from .firmware import (
 from .lints import LintWarning, check
 from .process import Process, process
 from .run import run
-from .start import StartError, start, stop
+from .start import Observer, StartError, observe, start, stop
 
 __all__ = [
     "DefinitionError",
@@ -95,6 +95,7 @@ __all__ = [
     "LintWarning",
     "Location",
     "Model",
+    "Observer",
     "Outline",
     "Part",
     "Process",
@@ -127,6 +128,7 @@ __all__ = [
     "guard",
     "initial",
     "input",
+    "observe",
     "on",
     "on_call",
     "on_set",

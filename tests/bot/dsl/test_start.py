@@ -87,6 +87,7 @@ class Recording(body.Bot):
         stm_memory: memory.StmMemory | None = None,
         firmware: hsm.Instance | None = None,
         name: str | None = None,
+        observe: collections.abc.Sequence[hsm.ObservationElement[typing.Any]] = (),
     ) -> None:
         parts: dict[str, object] = {
             "cognition": cognition,
@@ -99,6 +100,7 @@ class Recording(body.Bot):
             "stm_memory": stm_memory,
             "firmware": firmware,
             "name": name,
+            "observe": observe,
         }
         Recording.given.append((tuple(devices), parts))
         super().__init__(
@@ -113,6 +115,7 @@ class Recording(body.Bot):
             stm_memory=stm_memory,
             firmware=firmware,
             name=name,
+            observe=observe,
         )
 
     @typing.override
@@ -354,6 +357,71 @@ def test_without_traits_there_is_no_persona(built: Built) -> None:
     assert [name for name, _ in built if name == "Persona"] == []
     ((_, reflection),) = [entry for entry in built if entry[0] == "Reflection"]
     assert reflection["persona"] is None
+
+
+# Boundary observers (DSL-26)
+
+
+def _watching(seen: list[str]) -> bot.Observer:
+    """An observer that records the name of each body request it sees, and does nothing else."""
+
+    def watch(ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event[typing.Any]) -> None:
+        del ctx, instance
+        seen.append(typing.cast(dict[str, hsm.Event[typing.Any]], event.data)["event"].name)
+
+    return bot.observe(mosfet.ActivateEvent, mosfet.DeactivateEvent, watch)
+
+
+def test_bot_observe_is_hsms_observe() -> None:
+    assert bot.observe is hsm.observe
+
+
+def test_start_runs_its_observers_on_this_bots_body_and_only_for_this_start() -> None:
+    """The observers watch the body ``bot.start`` started, under the bot's name; a later start has none."""
+
+    model = bot.define("greeter", bot.cognition(support.Silent()), bot.attach(phone.Phone(id="desk")))
+    seen: list[str] = []
+
+    async def run() -> list[str]:
+        environment = Environment()
+        watched = await bot.start(environment, model, observe=(_watching(seen),))
+        states = [watched.state()]
+        await bot.stop(watched)
+        again = await bot.start(environment, model)
+        states.append(again.state())
+        await bot.stop(again)
+        return states
+
+    states = asyncio.run(run())
+
+    assert [state.split("/")[1:3] for state in states] == [["greeter", "active"], ["greeter", "active"]]
+    assert seen == ["bot.activate", "bot.deactivate"]
+
+
+def test_start_gives_its_observers_to_the_body(recording: type[Recording]) -> None:
+    model = bot.define("greeter", bot.cognition(support.Silent()), bot.attach(phone.Phone()))
+    observer = _watching([])
+
+    async def run() -> None:
+        started = await bot.start(Environment(), model, observe=(observer,))
+        await bot.stop(started)
+
+    asyncio.run(run())
+
+    ((_, parts),) = recording.given
+    assert parts["observe"] == (observer,)
+
+
+def test_start_observes_with_observers_only() -> None:
+    model = bot.define("greeter", bot.cognition(support.Silent()), bot.attach(phone.Phone()))
+
+    async def run() -> None:
+        _ = await bot.start(
+            Environment(), model, observe=typing.cast(collections.abc.Sequence[bot.Observer], (bot.state("extra"),))
+        )
+
+    with pytest.raises(TypeError, match="observe takes hsm observers"):
+        asyncio.run(run())
 
 
 def test_start_takes_a_bot_model() -> None:

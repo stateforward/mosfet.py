@@ -36,7 +36,7 @@ from mosfet.environment import Environment
 from mosfet.start import bound_model
 
 from . import body, elements
-from .start import start, stop
+from .start import Observer, start, stop
 
 
 @dataclasses.dataclass(frozen=True, kw_only=True)
@@ -132,14 +132,18 @@ class Run:
 
 @contextlib.asynccontextmanager
 async def running(
-    model: elements.Model, *, actors: collections.abc.Sequence[hsm.Instance] = (), clock: hsm.Clock | None = None
+    model: elements.Model,
+    *,
+    actors: collections.abc.Sequence[hsm.Instance] = (),
+    clock: hsm.Clock | None = None,
+    observe: collections.abc.Sequence[Observer] = (),
 ) -> collections.abc.AsyncGenerator[Run]:
     """Start ``model``'s bot in a new ``Environment`` for the block, after the shared ``actors`` it needs.
 
     The environment keeps time on ``clock`` when one is given (an ``hsm.Clock``, such as a test clock
     that brings a wait early), so the bot, every part it starts and the actors run their timers on it.
-    Each actor is started in order on its class's ``model``, then the bot with ``bot.start``. When the
-    block ends, even by raising, the bot is stopped with ``bot.stop``, then the actors in reverse.
+    Each actor is started in order on its class's ``model``, then the bot with ``bot.start``, watched by
+    the ``observe`` observers (``bot.observe(...)``), which record and never act. When the block ends, even by raising, the bot is stopped with ``bot.stop``, then the actors in reverse.
 
     Raises:
         TypeError: If an actor's class declares no ``model``.
@@ -154,7 +158,7 @@ async def running(
             if declared is None:
                 raise TypeError(f"actor {type(actor).__name__} declares no model to start it on")
             started.append(await mosfet.started(environment, actor, declared))
-        instance = await start(environment, model)
+        instance = await start(environment, model, observe=observe)
         try:
             yield Run(bot=instance, environment=environment)
         finally:

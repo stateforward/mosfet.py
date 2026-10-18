@@ -13,6 +13,19 @@ body's answer to its activation::
     ...
     await bot.stop(greeter)
 
+``observe=`` is the boundary observers whoever starts the bot opts into, for logs, harness records and
+summaries (AGENTS: observable at the owning runtime boundary when that boundary opts in). Each is a
+:data:`Observer`, made by :func:`observe`, which is ``hsm.observe`` itself; the body runs on its model
+redefined with them, so they watch this start of this bot only, and they never act on it::
+
+    def log(ctx, instance, event):
+        print(event.data["event"].name)
+
+
+    greeter = await bot.start(Environment(), model, observe=(bot.observe(mosfet.ActivateEvent, log),))
+
+An observer is not part of a bot's definition: given to ``bot.define`` it is ``B0015``.
+
 A body that activates answers ``bot.activated``; one whose parts fail to attach answers the typed
 ``bot.activating.failed`` and is returned as it is, inactive, for ``bot.stop`` to stop. ``bot.stop``
 asks the body to deactivate, awaits its answer (``bot.deactivated``, or ``bot.degraded`` when its
@@ -73,6 +86,12 @@ _FAILURE_KIND = "bot.failure.kind"
 # minutes), answering a failure or ``bot.degraded`` when one expires.
 _ANSWER_BOUND = datetime.timedelta(minutes=10)
 
+type Observer = hsm.ObservationElement[typing.Any]
+"""A boundary observer, ``bot.observe(...)``: it watches a running bot for logs and records, and never acts on it."""
+
+observe = hsm.observe
+"""``hsm.observe`` itself: ``observe(callback)`` watches everything, ``observe(event, ..., callback)`` those events."""
+
 
 class StartError(Error):
     """``bot.start`` could not start a bot: B0101, B0102 or B0103.
@@ -91,24 +110,33 @@ class StartError(Error):
         self.failure_kind: str = failure_kind
 
 
-def start(ctx: Environment, model: elements.Model, data: object = None) -> collections.abc.Awaitable[body.Bot]:
+def start(
+    ctx: Environment, model: elements.Model, data: object = None, *, observe: collections.abc.Sequence[Observer] = ()
+) -> collections.abc.Awaitable[body.Bot]:
     """Build the bot ``model`` defines and start it in ``ctx``, as ``hsm.start`` starts a machine.
 
-    ``data`` is the body's start data. The awaitable resolves to the body once it has answered its
-    activation: active, or inactive after ``bot.activating.failed``.
+    ``data`` is the body's start data, and ``observe`` the observers that watch this start of the bot.
+    The awaitable resolves to the body once it has answered its activation: active, or inactive after
+    ``bot.activating.failed``.
 
     Raises:
         StartError: B0101 if a part of ``model`` is already running, B0102 if building a part
             raised (chained to the cause), B0103 if ``ctx`` is not an ``Environment``.
-        TypeError: If ``model`` is not a ``bot.Model``.
+        TypeError: If ``model`` is not a ``bot.Model``, or something in ``observe`` is not an observer.
         TimeoutError: If the body never answers its activation.
     """
 
     # Captured here, in the bot file's own call, before the coroutine runs in another frame.
-    return _start(ctx, model, data, diagnostics.Location.capture())
+    return _start(ctx, model, data, tuple(observe), diagnostics.Location.capture())
 
 
-async def _start(ctx: Environment, model: elements.Model, data: object, location: diagnostics.Location) -> body.Bot:
+async def _start(
+    ctx: Environment,
+    model: elements.Model,
+    data: object,
+    observers: tuple[Observer, ...],
+    location: diagnostics.Location,
+) -> body.Bot:
     if not isinstance(typing.cast(object, model), elements.Model):
         raise TypeError(f"bot.start takes a bot.Model, not {type(model).__name__}: call the function that defines it")
     name = model.qualified_name[1:]
@@ -116,9 +144,12 @@ async def _start(ctx: Environment, model: elements.Model, data: object, location
         with span.operation("bot.model.start", scope=_SCOPE, component="mosfet.Bot", stage="start") as active:
             if not isinstance(typing.cast(object, ctx), Environment):
                 raise _outside(name, ctx, location)
-            instance = construct(model, location)
-            # The body's own model under the bot's name, as ``mosfet.Bot(name=)`` runs it (DSL-25).
-            _ = await mosfet.started(ctx, instance, hsm.redefine(body.Bot.model, name), hsm.Config(data=data))
+            instance = construct(model, location, observe=observers)
+            # The body's own model under the bot's name with its observers, as ``mosfet.Bot(name=, observe=)``
+            # runs it (DSL-25, DSL-26).
+            _ = await mosfet.started(
+                ctx, instance, hsm.redefine(body.Bot.model, name, *observers), hsm.Config(data=data)
+            )
             try:
                 ctx.join(instance)
                 answer = await abilities.run_terminal_operation(
@@ -157,22 +188,29 @@ async def _start(ctx: Environment, model: elements.Model, data: object, location
     return instance
 
 
-def construct(model: elements.Model, location: diagnostics.Location) -> body.Bot:
+def construct(
+    model: elements.Model, location: diagnostics.Location, *, observe: collections.abc.Sequence[Observer] = ()
+) -> body.Bot:
     """The body ``model`` defines, built around the very parts it holds and not yet started.
 
     ``location`` is the bot file's own call that asked for it, ``bot.start``'s or ``bot.run``'s, which
-    its diagnostics point at. ``bot.run`` builds every bot this way before its process starts.
+    its diagnostics point at, and ``observe`` the observers that call gave. ``bot.run`` builds every bot
+    this way before its process starts.
 
     Raises:
         StartError: B0101 if a part of ``model`` is already running, B0102 if building a part raised
             (chained to the cause).
+        TypeError: If something in ``observe`` is not an observer.
     """
 
+    for observer in observe:
+        if not isinstance(typing.cast(object, observer), hsm.ObservationElement):
+            raise TypeError(f"observe takes hsm observers (bot.observe(...)), not {type(observer).__name__}")
     name = model.qualified_name[1:]
     running = [(part, member) for part, member in _parts(model) if lifecycle.is_started(part)]
     if running:
         raise _again(name, running, location)
-    return _body(model, name, location)
+    return _body(model, name, tuple(observe), location)
 
 
 def _activate(reply_to: hsm.Instance) -> hsm.Event[typing.Any]:
@@ -236,7 +274,9 @@ def _parts(model: elements.Model) -> list[tuple[hsm.Instance, elements.Member]]:
     return parts
 
 
-def _body(model: elements.Model, name: str, location: diagnostics.Location) -> body.Bot:
+def _body(
+    model: elements.Model, name: str, observers: tuple[Observer, ...], location: diagnostics.Location
+) -> body.Bot:
     """The body ``model`` defines, around the very parts it holds."""
 
     devices: list[Device] = []
@@ -295,6 +335,7 @@ def _body(model: elements.Model, name: str, location: diagnostics.Location) -> b
             stm_memory=register,
             firmware=machine,
             name=name,
+            observe=observers,
         )
     except Exception as error:
         raise _raised(name, model.location, "body", error, location) from error
@@ -427,4 +468,4 @@ def _raised(
     )
 
 
-__all__ = ["StartError", "construct", "start", "stop"]
+__all__ = ["Observer", "StartError", "construct", "observe", "start", "stop"]

@@ -19,8 +19,8 @@ end in typed events.
 
 ## What `bot.run` runs
 
-`bot.run(*models, actors=(), process=None)` is synchronous and never returns: it ends the process with its
-exit code.
+`bot.run(*models, actors=(), process=None, observe=())` is synchronous and never returns: it ends the
+process with its exit code.
 
 * `models`: 1 to 32 `bot.Model`s, each given once (`B0105`), each under a name of its own (`B0104`). A
   bot's name is its supervisor's name and a telemetry attribute, so `MAX_BOTS` bounds that cardinality.
@@ -28,6 +28,9 @@ exit code.
   whose class declares `model` (`B0106`); the process starts each one with exactly that model before any
   bot and stops them in reverse after every bot.
 * `process`: the process's options, `bot.process()` when omitted.
+* `observe`: boundary observers (`bot.observe(...)`, which is `hsm.observe`) for logs and records. Each
+  bot's body runs on its model redefined with them, so they watch every bot the process runs, across its
+  supervisor's restarts, and never act on it.
 
 A violation is printed to stderr like `bot.define`'s errors, with the span of the bot file's own `bot.run`
 call, and the process exits `78` (`invalid_models`). Then `bot.run` creates the data dir `0700`, configures
