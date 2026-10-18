@@ -6,18 +6,21 @@ Usage::
     from mosfet.abilities import identification, memory
     from mosfet.providers import sqlite_memory
 
-    engine = sqlite_memory.open_engine(database_path="bot-memory.sqlite3")
-    store = memory.Memory(engine=engine, index=sqlite_memory.VecIndex(), embedder=embedder)
-    voices = identification.Matcher(store=sqlite_memory.IdentityStore(engine=engine), policy=policy)
+    database = sqlite_memory.Database(path="bot-memory.sqlite3")  # opened by the first part to start
+    store = memory.Memory(engine=database.open, index=sqlite_memory.VecIndex(), embedder=embedder)
+    voices = identification.Matcher(store=sqlite_memory.IdentityStore(engine=database.open), policy=policy)
+
+``open_engine(database_path=...)`` opens one now, for a script or a test.
 """
 
-from .engine import ProviderError, open_engine
+from .engine import Database, ProviderError, open_engine
 from .identity import IdentityStore
 from .index import VecIndex
 
 __version__ = "0.1.0"
 
 __all__ = [
+    "Database",
     "IdentityStore",
     "ProviderError",
     "VecIndex",

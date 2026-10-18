@@ -8,8 +8,8 @@ Domain code should build SQLAlchemy Core clauses against ``schema.memory_table``
 compile them with ``compile_statement`` / ``compile_statements``. The ability executes
 crude ``Statement(sql, parameters)`` batches only.
 
-Constructing a store does no I/O (DSL-29): it records the engine, database path or connection it
-was given. The store opens and migrates its database in its own ``opening`` state, the first time
+Constructing a store does no I/O (DSL-29): it records the engine, engine handle (a callable that
+opens one, called once in the opening state), database path or connection it was given. The store opens and migrates its database in its own ``opening`` state, the first time
 its behavior starts, and keeps that database for its lifetime; requests sent before it is open
 wait. Telemetry: ``bot.memory.store.open.count`` counts opens by ``bot.ability.name`` (the store
 class, a closed set from code) and ``bot.outcome`` {ok, failed, timeout}.
@@ -424,8 +424,10 @@ class MemoryStore(ability.Ability[InputData, OutputData]):
     """Ability that executes compiled SQL statements as one transaction per apply.
 
     Construction only records ``engine``, or ``database`` and ``connection``; nothing is opened.
-    The store's behavior starts in ``opening``: it opens the database (an injected ``engine`` is
-    migrated, otherwise a private SQLite engine is opened and migrated) and goes on to ``idle``.
+    ``engine`` is an open engine or a handle that opens one (a callable, such as a database other
+    parts share opening on its first use). The store's behavior starts in ``opening``: it opens the
+    database (an injected ``engine``, or the one its handle opens, is migrated; otherwise a private
+    SQLite engine is opened and migrated) and goes on to ``idle``.
     The open is bounded by the attach timeout. A store that cannot open its database, or does not
     within that bound, is ``degraded`` and answers every request failed. The open database is
     kept for the store's lifetime, so a store that detaches and attaches again opens nothing new.
@@ -448,7 +450,7 @@ class MemoryStore(ability.Ability[InputData, OutputData]):
     # The open database: None until the opening state has opened it, then kept for the lifetime.
     _engine: Engine | None
     # What construction was given; read only by the opening state.
-    _injected: Engine | None
+    _injected: Engine | collections.abc.Callable[[], Engine] | None
     _database: str
     _connection: typing.Any | None
     _apply_completed_event: typing.ClassVar[hsm.Event[OutputData]] = _MemoryStoreApplyCompletedEvent
@@ -461,7 +463,7 @@ class MemoryStore(ability.Ability[InputData, OutputData]):
         *,
         id: ability.AbilityId | None = None,
         clock: hsm.Clock | None = None,
-        engine: Engine | None = None,
+        engine: Engine | collections.abc.Callable[[], Engine] | None = None,
         connection: typing.Any | None = None,
         database: str = ":memory:",
     ) -> None:
@@ -480,9 +482,11 @@ class MemoryStore(ability.Ability[InputData, OutputData]):
             MigrationError: the database matches no known schema revision.
         """
 
-        if self._injected is not None:
-            migrate(self._injected)
-            return self._injected
+        injected = self._injected
+        if injected is not None:
+            engine = injected if isinstance(injected, Engine) else injected()
+            migrate(engine)
+            return engine
         return open_sqlite_engine(database=self._database, connection=self._connection)
 
     async def _open_engine(self) -> Engine:
@@ -494,7 +498,8 @@ class MemoryStore(ability.Ability[InputData, OutputData]):
     async def stop(self, ctx: hsm.Context) -> None:
         """Stop, then close the database this store opened; one it was given, as an engine or a connection, is left open.
 
-        Whoever opens a database closes it: an injected engine or connection is its owner's. A store
+        Whoever opens a database closes it: an injected engine, one a handle opened, or a connection is
+        its owner's. A store
         started again opens its database again.
         """
 

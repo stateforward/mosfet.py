@@ -9,11 +9,16 @@ cannot ship without a native extension:
 - `open_engine(database_path=...)`: the core SQLite engine, migrated to the head schema, with the
   bundled `vec0` loadable extension loaded on every connection (extension loading is locked again
   right after), `busy_timeout=5000`, and WAL for file databases.
+- `Database(path=...)`: the same file engine, opened on its first use. Construction opens nothing;
+  `database.open` is the engine handle a bot file gives every part that shares the database
+  (`memory.Memory(engine=database.open)`, `IdentityStore(engine=database.open)`), and the first of
+  them to start opens and migrates it, once, from any thread. An open that fails raises, and the
+  next call tries again.
 - `VecIndex()`: approximate cosine nearest search over one `vec0` table per embedding space
   (`bot_memory_vec_<dims>_<hash>`), written inside Memory's own transactions. Canonical vectors
   stay in `bot_memory_vector`, so the index can be dropped and rebuilt.
 - `IdentityStore(engine=...)`: an `identification.Store` that keeps voice and face identities in the
-  same database. Identity rows live in the core `bot_identity` table (memory baseline `0001`); each
+  same database, given an engine or an engine handle (opened by its first call). Identity rows live in the core `bot_identity` table (memory baseline `0001`); each
   print lives in one `vec0` table per print model and dims (`bot_identity_vec_<dims>_<hash>`,
   created on first use, with a `kind` column so voices and faces never match each other). Every
   call is one `BEGIN IMMEDIATE` transaction under a per-store lock, so it can share Memory's engine
@@ -27,14 +32,14 @@ cannot ship without a native extension:
 from mosfet.abilities import identification, memory
 from mosfet.providers import sqlite_memory
 
-engine = sqlite_memory.open_engine(database_path="bot-memory.sqlite3")
+database = sqlite_memory.Database(path="bot-memory.sqlite3")  # opened by the first part to start
 store = memory.Memory(
-    engine=engine,
+    engine=database.open,
     index=sqlite_memory.VecIndex(),
     embedder=embedder,  # any embedding.Embedder, or None for a bot that cannot embed
 )
 voices = identification.Matcher(
-    store=sqlite_memory.IdentityStore(engine=engine),
+    store=sqlite_memory.IdentityStore(engine=database.open),
     policy=identification.MatchPolicy(threshold=0.50, margin=0.05, refine_threshold=0.65),
 )
 ```

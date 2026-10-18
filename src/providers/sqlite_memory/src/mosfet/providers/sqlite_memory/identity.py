@@ -29,6 +29,8 @@ from mosfet.abilities import identification, memory
 from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.pool import StaticPool
 
+from .engine import ProviderError
+
 _IDENTITIES = memory.schema.identity_table
 
 
@@ -97,19 +99,21 @@ class IdentityStore(identification.Store):
     identity row and its print; memory nodes that carry the identity's ref stay.
     """
 
-    _engine: Engine
+    _engine: Engine | collections.abc.Callable[[], Engine]
     _lock: threading.Lock
 
-    def __init__(self, *, engine: Engine) -> None:
+    def __init__(self, *, engine: Engine | collections.abc.Callable[[], Engine]) -> None:
         """Keep identities in ``engine``'s file database, built by ``sqlite_memory.open_engine``.
 
-        The engine may be the one Memory uses: each call takes its own pooled connection.
+        ``engine`` is an open engine, or a handle that opens one, such as ``sqlite_memory.Database.open``:
+        the store calls it on its first call, so constructing the store opens nothing. The engine may be
+        the one Memory uses: each call takes its own pooled connection.
 
         Raises:
             ValueError: If ``engine`` is one shared connection (an in-memory database).
         """
 
-        if isinstance(engine.pool, StaticPool):
+        if isinstance(engine, Engine) and isinstance(engine.pool, StaticPool):
             raise ValueError("IdentityStore needs a file database; use identification.InProcessStore in memory")
         self._engine = engine
         self._lock = threading.Lock()
@@ -117,28 +121,37 @@ class IdentityStore(identification.Store):
     def _transaction[T](self, work: collections.abc.Callable[[Connection], T]) -> T:
         """Run ``work`` in one ``BEGIN IMMEDIATE`` transaction under the store's lock (database I/O).
 
+        The first call to a store given an engine handle opens the database through it.
+
         Raises:
-            identification.StoreError: ``work``'s own, or ``STORE_FAILED`` for a database failure. A
-                database error renders its bound parameters (packed prints among them), so the
-                ``STORE_FAILED`` error names only the failure's type and carries no cause or context.
+            identification.StoreError: ``work``'s own, or ``STORE_FAILED`` for a database failure or a
+                database that cannot be opened. A database error renders its bound parameters (packed
+                prints among them), so the ``STORE_FAILED`` error names only the failure's type and
+                carries no cause or context.
         """
 
         try:
-            with self._lock, self._engine.connect() as connection:
-                # pysqlite's legacy transaction mode emits no BEGIN of its own once one is open, so
-                # this statement is the transaction; IMMEDIATE takes the write lock up front.
-                _ = connection.exec_driver_sql("BEGIN IMMEDIATE")
-                try:
-                    result = work(connection)
-                    _ = connection.exec_driver_sql("COMMIT")
-                except BaseException:
-                    # SQLite may already have rolled back (a full disk); a ROLLBACK would then mask the error.
-                    driver = typing.cast(sqlite3.Connection, connection.connection.driver_connection)
-                    if driver.in_transaction:
-                        _ = connection.exec_driver_sql("ROLLBACK")
-                    raise
-                return result
-        except (sqlalchemy.exc.SQLAlchemyError, sqlite3.Error) as error:
+            with self._lock:
+                engine = self._engine if isinstance(self._engine, Engine) else self._engine()
+                if isinstance(engine.pool, StaticPool):
+                    raise identification.StoreError(
+                        identification.FailureKind.STORE_FAILED, "the identity store needs a file database"
+                    )
+                with engine.connect() as connection:
+                    # pysqlite's legacy transaction mode emits no BEGIN of its own once one is open, so
+                    # this statement is the transaction; IMMEDIATE takes the write lock up front.
+                    _ = connection.exec_driver_sql("BEGIN IMMEDIATE")
+                    try:
+                        result = work(connection)
+                        _ = connection.exec_driver_sql("COMMIT")
+                    except BaseException:
+                        # SQLite may already have rolled back (a full disk); a ROLLBACK would then mask the error.
+                        driver = typing.cast(sqlite3.Connection, connection.connection.driver_connection)
+                        if driver.in_transaction:
+                            _ = connection.exec_driver_sql("ROLLBACK")
+                        raise
+                    return result
+        except (sqlalchemy.exc.SQLAlchemyError, sqlite3.Error, memory.store.MigrationError, ProviderError) as error:
             failure = type(error).__name__
         # Raised outside the handler, so the parameter-bearing error is neither cause nor context.
         raise identification.StoreError(

@@ -18,6 +18,20 @@ examples/builder_bot/.venv/bin/python -m builder_bot_example --secrets-dir examp
 examples/builder_bot/.venv/bin/builder-terminal --secret-file examples/builder_bot/secrets/computer_token_secret
 ```
 
+`willy` is one bot for the whole house, that learns who people are: a voice nobody has named is a fact it is
+shown, and whom a voice belongs to, what to call someone and whether to ask are its own choices. Its bot file,
+`willy_example/__main__.py`, has one `bot.define`: a `computer.Computer` per room, each set on an
+`environment.Object` and served by one `websocket.Server`, an ear and a mouth on the lab's streaming speech
+server, a voice it is given when it is born, and `people.People` under the owner's household file. Every model
+runs on the local lab server. See [`willy/README.md`](willy/README.md) for the settings, the household and where
+safety sits:
+
+```bash
+uv sync --project examples/willy
+set -a; . examples/willy/.env; set +a
+examples/willy/.venv/bin/python -m willy_example --secrets-dir examples/willy/secrets
+```
+
 `minimal_bot` is the smallest bot: one device-free bot with a cognition on any OpenAI-compatible endpoint, run
 with `python -m minimal_bot_example`. Its own project installs `mosfet` and the bot, so the command runs exactly
 as documented; see [`minimal_bot/README.md`](minimal_bot/README.md):

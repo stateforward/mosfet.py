@@ -1,0 +1,4 @@
+[
+  {"id": "gabe", "name": "Gabe", "role": "adult"},
+  {"id": "ada", "name": "Ada", "role": "child", "born": 2018}
+]

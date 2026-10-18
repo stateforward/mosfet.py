@@ -146,6 +146,15 @@ OPENAI_BASE_URL=http://127.0.0.1:8080/v1 OPENAI_MODEL=... OPENAI_API_KEY=... \
   examples/minimal_bot/.venv/bin/python -m minimal_bot_example --ready-file /tmp/ready
 ```
 
+[`examples/willy`](examples/willy/README.md) is one bot for a whole house, on local models: a computer in
+each room, and the capacity to learn who people are, under the owner's household:
+
+```bash
+uv sync --project examples/willy
+set -a; . examples/willy/.env; set +a
+examples/willy/.venv/bin/python -m willy_example --secrets-dir examples/willy/secrets
+```
+
 [`docs/runtime.md`](docs/runtime.md) has every `bot.process` option, the stop bound and the
 restart policy. [Running in a container](docs/runtime.md#running-in-a-container) covers the one
 image recipe, `docker/Dockerfile`, that runs any bot project with `python -m`.

@@ -108,6 +108,15 @@ jobs:
           uv run --locked --project examples/builder_bot basedpyright --project examples/builder_bot
           uv run --locked --project examples/builder_bot python -m pytest -q examples/builder_bot/tests
 
+      - name: Willy example quality gates
+        run: |
+          uv run --locked --project examples/willy ruff check examples/willy/src examples/willy/tests
+          uv run --locked --project examples/willy ruff format --check \
+            examples/willy/src \
+            examples/willy/tests
+          uv run --locked --project examples/willy basedpyright --project examples/willy
+          uv run --locked --project examples/willy python -m pytest -q -m "not live" examples/willy/tests
+
       - name: Ruff
         run: |
           # Provider list derived via glob so new providers are covered automatically.

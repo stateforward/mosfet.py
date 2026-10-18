@@ -682,11 +682,49 @@ class _Embedder(embedding.Embedder):
         return embedding.OutputData(space=_SPACE, role=input.role, vectors=vectors)
 
 
-def test_memory_and_two_registries_share_one_file_database(tmp_path: pathlib.Path) -> None:
-    """One Memory write and a voice and a face registry in flight on one shared store all complete."""
+def test_a_store_on_a_database_opens_it_on_its_first_call(tmp_path: pathlib.Path) -> None:
+    """D-W8-20: constructing the store opens nothing; its first call opens (and migrates) the database."""
 
-    engine = _engine(tmp_path)
-    store = sqlite_memory.IdentityStore(engine=engine)
+    path = tmp_path / "memory.sqlite3"
+    database = sqlite_memory.Database(path=path)
+    store = sqlite_memory.IdentityStore(engine=database.open)
+    constructed = path.exists()
+
+    fixture = _fixture(lambda: store)
+    (minted,) = fixture.identify(_angle(0))
+
+    assert constructed is False
+    assert minted.recognized is False
+    assert path.exists()
+    database.open().dispose()
+
+
+def test_a_database_that_cannot_open_is_a_failed_store_call_naming_only_its_type(tmp_path: pathlib.Path) -> None:
+    path = tmp_path / "unversioned.sqlite3"
+    engine = sqlalchemy.create_engine(f"sqlite+pysqlite:///{path}")
+    with engine.begin() as connection:
+        _ = connection.execute(text(f"CREATE TABLE {memory.MEMORY_TABLE} (memory_id TEXT PRIMARY KEY)"))
+    engine.dispose()
+    fixture = _fixture(lambda: sqlite_memory.IdentityStore(engine=sqlite_memory.Database(path=path).open))
+
+    with pytest.raises(identification.StoreError) as raised:
+        _ = fixture.identify(_angle(0))
+
+    assert raised.value.kind is identification.FailureKind.STORE_FAILED
+    assert "MigrationError" in str(raised.value)
+    assert raised.value.__cause__ is None and raised.value.__context__ is None
+
+
+@pytest.mark.parametrize("shared", ["engine", "database"])
+def test_memory_and_two_registries_share_one_file_database(tmp_path: pathlib.Path, shared: str) -> None:
+    """One Memory write and a voice and a face registry in flight on one shared store all complete.
+
+    Shared as an open engine, or as a ``Database`` handle that whichever starts first opens (D-W8-20).
+    """
+
+    database = sqlite_memory.Database(path=tmp_path / "shared.sqlite3")
+    handle: Engine | collections.abc.Callable[[], Engine] = _engine(tmp_path) if shared == "engine" else database.open
+    store = sqlite_memory.IdentityStore(engine=handle)
     timeout = datetime.timedelta(seconds=10)
 
     async def run() -> list[hsm.Event[typing.Any]]:
@@ -702,7 +740,7 @@ def test_memory_and_two_registries_share_one_file_database(tmp_path: pathlib.Pat
             )
             for kind in ("voice", "face")
         ]
-        actors.append(memory.Memory(engine=engine, index=sqlite_memory.VecIndex(), embedder=_Embedder()))
+        actors.append(memory.Memory(engine=handle, index=sqlite_memory.VecIndex(), embedder=_Embedder()))
         for actor in actors:
             assert await actor.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)))
         voice, face, remembering = actors
@@ -733,6 +771,7 @@ def test_memory_and_two_registries_share_one_file_database(tmp_path: pathlib.Pat
         )
 
     replies = asyncio.run(run())
+    engine = handle if isinstance(handle, Engine) else handle()
     with engine.connect() as connection:
         kinds = connection.execute(text("SELECT kind, count(*) FROM bot_identity GROUP BY kind ORDER BY kind")).all()
     engine.dispose()

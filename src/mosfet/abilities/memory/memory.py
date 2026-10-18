@@ -422,7 +422,7 @@ class Memory(store.MemoryStore):
         *,
         id: ability.AbilityId | None = None,
         clock: hsm.Clock | None = None,
-        engine: Engine | None = None,
+        engine: Engine | collections.abc.Callable[[], Engine] | None = None,
         database: str = ":memory:",
         embedder: embedding.Embedder | None = None,
         index: index.Index | None = None,

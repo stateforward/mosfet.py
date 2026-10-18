@@ -179,7 +179,8 @@ embedder cannot take (too long, unsupported, invalid) is kept unindexed and reco
 `bot_memory_index_attempt`; `BackfillEvent` batches within the embedder's whole capacity,
 attributes a failure to the item it names, and never retries a permanently unindexable node in
 that space. `index=None` uses the exact in-process `ExactIndex`; production roots pass
-`sqlite_memory.VecIndex()` and `sqlite_memory.open_engine(...)`.
+`sqlite_memory.VecIndex()` and an engine: `sqlite_memory.open_engine(...)` opens one now, and a bot file
+passes `engine=database.open` of a `sqlite_memory.Database(path=...)`, so the first part to start opens it.
 
 ## Persistent routines
 
@@ -293,6 +294,6 @@ studio (publishes topology into the `web/` studio for inspection) with `BOT_MODE
 | `mosfet-provider-llama-cpp` | in-process llama.cpp on a pinned `llama-cpp-python` build (Metal / CUDA / CPU) |
 | `mosfet-provider-pyannote` | voice diarization & speaker identification |
 | `mosfet-provider-speech-server` | speech-server clients for `listening.Listening`: `Transcription` (streaming `/v1/audio/stream` session), `Diarizer` (`/v1/diarize`), `VoiceEmbedder` (`/v1/embed`) and `AffectClassifier` (`/v1/emotion`), with stdlib 16 kHz mono resampling |
-| `mosfet-provider-sqlite-memory` | SQLite + sqlite-vec for `memory.Memory`: `open_engine` (vec0 loaded) and the `VecIndex` vector index |
+| `mosfet-provider-sqlite-memory` | SQLite + sqlite-vec for `memory.Memory`: `open_engine` (vec0 loaded), the `Database` handle opened on first use, the `VecIndex` vector index and the `IdentityStore` |
 | `mosfet-provider-typesafe` | label-tier selection (system_one Choice/Score/Noul) |
 | `mosfet-provider-needle` | local Needle 3 tool calling for the Intuition reflex tier (Apache-2.0, on-device) |

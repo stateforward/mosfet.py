@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import concurrent.futures
+import contextlib
 import pathlib
 import sqlite3
 import typing
@@ -71,3 +73,34 @@ def test_migrations_leave_vec0_tables_to_the_provider() -> None:
         config.attributes["connection"] = connection
         command.check(config)
     engine.dispose()
+
+
+def test_a_database_opens_nothing_until_its_first_open_and_then_opens_once(tmp_path: pathlib.Path) -> None:
+    """D-W8-20: what Memory and the identity stores share is opened by whichever starts first, once."""
+
+    path = tmp_path / "data" / "memory.sqlite3"
+    database = sqlite_memory.Database(path=path)
+    constructed = path.parent.exists()
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+        engines = [opened.result() for opened in [pool.submit(database.open) for _ in range(8)]]
+
+    assert constructed is False
+    assert all(engine is engines[0] for engine in engines)
+    with engines[0].connect() as connection:
+        assert connection.execute(text("SELECT count(*) FROM alembic_version")).scalar_one() == 1
+        assert connection.execute(text("SELECT vec_version()")).scalar_one()
+    engines[0].dispose()
+
+
+def test_a_database_is_one_file_and_one_that_cannot_open_raises_each_time_it_is_opened(tmp_path: pathlib.Path) -> None:
+    path = tmp_path / "unversioned.sqlite3"
+    with contextlib.closing(sqlite3.connect(path)) as connection, connection:
+        _ = connection.execute(f"CREATE TABLE {memory.MEMORY_TABLE} (memory_id TEXT PRIMARY KEY)")
+    database = sqlite_memory.Database(path=path)
+
+    for _ in range(2):
+        with pytest.raises(memory.store.MigrationError):
+            _ = database.open()
+    with pytest.raises(ValueError, match="file"):
+        _ = sqlite_memory.Database(path=":memory:")

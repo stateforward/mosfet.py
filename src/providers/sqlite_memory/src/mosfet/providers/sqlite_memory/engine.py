@@ -6,6 +6,10 @@ extension loading immediately so SQL can never load another one, sets ``busy_tim
 switches file databases to WAL. It fails closed with ``ProviderError`` when the interpreter's
 ``sqlite3`` cannot load extensions (for example Apple's system Python), when the artifact is
 missing, or when ``vec0`` does not answer.
+
+``Database`` is the same file engine opened on first use: the handle a bot file gives the parts
+that share one database (``memory.Memory(engine=database.open)``, ``IdentityStore(engine=database.open)``),
+so constructing them opens nothing and the first to start opens and migrates it, once.
 """
 
 from __future__ import annotations
@@ -15,6 +19,7 @@ import importlib.resources
 import pathlib
 import sqlite3
 import sys
+import threading
 
 from mosfet.abilities import memory
 from sqlalchemy.engine import Engine
@@ -91,4 +96,44 @@ def open_engine(*, database_path: pathlib.Path | str = ":memory:") -> Engine:
     return memory.store.open_sqlite_engine(database=database, on_connect=hook)
 
 
-__all__ = ["ProviderError", "connect_hook", "extension_path", "load_vec0", "open_engine"]
+class Database:
+    """One file memory database, opened on its first use: the engine handle the parts sharing it are given.
+
+    Construction records the path and opens nothing (DSL-29), so a bot file builds its parts before
+    ``bot.run`` makes the data dir private. :meth:`open` opens the database with :func:`open_engine`
+    (migrating it) the first time it is called, from any thread, and returns that one engine on every
+    later call; an open that fails raises and is tried again by the next call. Memory and each
+    ``IdentityStore`` given ``engine=database.open`` call it when they first serve. The engine is never
+    disposed by the parts that share it; it lives as long as the process that made the handle.
+
+    Raises:
+        ValueError: if ``path`` is ``":memory:"``; an in-memory database is one connection, so
+            ``open_engine()`` serves it.
+    """
+
+    _path: pathlib.Path
+    _lock: threading.Lock
+    _engine: Engine | None
+
+    def __init__(self, *, path: pathlib.Path | str) -> None:
+        if str(path) == ":memory:":
+            raise ValueError("a Database is one file; use open_engine() for an in-memory database")
+        self._path = pathlib.Path(path)
+        self._lock = threading.Lock()
+        self._engine = None
+
+    def open(self) -> Engine:
+        """The database's one engine, opened and migrated by the first call (filesystem and database I/O).
+
+        Raises:
+            ProviderError: if extensions cannot be loaded or the bundled ``vec0`` is missing.
+            memory.store.MigrationError: if the database matches no known schema revision.
+        """
+
+        with self._lock:
+            if self._engine is None:
+                self._engine = open_engine(database_path=self._path)
+            return self._engine
+
+
+__all__ = ["Database", "ProviderError", "connect_hook", "extension_path", "load_vec0", "open_engine"]

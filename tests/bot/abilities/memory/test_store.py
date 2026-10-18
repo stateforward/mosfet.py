@@ -511,6 +511,41 @@ def test_a_store_closes_the_database_it_opened_when_it_stops(tmp_path: pathlib.P
     assert len(disposed) == 2
 
 
+def test_a_store_given_an_engine_handle_opens_it_when_its_behavior_starts_and_leaves_it_open() -> None:
+    """D-W8-20: a handle is called in the opening state, never at construction; what it opens is its owner's."""
+
+    from mosfet.abilities.memory import store as store_module
+
+    opened: list[Engine] = []
+
+    def handle() -> Engine:
+        engine = store_module.open_sqlite_engine()
+        opened.append(engine)
+        return engine
+
+    async def run() -> tuple[int, tuple[str, ...]]:
+        given = memory.MemoryStore(engine=handle)
+        constructed = len(opened)
+        ctx = shared_hsm_context()
+        await start_abilities_for_test(ctx, given)
+        found = await memory.transact(
+            ctx,
+            given,
+            memory.InputData(
+                statements=(_insert_content(content="handled", query_tags="h"), _select_by_query_tags(query_tags="h"))
+            ),
+        )
+        await hsm.stop(given, ctx)
+        return constructed, found.contents(statement_index=1)
+
+    with disposed_engines() as disposed:
+        constructed, contents = asyncio.run(run())
+
+    assert (constructed, len(opened), contents) == (0, 1, ("handled",))
+    assert disposed == []
+    opened[0].dispose()
+
+
 def test_a_store_leaves_an_engine_it_was_given_open_when_it_stops() -> None:
     """Whoever opens a database closes it: an injected engine is its owner's to dispose."""
 
