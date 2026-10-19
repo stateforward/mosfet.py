@@ -56,6 +56,9 @@ from . import diagnostics, elements, firmware, lints
 
 _NAME: pydantic.TypeAdapter[str] = pydantic.TypeAdapter(runtime.BotName)
 _LANGUAGES: pydantic.TypeAdapter[tuple[str, ...]] = pydantic.TypeAdapter(tuple[vocal.speech.Locale, ...])
+_KEYS: pydantic.TypeAdapter[tuple[str, ...]] = pydantic.TypeAdapter(
+    tuple[typing.Annotated[str, pydantic.StringConstraints(min_length=1, max_length=256)], ...]
+)
 _PROCESSOR: typing.Final = (
     "a `processing.Processor` (`from mosfet.abilities import processing`); in a test, the offline one is "
     + "`testing.Scripted()` (`from mosfet.bot import testing`)"
@@ -438,6 +441,14 @@ class Validator(hsm.ModelValidator):
             )
         except (TypeError, pydantic.ValidationError):
             spoken = False
+        keys = member.allowed
+        # The keys, as a sequence that is not one string; none at all is a scope too.
+        scoped = not isinstance(keys, str | bytes)
+        if scoped:
+            try:
+                _ = _KEYS.validate_python(tuple(typing.cast(collections.abc.Iterable[object], keys)))
+            except (TypeError, pydantic.ValidationError):
+                scoped = False
         checks: tuple[tuple[int | str, object, bool, str], ...] = (
             (0, member.catalog, isinstance(member.catalog, vocal.voice.Catalog), "a `vocal.voice.Catalog`"),
             (
@@ -447,8 +458,26 @@ class Validator(hsm.ModelValidator):
                 "a `vocal.voice.Designer`",
             ),
             ("languages", given, spoken, 'language tags such as `("en",)`'),
+            ("allowed", keys, scoped, 'the keys of the source\'s voices such as `("warm",)`'),
         )
         self._arguments(model, call, "bot.voice", checks)
+        if scoped and isinstance(member.designer, vocal.voice.Designer) and keys:
+            found = diagnostics.argument(call, "allowed")
+            model.findings.append(
+                diagnostics.Diagnostic(
+                    code="B0006",
+                    level="error",
+                    message="`bot.voice(allowed=)` is given with a `designer`, which the bot is born only from",
+                    primary=(call if found is None else found[0]).model_copy(
+                        update={"label": "never offered to a bot that designs its voice"}
+                    ),
+                    notes=(
+                        "a bot with a `designer` is born only as the one voice it designs, which its memory keeps; "
+                        + "`allowed` names the voices of a source without one that the bot may be born as",
+                    ),
+                    help=diagnostics.Help(message="drop `allowed=`, or the `designer=` to be born as an allowed voice"),
+                )
+            )
         # What the bot file wrote, so a part another diagnostic refused still counts as given.
         written = model.owned_elements
         if not any(isinstance(element, elements.RedefinableTraits) for element in written):

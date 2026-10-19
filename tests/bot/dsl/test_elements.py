@@ -154,7 +154,7 @@ def test_the_voice_and_the_seeds_register_as_written() -> None:
     model = bot.define(
         "greeter",
         bot.traits("warm"),
-        bot.voice(shelf, languages=("en", "fr")),
+        bot.voice(shelf, languages=("en", "fr"), allowed=("warm",)),
         bot.cognition(support.Silent(), intuition=support.Undecided(), autonomy=True, seeds=(heard,)),
         bot.output(mouth),
         bot.attach(phone.Phone()),
@@ -163,7 +163,7 @@ def test_the_voice_and_the_seeds_register_as_written() -> None:
     voice = model.members["/greeter/.voice"]
     cognition = model.members["/greeter/.cognition"]
     assert isinstance(voice, elements.VoiceElement)
-    assert (voice.catalog, voice.designer, voice.languages) == (shelf, None, ("en", "fr"))
+    assert (voice.catalog, voice.designer, voice.languages, voice.allowed) == (shelf, None, ("en", "fr"), ("warm",))
     assert isinstance(cognition, elements.CognitionElement)
     assert cognition.seeds == (heard,)
 
@@ -180,7 +180,8 @@ def test_a_voice_speaks_english_by_default_and_has_no_designer() -> None:
 
     voice = model.members["/greeter/.voice"]
     assert isinstance(voice, elements.VoiceElement)
-    assert (voice.designer, voice.languages) == (None, ("en",))
+    # And its owner allows it no voice of its source but one it designs itself.
+    assert (voice.designer, voice.languages, voice.allowed) == (None, ("en",), ())
 
 
 def test_a_bot_has_one_voice() -> None:
@@ -477,6 +478,18 @@ catalog = support.Shelf()
             'bot.define("greeter", bot.cognition(processor, intuition=decider), bot.attach(phone.Phone()), bot.voice(catalog, languages="en"))',
             "B0006",
             '`bot.voice(languages=)` takes language tags such as `("en",)`, not `str`',
+            None,
+        ),
+        (
+            'bot.define("greeter", bot.cognition(processor, intuition=decider), bot.attach(phone.Phone()), bot.voice(catalog, allowed="warm"))',
+            "B0006",
+            '`bot.voice(allowed=)` takes the keys of the source\'s voices such as `("warm",)`, not `str`',
+            None,
+        ),
+        (
+            'bot.define("greeter", bot.cognition(processor, intuition=decider), bot.attach(phone.Phone()), bot.voice(catalog, designer=support.Studio(), allowed=("warm",)))',
+            "B0006",
+            "`bot.voice(allowed=)` is given with a `designer`, which the bot is born only from",
             None,
         ),
         (

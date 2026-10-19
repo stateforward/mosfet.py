@@ -132,6 +132,7 @@ class VoiceElement(Member, kind=VoiceKind):
     catalog: object = None
     designer: object = None
     languages: object = ()
+    allowed: object = ()
 
 
 @dataclasses.dataclass(kw_only=True)
@@ -685,6 +686,7 @@ class RedefinableVoice(_Single[VoiceElement]):
     catalog: object = None
     designer: object = None
     languages: object = ()
+    allowed: object = ()
 
     @typing.override
     def _redefine(self, model: Model, stack: list[hsm.Element]) -> VoiceElement | None:
@@ -693,6 +695,7 @@ class RedefinableVoice(_Single[VoiceElement]):
             catalog=self.catalog,
             designer=self.designer,
             languages=self.languages,
+            allowed=self.allowed,
             location=self.location,
         )
         return self._register(model, member)
@@ -974,22 +977,29 @@ def voice(
     *,
     designer: vocal.voice.Designer | None = None,
     languages: collections.abc.Sequence[vocal.speech.Locale] = ("en",),
+    allowed: collections.abc.Sequence[str] = (),
 ) -> RedefinableVoice:
     """The source the bot is given its voice from when it is born (``bot.voice(catalog, languages=("en",))``).
 
     The first time the bot starts, its inception conceives a voice from the bot's traits, in ``languages``:
-    one ``catalog`` holds, or a new one ``designer`` makes (of the catalog's own source). Its one
-    ``speaking.Speaking`` given to ``bot.output`` speaks in it from then on, on every start after, and
-    cognition is told the voice it was given. The bot needs ``bot.traits`` to conceive it from.
+    one of the ``catalog``'s voices its owner ``allowed``, or a new one ``designer`` makes (of the catalog's own
+    source). Its one ``speaking.Speaking`` given to ``bot.output`` speaks in it from then on, on every start after,
+    and cognition is told the voice it was given. The bot needs ``bot.traits`` to conceive it from.
 
     Args:
         catalog: The voices the source holds.
         designer: What makes a new voice from a description, at the same source; none when omitted.
         languages: The languages the voice speaks, as language tags.
+        allowed: The keys of the source's voices the bot may be born as, for a source without a ``designer``
+            (with one, the bot is born only as the voice it designs, and ``allowed`` is B0006); none when omitted.
     """
 
     return RedefinableVoice(
-        catalog=catalog, designer=designer, languages=languages, location=diagnostics.Location.capture()
+        catalog=catalog,
+        designer=designer,
+        languages=languages,
+        allowed=allowed,
+        location=diagnostics.Location.capture(),
     )
 
 

@@ -90,7 +90,7 @@ what each bot is made of, and never a value given to a part:
 |---|---|
 | `bot.traits(*traits)` | The owner's fixed seed of the bot's nature: short descriptors such as `"curious"`, never instructions. With traits, the bot has a persona that it develops itself. At most one. |
 | `bot.cognition(processor, /, *, intuition, memory=None, associative=False, consolidation=False, autonomy=False, seeds=(), routines=None)` | Its mind: reasoning and reflection on `processor`, intuition on `intuition`, a `processing.DecisionProcessor` (see [Intuition decides on a decision model](#intuition-decides-on-a-decision-model)), plus each faculty switched on, all on one memory (a fresh in-memory `memory.Memory()` when none is given). `seeds` are native behaviors its autonomy runs, and need `autonomy=True`. `routines` is the wall clock routines keep time on. Exactly one. |
-| `bot.voice(catalog, /, *, designer=None, languages=("en",))` | The source it is given its voice from when it is born (see [Hearing, speaking and a voice](#hearing-speaking-and-a-voice)). At most one. |
+| `bot.voice(catalog, /, *, designer=None, languages=("en",), allowed=())` | The source it is given its voice from when it is born, and the voices of it the bot may be born as (see [Hearing, speaking and a voice](#hearing-speaking-and-a-voice)). At most one. |
 | `bot.attach(instance)` | A device it holds, keyed by its `id`, or an ability it acquires. |
 | `bot.input(ability)` | A sense organ: the body fans every environment stimulus out to its input abilities, in parallel. |
 | `bot.output(ability)` | An effector port, off the stimulus fan-out. |
@@ -172,7 +172,15 @@ behavior its autonomy runs before it deliberates, `communication.speech_heard_se
 from its traits, on its cognition's processor, as a voice the `catalog` holds or one its `designer`
 makes, and its one `speaking.Speaking` speaks in it from then on, on every start after (memory keeps
 it). The Speaking's `encoder` is then a factory, `(key, description) -> encoder`, called with the voice
-the bot was given. `bot.describe` lists `voice` among its faculties and the seeds by name:
+the bot was given.
+
+The bot is born only from its view of the catalog. With a `designer`, that is the one voice it designs
+itself, which its memory keeps, so it is never born as another the source holds (such as another maker's on
+a shared engine); `allowed` beside a `designer` is B0006. Without one, it is the voices its owner `allowed`
+by key; left out, nothing is allowed, so the bot must be allowed a voice to be born at all. The view bounds
+only what the bot is born as: a voice it was already given stays its own.
+
+`bot.describe` lists `voice` among its faculties and the seeds by name:
 
 ```pycon
 >>> from mosfet.abilities import communication, speaking, vocal

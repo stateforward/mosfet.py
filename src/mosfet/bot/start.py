@@ -363,6 +363,7 @@ def _body(
                 catalog=typing.cast(vocal.voice.Catalog, voice.catalog),
                 designer=typing.cast(vocal.voice.Designer | None, voice.designer),
                 memory=store,
+                allowed=tuple(typing.cast(collections.abc.Sequence[str], voice.allowed)),
             )
         except Exception as error:
             raise _raised(name, voice.location, "voice", error, location) from error

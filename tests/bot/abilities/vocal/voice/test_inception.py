@@ -219,7 +219,10 @@ async def make(
     start_speaking: bool = True,
     retry_after: datetime.timedelta = _FAST,
     inception_timeout: datetime.timedelta = datetime.timedelta(seconds=5),
+    allowed: tuple[str, ...] | None = None,
 ) -> Bot:
+    """One bot's inception; ``allowed`` is left to Inception's own default unless given."""
+
     environment = Environment()
     voices = voices or Voices()
     mouth = speaking.Speaking(encoder=voices, speaker=audio.Speaker())
@@ -238,6 +241,7 @@ async def make(
         memory=store,
         retry_after=retry_after,
         inception_timeout=inception_timeout,
+        **({} if allowed is None else {"allowed": allowed}),
     )
     await start_abilities_for_test(environment, inception)
     return Bot(environment, voices, mouth, inception)
@@ -303,7 +307,7 @@ def test_a_bot_made_by_a_catalog_source_is_given_the_one_voice_shortlisted_from_
     async def run() -> tuple[Bot, Maker, Shelf]:
         shelf = Shelf(warm, buddy)
         maker = Maker(shortlisted("buddy"))
-        bot = await make(shelf=shelf, maker=maker)
+        bot = await make(shelf=shelf, maker=maker, allowed=("warm", "buddy"))
         await made(bot)
         await bot.stop()
         return bot, maker, shelf
@@ -314,7 +318,7 @@ def test_a_bot_made_by_a_catalog_source_is_given_the_one_voice_shortlisted_from_
     shown = asked.input
     assert isinstance(shown, voice.InceptionInput)
     assert (shown.description_max_chars, shown.omitted) == (None, 0)
-    # The catalog is shown whole, but a model-facing input never carries audio: previews are left out.
+    # Every voice its owner allowed is shown, but a model-facing input never carries audio: previews are left out.
     assert shown.entries == (warm, buddy.model_copy(update={"preview": None}))
     assert shelf.calls == [("en",)]
     assert bot.voices.calls == [("buddy", "buddy")]
@@ -327,7 +331,7 @@ def test_a_long_catalog_is_shown_in_part_and_says_how_much_was_left_out() -> Non
 
     async def run() -> Maker:
         maker = Maker(shortlisted("v3"))
-        bot = await make(shelf=Shelf(*entries), maker=maker)
+        bot = await make(shelf=Shelf(*entries), maker=maker, allowed=tuple(entry.ref.key for entry in entries))
         await made(bot)
         await bot.stop()
         return maker
@@ -335,6 +339,122 @@ def test_a_long_catalog_is_shown_in_part_and_says_how_much_was_left_out() -> Non
     shown = asyncio.run(run()).inputs[0].input
     assert isinstance(shown, voice.InceptionInput)
     assert (len(shown.entries), shown.omitted) == (200, 5)
+
+
+def _catalog_of_many_makers() -> tuple[voice.Entry, ...]:
+    """A shared source: a stock voice and the voices another maker designed on it (a family's, a sidekick's)."""
+
+    return (
+        voice.Entry(ref=voice.Ref(source="lab", key="warm"), name="warm"),
+        voice.Entry(ref=voice.Ref(source="lab", key="v-family"), name="v-family", labels={"custom": "true"}),
+        voice.Entry(ref=voice.Ref(source="lab", key="v-sidekick"), name="v-sidekick", labels={"custom": "true"}),
+    )
+
+
+@pytest.mark.parametrize(
+    ("allowed", "shown_keys"),
+    [
+        (("warm",), ("warm",)),
+        (("warm", "v-sidekick"), ("warm", "v-sidekick")),
+        # A key the source does not hold is no voice to be born as.
+        (("v-family", "v-gone"), ("v-family",)),
+    ],
+)
+def test_a_bot_is_born_only_from_the_voices_its_owner_allowed(
+    allowed: tuple[str, ...], shown_keys: tuple[str, ...]
+) -> None:
+    async def run() -> tuple[Bot, Maker]:
+        maker = Maker(shortlisted(shown_keys[-1]))
+        bot = await make(shelf=Shelf(*_catalog_of_many_makers()), maker=maker, allowed=allowed)
+        await made(bot)
+        await bot.stop()
+        return bot, maker
+
+    bot, maker = asyncio.run(run())
+
+    shown = maker.inputs[0].input
+    assert isinstance(shown, voice.InceptionInput)
+    assert tuple(entry.ref.key for entry in shown.entries) == shown_keys
+    assert shown.omitted == 0
+    assert bot.voices.calls == [(shown_keys[-1], shown_keys[-1])]
+
+
+def test_a_voice_its_owner_did_not_allow_cannot_be_shortlisted() -> None:
+    async def run() -> tuple[Bot, Maker]:
+        maker = Maker(shortlisted("v-family"), shortlisted("warm"))
+        bot = await make(shelf=Shelf(*_catalog_of_many_makers()), maker=maker, allowed=("warm",))
+        await made(bot)
+        await bot.stop()
+        return bot, maker
+
+    bot, maker = asyncio.run(run())
+
+    assert len(maker.inputs) == 2
+    (message,) = bot.inception.messages()
+    assert "not one of the catalog entries" in message
+    assert bot.voices.calls == [("warm", "warm")]
+
+
+def test_a_bot_allowed_no_voice_of_a_source_that_does_not_design_conceives_nothing_and_says_so() -> None:
+    """Unscoped, a bot may be born only as a voice it designed; without a designer that is none."""
+
+    async def run() -> tuple[Bot, Maker]:
+        maker = Maker(shortlisted("warm"))
+        shelf = Shelf(*_catalog_of_many_makers())
+        bot = await make(shelf=shelf, maker=maker, retry_after=datetime.timedelta(seconds=30))
+        await wait_until(lambda: bool(bot.inception.failures))
+        await bot.stop()
+        return bot, maker
+
+    bot, maker = asyncio.run(run())
+
+    assert maker.inputs == []
+    assert bot.voices.calls == []
+    (message,) = bot.inception.messages()
+    assert "catalog holds no voices this bot may be born as" in message
+
+
+def test_a_bot_that_designs_its_voice_is_never_born_as_one_another_maker_designed_on_its_source() -> None:
+    async def run() -> tuple[Bot, Maker, Shelf, Studio]:
+        shelf = Shelf(*_catalog_of_many_makers())
+        studio = Studio(shelf)
+        maker = Maker(described())
+        bot = await make(shelf=shelf, studio=studio, maker=maker)
+        await made(bot)
+        await bot.stop()
+        return bot, maker, shelf, studio
+
+    bot, maker, shelf, studio = asyncio.run(run())
+
+    # Shown only what it may describe, never the source's other voices; one voice designed, and spoken in.
+    (asked,) = maker.inputs
+    assert asked.input == voice.InceptionInput(traits=_TRAITS.traits, languages=("en",), description_max_chars=300)
+    assert shelf.calls == []
+    assert studio.requests == [voice.DesignRequest(description=_DESCRIBED, languages=("en",))]
+    assert bot.voices.calls == [("v-000000000001", _DESCRIBED)]
+
+
+def test_a_voice_given_before_its_owner_scoped_the_view_is_still_the_bots() -> None:
+    """The view bounds what a bot is born as; a voice it was already given stays its own for life (P-5)."""
+
+    async def run() -> Bot:
+        store, connection = open_store()
+        try:
+            shelf = Shelf(*_catalog_of_many_makers())
+            first = await make(shelf=shelf, maker=Maker(shortlisted("v-family")), store=store, allowed=("v-family",))
+            await made(first)
+            await first.stop()
+            second = await make(shelf=shelf, maker=Maker(shortlisted("warm")), store=store)
+            await made(second)
+            await second.stop()
+            return second
+        finally:
+            connection.close()
+
+    second = asyncio.run(run())
+
+    assert second.inception.failures == []
+    assert second.voices.calls == [("v-family", "v-family")]
 
 
 def test_on_every_later_start_the_voice_is_recalled_checked_and_given_without_asking_anyone() -> None:
@@ -463,7 +583,7 @@ def test_a_conception_outside_what_was_asked_is_refused_and_conceived_again(
         shelf = Shelf(warm)
         studio = Studio(shelf, max_description=30) if designing else None
         maker = Maker(*answers)
-        bot = await make(shelf=shelf, studio=studio, maker=maker)
+        bot = await make(shelf=shelf, studio=studio, maker=maker, allowed=() if designing else ("warm",))
         await made(bot)
         await bot.stop()
         return bot, maker, studio
@@ -678,6 +798,7 @@ def test_inception_refuses_a_composition_it_cannot_honor() -> None:
         designer: voice.Designer | None = None,
         retry_after: datetime.timedelta = _FAST,
         inception_timeout: datetime.timedelta = _FAST,
+        allowed: tuple[str, ...] = (),
     ) -> voice.Inception:
         return voice.Inception(
             traits=_TRAITS,
@@ -688,6 +809,7 @@ def test_inception_refuses_a_composition_it_cannot_honor() -> None:
             designer=designer,
             retry_after=retry_after,
             inception_timeout=inception_timeout,
+            allowed=allowed,
         )
 
     with pytest.raises(ValueError, match="designer makes voices for 'cloud'"):
@@ -698,6 +820,11 @@ def test_inception_refuses_a_composition_it_cannot_honor() -> None:
         _ = compose(inception_timeout=datetime.timedelta(0))
     with pytest.raises(pydantic.ValidationError):
         _ = compose(languages=("English",))
+    with pytest.raises(pydantic.ValidationError):
+        _ = compose(allowed=("",))
+    # A source that designs gives the bot the one voice it designs: no voice of it is allowed beside that one.
+    with pytest.raises(ValueError, match="allowed no voice"):
+        _ = compose(designer=Studio(shelf), allowed=("warm",))
     # A processor factory is built once, like any other composed processor.
     built: list[Maker] = []
 

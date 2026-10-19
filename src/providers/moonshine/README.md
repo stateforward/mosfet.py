@@ -77,7 +77,7 @@ each voice is: a Kokoro voice names its language and gender in the two letters a
 prefix (`kokoro_af_heart` is American English, feminine), so it becomes the entry's
 `languages` and `descriptors.gender`. The filters `voices()` takes are hints; every declared
 voice is listed, in order. A catalog of no voices, of two sources or with a voice twice is
-refused (`ValueError`).
+refused (`ValueError`). The bot is born only as one of the voices its inception is `allowed`, by key.
 
 ```python
 from mosfet.abilities import speaking, vocal
@@ -97,7 +97,13 @@ mouth = speaking.Speaking(
     encoder=lambda key, description: moonshine.SpeechEncoder(language="en-us", voice=key),
 )
 inception = vocal.voice.Inception(
-    traits=traits, languages=("en",), speaking=mouth, processor=inception_model, catalog=voices, memory=bot_memory
+    traits=traits,
+    languages=("en",),
+    speaking=mouth,
+    processor=inception_model,
+    catalog=voices,
+    memory=bot_memory,
+    allowed=("kokoro_af_heart",),
 )
 ```
 

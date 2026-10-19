@@ -85,7 +85,8 @@ Kokoro id names its language and gender in its first two letters (`af_heart` is
 American English, feminine), so it becomes the entry's `languages` and
 `descriptors.gender`. The filters `voices()` takes are hints; every declared voice
 is listed, in order. A catalog of no voices, of two sources or with a voice twice
-is refused (`ValueError`).
+is refused (`ValueError`). The bot is born only as one of the voices its
+inception is `allowed`, by key.
 
 ```python
 from mosfet.abilities import speaking, vocal
@@ -116,6 +117,12 @@ mouth = speaking.Speaking(
     speaker=speaker,
 )
 inception = vocal.voice.Inception(
-    traits=traits, languages=("en",), speaking=mouth, processor=inception_model, catalog=kokoro, memory=bot_memory
+    traits=traits,
+    languages=("en",),
+    speaking=mouth,
+    processor=inception_model,
+    catalog=kokoro,
+    memory=bot_memory,
+    allowed=("af_heart", "bm_george"),
 )
 ```

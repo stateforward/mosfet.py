@@ -13,9 +13,16 @@ voice recorded only for another source is **estranged** (P-13), and so is one th
 either is a failure, the bot stays unvoiced, and it is never re-made automatically. Nothing about the voice changes
 after inception; how a reply is delivered within it does (``vocal.speech.Expression``).
 
+A bot is born only from its **view** of the catalog. With a ``designer`` that is the one voice it designs itself,
+which its memory keeps (the ``self_voice`` row, recalled on every start), and no voice of its source is ``allowed``
+beside it. Without one it is the voices whose keys its owner ``allowed``; by default none, so such a bot must be
+allowed a voice to be born at all. Nothing else its source holds is ever offered to it, such as the voices another
+maker designed on a shared engine. The view bounds only what a bot is born as: a voice it was already given is
+checked against the whole catalog, and stays its own for life.
+
 The conception is mechanical to check and nothing else: a conception of the wrong kind, a description longer than the
-source takes, or a ref the catalog did not list is refused (``invalid_response``) and conceived again after
-``retry_after``. Inception enrolls nothing: the bot learns its own voice id by hearing itself (P-12).
+source takes, or a ref outside the view the model was shown is refused (``invalid_response``) and conceived again
+after ``retry_after``. Inception enrolls nothing: the bot learns its own voice id by hearing itself (P-12).
 
 A bot without memory remembers no voice, so every start of it is an inception.
 
@@ -68,6 +75,11 @@ _DEFAULT_INCEPTION_TIMEOUT = datetime.timedelta(seconds=180)
 # One recall question is a single-row read; a memory or speaker not up yet is asked again soon.
 _RECALL_ATTEMPT_TIMEOUT = datetime.timedelta(seconds=1)
 _RETRY_DELAY = datetime.timedelta(milliseconds=100)
+
+# The keys of a source's voices, as refs carry them.
+_KEYS: pydantic.TypeAdapter[tuple[str, ...]] = pydantic.TypeAdapter(
+    tuple[typing.Annotated[str, pydantic.StringConstraints(min_length=1, max_length=256)], ...]
+)
 
 _METER = metrics.get_meter(_SCOPE)
 _INCEPTIONS = _METER.create_counter(
@@ -181,11 +193,12 @@ class Inception(ability.Ability[None, voice.VoiceData]):
     ``designer`` of the same source makes the voice from a description, and without one the voice is shortlisted from
     the catalog. ``processor`` is the inception model, wrapped in a child ``processing.Processing`` with no
     instructions of its own. ``speaking`` and ``memory`` are peers reached only by message. Each inception attempt
-    that fails is retried after ``retry_after``; ``inception_timeout`` bounds conceiving and voicing.
+    that fails is retried after ``retry_after``; ``inception_timeout`` bounds conceiving and voicing. ``allowed`` are
+    the keys of the voices of a source without a ``designer`` that its owner allows it to be born as; none by default.
 
     Raises:
-        ValueError: if ``designer`` names another source than ``catalog``, a language is not a locale, or a timeout
-            is not positive.
+        ValueError: if ``designer`` names another source than ``catalog`` or is given with ``allowed`` keys, a
+            language is not a locale, an allowed key is empty, or a timeout is not positive.
     """
 
     output_event: typing.ClassVar[hsm.Event[voice.VoiceData]] = voice.OutputEvent
@@ -195,6 +208,7 @@ class Inception(ability.Ability[None, voice.VoiceData]):
     _attachment_group: attachment.Group | None
     _traits: persona.Traits
     _languages: tuple[str, ...]
+    _allowed: frozenset[str]
     _speaking: speaking.Speaking
     _processing: processing.Processing
     _catalog: catalog.Catalog
@@ -223,10 +237,17 @@ class Inception(ability.Ability[None, voice.VoiceData]):
         memory: memory.MemoryStore | None = None,
         retry_after: datetime.timedelta = _DEFAULT_RETRY_AFTER,
         inception_timeout: datetime.timedelta = _DEFAULT_INCEPTION_TIMEOUT,
+        allowed: collections.abc.Iterable[str] = (),
     ) -> None:
         if designer is not None and designer.source != catalog.source:
             raise ValueError(
                 f"Inception's designer makes voices for {designer.source!r}, not its catalog's {catalog.source!r}."
+            )
+        keys = frozenset(_KEYS.validate_python(tuple(allowed)))
+        if designer is not None and keys:
+            raise ValueError(
+                "Inception's designer gives the bot the one voice it designs, so it is allowed no voice of its "
+                + f"source beside that one, got {sorted(keys)}."
             )
         if retry_after <= datetime.timedelta(0):
             raise ValueError(f"Inception retry_after must be positive, got {retry_after}.")
@@ -235,6 +256,7 @@ class Inception(ability.Ability[None, voice.VoiceData]):
         super().__init__(id=id, clock=clock)
         self._traits = traits
         self._languages = pydantic.TypeAdapter(tuple[speech.Locale, ...]).validate_python(languages)
+        self._allowed = keys
         # Peers: Speaking and memory are attached by their own owners and reached only by message.
         self._speaking = speaking
         self._memory = memory
@@ -407,7 +429,8 @@ class Inception(ability.Ability[None, voice.VoiceData]):
     async def _shown(instance: "Inception") -> conception.InceptionInput:
         """What the inception model is shown: the traits, the languages, and the source's capacity, nothing else.
 
-        A catalog's previews are never shown: a model-facing input carries no audio.
+        A catalog source's capacity is the voices of it the bot's owner allowed. Previews are never shown: a
+        model-facing input carries no audio.
         """
 
         designer = instance._designer
@@ -416,9 +439,15 @@ class Inception(ability.Ability[None, voice.VoiceData]):
             return conception.InceptionInput(
                 traits=traits, languages=instance._languages, description_max_chars=designer.max_description
             )
-        listed = await instance._catalog.voices(languages=instance._languages)
+        listed = [
+            entry
+            for entry in await instance._catalog.voices(languages=instance._languages)
+            if entry.ref.key in instance._allowed
+        ]
         if not listed:
-            raise catalog.Error("unsupported_input", "The voice source's catalog holds no voices.")
+            raise catalog.Error(
+                "unsupported_input", "The voice source's catalog holds no voices this bot may be born as."
+            )
         shown = tuple(entry.model_copy(update={"preview": None}) for entry in listed[: conception.MAX_ENTRIES])
         return conception.InceptionInput(
             traits=traits, languages=instance._languages, entries=shown, omitted=len(listed) - len(shown)

@@ -353,8 +353,9 @@ EXPLANATIONS: tuple[Explanation, ...] = (
             "`bot.attach` takes a device or an ability; `bot.input` and `bot.output` take an ability; "
             "`bot.register` takes a `memory.StmMemory`; `bot.cognition` takes a `processing.Processor` first, "
             "`intuition=` takes a `processing.DecisionProcessor`, `memory=` takes a `memory.Memory` and `seeds=` "
-            "takes `behavior.Seed`s; `bot.voice` takes a `vocal.voice.Catalog` first, `designer=` takes a `vocal.voice.Designer` and `languages=` takes "
-            "language tags. The help names the element that takes what was given."
+            "takes `behavior.Seed`s; `bot.voice` takes a `vocal.voice.Catalog` first, `designer=` takes a `vocal.voice.Designer`, "
+            "`languages=` takes language tags and `allowed=` takes the keys of the voices of a source without a "
+            "`designer=`. The help names the element that takes what was given."
         ),
         why=(
             "Each element is one part of the body: a device is held, a sense organ is an input, a processor is "

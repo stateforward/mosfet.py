@@ -76,6 +76,19 @@ class Shelf(vocal.voice.Catalog):
         return (WARM,)
 
 
+class Studio(vocal.voice.Designer):
+    """A designer at :class:`Shelf`'s source: enough to define a bot that designs its voice, never asked to make one."""
+
+    def __init__(self) -> None:
+        self.source: str = "lab"
+        self.max_description: int = 300
+
+    @typing.override
+    async def create(self, request: vocal.voice.DesignRequest) -> vocal.voice.Designed:
+        del request
+        raise vocal.voice.Error("unavailable", "this studio makes no voices")
+
+
 class Mute(vocal.speech.SpeechEncoder):
     """A speech encoder that reads everything it is given and says it as a moment of silence."""
 

@@ -5117,6 +5117,7 @@ async def _inception(ctx: hsm.Context, catalog: _Catalog) -> vocal.voice.Incepti
         speaking=mouth,
         processor=_Shortlisting(),
         catalog=catalog,
+        allowed=tuple(entry.ref.key for entry in catalog.entries),
         retry_after=datetime.timedelta(seconds=30),
     )
 

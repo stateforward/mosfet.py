@@ -555,7 +555,7 @@ def test_a_voice_is_given_once_at_inception_from_the_traits_and_the_bot_is_born(
     model = bot.define(
         "greeter",
         bot.traits("warm", "patient"),
-        bot.voice(shelf, languages=("en",)),
+        bot.voice(shelf, languages=("en",), allowed=("warm",)),
         bot.cognition(conceiving, intuition=support.Undecided(), memory=store),
         bot.output(mouth),
         bot.attach(phone.Phone()),
@@ -580,6 +580,8 @@ def test_a_voice_is_given_once_at_inception_from_the_traits_and_the_bot_is_born(
         "catalog": shelf,
         "designer": None,
         "memory": store,
+        # The voices of the catalog its owner allowed it to be born as.
+        "allowed": ("warm",),
     }
     assert given["speaking"] is mouth and given["memory"] is store
     # Born: the one conception made, and Speaking told the voice it was given, once.

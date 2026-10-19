@@ -240,12 +240,18 @@ is its own choice; a request to be different is something it heard, never an ins
 
 `vocal.voice.Inception` (owner-given `persona.Traits`, the composed languages, Speaking built with
 an encoder factory, the inception model, a `vocal.voice.Catalog` and optionally a
-`vocal.voice.Designer` of the same source, optional memory peer; compose it as
-`Cognition(voice=...)`) gives the bot its voice: its makers' choice, never the bot's. On the
-first start there is no `self_voice` row for the catalog's source, so the inception model is
-shown the traits, the languages and the source's capacity (`vocal.voice.InceptionInput`) and
-offered only `bot.ability.voice.conceive`; its one conception (a voice described within the
-designer's `max_description`, or one catalog entry shortlisted by ref) is checked mechanically,
+`vocal.voice.Designer` of the same source, optional memory peer, and, without a designer,
+`allowed=` the keys of the source's voices its owner allows it to be born as, none by default (a
+designer with allowed keys is a `ValueError`); compose it as `Cognition(voice=...)`) gives the
+bot its voice: its makers' choice, never the bot's. The bot's view of the catalog is the voice it
+designed itself, which its `self_voice` row keeps, when it has a designer, and the allowed
+voices when it has none; nothing else the source holds (another maker's voices on a shared
+engine) is ever offered. On the first start there is no `self_voice` row for the catalog's source, so the
+inception model is shown the traits, the languages and the source's capacity: the designer's
+`max_description`, or the allowed catalog entries (`vocal.voice.InceptionInput`); with neither,
+inception fails without asking. It is offered only `bot.ability.voice.conceive`; its one
+conception (a voice described within the designer's `max_description`, or one allowed entry
+shortlisted by ref) is checked mechanically,
 made permanent by the source, written down once as `vocal.voice.Given` (fail-closed), and given
 to Speaking (`speaking.VoiceEvent`), which constructs its encoder once. On every later start the
 row is recalled and the catalog is checked to still hold the voice, with no model call. A voice
