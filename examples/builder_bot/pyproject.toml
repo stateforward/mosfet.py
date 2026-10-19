@@ -8,6 +8,7 @@ dependencies = [
   "mosfet-provider-openai-compat",
   "mosfet-provider-websocket",
   "mosfet-provider-docker",
+  "mosfet-provider-typesafe",
 ]
 
 [project.scripts]
@@ -18,6 +19,7 @@ stateforward-mosfet = { path = "../..", editable = true }
 mosfet-provider-openai-compat = { path = "../../src/providers/openai_compat", editable = true }
 mosfet-provider-websocket = { path = "../../src/providers/websocket", editable = true }
 mosfet-provider-docker = { path = "../../src/providers/docker", editable = true }
+mosfet-provider-typesafe = { path = "../../src/providers/typesafe", editable = true }
 
 [dependency-groups]
 dev = [

@@ -9,6 +9,7 @@ dependencies = [
   "mosfet-provider-opencv",
   "mosfet-provider-speech-server",
   "mosfet-provider-sqlite-memory",
+  "mosfet-provider-typesafe",
   "mosfet-provider-websocket",
   "sounddevice==0.5.5",
 ]
@@ -19,6 +20,7 @@ mosfet-provider-openai-compat = { path = "../../src/providers/openai_compat", ed
 mosfet-provider-opencv = { path = "../../src/providers/opencv", editable = true }
 mosfet-provider-speech-server = { path = "../../src/providers/speech_server", editable = true }
 mosfet-provider-sqlite-memory = { path = "../../src/providers/sqlite_memory", editable = true }
+mosfet-provider-typesafe = { path = "../../src/providers/typesafe", editable = true }
 mosfet-provider-websocket = { path = "../../src/providers/websocket", editable = true }
 
 [dependency-groups]

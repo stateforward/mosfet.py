@@ -6,11 +6,13 @@ requires-python = ">=3.13"
 dependencies = [
   "stateforward.mosfet",
   "mosfet-provider-openai-compat",
+  "mosfet-provider-typesafe",
 ]
 
 [tool.uv.sources]
 stateforward-mosfet = { path = "../..", editable = true }
 mosfet-provider-openai-compat = { path = "../../src/providers/openai_compat", editable = true }
+mosfet-provider-typesafe = { path = "../../src/providers/typesafe", editable = true }
 
 [dependency-groups]
 dev = [
