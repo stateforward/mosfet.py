@@ -188,9 +188,9 @@ class FakeIdentifier(identification.Identifier):
 
     @typing.override
     async def identify(
-        self, kind: identification.Kind, prints: tuple[identification.Print, ...]
+        self, kind: identification.Kind, prints: tuple[identification.Print, ...], mint: tuple[bool, ...]
     ) -> tuple[identification.Recognition | None, ...]:
-        del kind
+        del kind, mint
         self.identified.append(prints)
         return self.recognitions
 

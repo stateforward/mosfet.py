@@ -213,9 +213,11 @@ class StreamingListening(listening.Listening):
         self.failures = []
 
 
-def _registry() -> identification.Registry:
+def _registry(store: identification.InProcessStore | None = None) -> identification.Registry:
     return identification.Registry(
-        identifier=identification.Matcher(store=identification.InProcessStore(max_ids=16), policy=_POLICY),
+        identifier=identification.Matcher(
+            store=identification.InProcessStore(max_ids=16) if store is None else store, policy=_POLICY
+        ),
         kind="voice",
         max_unlinked_age=datetime.timedelta(days=1),
         max_ids=16,
@@ -500,6 +502,46 @@ def test_an_overlap_while_producing_is_a_fact_carrying_the_words_so_far(
     assert (fact.voiced_seconds, fact.text, fact.voices) == (0.8, "wait, hold on", ())
     assert fact.participants == (_ADA,)
     assert stated == 1
+
+
+@pytest.mark.parametrize("known", [True, False])
+def test_an_overlap_names_only_a_voice_already_known_and_never_makes_a_new_one(known: bool) -> None:
+    """Willy live check (D-W8-21 D5, run6): an overlap is heard while the bot speaks, so its audio is the bot's
+    voice and another's at once, and identifying it minted a phantom voice that later took a real voice's place.
+    Overlap identification is match-only: a voice already known is named on the fact, one nobody knows is not,
+    and no voice is made from it."""
+
+    now = datetime.datetime.now(datetime.UTC)
+    store = identification.InProcessStore(max_ids=16)
+    if known:
+        _ = store.enroll("voice", "known-a", identification.Print(vector=(0.6, 0.8), model="m"), False, _POLICY, at=now)
+
+    async def run() -> StreamingListening:
+        sessions = Sessions()
+        classifier = FixedVoiceClassifier(voice.identification.VoiceEmbedding(embedding=(0.6, 0.8), model="m"))
+        ear = await _ear(sessions, voice_classifier=classifier, registry=_registry(store))
+        await produce(ear)
+        await arrives(ear, heard(12, participants=(_ADA,)))
+        await _wait(lambda: len(sessions.made) == 1 and bool(sessions.made[0].controllers))
+        await sessions.made[0].say(
+            stream.OverlapEvent.with_data(stream.OverlapData(at_seconds=1.2, voiced_seconds=1.2))
+        )
+        await _wait(lambda: bool(_facts(ear)))
+        return ear
+
+    ear = asyncio.run(run())
+
+    (fact,) = _facts(ear)
+    held = store.prune("voice", unseen_before=now + datetime.timedelta(days=1), max_ids=16)
+    if known:
+        (heard_voice,) = fact.voices
+        assert (heard_voice.recognition.id, heard_voice.recognition.recognized) == ("known-a", True)
+        assert fact.participants == (_ADA, identification.participant("voice", "known-a"))
+        assert held == 1
+    else:
+        assert fact.voices == ()
+        assert fact.participants == (_ADA,)
+        assert held == 0
 
 
 def test_an_overlap_after_the_bot_stopped_producing_is_no_fact() -> None:

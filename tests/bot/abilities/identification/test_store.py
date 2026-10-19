@@ -54,7 +54,7 @@ def _fixture(*, max_ids: int = 100, policy: identification.MatchPolicy = _POLICY
 def _identify(
     fixture: Fixture, *prints: identification.Print, kind: identification.Kind = "voice"
 ) -> list[identification.Recognition]:
-    recognitions = asyncio.run(fixture.matcher.identify(kind, prints))
+    recognitions = asyncio.run(fixture.matcher.identify(kind, prints, (True,) * len(prints)))
     assert all(recognition is not None for recognition in recognitions)
     return [typing.cast(identification.Recognition, recognition) for recognition in recognitions]
 
@@ -113,6 +113,21 @@ def test_prints_in_one_request_are_identified_in_order() -> None:
 
     assert [first.recognized, second.recognized, third.recognized] == [False, False, True]
     assert third.id == first.id
+
+
+def test_a_match_only_print_names_a_known_id_and_leaves_one_nobody_has_unidentified_storing_nothing() -> None:
+    """D-W8-21 D5: a match-only print matches as any print does, and one that matches nobody is ``None``."""
+
+    fixture = _fixture()
+    (known,) = _identify(fixture, _angle(0))
+
+    matched, unknown = asyncio.run(fixture.matcher.identify("voice", (_angle(10), _angle(90)), (False, False)))
+    (minted,) = _identify(fixture, _angle(90))
+
+    assert matched is not None and (matched.id, matched.recognized) == (known.id, True)
+    assert unknown is None
+    # Nothing was stored for the unknown print: identifying it again with minting allowed mints it now.
+    assert minted.recognized is False
 
 
 def test_kinds_are_isolated() -> None:
@@ -226,7 +241,7 @@ def test_a_dimension_mismatch_for_a_model_is_invalid_input_and_changes_nothing()
     _ = _identify(fixture, _angle(0))
 
     with pytest.raises(identification.StoreError) as raised:
-        _ = asyncio.run(fixture.matcher.identify("voice", (_angle(90), _print(1.0, 0.0, 0.0))))
+        _ = asyncio.run(fixture.matcher.identify("voice", (_angle(90), _print(1.0, 0.0, 0.0)), (True, True)))
     with pytest.raises(identification.StoreError) as enrolled:
         _ = _enroll(fixture, "tts:warm", _print(1.0, 0.0, 0.0))
     (after,) = _identify(fixture, _angle(90))
@@ -442,7 +457,9 @@ def test_store_calls_from_two_threads_serialize() -> None:
         try:
             for index in range(200):
                 radians = math.radians(index * 1.7)
-                _ = store.identify(kind, (_print(math.cos(radians), math.sin(radians), 1.0),), _POLICY, at=_START)
+                _ = store.identify(
+                    kind, (_print(math.cos(radians), math.sin(radians), 1.0),), _POLICY, at=_START, mint=(True,)
+                )
         except BaseException as error:
             errors.append(error)
 

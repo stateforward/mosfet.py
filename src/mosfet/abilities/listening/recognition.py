@@ -140,6 +140,7 @@ async def identify(
     segments: tuple[voice.VoiceSegment, ...],
     embeddings: tuple[voice.identification.VoiceEmbedding | None, ...],
     *,
+    match_only: bool,
     timeout: datetime.timedelta,
     operation_id: str,
     metadata: collections.abc.Mapping[str, typing.Any],
@@ -147,7 +148,8 @@ async def identify(
     """Who was heard in each segment, in order: one identify request to the registry, bounded by ``timeout``.
 
     A segment with no voiceprint, whose embedding cannot be printed, or that the registry does not answer
-    in time, is ``None``.
+    in time, is ``None``. With ``match_only`` (an overlap: the bot's own voice is in that audio too), a voice
+    nobody knows is ``None`` as well, and the registry makes no new voice from it.
     """
 
     fingerprinted = [(index, embedding) for index, embedding in enumerate(embeddings) if embedding is not None]
@@ -164,7 +166,10 @@ async def identify(
             child=registry,
             request=dataclasses.replace(
                 identification.IdentifyEvent.with_data_and_id(
-                    identification.IdentifyData(prints=tuple(print_ for _, print_ in indexed)),
+                    identification.IdentifyData(
+                        prints=tuple(print_ for _, print_ in indexed),
+                        mint=(not match_only,) * len(indexed),
+                    ),
                     f"{operation_id}:recognize:{uuid.uuid4().hex}",
                 ),
                 metadata=dict(metadata),

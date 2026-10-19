@@ -257,9 +257,9 @@ class SilentIdentifier(identification.Identifier):
 
     @override
     async def identify(
-        self, kind: identification.Kind, prints: tuple[identification.Print, ...]
+        self, kind: identification.Kind, prints: tuple[identification.Print, ...], mint: tuple[bool, ...]
     ) -> tuple[identification.Recognition | None, ...]:
-        del kind, prints
+        del kind, prints, mint
         _ = await asyncio.Event().wait()
         raise AssertionError("unreachable")
 
@@ -2293,8 +2293,12 @@ def _overlapping_utterance(
     voice_classifier: FixedVoiceClassifier | None = None,
     diarizer: FixedVoiceDiarizer | None = None,
     enroll: bool = False,
+    store: identification.InProcessStore | None = None,
 ) -> list[cognition.InputData]:
-    """Hear one utterance of voiced chunks then silence, optionally while the body is producing."""
+    """Hear one utterance of voiced chunks then silence, optionally while the body is producing.
+
+    ``store`` is the voice registry's store when given (the voices it already holds are known), else a fresh one.
+    """
 
     async def run() -> list[cognition.InputData]:
         detector = SequenceVoiceActivityClassifier(*([_VOICE_APPLY] * len(chunks)), _SILENCE_APPLY)
@@ -2302,7 +2306,11 @@ def _overlapping_utterance(
             voice_activity_classifier=detector,
             voice_diarizer=diarizer,
             voice_classifier=voice_classifier,
-            registry=None if voice_classifier is None else voice_registry(),
+            registry=(
+                None
+                if voice_classifier is None
+                else voice_registry(None if store is None else identification.Matcher(store=store, policy=_POLICY))
+            ),
         )
         ctx = hsm.Context()
         await start_ability_tree(ctx, listening_ability)
@@ -2380,17 +2388,80 @@ def test_a_sound_at_or_below_the_product_threshold_is_no_overlap() -> None:
     assert _overlaps(handoffs) == []
 
 
-def test_an_identified_overlapping_voice_is_stamped_on_the_fact() -> None:
+def _known_voice_store() -> identification.InProcessStore:
+    """A voice store that already knows the voice ``(0.6, 0.8)`` of model ``m`` as ``known-a``."""
+
+    store = identification.InProcessStore(max_ids=16)
+    _ = store.enroll(
+        "voice",
+        "known-a",
+        identification.Print(vector=(0.6, 0.8), model="m"),
+        False,
+        _POLICY,
+        at=datetime.datetime.now(datetime.UTC),
+    )
+    return store
+
+
+def _unlinked_voices(store: identification.InProcessStore) -> int:
+    """How many voices the store holds that are neither own nor linked: every one is pruned from a far future."""
+
+    return store.prune(
+        "voice", unseen_before=datetime.datetime.now(datetime.UTC) + datetime.timedelta(days=1), max_ids=16
+    )
+
+
+def test_a_known_overlapping_voice_is_stamped_on_the_fact() -> None:
+    store = _known_voice_store()
     handoffs = _overlapping_utterance(
         somebody_speaking(3),
         somebody_speaking(3),
         voice_classifier=FixedVoiceClassifier(voice.identification.VoiceEmbedding(embedding=(0.6, 0.8), model="m")),
+        store=store,
     )
 
     (overlap,) = _overlaps(handoffs)
     (heard,) = overlap.voices
-    assert heard.recognition.own is False
-    assert overlap.participants == (_SOMEBODY, identification.participant("voice", heard.recognition.id))
+    assert (heard.recognition.id, heard.recognition.recognized, heard.recognition.own) == ("known-a", True, False)
+    assert overlap.participants == (_SOMEBODY, identification.participant("voice", "known-a"))
+
+
+def test_an_overlapping_voice_nobody_knows_is_not_named_and_makes_no_new_voice() -> None:
+    """Willy live check (D-W8-21 D5, run6): an overlap is heard while the bot speaks, so its audio is the bot's
+    voice and another's at once, and identifying it minted a phantom voice that later took a real voice's place.
+    Overlap identification is match-only: a voice nobody knows is not named on the fact, and no voice is made."""
+
+    store = identification.InProcessStore(max_ids=16)
+    classifier = FixedVoiceClassifier(voice.identification.VoiceEmbedding(embedding=(0.6, 0.8), model="m"))
+    handoffs = _overlapping_utterance(
+        somebody_speaking(3),
+        somebody_speaking(3),
+        voice_classifier=classifier,
+        # With a diarizer the utterance's voices are identified after it ends, so the overlap recognizes its own.
+        diarizer=FixedVoiceDiarizer(
+            segment=voice.diarization.VoiceDiarizationSegment(
+                audio=_TENTH * 7,
+                media_type="audio/pcm",
+                sample_rate_hz=16_000,
+                channels=1,
+                start_seconds=0.0,
+                end_seconds=0.7,
+            )
+        ),
+        store=store,
+    )
+
+    (overlap,) = _overlaps(handoffs)
+    assert classifier.calls[0].segments[0].audio == _TENTH * 6
+    assert overlap.voices == ()
+    assert overlap.participants == (_SOMEBODY,)
+    # The utterance's own speech products identify (and enroll) as they always do; the overlap made none.
+    speech_voices = [
+        typing.cast(listening.SpeechData, _stimulus(handoff).data).voices
+        for handoff in handoffs
+        if _stimulus(handoff).name == listening.SpeechEvent.name
+    ]
+    assert _unlinked_voices(store) == len({heard.recognition.id for voices in speech_voices for heard in voices})
 
 
 def test_a_recognized_own_voice_makes_no_overlap_fact() -> None:
@@ -2413,6 +2484,7 @@ def test_a_diarizing_ear_recognizes_the_overlapping_voice_before_stating_the_fac
         somebody_speaking(3),
         somebody_speaking(3),
         voice_classifier=classifier,
+        store=_known_voice_store(),
         diarizer=FixedVoiceDiarizer(
             segment=voice.diarization.VoiceDiarizationSegment(
                 audio=_TENTH * 7,
@@ -2427,7 +2499,7 @@ def test_a_diarizing_ear_recognizes_the_overlapping_voice_before_stating_the_fac
 
     (overlap,) = _overlaps(handoffs)
     (heard,) = overlap.voices
-    assert heard.recognition.own is False
+    assert (heard.recognition.id, heard.recognition.own) == ("known-a", False)
     assert (heard.start_seconds, heard.end_seconds) == (0.0, pytest.approx(0.6))
     # The overlap recognized the 0.6 s heard so far; the diarized products are identified after the utterance.
     assert classifier.calls[0].segments[0].audio == _TENTH * 6

@@ -79,7 +79,7 @@ class Fixture:
     def identify(
         self, *prints: identification.Print, kind: identification.Kind = "voice"
     ) -> list[identification.Recognition]:
-        recognitions = asyncio.run(self.matcher.identify(kind, prints))
+        recognitions = asyncio.run(self.matcher.identify(kind, prints, (True,) * len(prints)))
         assert all(recognition is not None for recognition in recognitions)
         return [typing.cast(identification.Recognition, recognition) for recognition in recognitions]
 
@@ -96,6 +96,16 @@ class Fixture:
 
     def link(self, id: str, linked: bool, *, kind: identification.Kind = "voice") -> None:
         asyncio.run(self.matcher.link(kind, id, linked))
+
+
+def _minted(
+    store: identification.Store, kind: identification.Kind, *prints: identification.Print, at: datetime.datetime
+) -> tuple[identification.Recognition, ...]:
+    """Identify ``prints`` on ``store`` directly, every unknown one minted, so each has a recognition."""
+
+    recognitions = store.identify(kind, prints, _POLICY, at=at, mint=(True,) * len(prints))
+    assert all(recognition is not None for recognition in recognitions)
+    return tuple(typing.cast(identification.Recognition, recognition) for recognition in recognitions)
 
 
 StoreFactory: typing.TypeAlias = collections.abc.Callable[[], identification.Store]
@@ -144,6 +154,23 @@ def test_contract_a_new_print_is_minted_and_a_near_print_is_recognized(store_fac
     assert other.id != first.id
     # The 10° print refined the id to the running mean, 5°, so 90° is 85° from it.
     assert other.similarity == pytest.approx(math.cos(math.radians(85)), abs=_CLOSE)
+
+
+def test_contract_a_match_only_print_matches_and_one_nobody_has_is_unidentified_storing_nothing(
+    store_factory: StoreFactory,
+) -> None:
+    """D-W8-21 D5: a match-only print (an overlap's) names a known id, and one that matches nobody is None."""
+
+    fixture = _fixture(store_factory)
+    (known,) = fixture.identify(_angle(0))
+
+    matched, unknown = asyncio.run(fixture.matcher.identify("voice", (_angle(10), _angle(90)), (False, False)))
+    (minted,) = fixture.identify(_angle(90))
+
+    assert matched is not None and (matched.id, matched.recognized) == (known.id, True)
+    assert unknown is None
+    # Nothing was stored for the unknown print: identifying it again with minting allowed mints it now.
+    assert minted.recognized is False
 
 
 def test_contract_prints_in_one_request_are_identified_in_order(store_factory: StoreFactory) -> None:
@@ -266,7 +293,7 @@ def test_contract_a_dimension_mismatch_is_invalid_input_and_changes_nothing(stor
     _ = fixture.identify(_angle(0))
 
     with pytest.raises(identification.StoreError) as raised:
-        _ = asyncio.run(fixture.matcher.identify("voice", (_angle(90), _print(1.0, 0.0, 0.0))))
+        _ = asyncio.run(fixture.matcher.identify("voice", (_angle(90), _print(1.0, 0.0, 0.0)), (True, True)))
     with pytest.raises(identification.StoreError) as enrolled:
         _ = fixture.enroll("tts:warm", _print(1.0, 0.0, 0.0))
     (after,) = fixture.identify(_angle(90))
@@ -416,13 +443,13 @@ def test_a_link_mark_writes_the_linked_column_and_nothing_else(tmp_path: pathlib
     engine = _engine(tmp_path)
     store = sqlite_memory.IdentityStore(engine=engine)
     later = _START + datetime.timedelta(hours=1)
-    (voice,) = store.identify("voice", (_angle(0),), _POLICY, at=_START)
+    (voice,) = _minted(store, "voice", _angle(0), at=_START)
     query = text("SELECT linked, seen_at, seen_count FROM bot_identity WHERE id = :id")
 
     store.link("voice", voice.id, True)
     with engine.connect() as connection:
         linked = connection.execute(query, {"id": voice.id}).one()
-    (_,) = store.identify("voice", (_angle(0),), _POLICY, at=later)
+    (_,) = _minted(store, "voice", _angle(0), at=later)
     store.link("voice", voice.id, False)
     with engine.connect() as connection:
         unlinked = connection.execute(query, {"id": voice.id}).one()
@@ -436,9 +463,9 @@ def test_the_baseline_creates_bot_identity_with_a_never_reused_seq(tmp_path: pat
     engine = _engine(tmp_path)
     store = sqlite_memory.IdentityStore(engine=engine)
 
-    (first,) = store.identify("voice", (_angle(0),), _POLICY, at=_START)
+    (first,) = _minted(store, "voice", _angle(0), at=_START)
     assert store.forget("voice", first.id) is True
-    (second,) = store.identify("voice", (_angle(0),), _POLICY, at=_START)
+    (second,) = _minted(store, "voice", _angle(0), at=_START)
     with engine.connect() as connection:
         ddl = connection.execute(text("SELECT sql FROM sqlite_master WHERE name = 'bot_identity'")).scalar_one()
         unique = sqlalchemy.inspect(connection).get_unique_constraints("bot_identity")
@@ -481,8 +508,8 @@ def test_one_vec0_table_per_model_and_dims(tmp_path: pathlib.Path) -> None:
     engine = _engine(tmp_path)
     store = sqlite_memory.IdentityStore(engine=engine)
 
-    _ = store.identify("voice", (_angle(0), _angle(0, model="other")), _POLICY, at=_START)
-    _ = store.identify("face", (_angle(90),), _POLICY, at=_START)
+    _ = store.identify("voice", (_angle(0), _angle(0, model="other")), _POLICY, at=_START, mint=(True, True))
+    _ = store.identify("face", (_angle(90),), _POLICY, at=_START, mint=(True,))
     _ = store.enroll("voice", "tts:warm", _print(1.0, 0.0, 0.0, model="wide"), True, _POLICY, at=_START)
     with engine.connect() as connection:
         tables = set(
@@ -500,8 +527,8 @@ def test_refine_and_match_update_the_row_and_the_vector_under_one_seq(tmp_path: 
     store = sqlite_memory.IdentityStore(engine=engine)
     later = _START + datetime.timedelta(hours=1)
 
-    (minted,) = store.identify("voice", (_angle(0),), _POLICY, at=_START)
-    (refined,) = store.identify("voice", (_angle(20),), _POLICY, at=later)
+    (minted,) = _minted(store, "voice", _angle(0), at=_START)
+    (refined,) = _minted(store, "voice", _angle(20), at=later)
     with engine.connect() as connection:
         row = connection.execute(
             text("SELECT seq, model, own, linked, seen_count, created_at, seen_at FROM bot_identity")
@@ -533,10 +560,10 @@ def test_a_failure_sqlite_already_rolled_back_surfaces_the_original_error(tmp_pa
         )
 
     with pytest.raises(identification.StoreError) as raised:
-        _ = store.identify("voice", (_angle(0),), _POLICY, at=_START)
+        _ = store.identify("voice", (_angle(0),), _POLICY, at=_START, mint=(True,))
     with engine.begin() as connection:
         _ = connection.exec_driver_sql("DROP TRIGGER disk_full")
-    (after,) = store.identify("voice", (_angle(0),), _POLICY, at=_START)
+    (after,) = _minted(store, "voice", _angle(0), at=_START)
     engine.dispose()
 
     assert raised.value.kind is identification.FailureKind.STORE_FAILED
@@ -559,7 +586,7 @@ def test_a_failed_statement_never_carries_its_bound_print_into_the_store_error(t
         _ = connection.exec_driver_sql(f"INSERT INTO {table} VALUES (1, x'00', 'voice', 0.0, 2)")
 
     with pytest.raises(identification.StoreError) as raised:
-        _ = store.identify("voice", (voice,), _POLICY, at=_START)
+        _ = store.identify("voice", (voice,), _POLICY, at=_START, mint=(True,))
     engine.dispose()
     chain: list[BaseException] = []
     error: BaseException | None = raised.value
@@ -588,7 +615,7 @@ def test_migrations_leave_both_vec0_prefixes_to_the_providers(tmp_path: pathlib.
     from alembic import command
 
     engine = _engine(tmp_path)
-    _ = sqlite_memory.IdentityStore(engine=engine).identify("voice", (_angle(0),), _POLICY, at=_START)
+    _ = sqlite_memory.IdentityStore(engine=engine).identify("voice", (_angle(0),), _POLICY, at=_START, mint=(True,))
     with engine.begin() as connection:
         sqlite_memory.VecIndex().ensure(connection, _SPACE)
         tables = set(connection.execute(text("SELECT name FROM sqlite_master WHERE type = 'table'")).scalars())
@@ -613,7 +640,7 @@ def _episode(words: str, *voices: str) -> memory.EpisodeData:
 def test_forget_removes_only_the_identity_row_and_its_print(tmp_path: pathlib.Path) -> None:
     engine = _engine(tmp_path)
     store = sqlite_memory.IdentityStore(engine=engine)
-    (voice,) = store.identify("voice", (_angle(0),), _POLICY, at=_START)
+    (voice,) = _minted(store, "voice", _angle(0), at=_START)
     ref = identification.ref("voice", voice.id)
     kept = memory.graph.write_episode(engine, _episode("hello", voice.id), at=_START)
 
@@ -636,7 +663,7 @@ def test_memory_forget_and_merge_leave_identities_intact(tmp_path: pathlib.Path)
     store = sqlite_memory.IdentityStore(engine=engine)
     vec = sqlite_memory.VecIndex()
     _ = store.enroll("voice", "tts:warm", _angle(0), True, _POLICY, at=_START)
-    (heard,) = store.identify("voice", (_angle(90),), _POLICY, at=_START)
+    (heard,) = _minted(store, "voice", _angle(90), at=_START)
     seqs = [memory.graph.write_episode(engine, _episode(words), at=_START).seq for words in ("a", "b", "c")]
     memory.graph.write_vectors(
         engine, vec, _SPACE, [(seq, _angle(index * 10).vector) for index, seq in enumerate(seqs)]
@@ -653,8 +680,8 @@ def test_memory_forget_and_merge_leave_identities_intact(tmp_path: pathlib.Path)
     outcome, _ = memory.graph.commit(
         engine, vec, decision, lease, space=_SPACE, merged_vectors=[_angle(5).vector], at=_START
     )
-    (again,) = store.identify("voice", (_angle(0),), _POLICY, at=_START)
-    (other,) = store.identify("voice", (_angle(90),), _POLICY, at=_START)
+    (again,) = _minted(store, "voice", _angle(0), at=_START)
+    (other,) = _minted(store, "voice", _angle(90), at=_START)
     with engine.connect() as connection:
         identities = connection.execute(text("SELECT count(*) FROM bot_identity")).scalar_one()
         prints = connection.execute(text(f"SELECT count(*) FROM {_vec_table(_MODEL, 2)}")).scalar_one()

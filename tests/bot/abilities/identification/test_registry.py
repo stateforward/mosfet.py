@@ -15,6 +15,7 @@ import typing
 
 import hsm
 import mosfet
+import pydantic
 import pytest
 from opentelemetry.sdk.trace import ReadableSpan, TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
@@ -99,10 +100,12 @@ class FakeIdentifier(identification.Identifier):
     errors: dict[str, BaseException]
     recognitions: tuple[identification.Recognition | None, ...] | None
     enrolled: identification.Recognition | None
+    mints: list[tuple[bool, ...]]
 
     def __init__(self, time: FakeTime) -> None:
         self.time = time
         self.calls = []
+        self.mints = []
         self.prunes = []
         self.links = []
         self.gated = set()
@@ -124,8 +127,9 @@ class FakeIdentifier(identification.Identifier):
 
     @typing.override
     async def identify(
-        self, kind: identification.Kind, prints: tuple[identification.Print, ...]
+        self, kind: identification.Kind, prints: tuple[identification.Print, ...], mint: tuple[bool, ...]
     ) -> tuple[identification.Recognition | None, ...]:
+        self.mints.append(mint)
         await self._call("identify")
         if self.recognitions is not None:
             return self.recognitions
@@ -773,6 +777,48 @@ def test_telemetry_counts_outcomes_with_closed_attributes_and_no_vector(
         if attributes.get("bot.outcome") == "failed":
             assert attributes["bot.failure.kind"] in kinds
     assert {dict(recorded.attributes or {}).get("bot.failure.kind") for recorded in spans} == {None, "store_failed"}
+
+
+def test_identify_hands_the_identifier_one_mint_flag_per_print_and_counts_an_unmatched_match_only_print(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D-W8-21 D5: a match-only print (an overlap's) that matches nobody is unmatched, not a failure."""
+
+    async def run(
+        reader: metric_reader.Reader,
+    ) -> tuple[list[tuple[bool, ...]], dict[tuple[tuple[str, object], ...], float]]:
+        before = reader.points("bot.identification.count")
+        harness = await _harness()
+        await harness.identify("every", _PRINT, _PRINT)
+        _ = await harness.reply("every")
+        harness.identifier.recognitions = (
+            None,
+            identification.Recognition(id="new", recognized=False, similarity=None, own=False),
+        )
+        await harness.send(
+            identification.IdentifyEvent,
+            "flagged",
+            identification.IdentifyData(prints=(_PRINT, _PRINT), mint=(False, True)),
+        )
+        reply = await harness.reply("flagged")
+        assert reply.data == identification.IdentifiedData(kind="voice", recognitions=harness.identifier.recognitions)
+        return harness.identifier.mints, _delta(before, reader.points("bot.identification.count"))
+
+    with metric_reader.recording(tmp_path, monkeypatch) as reader:
+        mints, delta = asyncio.run(run(reader))
+
+    voice = ("bot.identification.kind", "voice")
+    assert mints == [(True, True), (False, True)]
+    assert delta == {
+        (("bot.failure.kind", "none"), voice, ("bot.outcome", "recognized")): 1,
+        (("bot.failure.kind", "none"), voice, ("bot.outcome", "minted")): 2,
+        (("bot.failure.kind", "none"), voice, ("bot.outcome", "unmatched")): 1,
+    }
+
+
+def test_identify_data_takes_one_mint_flag_per_print() -> None:
+    with pytest.raises(pydantic.ValidationError, match="one flag per print"):
+        _ = identification.IdentifyData(prints=(_PRINT, _PRINT), mint=(False,))
 
 
 def test_enroll_telemetry_names_whether_the_id_was_declared_matched_or_minted(

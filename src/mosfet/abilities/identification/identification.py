@@ -7,7 +7,9 @@ under the request's id, and prunes ids that are not linked to a person on its ow
 mark (``LinkEvent``) only says whether an id belongs to some person, so retention keeps its print;
 who that person is lives in memory, never here. An own id belongs to the bot itself, so a link mark
 on it is a ``CONFLICT``. Unknown prints
-are enrolled automatically: identifying a print either matches an existing id or mints a new one.
+are enrolled automatically: identifying a print either matches an existing id or mints a new one,
+unless the request marks that print match-only (``IdentifyData.mint``), when an unknown print is
+left unidentified and nothing is minted.
 An enrollment either names the id it refines (declared) or, for the bot's own print, names none:
 the print then refines the nearest own id of its kind or mints a new own id, and never matches an
 id that is not own.
@@ -17,12 +19,13 @@ and no failure message carries a payload. Telemetry (every attribute is a closed
 ids are never attributes):
 
 * ``bot.identification.count`` — ``bot.identification.kind`` {voice, face} × ``bot.outcome``
-  {recognized, minted, failed, skipped, linked, unlinked} × ``bot.failure.kind`` (``FailureKind``
-  or ``none``): one point per print identified or enrolled, one per link mark set (``linked``) or
+  {recognized, minted, unmatched, failed, skipped, linked, unlinked} × ``bot.failure.kind``
+  (``FailureKind`` or ``none``): one point per print identified or enrolled, one per match-only
+  print that matched nobody (``unmatched`` with ``none``), one per link mark set (``linked``) or
   cleared (``unlinked``), one per failed request, one per print an identifier could not identify
   (``failed`` with ``none``), and, from the ear, one per voice segment its classifier gave no
   voiceprint (``skipped`` with ``none``, voice only). An enrolled print's point also carries
-  ``bot.identification.mode`` {declared, own_matched, own_minted}: at most 31 series (7 plain, 8
+  ``bot.identification.mode`` {declared, own_matched, own_minted}: at most 33 series (9 plain, 8
   enrolled, 4 link marks, and 12 failures across the six failure kinds).
 * ``bot.identification.pruned`` — ids pruned by retention, by kind: 2 series.
 * ``bot.identification.prune.failed`` — prunes that failed or timed out, by kind ×
@@ -313,10 +316,13 @@ class Identifier(abc.ABC):
     """
 
     @abc.abstractmethod
-    async def identify(self, kind: Kind, prints: tuple[Print, ...]) -> tuple[Recognition | None, ...]:
+    async def identify(
+        self, kind: Kind, prints: tuple[Print, ...], mint: tuple[bool, ...]
+    ) -> tuple[Recognition | None, ...]:
         """One result per print, in order; ``None`` when this identifier cannot identify that print.
 
-        Unknown prints are enrolled automatically under a minted id.
+        ``mint`` has one flag per print: an unknown print whose flag is set is enrolled automatically
+        under a minted id, and one whose flag is clear (match only) is ``None``, with nothing minted.
 
         Raises:
             StoreError: For a request invalid as a whole (``INVALID_INPUT``, for example a dimension
@@ -370,14 +376,23 @@ class Identifier(abc.ABC):
 
 
 class IdentifyData(pydantic.BaseModel):
-    """Who are these prints? Each is matched to an existing id or enrolled under a new one."""
+    """Who are these prints? Each is matched to an existing id or, unless it is match-only, enrolled under a new one."""
 
     model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
         frozen=True,
         extra="forbid",
         json_schema_extra={
-            "description": "Prints to identify; each is matched to a known id or enrolled under a new one.",
-            "examples": [{"prints": [{"vector": [0.6, 0.8], "model": "pyannote/wespeaker-voxceleb-resnet34-LM"}]}],
+            "description": (
+                "Prints to identify; each is matched to a known id or, unless it is match-only, enrolled under a "
+                "new one."
+            ),
+            "examples": [
+                {"prints": [{"vector": [0.6, 0.8], "model": "pyannote/wespeaker-voxceleb-resnet34-LM"}]},
+                {
+                    "prints": [{"vector": [0.6, 0.8], "model": "pyannote/wespeaker-voxceleb-resnet34-LM"}],
+                    "mint": [False],
+                },
+            ],
         },
     )
 
@@ -386,6 +401,20 @@ class IdentifyData(pydantic.BaseModel):
         max_length=_MAX_PRINTS,
         description="The prints to identify, all of the registry's kind.",
     )
+    mint: tuple[bool, ...] | None = pydantic.Field(
+        default=None,
+        description=(
+            "One flag per print, in order: true enrolls an unknown print under a new id, false matches only and "
+            "leaves an unknown print unidentified. Null enrolls every unknown print."
+        ),
+        examples=[None, [False], [True, False]],
+    )
+
+    @pydantic.model_validator(mode="after")
+    def _one_flag_per_print(self) -> typing.Self:
+        if self.mint is not None and len(self.mint) != len(self.prints):
+            raise ValueError("mint must have one flag per print")
+        return self
 
 
 class IdentifiedData(pydantic.BaseModel):
@@ -557,6 +586,8 @@ class _DoneData(pydantic.BaseModel):
 
     reply: _Reply
     mode: _Mode | None = None
+    # An identify request's flags, one per print: an unknown match-only print is unmatched, not failed.
+    mint: tuple[bool, ...] = ()
 
 
 class _PrunedData(pydantic.BaseModel):
@@ -786,8 +817,10 @@ class Registry(ability.Ability[IdentifyData, IdentifiedData]):
             else:
                 try:
                     mode: _Mode | None = None
+                    mint: tuple[bool, ...] = ()
                     if isinstance(data, IdentifyData):
-                        recognitions = await instance._identifier.identify(kind, data.prints)
+                        mint = (True,) * len(data.prints) if data.mint is None else data.mint
+                        recognitions = await instance._identifier.identify(kind, data.prints, mint)
                         if len(recognitions) != len(data.prints):
                             raise StoreError(FailureKind.STORE_FAILED, "the identifier answered the wrong count")
                         reply: _Reply = IdentifiedData(kind=kind, recognitions=recognitions)
@@ -814,7 +847,7 @@ class Registry(ability.Ability[IdentifyData, IdentifiedData]):
                     )
                 else:
                     _ = instance.dispatch(
-                        ctx, _DoneEvent.with_data_and_id(_DoneData(reply=reply, mode=mode), in_flight.id)
+                        ctx, _DoneEvent.with_data_and_id(_DoneData(reply=reply, mode=mode, mint=mint), in_flight.id)
                     )
                     return
             span.record_failure(active, failure.kind.value)
@@ -856,8 +889,11 @@ class Registry(ability.Ability[IdentifyData, IdentifiedData]):
                     "bot.failure.kind": "none",
                 },
             )
-        for recognition in recognitions:
-            outcome = "failed" if recognition is None else "recognized" if recognition.recognized else "minted"
+        for index, recognition in enumerate(recognitions):
+            if recognition is None:
+                outcome = "failed" if index >= len(data.mint) or data.mint[index] else "unmatched"
+            else:
+                outcome = "recognized" if recognition.recognized else "minted"
             attributes = {"bot.identification.kind": kind, "bot.outcome": outcome, "bot.failure.kind": "none"}
             if data.mode is not None:
                 attributes["bot.identification.mode"] = data.mode

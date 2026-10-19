@@ -110,6 +110,7 @@ def test_removal_touches_only_memory_vec0_tables(tmp_path: pathlib.Path) -> None
         (identification.Print(vector=_unit(0.0), model="test/embedder"),),
         identification.MatchPolicy(threshold=0.5, margin=0.05, refine_threshold=0.65),
         at=datetime.datetime(2026, 10, 15, tzinfo=datetime.UTC),
+        mint=(True,),
     )
     with engine.begin() as connection:
         _ = connection.exec_driver_sql(

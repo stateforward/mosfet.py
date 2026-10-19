@@ -26,7 +26,8 @@ voices and stamps a ``voice:<id>`` participant for each. A segment the classifie
 With an affect classifier composed, the turn
 also carries the tone of its longest voice (``SpeechData.affect``), heard while its voices are
 identified (:mod:`~mosfet.abilities.listening.tone`). Partial words never reach cognition on their
-own; they ride only on the overlap fact.
+own; they ride only on the overlap fact, whose voice is recognized match-only: the bot's own voice is in
+that audio too, so it names a voice already known and never makes a new one.
 
 Telemetry: ``bot.listening.transcription.gated.count`` (sounds not streamed as predicted own voice),
 ``bot.listening.transcription.dropped.count`` (``bot.listening.transcription.drop.reason``: ``sessions``
@@ -544,9 +545,12 @@ class Source(Traced):
 
     @staticmethod
     async def _identify(
-        instance: "Source", event: hsm.Event[typing.Any], segments: tuple[voice.VoiceSegment, ...]
+        instance: "Source", event: hsm.Event[typing.Any], segments: tuple[voice.VoiceSegment, ...], *, match_only: bool
     ) -> tuple[voice.HeardVoice, ...]:
-        """Who was heard in the segments, earliest first; nobody when identification is not composed or fails."""
+        """Who was heard in the segments, earliest first; nobody when identification is not composed or fails.
+
+        ``match_only`` names only voices already known and makes no new one (``recognition.identify``).
+        """
 
         embedder, registry = instance._embedder, instance._registry
         if embedder is None or registry is None or not segments:
@@ -571,6 +575,7 @@ class Source(Traced):
             registry,
             segments,
             embeddings,
+            match_only=match_only,
             timeout=instance._recognize_timeout,
             operation_id=operation_id,
             metadata=event.metadata,
@@ -627,7 +632,7 @@ class Source(Traced):
         ) as active:
             segments = await Source._diarize(instance, event, turn)
             heard, affect = await asyncio.gather(
-                Source._identify(instance, event, segments),
+                Source._identify(instance, event, segments, match_only=False),
                 tone.classify(
                     instance.context(),
                     instance._affect,
@@ -765,7 +770,9 @@ class Source(Traced):
                 parent=None,
             )
         )
-        heard = await Source._identify(instance, event, segments)
+        # Match only: the overlap's audio carries the bot's own voice too, so it names a voice already known
+        # and never makes a new one.
+        heard = await Source._identify(instance, event, segments, match_only=True)
         _ = hsm.dispatch(ctx, instance, _OverlapHeardEvent.with_data(_HeardData(voices=heard)))
 
     # -- timers -----------------------------------------------------------------------------------

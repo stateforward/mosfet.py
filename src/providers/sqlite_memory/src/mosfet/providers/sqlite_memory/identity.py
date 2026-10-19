@@ -166,12 +166,13 @@ class IdentityStore(identification.Store):
         policy: identification.MatchPolicy,
         *,
         at: datetime.datetime,
-    ) -> tuple[identification.Recognition, ...]:
+        mint: tuple[bool, ...],
+    ) -> tuple[identification.Recognition | None, ...]:
         stamp = memory.graph.utc_text(at)
 
-        def work(connection: Connection) -> tuple[identification.Recognition, ...]:
-            recognitions: list[identification.Recognition] = []
-            for print in prints:
+        def work(connection: Connection) -> tuple[identification.Recognition | None, ...]:
+            recognitions: list[identification.Recognition | None] = []
+            for print, minting in zip(prints, mint, strict=True):
                 table = _space(connection, print)
                 # ``decide`` reads only the best neighbor and the runner-up.
                 nearest = connection.exec_driver_sql(
@@ -193,6 +194,9 @@ class IdentityStore(identification.Store):
                     for seq, id, own, _ in rows
                 ]
                 decision = identification.decide(neighbors, policy)
+                if isinstance(decision, identification.Mint) and not minting:
+                    recognitions.append(None)
+                    continue
                 if isinstance(decision, identification.Mint):
                     minted = uuid.uuid4().hex
                     result = connection.execute(

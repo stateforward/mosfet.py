@@ -29,7 +29,9 @@ and the enroller is told which id it has (``listening.EnrolledEvent``, through L
 Another voice heard while the bot's own mouth is producing is a fact of its own
 (``listening.OverlapEvent``), stated once per utterance once that voice has been going for
 ``overlap_min_voiced``, after it was recognized when voice identification is composed, and never for
-a voice recognized as the bot's own. It is perception, not a decision: nothing here stops anything.
+a voice recognized as the bot's own. Its recognition is match-only: the overlap's audio carries the bot's
+own voice too, so it names a voice already known and never makes a new one. It is perception, not a
+decision: nothing here stops anything.
 
 How a voice sounded is perceived too: with an affect classifier composed, decoded speech carries the
 tone of its longest voice (``SpeechData.affect``, see :mod:`~mosfet.abilities.listening.tone`), heard
@@ -1762,7 +1764,9 @@ class Interpretation(ability.Ability[sensitivity.OutputData, cognition.InputData
             return None
         if embeddings is None:
             return None
-        (heard,) = await Interpretation._recognize(instance, event, (segment,), embeddings)
+        # Match only: the overlap's audio carries the bot's own voice too, so it names a voice already known
+        # and never makes a new one.
+        (heard,) = await Interpretation._recognize(instance, event, (segment,), embeddings, match_only=True)
         return heard
 
     @staticmethod
@@ -2140,7 +2144,7 @@ class Interpretation(ability.Ability[sensitivity.OutputData, cognition.InputData
             active.set_attribute(
                 "bot.voice.embedding.count", sum(embedding is not None for embedding in output.embeddings)
             )
-            voices = await Interpretation._recognize(instance, event, segments, output.embeddings)
+            voices = await Interpretation._recognize(instance, event, segments, output.embeddings, match_only=False)
             active.set_attribute("bot.voice.identified.count", sum(heard is not None for heard in voices))
             if own := sum(heard is not None and heard.recognition.own for heard in voices):
                 _OWN_VOICE.add(own)
@@ -2166,8 +2170,13 @@ class Interpretation(ability.Ability[sensitivity.OutputData, cognition.InputData
         event: hsm.Event[typing.Any],
         segments: tuple[voice.VoiceSegment, ...],
         embeddings: tuple[voice.identification.VoiceEmbedding | None, ...],
+        *,
+        match_only: bool,
     ) -> tuple[voice.HeardVoice | None, ...]:
-        """Who was heard in each segment, in order, bounded by ``recognize_timeout``; the embeddings stay here."""
+        """Who was heard in each segment, in order, bounded by ``recognize_timeout``; the embeddings stay here.
+
+        ``match_only`` names only voices already known and makes no new one (``recognition.identify``).
+        """
 
         registry = instance._registry
         assert registry is not None, "a voice classifier is always composed with a registry"
@@ -2176,6 +2185,7 @@ class Interpretation(ability.Ability[sensitivity.OutputData, cognition.InputData
             registry,
             segments,
             embeddings,
+            match_only=match_only,
             timeout=instance._recognize_timeout,
             operation_id=instance._active_operation_id or event.id or uuid.uuid4().hex,
             metadata=event.metadata,

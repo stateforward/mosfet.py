@@ -37,8 +37,12 @@ class Store(abc.ABC):
         policy: identification.MatchPolicy,
         *,
         at: datetime.datetime,
-    ) -> tuple[identification.Recognition, ...]:
-        """Match or mint an id for each print, in order; a store never leaves a print unidentified.
+        mint: tuple[bool, ...],
+    ) -> tuple[identification.Recognition | None, ...]:
+        """Match or mint an id for each print, in order.
+
+        ``mint`` has one flag per print. A print that matches nobody is minted when its flag is set; when it is
+        clear (match only) the print is ``None`` and nothing is stored. A store leaves no other print unidentified.
 
         Raises:
             identification.StoreError: ``INVALID_INPUT`` for a dimension mismatch, else ``STORE_FAILED``.
@@ -157,13 +161,14 @@ class InProcessStore(Store):
         policy: identification.MatchPolicy,
         *,
         at: datetime.datetime,
-    ) -> tuple[identification.Recognition, ...]:
+        mint: tuple[bool, ...],
+    ) -> tuple[identification.Recognition | None, ...]:
         with self._lock:
             # Staged copies commit only when every print succeeded: one call is one transaction.
             ids = dict(self._ids.get(kind, {}))
             dimensions = dict(self._dimensions)
-            recognitions: list[identification.Recognition] = []
-            for print in prints:
+            recognitions: list[identification.Recognition | None] = []
+            for print, minting in zip(prints, mint, strict=True):
                 recorded = dimensions.setdefault(print.model, len(print.vector))
                 if recorded != len(print.vector):
                     raise identification.StoreError(
@@ -178,6 +183,9 @@ class InProcessStore(Store):
                     if entry.model == print.model
                 ]
                 decision = identification.decide(neighbors, policy)
+                if isinstance(decision, identification.Mint) and not minting:
+                    recognitions.append(None)
+                    continue
                 if isinstance(decision, identification.Mint):
                     if len(ids) >= self._max_ids:
                         evictable = [
@@ -364,9 +372,9 @@ class Matcher(identification.Identifier):
 
     @typing.override
     async def identify(
-        self, kind: identification.Kind, prints: tuple[identification.Print, ...]
+        self, kind: identification.Kind, prints: tuple[identification.Print, ...], mint: tuple[bool, ...]
     ) -> tuple[identification.Recognition | None, ...]:
-        return await asyncio.to_thread(self._store.identify, kind, prints, self._policy, at=self._now())
+        return await asyncio.to_thread(self._store.identify, kind, prints, self._policy, at=self._now(), mint=mint)
 
     @typing.override
     async def enroll(

@@ -131,7 +131,9 @@ Voice and face prints never leave the memory database: they never reach the mode
 telemetry. The model sees only opaque refs (`voice:3f2a…`) and whether each is someone it knows. A print nobody
 is known by is pruned 30 days after it was last heard (at most 1000 are kept); a print of someone named or declared is
 kept, and one linked to a person nobody has named is still pruned.
-Forgetting a person erases their prints with them.
+Forgetting a person erases their prints with them. A voice heard over Willy's own (an overlap, while it is
+speaking) is only matched to a voice it already knows: that audio is Willy's voice too, so no new voice is made
+from it.
 
 ## Security
 
