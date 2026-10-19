@@ -4,6 +4,9 @@
   makes each :class:`Choice` once, only on a turn woken by that choice's stimulus that offers its
   event, and otherwise selects nothing. A test pins what the bot was *offered* and what *woke* it;
   what the bot chooses is scripted only to prove a capacity, never to stand in for its judgment.
+* :class:`Decider` is :class:`Scripted` as a decision model, the kind intuition runs on. It makes its
+  choices the same way, and records the same; when it selects nothing, intuition hands the turn on to
+  reasoning.
 * :func:`running` starts a bot for the length of an ``async with`` block, with the shared actors its
   parts need, in an environment keeping time on the test's clock when it gives one, and stops it and
   them when the block ends, even when it raised.
@@ -112,6 +115,10 @@ class Scripted(processing.Processor):
         return any(isinstance(call.input, cognition.reflection.SelectInput) for call in self._calls)
 
 
+class Decider(Scripted, processing.DecisionProcessor):
+    """A decision model, scripted: intuition's offline double, with :class:`Scripted`'s choices and record."""
+
+
 def _stimulus(call: processing.InputData) -> str | None:
     """The name of what woke the turn ``call`` belongs to: a device's observation, or an ability's event."""
 
@@ -181,4 +188,4 @@ def snapshot(instance: body.Bot) -> hsm.Snapshot:
     return instance.take_snapshot()
 
 
-__all__ = ["Choice", "Run", "Scripted", "running", "snapshot"]
+__all__ = ["Choice", "Decider", "Run", "Scripted", "running", "snapshot"]

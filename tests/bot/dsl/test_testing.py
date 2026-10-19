@@ -126,6 +126,62 @@ def test_a_choice_reaches_through_reasoning_to_the_turn_it_reasons_about() -> No
     assert model.woken_by("device.phone.ringing") == (reasoning,)
 
 
+# Decider
+
+
+def test_a_decider_is_a_scripted_decision_processor_and_a_scripted_model_is_not() -> None:
+    assert isinstance(testing.Decider(), processing.DecisionProcessor)
+    assert isinstance(testing.Decider(), testing.Scripted)
+    assert not isinstance(testing.Scripted(), processing.DecisionProcessor)
+    assert "Decider" in testing.__all__
+
+
+def test_a_decider_makes_each_choice_once_on_a_turn_its_stimulus_woke_that_offers_its_event() -> None:
+    decider = testing.Decider(testing.Choice(stimulus="device.phone.ringing", event="timer.set", data={"minutes": 3}))
+
+    async def run() -> tuple[processing.Events, processing.Events]:
+        first = await decider.process(_turn("device.phone.ringing", _SetEvent, _CancelEvent))
+        return first, await decider.process(_turn("device.phone.ringing", _SetEvent))
+
+    first, second = asyncio.run(run())
+
+    assert first == (processing.SelectedEvent(event="timer.set", target="desk", data={"minutes": 3}),)
+    assert second == ()
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        _turn("device.phone.ringing", _CancelEvent),
+        _turn("device.phone.hung_up", _SetEvent),
+        _turn("device.phone.ringing"),
+    ],
+    ids=["not offered", "another stimulus", "nothing offered"],
+)
+def test_otherwise_a_decider_selects_nothing(call: processing.InputData) -> None:
+    decider = testing.Decider(testing.Choice(stimulus="device.phone.ringing", event="timer.set"))
+
+    assert asyncio.run(decider.process(call)) == ()
+
+
+def test_a_decider_records_every_call_what_was_offered_and_what_woke_it() -> None:
+    decider = testing.Decider()
+    ringing = _turn("device.phone.ringing", _SetEvent)
+    ran = _woken_by_an_event(_CancelEvent.with_data(_SetData(minutes=1)), _CancelEvent)
+
+    async def run() -> None:
+        _ = await decider.process(ringing)
+        _ = await decider.process(ran)
+
+    asyncio.run(run())
+
+    assert decider.calls() == (ringing, ran)
+    assert decider.offered_names() == frozenset({"timer.set", "timer.cancel"})
+    assert decider.woken_by("device.phone.ringing") == (ringing,)
+    assert decider.woken_by("timer.cancel") == (ran,)
+    assert decider.woken_by("device.phone.hung_up") == ()
+
+
 # running and snapshot
 
 
