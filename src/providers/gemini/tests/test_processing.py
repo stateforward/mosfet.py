@@ -313,7 +313,16 @@ def test_processor_lifts_confidence_from_patched_dispatch_data() -> None:
     assert output[0].confidence == 73
 
 
-def test_processor_requires_stamped_instructions() -> None:
-    processor = Processor(generator=RecordingGenerator(content="[]"))
-    with pytest.raises(ProcessingError, match="instructions"):
-        asyncio.run(process_for_test(processor, processing.InputData(input="hello")))
+@pytest.mark.parametrize("instructions", [None, "  \n"])
+def test_processor_sends_no_system_message_for_blank_instructions(instructions: str | None) -> None:
+    """Willy live check (D-W8-21 D1): inception's Processing stamps no instructions, and the processor
+    refused the call, so Willy could not be born. Blank instructions send the user message alone."""
+
+    generator = RecordingGenerator(content="[]")
+    processor = Processor(generator=generator)
+
+    output = asyncio.run(process_for_test(processor, processing.InputData(input="hello", instructions=instructions)))
+
+    assert output == ()
+    (sent,) = generator.inputs
+    assert [message.role for message in sent.messages] == [text.generation.TextRole.USER]

@@ -735,7 +735,7 @@ _ToolChoice: typing.TypeAlias = typing.Literal[
 
 
 class Processor(processing.Processor):
-    """OpenAI-compatible transport: input (+ stamped instructions) → events array.
+    """OpenAI-compatible transport: input (+ stamped instructions, a system message when not blank) → events array.
 
     ``image_capacity`` is stamped once from the generator, so the projection attaches exactly the
     images that generator accepts. ``stream`` is the owner's: ``False`` for an endpoint that cannot stream
@@ -788,9 +788,8 @@ class Processor(processing.Processor):
         made with ``stream=False`` never streams, so ``drafts`` is never called.
         """
 
+        # Blank instructions (inception's Processing stamps none) send no system message: the user message alone.
         instructions = (input.instructions or "").strip()
-        if not instructions:
-            raise ProcessingError("OpenAI-compatible processing requires non-blank instructions stamped by Processing.")
         operation_tools: tuple[dict[str, object], ...] = ()
         if input.schemas:
             operation_tools = (
@@ -802,7 +801,11 @@ class Processor(processing.Processor):
             )
         generation_input = text.generation.InputData(
             messages=(
-                text.generation.TextMessage(role=text.generation.TextRole.SYSTEM, content=instructions),
+                *(
+                    (text.generation.TextMessage(role=text.generation.TextRole.SYSTEM, content=instructions),)
+                    if instructions
+                    else ()
+                ),
                 text.generation.TextMessage(
                     role=text.generation.TextRole.USER,
                     content=input.model_facing_content(self.image_capacity),

@@ -594,7 +594,7 @@ def _same_typed_completion_value(value: object, validated: object) -> bool:
 
 
 class Processor(processing.Processor):
-    """Gemini transport: ``process`` maps a Processing input (+ stamped instructions) → events.
+    """Gemini transport: ``process`` maps a Processing input (+ stamped instructions, a system message when not blank) → events.
 
     ``image_capacity`` is stamped once from the generator, so the projection attaches exactly the
     images that generator accepts.
@@ -628,9 +628,8 @@ class Processor(processing.Processor):
     async def process(
         self, input: processing.InputData, *, drafts: processing.DraftSink | None = None
     ) -> processing.Events:
+        # Blank instructions (inception's Processing stamps none) send no system message: the user message alone.
         instructions = (input.instructions or "").strip()
-        if not instructions:
-            raise ProcessingError("Gemini processing requires non-blank instructions stamped by Processing.")
         operation_tools: tuple[dict[str, object], ...] = ()
         if input.schemas:
             operation_tools = (
@@ -642,7 +641,11 @@ class Processor(processing.Processor):
             )
         generation_input = text.generation.InputData(
             messages=(
-                text.generation.TextMessage(role=text.generation.TextRole.SYSTEM, content=instructions),
+                *(
+                    (text.generation.TextMessage(role=text.generation.TextRole.SYSTEM, content=instructions),)
+                    if instructions
+                    else ()
+                ),
                 text.generation.TextMessage(
                     role=text.generation.TextRole.USER,
                     content=input.model_facing_content(self.image_capacity),
