@@ -12,6 +12,7 @@ from mosfet.abilities.hearing import sound as sound_hearing
 from mosfet.abilities.hearing import speech
 from mosfet.abilities.hearing import voice
 from mosfet.devices import audio
+from mosfet.devices import computer
 from mosfet.devices import phone as phone_device
 import asyncio
 from pathlib import Path
@@ -3837,6 +3838,99 @@ def test_deferred_input_replays_after_clear_focus_completion() -> None:
         clear_output("clear before replay"),
         no_output("after clear"),
     ]
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="H3 (wave 12): the busy body defers, so each queued stimulus takes a whole turn of its own.",
+)
+def test_a_line_typed_while_the_bot_is_busy_is_perceived_on_the_next_turn() -> None:
+    """A line typed during a turn waits one turn, not one turn per stimulus queued ahead of it.
+
+    Three handed-back step failures queue behind the turn in progress, then the person types a
+    line. When the turn ends, the next turn perceives all four together in arrival order, as
+    one ``bot.perceived``, and no further turn is taken for any of them.
+    """
+
+    async def run() -> tuple[str, list[processing.InputData]]:
+        release = asyncio.Event()
+        ability = BlockingSequenceAbility(release=release, block_on_call=1, outputs=())
+        active_bot = AbilityAgent(devices=configured_devices("desk"), cognition=ability)
+
+        _ = await start_bot_with_devices(active_bot)
+        await active_bot.dispatch(
+            active_bot.context(),
+            mosfet.InputEvent.with_data_and_id(mosfet.InputEventData(target_device="desk"), "turn-1"),
+        )
+        await wait_until(lambda: len(ability.calls) == 1 and active_bot.state() == "/Bot/active/processing")
+
+        for index in range(3):
+            failure = cognition.StepFailedData(
+                message="Cognition's intuition step failed, so the turn failed: provider unavailable",
+                stage="intuition",
+                turn_id=f"failed-turn-{index}",
+                stimulus=mosfet.InputEvent.name,
+            )
+            await active_bot.dispatch(
+                active_bot.context(),
+                dataclasses.replace(
+                    cognition.InputEvent.with_data_and_id(
+                        cognition.InputData(
+                            stimulus=dataclasses.replace(
+                                cognition.StepFailedEvent.with_data(failure), source="cognition"
+                            )
+                        ),
+                        f"handed-back-{index}",
+                    ),
+                    source="cognition",
+                ),
+            )
+        person = mosfet.Participant(ref="person-42", role=mosfet.ParticipantRole.SOURCE)
+        line = computer.TextEnteredData(
+            device_id="desk", person_id="person-42", participants=(person,), text="Are you there?"
+        )
+        await active_bot.dispatch(
+            active_bot.context(),
+            dataclasses.replace(
+                mosfet.InputEvent.with_data_and_id(
+                    mosfet.InputEventData(
+                        target_device="desk",
+                        observation=mosfet.StimulusData.from_event(computer.TextEnteredEvent.with_data(line)),
+                        participants=(person,),
+                    ),
+                    "typed-line",
+                ),
+                source="desk",
+            ),
+        )
+        assert len(ability.calls) == 1
+        _ = release.set()
+        await wait_until(lambda: len(ability.calls) >= 2 and active_bot.state() == "/Bot/active/focused")
+
+        return active_bot.state() or "", ability.calls
+
+    state, calls = asyncio.run(run())
+
+    assert state == "/Bot/active/focused"
+    perceived = calls[1].input
+    assert isinstance(perceived, hsm.Event)
+    assert perceived.name == "bot.perceived"
+    percepts = object_dict(object_dict(event_contract.event_json_value(perceived))["data"])["percepts"]
+    assert isinstance(percepts, list)
+    stimuli = [object_dict(object_dict(percept)["stimulus"]) for percept in typing.cast(list[object], percepts)]
+    assert [stimulus.get("name") for stimulus in stimuli[:3]] == [cognition.StepFailedEvent.name] * 3
+    assert [object_dict(stimulus["data"])["turn_id"] for stimulus in stimuli[:3]] == [
+        "failed-turn-0",
+        "failed-turn-1",
+        "failed-turn-2",
+    ]
+    typed = object_dict(stimuli[3]["observation"])
+    assert typed["event"] == computer.TextEnteredEvent.name
+    assert object_dict(typed["data"])["text"] == "Are you there?"
+    assert object_dict(typing.cast(list[object], percepts)[3])["participants"] == [
+        {"ref": "person-42", "role": "source", "own": False}
+    ]
+    assert len(calls) == 2
 
 
 def test_bot_processing_state_rejects_malformed_input_event_data() -> None:
