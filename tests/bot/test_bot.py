@@ -6024,6 +6024,50 @@ def test_bot_degrades_when_reboot_cleanup_times_out_under_the_last_activation_id
     assert state == "/Bot/degraded"
 
 
+def _undelivered_count(metrics: metric_reader.Reader, terminal: str) -> float:
+    return sum(
+        point.value
+        for point in metrics.points("bot.lifecycle.answer.undelivered.count")
+        if point.attributes == {"terminal": terminal}
+    )
+
+
+def test_a_reboot_after_its_activator_stopped_reactivates_and_counts_the_answer_nobody_heard(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Willy live check (D2): ``bot.start`` waits for activation with a one-shot reply target that stops once
+    answered. A cognition reboot later re-entered activation, and answering that stopped target raised, so the
+    body never became active again. A reply target hears the answer only while it runs: the body is active
+    again, still answers what it is asked next, and the answer nobody heard is counted."""
+
+    async def run() -> tuple[str, list[tuple[str, str]], list[tuple[str, str]]]:
+        replies = await started_replies()
+        cognition_ability = as_cognition(IgnoreAbility())
+        active_bot = LifecycleAgent(cognition=cognition_ability)
+        environment = Environment()
+        _ = await active_bot.attach(environment, reply_to=replies, operation_id="op-a")
+        await wait_for_state(active_bot, "/Bot/active/unfocused")
+        await hsm.stop(replies, hsm.Context())
+        await request_cognition_reboot(environment, active_bot, cognition_ability)
+        await wait_until(lambda: active_bot.state() != "/Bot/active/unfocused")
+        await wait_for_state(active_bot, "/Bot/active/unfocused")
+        later = await started_replies()
+        _ = await active_bot.detach(environment, reply_to=later, operation_id="op-stop")
+        await wait_until(lambda: active_bot.state() == "/Bot/inactive" and len(later.terminals) == 1)
+        await settle()
+        return active_bot.state(), replies.ledger(), later.ledger()
+
+    with metric_reader.recording(tmp_path, monkeypatch) as metrics:
+        before = _undelivered_count(metrics, mosfet.ActivatingDoneEvent.name)
+        state, stopped, later = asyncio.run(run())
+        after = _undelivered_count(metrics, mosfet.ActivatingDoneEvent.name)
+
+    assert state == "/Bot/inactive"
+    assert stopped == [("bot.activated", "op-a")]
+    assert later == [("bot.deactivated", "op-stop")]
+    assert after - before == 1
+
+
 def test_bot_degrades_when_processing_cancellation_times_out_under_the_last_activation_id() -> None:
     async def run() -> tuple[list[tuple[str, str]], list[str], str]:
         replies = await started_replies()

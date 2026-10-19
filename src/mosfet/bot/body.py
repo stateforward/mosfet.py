@@ -53,6 +53,12 @@ _DEGRADED = metrics.get_meter(_LIFECYCLE_SCOPE).create_counter(
     unit="{transition}",
     description="Count of Bot transitions into the degraded lifecycle state, by the stage whose bound expired.",
 )
+# ``terminal`` is the lifecycle terminal's event name: a closed set of four from code.
+_UNDELIVERED = metrics.get_meter(_LIFECYCLE_SCOPE).create_counter(
+    "bot.lifecycle.answer.undelivered.count",
+    unit="{answer}",
+    description="Lifecycle answers a reply target did not take (it had stopped), by terminal event name.",
+)
 
 # Lifecycle idempotency predicates live in mosfet.lifecycle (single prose allowlist that may
 # only shrink); call sites below use lifecycle.is_already_running_error /
@@ -388,6 +394,9 @@ class Bot(Traced):
     # completes a later one and superseding the request never re-keys the running step.
     _lifecycle_step: int
     _lifecycle_step_id: str
+    # Answers still on their way to a reply target, held until delivery settles so none is lost
+    # before its outcome is known.
+    _answering: set[asyncio.Future[bool]]
 
     def __init__(
         self,
@@ -483,6 +492,7 @@ class Bot(Traced):
         self._lifecycle = None
         self._lifecycle_step = 0
         self._lifecycle_step_id = ""
+        self._answering = set()
 
     async def attach(
         self,
@@ -1471,6 +1481,11 @@ class Bot(Traced):
 
         Stamped from the durable request, never from the triggering event: a timer or private
         completion carries an id of its own, and the activator correlates by its operation id.
+
+        Delivery is the gate for the reply target: it hears the answer only while it runs. A
+        reboot re-enters activation and answers the same request again, and by then a one-shot
+        activator (``bot.start``'s) has stopped, so the answer is addressed by delivery (the
+        target is stamped as it is delivered) and an undelivered one is counted, never raised.
         """
 
         request = instance._lifecycle
@@ -1484,11 +1499,26 @@ class Bot(Traced):
         )
         _ = hsm.dispatch(ctx, instance, answer)
         if request.reply_to is not None:
-            _ = hsm.dispatch(
-                ctx,
-                request.reply_to,
-                dataclasses.replace(answer, target=hsm.id(request.reply_to), metadata=dict(event.metadata)),
+            delivery = asyncio.ensure_future(
+                hsm.dispatch(
+                    ctx, request.reply_to, dataclasses.replace(answer, target="", metadata=dict(event.metadata))
+                )
             )
+            instance._answering.add(delivery)
+            delivery.add_done_callback(lambda done: Bot._settle_answer(instance, answer.name, done))
+
+    @staticmethod
+    def _settle_answer(instance: "Bot", terminal: str, delivery: asyncio.Future[bool]) -> None:
+        """Count a lifecycle answer its reply target did not take; a target that stopped hears nothing."""
+
+        instance._answering.discard(delivery)
+        if delivery.cancelled():
+            return
+        error = delivery.exception()
+        if error is None:
+            return
+        _UNDELIVERED.add(1, {"terminal": terminal})
+        _LOG.info("Bot lifecycle answer undelivered terminal=%s error=%s", terminal, type(error).__name__)
 
     @staticmethod
     def _dispatch_activating_done(ctx: hsm.Context, instance: "Bot", event: hsm.Event) -> None:
