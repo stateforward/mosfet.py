@@ -369,6 +369,28 @@ def test_processing_defines_base_operation_contract() -> None:
     assert processing.Processing.model is not None
 
 
+def test_a_decision_processor_is_an_abstract_kind_of_processor() -> None:
+    assert issubclass(processing.DecisionProcessor, processing.Processor)
+    assert "DecisionProcessor" in processing.__all__
+    with pytest.raises(TypeError):
+        typing.cast(typing.Any, processing.DecisionProcessor)()
+
+    class Deciding(processing.DecisionProcessor):
+        @typing.override
+        async def process(
+            self, input: processing.InputData, *, drafts: processing.DraftSink | None = None
+        ) -> processing.Events:
+            del input, drafts
+            return ()
+
+    assert isinstance(Deciding(), processing.Processor)
+    assert isinstance(Deciding(), processing.DecisionProcessor)
+
+
+def test_a_chat_processor_is_not_a_decision_processor() -> None:
+    assert not isinstance(LengthProcessor(), processing.DecisionProcessor)
+
+
 def test_processing_operation_store_is_owner_scoped_and_retires_capabilities() -> None:
     async def run() -> None:
         ctx = shared_hsm_context()

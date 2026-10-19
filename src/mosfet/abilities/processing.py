@@ -2232,6 +2232,16 @@ class Processor(abc.ABC):
         ...
 
 
+class DecisionProcessor(Processor, abc.ABC):
+    """A processor whose model decides: it chooses among the offered events, each with its confidence.
+
+    A decision model is not a chat model. It writes no prose and calls no tool; it answers which offered
+    event to fire, or none. Intuition, the bot's fast first decision, runs on one. A processor that
+    chooses nothing hands the turn on, as any processor's empty selection does. The kind adds no members;
+    it is what a decision model's processor subclasses, so a chat processor is never taken for one.
+    """
+
+
 class Processing(ability.Ability[InputData, CompletionData]):
     """Leaf ability: apply an injected ``Processor``, then dispatch selected events if any.
 
@@ -2690,6 +2700,7 @@ __all__ = [
     "OutputData",
     "Operation",
     "InputData",
+    "DecisionProcessor",
     "Processor",
     "Processing",
     "Result",
