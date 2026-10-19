@@ -1,9 +1,12 @@
 from mosfet.abilities import cognition
 from mosfet.abilities import ability
 from mosfet.abilities import communication
+from mosfet.abilities import listening
 from mosfet.abilities import memory
 from mosfet.abilities import processing
 from mosfet.abilities.cognition import autonomy as autonomy_module
+from mosfet.abilities.communication import conversation
+from mosfet.abilities.hearing import voice
 from mosfet.protocols import attachment
 from mosfet.behavior import storage as behavior_storage
 from mosfet.behavior import seed
@@ -56,6 +59,10 @@ class _CandidateCapabilityFactory(typing.Protocol):
     ) -> object: ...
 
 
+class _AgendaFactory(typing.Protocol):
+    def __call__(self, *, slots: tuple[object, ...], perceived: int) -> object: ...
+
+
 class _CandidateModelFactory(typing.Protocol):
     def model_for(
         self,
@@ -64,7 +71,8 @@ class _CandidateModelFactory(typing.Protocol):
         behavior: ability.Ability[typing.Any, typing.Any],
         capability: object,
         turn: cognition.types.TurnData,
-        candidates: tuple[object, ...],
+        agenda: object,
+        view: cognition.InputData,
         input_adapter: collections.abc.Callable[[cognition.InputData], object],
         metadata: dict[str, object],
     ) -> hsm.Model: ...
@@ -275,6 +283,7 @@ def test_autonomy_origin_and_candidate_outcomes_use_explicit_choices() -> None:
     child = cognition.Intuition(processor=testing.Decider())
     candidate_run_type = typing.cast(_CandidateModelFactory, getattr(autonomy_module, "_CandidateRun"))
     capability_type = typing.cast(_CandidateCapabilityFactory, getattr(autonomy_module, "_CandidateCapability"))
+    agenda_type = typing.cast(_AgendaFactory, getattr(autonomy_module, "_Agenda"))
 
     def adapt(value: cognition.InputData) -> object:
         return value
@@ -290,7 +299,8 @@ def test_autonomy_origin_and_candidate_outcomes_use_explicit_choices() -> None:
             origin="native",
         ),
         turn=_turn("choice-operation"),
-        candidates=(),
+        agenda=agenda_type(slots=(), perceived=1),
+        view=_turn("choice-operation").input,
         input_adapter=adapt,
         metadata={},
     )
@@ -1026,3 +1036,230 @@ def test_autonomy_never_matches_persistent_routines() -> None:
         return tuple(item.name for item in vars(instance)["_behaviors"])
 
     assert asyncio.run(run()) == ("TurnGreeting",)
+
+
+# A turn that perceived several stimuli together (bot.perceived): behaviors meet each percept on its own.
+
+
+def _heard(content: str, *, event_id: str) -> hsm.Event[listening.SpeechData]:
+    speech = listening.SpeechData(
+        content=content,
+        content_type="text/plain",
+        voice_detection=voice.detection.ApplyData(
+            segments=(voice.detection.VoiceDetectionSegment(start_seconds=0.0, end_seconds=0.1, confidence=0.9),)
+        ),
+        sample_rate_hz=16_000,
+        media_type="audio/pcm",
+        channels=1,
+        source_ids=frozenset({"voice:3f2a9c"}),
+    )
+    return dataclasses.replace(listening.SpeechEvent.with_data(speech), id=event_id, source="listening")
+
+
+def _batch_turn(
+    *stimuli: mosfet.InputData,
+    actors: dict[str, hsm.Instance] | None = None,
+    operation_id: str = "batch-turn",
+) -> cognition.types.TurnData:
+    perceived = mosfet.PerceivedEvent.with_data(
+        mosfet.PerceivedData(
+            percepts=tuple(mosfet.PerceptData(stimulus=stimulus, source="nerve") for stimulus in stimuli)
+        )
+    )
+    return cognition.types.TurnData(
+        input=cognition.InputData(
+            stimulus=dataclasses.replace(perceived, id=operation_id, source="bot"),
+            abilities=(),
+            actors=actors or {},
+            focus=None,
+            focus_candidates=(),
+        ),
+        operation_id=operation_id,
+        generation="operation-token",
+    )
+
+
+def test_a_speech_heard_seed_admits_the_speech_percept_of_a_batch_and_leaves_the_turn_to_deliberation() -> None:
+    """Speech heard while the bot was busy is still admitted; the rest of the batch is deliberation's."""
+
+    async def run() -> tuple[object, cognition.types.TurnData, list[hsm.Event[typing.Any]]]:
+        autonomy = cognition.Autonomy(seeded_behaviors=(communication.speech_heard_seed(),))
+        recipient = _CommunicationRecipient()
+        ctx = shared_hsm_context()
+        await start_abilities_for_test(ctx, autonomy)
+        _ = await mosfet.started(ctx, recipient, recipient.model)
+        turn = _batch_turn(
+            mosfet.InputEventData(target_device="desk", priority=5),
+            _heard("answer the phone", event_id="speech-1"),
+            mosfet.InputEventData(target_device="desk", priority=1),
+            actors={"communication": recipient},
+        )
+        output = await dispatch_ability_for_test(autonomy, ctx, turn, timeout=10.0)
+        await _wait_until(lambda: bool(recipient.received))
+        return output, turn, recipient.received
+
+    output, turn, received = asyncio.run(run())
+
+    # Not every percept was handled, so deliberation perceives the whole batch, unfiltered, and the
+    # turn carries what the behavior already did on its percept (D-W12-9).
+    assert isinstance(output, cognition.types.CompletionData)
+    assert output.output is None
+    assert output.turn.model_copy(update={"acted": None}) == turn
+    acted = output.turn.acted
+    assert acted is not None
+    assert acted.percepts == (1,)
+    (selection,) = acted.acts
+    assert selection.event == communication.InputEvent.name
+    assert [event.name for event in received] == [communication.InputEvent.name]
+    admitted = received[0].data
+    assert isinstance(admitted, conversation.TurnData)
+    assert admitted.content == "answer the phone"
+    assert selection.data == admitted
+
+
+def test_a_batch_every_percept_of_which_a_behavior_handles_is_handled_with_their_selections_in_order() -> None:
+    async def run() -> tuple[object, cognition.types.TurnData]:
+        autonomy = cognition.Autonomy(seeded_behaviors=(communication.speech_heard_seed(),))
+        ctx = shared_hsm_context()
+        await start_abilities_for_test(ctx, autonomy)
+        turn = _batch_turn(_heard("first", event_id="speech-1"), _heard("second", event_id="speech-2"))
+        return await dispatch_ability_for_test(autonomy, ctx, turn, timeout=10.0), turn
+
+    output, turn = asyncio.run(run())
+
+    assert isinstance(output, cognition.types.CompletionData)
+    assert output.turn == turn
+    assert output.output is not None
+    contents: list[object] = []
+    for selection in output.output:
+        assert selection.event == communication.InputEvent.name
+        assert isinstance(selection.data, conversation.TurnData)
+        contents.append(selection.data.content)
+    assert contents == ["first", "second"]
+
+
+_ECHO_KIND_BEHAVIOR_SOURCE = """
+input_event = hsm.event(
+    name = "bot.behavior.echo_kind.input",
+    schema = {"type": "object", "additionalProperties": True},
+    description = "Input for a behavior that says which sound it met.",
+)
+output_event = hsm.event(
+    name = "bot.behavior.echo_kind.output",
+    schema = {
+        "type": "object",
+        "properties": {"event": {"type": "string"}, "reason": {"type": "string"}},
+        "required": ["event"],
+        "additionalProperties": True,
+    },
+    description = "A selection naming the sound this behavior met.",
+)
+triggers = ["environment.sound"]
+
+def echo(event):
+    hsm.dispatch(output_event, {"event": "bot.clear_focus", "reason": event["data"]["kind"]})
+
+behavior = hsm.define(
+    "EchoKind",
+    hsm.initial(hsm.target("/EchoKind/idle")),
+    hsm.state(
+        "idle",
+        hsm.transition(hsm.on(input_event), hsm.effect("echo")),
+    ),
+)
+""".strip()
+
+
+def test_a_learned_behavior_meets_only_its_own_percept_of_a_batch() -> None:
+    async def run() -> object:
+        installed = behavior.start(_ECHO_KIND_BEHAVIOR_SOURCE, name="EchoKind", triggers=(SoundEvent.name,))
+        store = await _attached_memory(installed)
+        autonomy = cognition.Autonomy(memory=store)
+        ctx = shared_hsm_context()
+        await start_abilities_for_test(ctx, autonomy)
+        turn = _batch_turn(
+            dataclasses.replace(SoundEvent.with_data(SoundData(audio=b"ring", kind="phone.ringing")), id="ring"),
+            dataclasses.replace(SoundEvent.with_data(SoundData(audio=b"knock", kind="door.knock")), id="knock"),
+        )
+        return await dispatch_ability_for_test(autonomy, ctx, turn, timeout=10.0)
+
+    output = asyncio.run(run())
+
+    assert isinstance(output, cognition.types.CompletionData)
+    assert output.output is not None
+    # Each run met one sound: its own percept's event, never the batch.
+    assert [selection.reason for selection in output.output] == ["phone.ringing", "door.knock"]
+
+
+def test_a_learned_behavior_that_handles_two_percepts_of_a_batch_is_counted_used_twice() -> None:
+    """Each percept's run is its own use: the second run counts from the first one's stored count."""
+
+    async def run() -> tuple[int, ...]:
+        installed = behavior.start(_ECHO_KIND_BEHAVIOR_SOURCE, name="EchoKind", triggers=(SoundEvent.name,))
+        store = await _attached_memory(installed)
+        autonomy = cognition.Autonomy(memory=store)
+        ctx = shared_hsm_context()
+        await start_abilities_for_test(ctx, autonomy)
+        turn = _batch_turn(
+            dataclasses.replace(SoundEvent.with_data(SoundData(audio=b"ring", kind="phone.ringing")), id="ring"),
+            dataclasses.replace(SoundEvent.with_data(SoundData(audio=b"knock", kind="door.knock")), id="knock"),
+        )
+        output = await dispatch_ability_for_test(autonomy, ctx, turn, timeout=10.0)
+        assert isinstance(output, cognition.types.CompletionData)
+        assert output.output is not None
+        stored = await memory.transact(
+            ctx,
+            store,
+            memory.InputData(statements=memory.compile_statements(*behavior_storage.select_all_behaviors_clauses())),
+        )
+        behaviors = behavior_storage.instances_from_behavior_results(
+            tuple(row.as_mapping() for row in stored.results[0].rows),
+            tuple(row.as_mapping() for row in stored.results[1].rows),
+        )
+        return (installed.used_count, *(item.used_count for item in behaviors))
+
+    before, *after = asyncio.run(run())
+
+    assert after == [before + 2]
+
+
+_FAILING_RING_BEHAVIOR_SOURCE = _DELAYED_BEHAVIOR_SOURCE.replace(
+    'hsm.dispatch(output_event, {"event": "bot.clear_focus", "reason": "delayed behavior"})', 'fail("boom")'
+)
+
+
+def test_a_batch_whose_last_percept_fails_after_an_earlier_one_was_handled_carries_what_was_done() -> None:
+    """The failed candidate leaves its percept to deliberation, which still learns what the seed did (D-W12-9)."""
+
+    async def run() -> tuple[object, cognition.types.TurnData, list[hsm.Event[typing.Any]]]:
+        installed = behavior.start(_FAILING_RING_BEHAVIOR_SOURCE, name="DelayedRing", triggers=(SoundEvent.name,))
+        store = await _attached_memory(installed)
+        autonomy = cognition.Autonomy(memory=store, seeded_behaviors=(communication.speech_heard_seed(),))
+        recipient = _CommunicationRecipient()
+        ctx = shared_hsm_context()
+        await start_abilities_for_test(ctx, autonomy)
+        _ = await mosfet.started(ctx, recipient, recipient.model)
+        turn = _batch_turn(
+            _heard("answer the phone", event_id="speech-1"),
+            dataclasses.replace(SoundEvent.with_data(SoundData(audio=b"ring", kind="phone.ringing")), id="ring"),
+            actors={"communication": recipient},
+        )
+        output = await dispatch_ability_for_test(autonomy, ctx, turn, timeout=30.0)
+        await _wait_until(lambda: bool(recipient.received))
+        return output, turn, recipient.received
+
+    output, turn, received = asyncio.run(run())
+
+    assert isinstance(output, cognition.types.CompletionData)
+    assert output.output is None
+    assert output.turn.model_copy(update={"acted": None}) == turn
+    acted = output.turn.acted
+    assert acted is not None
+    assert acted.percepts == (0,)
+    (selection,) = acted.acts
+    assert selection.event == communication.InputEvent.name
+    assert [event.name for event in received] == [communication.InputEvent.name]
+    admitted = received[0].data
+    assert isinstance(admitted, conversation.TurnData)
+    assert admitted.content == "answer the phone"
+    assert selection.data == admitted

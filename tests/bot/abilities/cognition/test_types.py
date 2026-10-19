@@ -7,6 +7,7 @@ from mosfet.abilities.cognition import types
 from mosfet.device import Device
 from mosfet.devices.phone import events as phone_events
 import hsm
+import pydantic
 import pytest
 
 
@@ -179,3 +180,21 @@ def test_attention_for_a_batch_reads_arrival_order_never_priority() -> None:
 
     assert candidates(idle, urgent) == ("browser", "phone")
     assert candidates(urgent, idle) == ("phone", "browser")
+
+
+def test_what_behaviors_already_did_names_at_least_one_percept_and_is_closed() -> None:
+    """D-W12-9: ``ActedData`` is the typed carrier of a partly handled batch's behavior selections."""
+
+    acts = types.OUTPUT_SCHEMA_CONTRACT.validate_python(({"event": "bot.focus_device", "data": {"device": "phone"}},))
+    acted = types.ActedData(percepts=(0, 2), acts=acts)
+
+    assert acted.acts == acts
+    with pytest.raises(pydantic.ValidationError):
+        _ = types.ActedData(percepts=(), acts=acts)
+    with pytest.raises(pydantic.ValidationError):
+        _ = types.ActedData.model_validate({"percepts": [0], "acts": [], "by": "behavior"})
+    assert types.ActedData.model_config.get("frozen") is True
+    schema = types.ActedData.model_json_schema()
+    assert schema["description"]
+    assert schema["examples"]
+    assert all(field.description for field in types.ActedData.model_fields.values())

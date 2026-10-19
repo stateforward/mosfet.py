@@ -65,6 +65,9 @@ _OUTPUT_IMAGES: typing.Final = media.ImageCapacity()
 _MAX_OUTPUT_BYTES: typing.Final = memory.MAX_EPISODE_TEXT_BYTES // 4
 # What an episode keeps of a failed turn's typed failure, rendered after its output, within its own bound.
 _MAX_FAILURE_BYTES: typing.Final = memory.MAX_EPISODE_TEXT_BYTES // 16
+# What deliberation is told behaviors already did this turn (D-W12-9): text only, after the world and self
+# blocks, within its own bound so the instructions keep room for them.
+_MAX_ACTED_BYTES: typing.Final = memory.MAX_EPISODE_TEXT_BYTES // 16
 
 _LOG = logging.getLogger(__name__)
 
@@ -494,7 +497,11 @@ class Cognition(ability.Ability[InputData, OutputData]):
         cognition_input: InputData,
         *,
         recalled: memory.AssociationsData | None = None,
+        acted: types.ActedData | None = None,
     ) -> processing.InputData:
+        """Deliberation's frame for the turn: offered events, the world and self blocks, then what
+        behaviors already did on its percepts (``acted``), as a fact of the turn after those blocks."""
+
         associative = instance._associative
         told = instance._persona_told
         voiced = instance._voice_told
@@ -505,6 +512,15 @@ class Cognition(ability.Ability[InputData, OutputData]):
             authority=instance,
             known=None if told is None and voiced is None else input.SelfData(persona=told, voice=voiced),
         )
+        if acted is not None:
+            fact = "".join(
+                part.text
+                for part in projection.memory_content(acted, capacity=_OUTPUT_IMAGES, budget_bytes=_MAX_ACTED_BYTES)
+                if isinstance(part, text.TextPart)
+            )
+            frame = frame.model_copy(
+                update={"instructions": "\n".join(block for block in (frame.instructions, fact) if block)}
+            )
         return frame if recalled is None else frame.model_copy(update={"recalled": recalled})
 
     @staticmethod
@@ -514,6 +530,7 @@ class Cognition(ability.Ability[InputData, OutputData]):
         operation_id: str,
         *,
         associations: memory.AssociationsData | None = None,
+        acted: types.ActedData | None = None,
     ) -> types.TurnData:
         operation = processing.active_operation(instance, operation_id)
         assert operation is not None
@@ -522,6 +539,7 @@ class Cognition(ability.Ability[InputData, OutputData]):
             operation_id=operation_id,
             generation=hsm.id(operation),
             associations=associations,
+            acted=acted,
         )
 
     @staticmethod
@@ -728,8 +746,10 @@ class Cognition(ability.Ability[InputData, OutputData]):
         cognition_input: InputData,
         operation_id: str | None,
         associations: memory.AssociationsData | None,
+        acted: types.ActedData | None,
     ) -> None:
-        """Build intuition's frame (with what memory surfaced as ``recalled``) and hop to it."""
+        """Build intuition's frame (with what memory surfaced as ``recalled``, and what behaviors
+        already did as ``acted``) and hop to it."""
 
         public_metadata = _public_metadata(dict(event.metadata))
         base = operation_id or uuid.uuid4().hex
@@ -738,6 +758,7 @@ class Cognition(ability.Ability[InputData, OutputData]):
                 instance,
                 cognition_input,
                 recalled=associations,
+                acted=acted,
             )
         except Exception as error:
             failed = _failure(operation_id, str(error))
@@ -748,6 +769,7 @@ class Cognition(ability.Ability[InputData, OutputData]):
                 outcome=memory.Outcome.FAILED,
                 metadata=public_metadata,
                 cognition_input=cognition_input,
+                output=() if acted is None else acted.acts,
                 failure=failed.failure,
             )
             Cognition._hand_back_step_failure(
@@ -771,7 +793,7 @@ class Cognition(ability.Ability[InputData, OutputData]):
             return
         if processing.active_operation(instance, base) is None:
             _ = await processing.start_operation(instance, base)
-        turn = Cognition._turn(instance, cognition_input, base, associations=associations)
+        turn = Cognition._turn(instance, cognition_input, base, associations=associations, acted=acted)
         hop_id = f"{base}{_INTUITION_ID_SUFFIX}"
         input_event = dataclasses.replace(
             instance._intuition.input_event.with_data_and_id(
@@ -864,8 +886,10 @@ class Cognition(ability.Ability[InputData, OutputData]):
         cognition_input = data.turn.input
         operation_id = data.turn.operation_id
         public_metadata = _public_metadata(dict(event.metadata))
+        # What behaviors already did on this turn's percepts is the turn's too, ahead of deliberation's (D-W12-9).
+        acted = () if data.turn.acted is None else data.turn.acted.acts
         try:
-            output = _coerce_output(data.output)
+            output = (*acted, *_coerce_output(data.output))
         except Exception as error:
             failed = _failure(operation_id, str(error))
             Cognition._remember(
@@ -875,6 +899,7 @@ class Cognition(ability.Ability[InputData, OutputData]):
                 outcome=memory.Outcome.FAILED,
                 metadata=public_metadata,
                 cognition_input=cognition_input,
+                output=acted,
                 failure=failed.failure,
             )
             _ = hsm.dispatch(
@@ -948,6 +973,7 @@ class Cognition(ability.Ability[InputData, OutputData]):
                     cognition_input=data.turn.input,
                     operation_id=data.turn.operation_id,
                     associations=data.turn.associations,
+                    acted=data.turn.acted,
                 )
                 return
             # Prefer full unhandled-autonomy match (envelope id, generation, live op, suffix).
@@ -962,12 +988,19 @@ class Cognition(ability.Ability[InputData, OutputData]):
                     cognition_input=data.turn.input,
                     operation_id=data.turn.operation_id,
                     associations=None,
+                    acted=data.turn.acted,
                 )
                 return
             active.set_attribute("bot.cognition.entered_from", "input")
             assert is_input(data)
             await Cognition._hop_intuition(
-                ctx, instance, event, cognition_input=data, operation_id=event.id or None, associations=None
+                ctx,
+                instance,
+                event,
+                cognition_input=data,
+                operation_id=event.id or None,
+                associations=None,
+                acted=None,
             )
 
     @staticmethod
@@ -986,9 +1019,11 @@ class Cognition(ability.Ability[InputData, OutputData]):
             context=telemetry.event_context(event),
         ) as active:
             data = event.data
+            acted: types.ActedData | None = None
             if isinstance(data, types.CompletionData):
                 cognition_input = data.turn.input
                 operation_id = data.turn.operation_id
+                acted = data.turn.acted
             else:
                 assert is_input(data)
                 cognition_input = data
@@ -1025,7 +1060,7 @@ class Cognition(ability.Ability[InputData, OutputData]):
             if terminal is not None and isinstance(terminal.data, memory.AssociationsData):
                 associations = terminal.data
             active.set_attribute("bot.cognition.associated", associations is not None)
-            turn = Cognition._turn(instance, cognition_input, operation_id, associations=associations)
+            turn = Cognition._turn(instance, cognition_input, operation_id, associations=associations, acted=acted)
             _ = hsm.dispatch(
                 ctx,
                 instance,
@@ -1177,12 +1212,14 @@ class Cognition(ability.Ability[InputData, OutputData]):
                 )
                 return
             associations = completion.turn.associations if isinstance(completion, types.CompletionData) else None
+            acted = completion.turn.acted if isinstance(completion, types.CompletionData) else None
             base = operation_id if operation_id else uuid.uuid4().hex
             try:
                 input = Cognition._build_processing_input(
                     instance,
                     cognition_input,
                     recalled=associations,
+                    acted=acted,
                 )
             except Exception as error:
                 failed = _failure(operation_id, str(error))
@@ -1193,6 +1230,7 @@ class Cognition(ability.Ability[InputData, OutputData]):
                     outcome=memory.Outcome.FAILED,
                     metadata=public_metadata,
                     cognition_input=cognition_input,
+                    output=() if acted is None else acted.acts,
                     failure=failed.failure,
                 )
                 Cognition._hand_back_step_failure(
@@ -1214,7 +1252,7 @@ class Cognition(ability.Ability[InputData, OutputData]):
                     ),
                 )
                 return
-            turn = Cognition._turn(instance, cognition_input, base, associations=associations)
+            turn = Cognition._turn(instance, cognition_input, base, associations=associations, acted=acted)
             hop_id = f"{base}{_REASONING_ID_SUFFIX}"
             input_event = dataclasses.replace(
                 instance._reasoning.input_event.with_data_and_id(
@@ -1288,6 +1326,7 @@ class Cognition(ability.Ability[InputData, OutputData]):
                 outcome=memory.Outcome.FAILED,
                 metadata=dict(event.metadata),
                 cognition_input=event.data.turn.input,
+                output=() if event.data.turn.acted is None else event.data.turn.acted.acts,
                 # What failed, without the turn it correlates: the episode already holds that turn.
                 failure=ability.FailureData(message=failure.message),
             )
@@ -1401,6 +1440,7 @@ class Cognition(ability.Ability[InputData, OutputData]):
             outcome=memory.Outcome.FAILED,
             metadata=public_metadata,
             cognition_input=data.turn.input,
+            output=() if data.turn.acted is None else data.turn.acted.acts,
             failure=data.failure,
         )
         terminal = dataclasses.replace(

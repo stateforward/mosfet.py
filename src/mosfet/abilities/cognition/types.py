@@ -145,6 +145,44 @@ def without_ignore_selections(selections: processing.Events) -> processing.Event
     return tuple(item for item in selections if not is_ignore_event(item.event))
 
 
+class ActedData(pydantic.BaseModel):
+    """What behaviors already did on this turn's percepts, before deliberation took the turn up.
+
+    A ``bot.perceived`` batch is handled by autonomy only when every percept was. When some
+    were not, the selections the handling behaviors made were already dispatched; they ride
+    the turn so the turn's one episode and its output carry them first, and deliberation
+    knows them as a fact of the turn, never as an instruction.
+    """
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
+        arbitrary_types_allowed=True,
+        frozen=True,
+        extra="forbid",
+        json_schema_extra={
+            "description": (
+                "What the bot's behaviors already did on this turn, before deliberation: the percepts they "
+                "handled and the events they selected and dispatched."
+            ),
+            "examples": [
+                {
+                    "percepts": [1],
+                    "acts": [{"target": "communication", "event": "bot.ability.communication.input"}],
+                }
+            ],
+        },
+    )
+
+    percepts: tuple[int, ...] = pydantic.Field(
+        min_length=1,
+        description="Arrival positions, from 0, of the batch's percepts that behaviors handled, in arrival order.",
+        examples=[[0], [0, 2]],
+    )
+    acts: OutputData = pydantic.Field(
+        description="What those behaviors selected and the bot already dispatched, in the percepts' arrival order.",
+        examples=[[{"target": "communication", "event": "bot.ability.communication.input"}]],
+    )
+
+
 class TurnData(pydantic.BaseModel):
     """Typed correlation and body input for one active cognition turn."""
 
@@ -177,6 +215,13 @@ class TurnData(pydantic.BaseModel):
         default=None,
         description=(
             "What memory surfaced for this turn; None when the bot has no associative memory or association failed."
+        ),
+    )
+    acted: ActedData | None = pydantic.Field(
+        default=None,
+        description=(
+            "What behaviors already did on this turn's percepts when autonomy handled only some of them; None "
+            "when no behavior acted. The stages that follow carry it, and the turn's output and episode put it first."
         ),
     )
 
@@ -457,6 +502,7 @@ __all__ = [
     "DELIBERATIVE_HANDOFF_EVENT_NAME",
     "OUTPUT_SCHEMA",
     "OUTPUT_SCHEMA_CONTRACT",
+    "ActedData",
     "CompletionData",
     "EventData",
     "EventPayload",

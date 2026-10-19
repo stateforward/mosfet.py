@@ -6,6 +6,11 @@ inventory from memory (behaviors authored mid-lifetime are usable immediately) a
 matches both sources by stimulus trigger, then runs the chosen Ability/HSM through one
 attach, input, terminal, and detach lifecycle. Only materialization and input adaptation
 differ between the two sources.
+
+A turn that perceived several stimuli together (``bot.perceived``) is matched percept by
+percept, in arrival order: each behavior meets only its own percept, on the turn as that
+percept alone presents it. The turn is handled only when every percept was; otherwise the
+behaviors' selections stand and deliberation perceives the whole batch.
 """
 
 from __future__ import annotations
@@ -106,8 +111,47 @@ _MatchEvent = hsm.Event[_MatchData](
 )
 
 
+class _Slot(pydantic.BaseModel):
+    """One behavior meeting one percept of the turn, on the turn as that percept alone presents it."""
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
+        arbitrary_types_allowed=True,
+        frozen=True,
+    )
+
+    candidate: BehaviorCandidate
+    percept: int = pydantic.Field(ge=0, description="Arrival position of the percept; 0 for a single stimulus.")
+    view: input.InputData = pydantic.Field(
+        description=(
+            "The turn's input with this percept as its stimulus and its own participants, or the turn's input "
+            "itself when it perceived a single stimulus."
+        )
+    )
+
+
+class _Agenda(pydantic.BaseModel):
+    """Which behaviors meet which percept of one turn, and what they have handled so far.
+
+    Slots run in the percepts' arrival order, then inventory order: each percept meets its own
+    candidates, and the first that handles it settles that percept. The turn is handled only
+    when every percept it perceived was; nothing ranks one percept above another.
+    """
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
+        arbitrary_types_allowed=True,
+        frozen=True,
+    )
+
+    slots: tuple[_Slot, ...]
+    perceived: int = pydantic.Field(ge=1, description="How many percepts the turn perceived.")
+    handled: tuple[int, ...] = pydantic.Field(default=(), description="Arrival positions a behavior handled.")
+    selected: processing.Events = pydantic.Field(
+        default=(), description="What the handling behaviors selected, in the percepts' arrival order."
+    )
+
+
 class _MatchedEventData(pydantic.BaseModel):
-    """Private completion: candidate behavior instances for this stimulus."""
+    """Private completion: which behaviors meet which percept of this turn."""
 
     model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
         arbitrary_types_allowed=True,
@@ -115,7 +159,7 @@ class _MatchedEventData(pydantic.BaseModel):
     )
 
     turn: types.TurnData
-    candidates: tuple[BehaviorCandidate, ...]
+    agenda: _Agenda
     reply_to: str | None = None
 
 
@@ -132,7 +176,7 @@ _MatchedCandidatesEvent = hsm.Event[_MatchedEventData](
 
 
 class _StartCandidateEventData(pydantic.BaseModel):
-    """Private: start (or advance to) candidate behavior at index."""
+    """Private: start (or advance to) the agenda's candidate behavior at index."""
 
     model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
         arbitrary_types_allowed=True,
@@ -140,7 +184,7 @@ class _StartCandidateEventData(pydantic.BaseModel):
     )
 
     turn: types.TurnData
-    candidates: tuple[BehaviorCandidate, ...]
+    agenda: _Agenda
     index: int
     reply_to: str | None = None
 
@@ -207,7 +251,7 @@ class _CandidateResultData(pydantic.BaseModel):
 
     capability: _CandidateCapability
     turn: types.TurnData
-    candidates: tuple[BehaviorCandidate, ...]
+    agenda: _Agenda
     outcome: _CandidateOutcome
     output: processing.Events | None = None
     message: str | None = None
@@ -239,7 +283,7 @@ class _CandidateMaterializedData(pydantic.BaseModel):
 
     capability: _CandidateCapability
     turn: types.TurnData
-    candidates: tuple[BehaviorCandidate, ...]
+    agenda: _Agenda
     index: int
     candidate: BehaviorCandidate
     program: ability.Ability[typing.Any, typing.Any]
@@ -257,7 +301,7 @@ class _CandidateStartFailureData(pydantic.BaseModel):
 
     capability: _CandidateCapability
     turn: types.TurnData
-    candidates: tuple[BehaviorCandidate, ...]
+    agenda: _Agenda
     index: int
     candidate: BehaviorCandidate
     message: str
@@ -277,6 +321,23 @@ class _CandidateUsageData(pydantic.BaseModel):
     store: memory.MemoryStore | None
 
 
+class _PerceptHandledData(pydantic.BaseModel):
+    """Private: a behavior handled its percept and its selections were dispatched."""
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
+        arbitrary_types_allowed=True,
+        frozen=True,
+    )
+
+    result: _CandidateResultData
+    output: processing.Events | types.OutputData
+
+
+_PerceptHandledEvent = hsm.Event[_PerceptHandledData](
+    name="bot.ability.autonomy.percept.handled",
+    kind=hsm.CompletionEventKind,
+    schema=_PerceptHandledData,
+)
 _CandidateMaterializeEvent = hsm.Event[_StartCandidateEventData](
     name="bot.ability.autonomy.candidate.start.materialize",
     kind=hsm.CompletionEventKind,
@@ -504,12 +565,14 @@ class _CandidateRun(Traced):
         behavior: ability.Ability[typing.Any, typing.Any],
         capability: _CandidateCapability,
         turn: types.TurnData,
-        candidates: tuple[BehaviorCandidate, ...],
+        agenda: _Agenda,
+        view: input.InputData,
         input_adapter: collections.abc.Callable[[input.InputData], object],
         metadata: dict[str, object],
     ) -> hsm.Model:
         child_id = _child_operation_id(capability.operation_id, capability.index)
-        cognition_input = turn.input
+        # The behavior meets its own percept: the turn as that percept alone presents it.
+        cognition_input = view
         event_id, event_source, event_target = behavior_event_fields(cognition_input)
         behavior_operation_id = event_id or child_id
         operation_manager = _BehaviorOperation()
@@ -527,7 +590,7 @@ class _CandidateRun(Traced):
             return _CandidateResultData(
                 capability=capability,
                 turn=turn,
-                candidates=candidates,
+                agenda=agenda,
                 outcome=outcome,
                 output=output,
                 message=message,
@@ -1345,19 +1408,41 @@ def _behaviors_from_memory_output(output: memory.OutputData) -> tuple[Instance, 
     return behavior_storage.instances_from_behavior_results(behavior_rows, trigger_rows)
 
 
-def _behavior_at_index(
-    candidates: tuple[BehaviorCandidate, ...] | None,
-    index: int | None,
-) -> BehaviorCandidate | None:
-    if candidates is None or index is None or index < 0 or index >= len(candidates):
+def _behavior_at_index(agenda: _Agenda, index: int) -> BehaviorCandidate | None:
+    if index < 0 or index >= len(agenda.slots):
         return None
-    return candidates[index]
+    return agenda.slots[index].candidate
 
 
-def _replace_behavior_in_tuple(
-    behaviors: tuple[BehaviorCandidate, ...], updated: Instance
-) -> tuple[BehaviorCandidate, ...]:
-    return tuple(updated if isinstance(item, Instance) and item.name == updated.name else item for item in behaviors)
+def _replace_behavior_in_agenda(agenda: _Agenda, updated: Instance) -> _Agenda:
+    """The agenda with every slot of the learned behavior ``updated`` replaced by it, on each percept."""
+
+    return agenda.model_copy(
+        update={
+            "slots": tuple(
+                slot.model_copy(update={"candidate": updated})
+                if isinstance(slot.candidate, Instance) and slot.candidate.name == updated.name
+                else slot
+                for slot in agenda.slots
+            )
+        }
+    )
+
+
+def _as_output(selections: processing.Events) -> types.OutputData:
+    """Behavior selections as the cognition output contract types them."""
+
+    return types.OUTPUT_SCHEMA_CONTRACT.validate_python(
+        tuple(
+            {
+                "event": item.event,
+                "target": item.target,
+                "data": item.data,
+                "reason": item.reason,
+            }
+            for item in selections
+        )
+    )
 
 
 def _event_data_payload(event: object) -> object:
@@ -1522,9 +1607,9 @@ class Autonomy(ability.Ability[types.TurnData, types.CompletionData]):
         assert isinstance(data, _CandidateUsageData)
         assert data.outcome == outcome
         updated = Autonomy._updated_behavior_usage(data.behavior, outcome=outcome)
-        result = data.result
-        if outcome == "failed":
-            result = result.model_copy(update={"candidates": _replace_behavior_in_tuple(result.candidates, updated)})
+        # The agenda carries the update for either outcome: a later slot of the same behavior (the
+        # next candidate, or its own slot on a later percept) counts from this use, not from the match.
+        result = data.result.model_copy(update={"agenda": _replace_behavior_in_agenda(data.result.agenda, updated)})
         persisted_event = _BehaviorUsagePersistedEvent
         store = data.store
         if store is not None:
@@ -1562,7 +1647,7 @@ class Autonomy(ability.Ability[types.TurnData, types.CompletionData]):
 
         result = event.data
         assert isinstance(result, _CandidateResultData)
-        behavior = _behavior_at_index(result.candidates, result.capability.index)
+        behavior = _behavior_at_index(result.agenda, result.capability.index)
         assert isinstance(behavior, Instance)
         request = _CandidateUsageData(
             result=result,
@@ -1708,18 +1793,37 @@ class Autonomy(ability.Ability[types.TurnData, types.CompletionData]):
                 _ = await processing.start_operation(instance, event.id)
             cognition_input = data.turn.input
             stimulus = input.stimulus_name(cognition_input.stimulus)
-            candidates = tuple(item for item in data.inventory if _matches_trigger(item, stimulus))
+            # Behaviors meet each percept on its own, in arrival order: a batch is matched percept by
+            # percept on the turn as that percept alone presents it (its stimulus, its participants).
+            # A single stimulus is its own percept, on the turn's input itself.
+            perceived = cognition_input.stimulus
+            views = (
+                tuple(
+                    cognition_input.model_copy(
+                        update={"stimulus": percept.stimulus, "participants": percept.participants}
+                    )
+                    for percept in perceived.data.percepts
+                )
+                if isinstance(perceived, hsm.Event) and isinstance(perceived.data, mosfet.PerceivedData)
+                else (cognition_input,)
+            )
+            slots = tuple(
+                _Slot(candidate=item, percept=position, view=view)
+                for position, view in enumerate(views)
+                for item in data.inventory
+                if _matches_trigger(item, input.stimulus_name(view.stimulus))
+            )
             # Zero candidates from a non-empty inventory is a trigger mismatch, not a missing
             # behavior — the two look identical downstream, where the turn is simply unhandled.
             active.set_attribute("bot.stimulus.name", stimulus or "")
             active.set_attribute("bot.behavior.installed.count", len(data.inventory))
-            active.set_attribute("bot.behavior.candidate.count", len(candidates))
+            active.set_attribute("bot.behavior.candidate.count", len(slots))
             matched = _MatchedEventData(
                 turn=data.turn,
-                candidates=candidates,
+                agenda=_Agenda(slots=slots, perceived=len(views)),
                 reply_to=data.reply_to,
             )
-            matched_event = _MatchedCandidatesEvent if candidates else _MatchedEmptyEvent
+            matched_event = _MatchedCandidatesEvent if slots else _MatchedEmptyEvent
             await hsm.dispatch(
                 ctx,
                 instance,
@@ -1905,7 +2009,7 @@ class Autonomy(ability.Ability[types.TurnData, types.CompletionData]):
                 _StartCandidateEvent.with_data(
                     _StartCandidateEventData(
                         turn=matched.turn,
-                        candidates=matched.candidates,
+                        agenda=matched.agenda,
                         index=0,
                         reply_to=matched.reply_to,
                     )
@@ -1919,6 +2023,15 @@ class Autonomy(ability.Ability[types.TurnData, types.CompletionData]):
     def _complete_exhausted(ctx: hsm.Context, instance: "Autonomy", event: hsm.Event[typing.Any]) -> None:
         data = event.data
         assert isinstance(data, _StartCandidateEventData)
+        agenda = data.agenda
+        # Deliberation takes the turn up carrying what behaviors already did on its other percepts (D-W12-9).
+        turn = (
+            data.turn.model_copy(
+                update={"acted": types.ActedData(percepts=agenda.handled, acts=_as_output(agenda.selected))}
+            )
+            if agenda.handled
+            else data.turn
+        )
         _ = hsm.dispatch(
             ctx,
             instance,
@@ -1926,7 +2039,7 @@ class Autonomy(ability.Ability[types.TurnData, types.CompletionData]):
                 _ApplyCompletedEvent.with_data(
                     _ApplyCompletedEventData(
                         output=None,
-                        turn=data.turn,
+                        turn=turn,
                         operation_id=event.id or data.turn.operation_id,
                         reply_to=data.reply_to,
                     )
@@ -1944,7 +2057,7 @@ class Autonomy(ability.Ability[types.TurnData, types.CompletionData]):
     ) -> None:
         data = event.data
         assert isinstance(data, _StartCandidateEventData)
-        if data.index >= len(data.candidates):
+        if data.index >= len(data.agenda.slots):
             await hsm.dispatch(
                 ctx,
                 instance,
@@ -1974,7 +2087,7 @@ class Autonomy(ability.Ability[types.TurnData, types.CompletionData]):
     ) -> None:
         data = event.data
         assert isinstance(data, _StartCandidateEventData)
-        candidate = _behavior_at_index(data.candidates, data.index)
+        candidate = _behavior_at_index(data.agenda, data.index)
         assert candidate is not None
         input_adapter: collections.abc.Callable[[input.InputData], object]
         origin: CandidateOrigin = "learned" if isinstance(candidate, Instance) else "native"
@@ -2001,7 +2114,7 @@ class Autonomy(ability.Ability[types.TurnData, types.CompletionData]):
             failure = _CandidateStartFailureData(
                 capability=capability,
                 turn=data.turn,
-                candidates=data.candidates,
+                agenda=data.agenda,
                 index=data.index,
                 candidate=candidate,
                 message=str(error),
@@ -2020,7 +2133,7 @@ class Autonomy(ability.Ability[types.TurnData, types.CompletionData]):
         materialized = _CandidateMaterializedData(
             capability=capability,
             turn=data.turn,
-            candidates=data.candidates,
+            agenda=data.agenda,
             index=data.index,
             candidate=candidate,
             program=program,
@@ -2055,7 +2168,8 @@ class Autonomy(ability.Ability[types.TurnData, types.CompletionData]):
                     behavior=data.program,
                     capability=data.capability,
                     turn=data.turn,
-                    candidates=data.candidates,
+                    agenda=data.agenda,
+                    view=data.agenda.slots[data.index].view,
                     input_adapter=data.input_adapter,
                     metadata=data.metadata,
                 ),
@@ -2065,7 +2179,7 @@ class Autonomy(ability.Ability[types.TurnData, types.CompletionData]):
             failure = _CandidateStartFailureData(
                 capability=data.capability,
                 turn=data.turn,
-                candidates=data.candidates,
+                agenda=data.agenda,
                 index=data.index,
                 candidate=data.candidate,
                 message=str(error),
@@ -2096,7 +2210,7 @@ class Autonomy(ability.Ability[types.TurnData, types.CompletionData]):
         result = _CandidateResultData(
             capability=data.capability,
             turn=data.turn,
-            candidates=data.candidates,
+            agenda=data.agenda,
             outcome="failed",
             message=data.message,
         )
@@ -2169,7 +2283,8 @@ class Autonomy(ability.Ability[types.TurnData, types.CompletionData]):
         result = event.data
         assert isinstance(result, _CandidateResultData)
         parent_id = result.capability.operation_id
-        cognition_input = result.turn.input
+        # Selections are dispatched against the turn as the behavior's own percept presented it.
+        cognition_input = result.agenda.slots[result.capability.index].view
         public_metadata = _public_metadata(dict(event.metadata))
         try:
             output = result.output
@@ -2192,8 +2307,8 @@ class Autonomy(ability.Ability[types.TurnData, types.CompletionData]):
                     selections,
                     operation_id=parent_id,
                     source=instance,
-                    focus_candidates=result.turn.input.focus_candidates,
-                    focused_device=result.turn.input.focus,
+                    focus_candidates=cognition_input.focus_candidates,
+                    focused_device=cognition_input.focus,
                     metadata=public_metadata,
                     dispatch_trust=_candidate_dispatch_trust(result.capability.origin),
                 )
@@ -2234,7 +2349,7 @@ class Autonomy(ability.Ability[types.TurnData, types.CompletionData]):
                 _StartCandidateEvent.with_data(
                     _StartCandidateEventData(
                         turn=result.turn,
-                        candidates=result.candidates,
+                        agenda=result.agenda,
                         index=result.capability.index + 1,
                         reply_to=result.capability.reply_to,
                     )
@@ -2270,29 +2385,12 @@ class Autonomy(ability.Ability[types.TurnData, types.CompletionData]):
         output = result.output
         if output is None:
             raise TypeError("Autonomy behavior output is unhandled.")
-        completion_output: types.OutputData = types.OUTPUT_SCHEMA_CONTRACT.validate_python(
-            tuple(
-                {
-                    "event": item.event,
-                    "target": item.target,
-                    "data": item.data,
-                    "reason": item.reason,
-                }
-                for item in output
-            )
-        )
+        completion_output = _as_output(output)
         _ = hsm.dispatch(
             ctx,
             instance,
             dataclasses.replace(
-                _ApplyCompletedEvent.with_data(
-                    _ApplyCompletedEventData(
-                        output=completion_output,
-                        turn=result.turn,
-                        operation_id=result.capability.operation_id,
-                        reply_to=result.capability.reply_to,
-                    )
-                ),
+                _PerceptHandledEvent.with_data(_PerceptHandledData(result=result, output=completion_output)),
                 id=result.capability.operation_id,
                 metadata=dict(event.metadata),
             ),
@@ -2302,14 +2400,85 @@ class Autonomy(ability.Ability[types.TurnData, types.CompletionData]):
     def _complete_native_dispatch(ctx: hsm.Context, instance: "Autonomy", event: hsm.Event[typing.Any]) -> None:
         result = event.data
         assert isinstance(result, _CandidateResultData)
+        output = result.output
+        if output is None:
+            raise TypeError("Autonomy behavior output is unhandled.")
+        _ = hsm.dispatch(
+            ctx,
+            instance,
+            dataclasses.replace(
+                _PerceptHandledEvent.with_data(_PerceptHandledData(result=result, output=output)),
+                id=result.capability.operation_id,
+                metadata=dict(event.metadata),
+            ),
+        )
+
+    @staticmethod
+    def _settle_percept(ctx: hsm.Context, instance: "Autonomy", event: hsm.Event[typing.Any]) -> None:
+        """Settle a handled percept: meet the next percept's behaviors, or complete the turn.
+
+        The handled percept's remaining candidates are skipped, as one behavior settles it. When
+        no percept is left, the turn is handled only if every percept was: a single stimulus
+        completes with exactly what its behavior selected, a batch with every percept's
+        selections in arrival order. A turn with any percept left unhandled completes unhandled,
+        so deliberation perceives the whole batch after these selections were dispatched; the
+        turn then carries them (``TurnData.acted``) into the stages that follow.
+        """
+
+        data = event.data
+        assert isinstance(data, _PerceptHandledData)
+        result = data.result
+        agenda = result.agenda
+        percept = agenda.slots[result.capability.index].percept
+        settled = agenda.model_copy(
+            update={
+                "handled": (*agenda.handled, percept),
+                "selected": (*agenda.selected, *(result.output or ())),
+            }
+        )
+        following = next(
+            (
+                index
+                for index in range(result.capability.index + 1, len(agenda.slots))
+                if agenda.slots[index].percept != percept
+            ),
+            None,
+        )
+        if following is not None:
+            _ = hsm.dispatch(
+                ctx,
+                instance,
+                dataclasses.replace(
+                    _StartCandidateEvent.with_data(
+                        _StartCandidateEventData(
+                            turn=result.turn,
+                            agenda=settled,
+                            index=following,
+                            reply_to=result.capability.reply_to,
+                        )
+                    ),
+                    id=result.capability.operation_id,
+                    metadata=dict(event.metadata),
+                ),
+            )
+            return
+        output: processing.Events | types.OutputData | None = None
+        turn = result.turn
+        if len(settled.handled) == settled.perceived:
+            output = data.output if settled.perceived == 1 else settled.selected
+        else:
+            # Deliberation takes the turn up carrying what behaviors already did (D-W12-9).
+            turn = turn.model_copy(
+                update={"acted": types.ActedData(percepts=settled.handled, acts=_as_output(settled.selected))}
+            )
         _ = hsm.dispatch(
             ctx,
             instance,
             dataclasses.replace(
                 _ApplyCompletedEvent.with_data(
                     _ApplyCompletedEventData(
-                        output=result.output,
-                        turn=result.turn,
+                        output=output,
+                        turn=turn,
                         operation_id=result.capability.operation_id,
                         reply_to=result.capability.reply_to,
                     )
@@ -2374,7 +2543,7 @@ class Autonomy(ability.Ability[types.TurnData, types.CompletionData]):
                 _StartCandidateEvent.with_data(
                     _StartCandidateEventData(
                         turn=data.result.turn,
-                        candidates=data.result.candidates,
+                        agenda=data.result.agenda,
                         index=data.result.capability.index + 1,
                         reply_to=data.result.capability.reply_to,
                     )
@@ -2514,6 +2683,10 @@ class Autonomy(ability.Ability[types.TurnData, types.CompletionData]):
                 hsm.on(_CandidateExhaustedEvent),
                 hsm.guard(_has_start_candidate),
                 hsm.effect(_complete_exhausted),
+            ),
+            hsm.transition(
+                hsm.on(_PerceptHandledEvent),
+                hsm.effect(_settle_percept),
             ),
             hsm.transition(
                 hsm.on(_StartCandidateEvent),

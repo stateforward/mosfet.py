@@ -4,6 +4,7 @@ from mosfet import behavior as behavior_events
 from mosfet import event
 from mosfet.abilities import ability as ability_module
 from mosfet.abilities import cognition
+from mosfet.abilities import communication
 from mosfet.abilities import memory
 from mosfet.abilities import persona
 from mosfet.abilities import processing
@@ -5441,3 +5442,81 @@ def test_a_batch_turn_whose_step_outlasts_its_timeout_names_bot_perceived_as_its
     (perceived,) = [event for event in told if event.name == cognition.InputEvent.name]
     assert isinstance(perceived.data, cognition.InputData)
     assert perceived.data.participants == (_ADA, _BOB)
+
+
+def _record_admitted(ctx: hsm.Context, instance: "_Communication", event: hsm.Event[typing.Any]) -> None:
+    del ctx
+    instance.admitted.append(event)
+
+
+class _Communication(hsm.Instance):
+    """Minimal communication ability: records the speech a behavior admits to it."""
+
+    model: typing.ClassVar[hsm.Model] = mosfet.define(
+        "CognitionTestCommunication",
+        hsm.initial(hsm.target("/CognitionTestCommunication/ready")),
+        hsm.state("ready", hsm.transition(hsm.on(communication.InputEvent), hsm.effect(_record_admitted))),
+    )
+    admitted: list[hsm.Event[typing.Any]]
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.admitted = []
+
+
+def test_a_partly_handled_batch_carries_its_behaviors_acts_first_into_the_turn_and_its_episode() -> None:
+    """D-W12-9: what behaviors already did on their percepts is the turn's, ahead of deliberation's.
+
+    Speech and a typed line queue together. SpeechHeard admits the speech; the line is intuition's.
+    Intuition knows, as a fact of the turn, that a behavior already acted on the speech, and the
+    turn's output and its one episode carry that act first, then intuition's.
+    """
+
+    from mosfet.abilities.communication import behaviors
+
+    async def run() -> tuple[
+        list[cognition.types.OutputData],
+        list[processing.InputData],
+        tuple[memory.Episode, ...],
+        list[hsm.Event[typing.Any]],
+    ]:
+        store = memory.Memory()
+        intuition_processor = RecordingIntuitionProcessor(focus_output("phone", "answer the line"))
+        ability = RecordingCognition(
+            autonomy=cognition.Autonomy(seeded_behaviors=(behaviors.speech_heard_seed(),)),
+            intuition_processor=intuition_processor,
+            reflection=cognition.Reflection(processor=FixedProcessor(no_output("observed")), memory=store),
+            store=store,
+        )
+        ctx = await start_cognition_ability_for_test(ability)
+        await wait_until(lambda: ability.state().endswith("/idle"))
+        talk = _Communication()
+        _ = await mosfet.started(ctx, talk, talk.model)
+        base = await started_cognition_input(ctx)
+        turn = _batch_turn(
+            base.model_copy(update={"actors": {**base.actors, "communication": talk}}),
+            mosfet.PerceptData(stimulus=_speech_event_stimulus(), source="listening-1"),
+            _typed_percept("are you there?", person=_ADA),
+        )
+        _ = await dispatch_ability_for_test(ability, ctx, turn)
+        await wait_until(lambda: bool(ability.outputs))
+        await wait_until(lambda: ability.state().endswith("/idle"))
+        return ability.outputs, intuition_processor.calls, await _remembered(ctx, store), talk.admitted
+
+    outputs, intuition_calls, episodes, admitted = asyncio.run(run())
+
+    assert [event.name for event in admitted] == [communication.InputEvent.name]
+    (output,) = outputs
+    assert [selection.event for selection in output] == [communication.InputEvent.name, mosfet.FocusDeviceEvent.name]
+    assert output[1].reason == "answer the line"
+    (call,) = intuition_calls
+    assert call.instructions is not None
+    # The fact follows the world and self blocks: which percepts behaviors handled, and what they did.
+    acted = call.instructions[call.instructions.index("<cognition:acted>") :]
+    assert acted.endswith("</cognition:acted>")
+    assert '<percepts count="1">\n    <item>0</item>\n  </percepts>' in acted
+    assert f'event="{communication.InputEvent.name}"' in acted
+    assert "answer the line" not in acted
+    (kept,) = episodes
+    assert kept.stimulus == "bot.perceived"
+    assert [act.event for act in kept.acts] == [communication.InputEvent.name, mosfet.FocusDeviceEvent.name]

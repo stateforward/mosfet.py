@@ -162,6 +162,7 @@ class House:
 
     run: testing.Run
     model: testing.Scripted
+    intuition: testing.Decider
     capacity: people.People
     mouth: Mouth
     prints: Prints
@@ -248,14 +249,17 @@ async def willy(
     *choices: testing.Choice,
     household: tuple[memory.Member, ...] = (),
     heard_before: tuple[tuple[str, int], ...] = (),
+    intuition: testing.Decider | None = None,
 ) -> collections.abc.AsyncGenerator[House]:
     """Run a Willy-shaped bot for the block, on wire fakes, with the model's ``choices`` scripted.
 
     ``heard_before`` gives voices Willy's registry already holds unnamed, as (id, voice) pairs, as a voice heard on an earlier
-    day would be: so a test can write a choice about that voice's ref before the bot runs.
+    day would be: so a test can write a choice about that voice's ref before the bot runs. ``intuition`` is the
+    decision model, a ``testing.Decider`` that chooses nothing when not given.
     """
 
     model = testing.Scripted(*choices)
+    decider = intuition if intuition is not None else testing.Decider()
     prints = Prints()
     for id, voice in heard_before:
         _ = prints.enroll(
@@ -289,7 +293,7 @@ async def willy(
             bot.traits(*willy_example.DEFAULT_TRAITS.traits),
             bot.cognition(
                 model,
-                intuition=testing.Decider(),
+                intuition=decider,
                 memory=store,
                 associative=True,
                 autonomy=True,
@@ -301,7 +305,67 @@ async def willy(
             bot.attach(capacity),
         )
         async with testing.running(defined) as run:
-            yield House(run=run, model=model, capacity=capacity, mouth=mouth, prints=prints)
+            yield House(run=run, model=model, intuition=decider, capacity=capacity, mouth=mouth, prints=prints)
+
+
+class Busy(testing.Decider):
+    """Willy's intuition, scripted, holding the first turn it is given until the test lets it go."""
+
+    def __init__(self, release: asyncio.Event) -> None:
+        super().__init__()
+        self.release: asyncio.Event = release
+        self.holding: asyncio.Event = asyncio.Event()
+
+    @typing.override
+    async def process(
+        self, input: processing.InputData, *, drafts: processing.DraftSink | None = None
+    ) -> processing.Events:
+        if not self.holding.is_set():
+            _ = self.holding.set()
+            _ = await self.release.wait()
+        return await super().process(input, drafts=drafts)
+
+
+def _heard_count(calls: tuple[processing.InputData, ...]) -> int:
+    """How many conversation turns Willy's intuition perceived on ``calls``, alone or with what else queued."""
+
+    heard = 0
+    for call in calls:
+        given = call.input
+        if not isinstance(given, hsm.Event):
+            continue
+        event = typing.cast(hsm.Event[typing.Any], given)
+        batch = event.data
+        stimuli = (
+            [percept.stimulus for percept in batch.percepts] if isinstance(batch, mosfet.PerceivedData) else [event]
+        )
+        heard += sum(1 for stimulus in stimuli if isinstance(stimulus, hsm.Event) and stimulus.name == _HEARD)
+    return heard
+
+
+def test_speech_heard_while_willy_is_busy_still_reaches_the_conversation() -> None:
+    """Two utterances that queue behind a busy turn are perceived together, and each is admitted as speech."""
+
+    async def run() -> int:
+        release = asyncio.Event()
+        busy = Busy(release)
+        async with willy(intuition=busy) as house:
+            await house.say(_SAM)
+            async with asyncio.timeout(_WAIT):
+                _ = await busy.holding.wait()
+            await house.say(_ADA)
+            await house.say(_SAM)
+            async with asyncio.timeout(_WAIT):
+                # Both utterances wait, held, while the turn in progress lasts.
+                while (testing.snapshot(house.run.bot).Attributes or {}).get("/willy/held_percepts") != 2:
+                    await asyncio.sleep(0.01)
+            _ = release.set()
+            async with asyncio.timeout(_WAIT):
+                while _heard_count(busy.calls()) < 3:
+                    await asyncio.sleep(0.01)
+            return _heard_count(busy.calls())
+
+    assert asyncio.run(run()) == 3
 
 
 def test_a_strangers_voice_reaches_willy_unknown_and_knowing_them_is_offered() -> None:
