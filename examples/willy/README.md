@@ -184,5 +184,6 @@ for a selection, makes that voice known by the next utterance (L4); two voices i
 (L5); its own voice, echoed through the room's microphone, is `you` (L6, 90 s); and forgetting the person erases
 the print (L7); 60 s each unless given. It asserts perception and capacity only. Whatever Willy chose on each
 turn (whether it asked who the stranger was, what it said, the tools it called) is recorded, never asserted:
-printed as it happens, kept in `live-report.jsonl`, with OTEL JSONL, in the test's data directory. It takes about
+printed as it happens, kept in `live-report.jsonl` beside the OTEL JSONL in the test's data directory, each
+readable by its owner alone (0600). It takes about
 fifteen minutes, most of it Willy's birth on the 27B model, which thinks by default.

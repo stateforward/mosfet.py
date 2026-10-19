@@ -22,10 +22,11 @@ in two voices from its catalog ("A" and "B") that are not Willy's own.
 What it asserts is perception and capacity, never a choice. The model is the lab's, recorded (every call it is
 given, and what it chose) and never steered: whether Willy asks who A is, what it says, and which tools it calls
 are its own, and they are written to the report (printed as they happen, so pytest shows them on a failure, and
-kept in ``live-report.jsonl``) and to OTEL JSONL in the data directory. Where the test needs a capacity used, it
-dispatches the event itself, standing in for a selection, or drives Speaking with a fixed reply, so whether
-Willy speaks is never the test's question. A turn speech woke is one a conversation's speech woke, or speech heard
-while Willy was speaking (``listening.overlap``). Each step is bounded, and a failure says which step and its bound:
+kept in ``live-report.jsonl``, readable by its owner alone) and to OTEL JSONL in the data directory. Where the test
+needs a capacity used, it dispatches the event itself, standing in for a selection, or drives Speaking with a fixed
+reply, so whether Willy speaks is never the test's question. A turn speech woke is one a conversation's speech woke,
+or speech heard while Willy was speaking (``listening.overlap``). Each step is bounded, and a failure says which step
+and its bound:
 
 * L1 preflight (10 s): the language model, asked with the ``openai_api_key`` its client sends, lists
   ``WILLY_MODEL``, and ``/healthz`` answers 200 on speech to text, speech, voiceprints, tone, diarization and
@@ -157,6 +158,17 @@ class Report:
         line = json.dumps({"kind": kind, **fields}, default=str)
         print(line)
         self.lines.append(line)
+
+    def save(self, path: pathlib.Path) -> None:
+        """Keep the report at ``path``, readable by its owner alone (0600), as the OTEL files beside it are.
+
+        It holds what the household said and what Willy chose, so it is never left world-readable.
+        """
+
+        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as file:
+            _ = file.write("".join(f"{line}\n" for line in self.lines))
 
 
 class Recorded(processing.Processor):
@@ -476,7 +488,7 @@ def test_willy_is_born_hears_a_stranger_learns_them_and_forgets_them(
         asyncio.run(_live(settings, api_key, tmp_path, report))
     finally:
         telemetry.reset()
-        _ = (tmp_path / "live-report.jsonl").write_text("".join(f"{line}\n" for line in report.lines), "utf-8")
+        report.save(tmp_path / "live-report.jsonl")
 
 
 async def _live(
