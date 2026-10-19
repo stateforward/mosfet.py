@@ -1,4 +1,5 @@
 import asyncio
+import dataclasses
 
 import mosfet
 from mosfet.abilities import processing
@@ -121,3 +122,60 @@ def test_a_rejected_selection_is_repaired_from_its_redacted_key_appended_to_the_
     assert instructions.startswith("World.\n\nThe previous event selection was rejected during dispatch.")
     assert f"Selection rejected: {key}\n----- END UNTRUSTED VALIDATOR DIAGNOSTIC -----" in instructions
     assert types.MAX_SELECTION_REPAIRS == 2
+
+
+def _batch(*percepts: mosfet.PerceptData) -> hsm.Event[mosfet.PerceivedData]:
+    """A turn's batch as the body hands it: the bot itself is the batch's envelope source."""
+
+    return dataclasses.replace(mosfet.PerceivedEvent.with_data(mosfet.PerceivedData(percepts=percepts)), source="bot-1")
+
+
+def _device_input(*, source: str, target_device: str | None = None, priority: int = 5) -> mosfet.PerceptData:
+    return mosfet.PerceptData(
+        stimulus=mosfet.InputEventData(target_device=target_device, priority=priority), source=source
+    )
+
+
+_DEVICES = frozenset({"desk", "browser", "phone"})
+_SOURCE_REFS = {"desk-1": "desk", "browser-1": "browser", "phone-1": "phone"}
+
+
+def test_attention_for_a_batch_is_focus_then_each_percepts_device_in_arrival_order_without_duplicates() -> None:
+    ring = dataclasses.replace(
+        phone_events.IncomingCallEvent.with_data(phone_events.IncomingCallData(call_id="c")), source="phone-1"
+    )
+    batch = _batch(
+        _device_input(source="browser-1"),
+        mosfet.PerceptData(stimulus=ring, source="listening-1"),
+        _device_input(source="desk-1"),
+        _device_input(source="unknown", target_device="browser"),
+        _device_input(source="unknown", target_device="ghost"),
+    )
+
+    focus, candidates = types.attention_bias_for_turn(
+        batch,
+        envelope_source="bot-1",
+        device_names=_DEVICES,
+        device_source_refs=_SOURCE_REFS,
+        focused_device="desk",
+    )
+
+    assert focus == "desk"
+    assert candidates == ("desk", "browser", "phone")
+
+
+def test_attention_for_a_batch_reads_arrival_order_never_priority() -> None:
+    urgent = _device_input(source="phone-1", priority=0)
+    idle = _device_input(source="browser-1", priority=10)
+
+    def candidates(*percepts: mosfet.PerceptData) -> tuple[str, ...]:
+        return types.attention_bias_for_turn(
+            _batch(*percepts),
+            envelope_source="bot-1",
+            device_names=_DEVICES,
+            device_source_refs=_SOURCE_REFS,
+            focused_device=None,
+        )[1]
+
+    assert candidates(idle, urgent) == ("browser", "phone")
+    assert candidates(urgent, idle) == ("phone", "browser")

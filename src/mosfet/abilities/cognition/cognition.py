@@ -1431,14 +1431,23 @@ class Cognition(ability.Ability[InputData, OutputData]):
 
         The body gets a ``cognition.InputEvent`` observing it with the failed turn's participants: a
         turn the bot decides on, the way a recall outcome is. Bounded: when the failed turn was itself
-        taken up for a failed step (its stimulus carries one), nothing is handed back, so a step that
-        keeps failing cannot keep waking the bot.
+        taken up only for failed steps (its stimulus carries one, or every percept of its
+        ``bot.perceived`` batch does), nothing is handed back, so a step that keeps failing cannot
+        keep waking the bot. A batch that also perceived anything else is handed back once.
         """
 
         timed_out = isinstance(failure, StepTimedOutData)
         kind = "timed_out" if timed_out else "failed"
         perceived = cognition_input.stimulus
-        if isinstance(perceived, hsm.Event) and isinstance(perceived.data, StepFailedData | StepTimedOutData):
+        stimuli = (
+            tuple(percept.stimulus for percept in perceived.data.percepts)
+            if isinstance(perceived, hsm.Event) and isinstance(perceived.data, mosfet.PerceivedData)
+            else (perceived,)
+        )
+        if all(
+            isinstance(stimulus, hsm.Event) and isinstance(stimulus.data, StepFailedData | StepTimedOutData)
+            for stimulus in stimuli
+        ):
             _HANDED_BACK.add(1, {"stage": failure.stage, "kind": kind, "outcome": "bounded"})
             return
         if not instance._attachments:

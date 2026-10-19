@@ -620,3 +620,13 @@ def test_cognition_input_participants_schema_says_the_producer_stamps_them() -> 
 
     assert "stamped by the producer of this input" in str(participants["description"])
     assert participants["maxItems"] == 32
+
+
+def test_stimulus_name_labels_a_batch_bot_perceived_and_a_single_stimulus_by_its_own_name() -> None:
+    line = mosfet.PerceptData(stimulus=mosfet.InputEventData(target_device="desk"), source="desk-1")
+    batch = mosfet.PerceivedEvent.with_data(mosfet.PerceivedData(percepts=(line, line)))
+    ring = phone_device.IncomingCallEvent.with_data(phone_device.IncomingCallData(call_id="call-1"))
+
+    assert cognition_input.stimulus_name(batch) == "bot.perceived"
+    assert cognition_input.stimulus_name(mosfet.InputEventData(target_device="desk")) == mosfet.InputEvent.name
+    assert cognition_input.stimulus_name(ring) == phone_device.IncomingCallEvent.name

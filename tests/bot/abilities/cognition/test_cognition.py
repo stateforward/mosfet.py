@@ -15,6 +15,7 @@ from mosfet.abilities.language import text
 from mosfet.abilities.cognition import reflection as reflection_module
 from mosfet.behavior import instance as behavior_instance
 from mosfet.devices import audio
+from mosfet.devices import computer
 from mosfet.environment import Environment
 from mosfet.protocols import attachment
 
@@ -34,6 +35,7 @@ from sqlalchemy.engine import Engine
 from tests.bot.abilities.memory.memory_fixtures import execute_on
 from tests.bot.abilities.support import dispatch_ability_for_test, shared_hsm_context, start_abilities_for_test
 from tests.hsm_instance_state import start_ability_tree
+from tests import metric_reader
 import pydantic
 import pytest
 
@@ -5245,3 +5247,197 @@ def test_what_inception_fails_at_is_observed_by_the_body_never_silently_dropped(
     failure = stimulus.data
     assert isinstance(failure, abilities.FailureData)
     assert "catalog holds no voices" in failure.message
+
+
+# --- a batch turn: what queued while the bot was busy, perceived together ------------------------
+
+_BOB = mosfet.Participant(ref="person-7", role=mosfet.ParticipantRole.SOURCE)
+
+
+def _typed_percept(line: str, *, person: mosfet.Participant) -> mosfet.PerceptData:
+    """A line typed on the desk computer while the bot was busy, as the body holds it."""
+
+    return mosfet.PerceptData(
+        stimulus=mosfet.InputEventData(
+            target_device="phone",
+            observation=mosfet.StimulusData.from_event(
+                computer.TextEnteredEvent.with_data(
+                    computer.TextEnteredData(device_id="desk", person_id=person.ref, participants=(person,), text=line)
+                )
+            ),
+            participants=(person,),
+        ),
+        source="desk-1",
+        participants=(person,),
+    )
+
+
+def _failed_percept(turn_id: str, *, timed_out: bool = False) -> mosfet.PerceptData:
+    """A failed step cognition handed back, as the body holds it."""
+
+    observed = (
+        cognition.StepTimedOutEvent.with_data(
+            cognition.StepTimedOutData(
+                message="Cognition's intuition step took longer than 0.5 seconds, so the turn failed.",
+                stage="intuition",
+                timeout_seconds=0.5,
+                turn_id=turn_id,
+                stimulus=mosfet.InputEvent.name,
+            )
+        )
+        if timed_out
+        else cognition.StepFailedEvent.with_data(
+            cognition.StepFailedData(
+                message="Cognition's intuition step failed, so the turn failed: the step failed",
+                stage="intuition",
+                turn_id=turn_id,
+                stimulus=mosfet.InputEvent.name,
+            )
+        )
+    )
+    return mosfet.PerceptData(stimulus=dataclasses.replace(observed, source="cognition-1"), source="cognition-1")
+
+
+def _batch_turn(base: cognition.InputData, *percepts: mosfet.PerceptData) -> cognition.InputData:
+    """The cognition input a body hands for a batch: the batch, and the union of who took part, in order."""
+
+    union: list[mosfet.Participant] = []
+    for percept in percepts:
+        union.extend(participant for participant in percept.participants if participant not in union)
+    batch = dataclasses.replace(
+        mosfet.PerceivedEvent.with_data(mosfet.PerceivedData(percepts=percepts)), source="bot-1"
+    )
+    return base.model_copy(update={"stimulus": batch, "participants": tuple(union)})
+
+
+def test_a_batch_turn_is_remembered_as_one_episode_of_everything_it_perceived() -> None:
+    async def run() -> tuple[cognition.types.OutputData, tuple[memory.Episode, ...]]:
+        store = memory.Memory()
+        ability = RecordingCognition(
+            intuition_processor=RecordingIntuitionProcessor(cognition.intuition.OutputData(result=no_output("both"))),
+            reflection=cognition.Reflection(processor=FixedProcessor(no_output("observed")), memory=store),
+            store=store,
+        )
+        ctx = await start_cognition_ability_for_test(ability)
+        await wait_until(lambda: ability.state().endswith("/idle"))
+        turn = _batch_turn(
+            await started_cognition_input(ctx),
+            _typed_percept("first line", person=_ADA),
+            _typed_percept("second line", person=_BOB),
+            _typed_percept("third line", person=_ADA),
+        )
+        result = await dispatch_ability_for_test(ability, ctx, turn)
+        await wait_until(lambda: ability.state().endswith("/idle"))
+        return result, await _remembered(ctx, store)
+
+    result, episodes = asyncio.run(run())
+
+    assert result == no_output("both")
+    (kept,) = episodes
+    assert kept.stimulus == "bot.perceived"
+    assert kept.participants == (_ADA, _BOB)
+    assert kept.outcome is memory.Outcome.COMPLETED
+    first, second, third = (kept.text.index(f'text="{line}"') for line in ("first line", "second line", "third line"))
+    assert first < second < third
+    assert 'omitted="size"' not in kept.text
+
+
+@pytest.mark.parametrize(
+    ("percepts", "handed_back"),
+    [
+        ((_failed_percept("failed-1"), _typed_percept("are you there?", person=_ADA)), True),
+        ((_failed_percept("failed-1"), _failed_percept("failed-2", timed_out=True)), False),
+    ],
+    ids=["mixed", "only-failed-steps"],
+)
+def test_a_failed_batch_turn_is_handed_back_once_unless_it_perceived_only_failed_steps(
+    percepts: tuple[mosfet.PerceptData, ...],
+    handed_back: bool,
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """D-W12-6 (Q6): a batch whose turn fails is handed back once, so the next turn perceives that failure
+    with whatever else queued; a batch that perceived nothing but failed steps is not handed back, so a
+    failing step cannot wake the bot more often than new stimuli arrive."""
+
+    def outcomes(reader: metric_reader.Reader) -> dict[str, float]:
+        return {
+            str(point.attributes["outcome"]): point.value
+            for point in reader.points("bot.cognition.step.failure.count")
+            if point.attributes.get("stage") == "intuition" and point.attributes.get("kind") == "failed"
+        }
+
+    async def run() -> list[hsm.Event[typing.Any]]:
+        intuition, reasoning = cognition_abilities(intuition_processor=_FailingStepProcessor())
+        store = memory.Memory()
+        ability = cognition.Cognition(
+            intuition=intuition,
+            reasoning=reasoning,
+            reflection=cognition.Reflection(processor=FixedProcessor(no_output("reflection")), memory=store),
+            memory=store,
+        )
+        ctx = shared_hsm_context()
+        body = _StepTimeoutBody()
+        _ = await mosfet.started(ctx, body, body.model)
+        _ = await ability.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=body)))
+        await wait_until(lambda: ability.state().endswith("/idle"))
+        turn = _batch_turn(await started_cognition_input(ctx), *percepts)
+        _ = await hsm.dispatch(ctx, ability, ability.input_event.with_data_and_id(turn, "batch-turn"))
+        await wait_until(lambda: any(event.name == cognition.Cognition.failed_event.name for event in body.told))
+        await wait_until(lambda: ability.state().endswith("/idle"))
+        for _ in range(50):
+            await asyncio.sleep(0)
+        return list(body.told)
+
+    with metric_reader.recording(tmp_path, monkeypatch) as reader:
+        before = outcomes(reader)
+        told = asyncio.run(run())
+        after = outcomes(reader)
+
+    handed = [event for event in told if event.name == cognition.InputEvent.name]
+    outcome = "handed_back" if handed_back else "bounded"
+    assert after.get(outcome, 0.0) - before.get(outcome, 0.0) == 1.0
+    assert len(handed) == (1 if handed_back else 0)
+    if handed_back:
+        (perceived,) = handed
+        assert isinstance(perceived.data, cognition.InputData)
+        assert perceived.data.participants == (_ADA,)
+        failure = perceived.data.stimulus
+        assert isinstance(failure, hsm.Event)
+        assert isinstance(failure.data, cognition.StepFailedData)
+        assert (failure.data.turn_id, failure.data.stimulus) == ("batch-turn", "bot.perceived")
+
+
+def test_a_batch_turn_whose_step_outlasts_its_timeout_names_bot_perceived_as_its_stimulus() -> None:
+    async def run() -> list[hsm.Event[typing.Any]]:
+        intuition, reasoning = cognition_abilities(intuition_processor=_SlowFirstStepProcessor(hangs=True))
+        store = memory.Memory()
+        ability = cognition.Cognition(
+            intuition=intuition,
+            reasoning=reasoning,
+            reflection=cognition.Reflection(processor=FixedProcessor(no_output("reflection")), memory=store),
+            memory=store,
+            child_operation_timeout=datetime.timedelta(milliseconds=200),
+        )
+        ctx = shared_hsm_context()
+        body = _StepTimeoutBody()
+        _ = await mosfet.started(ctx, body, body.model)
+        _ = await ability.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=body)))
+        await wait_until(lambda: ability.state().endswith("/idle"))
+        turn = _batch_turn(
+            await started_cognition_input(ctx),
+            _typed_percept("first line", person=_ADA),
+            _typed_percept("second line", person=_BOB),
+        )
+        _ = await hsm.dispatch(ctx, ability, ability.input_event.with_data_and_id(turn, "slow-batch"))
+        await wait_until(lambda: any(event.name == cognition.InputEvent.name for event in body.told))
+        return list(body.told)
+
+    told = asyncio.run(run())
+
+    (failed,) = [event for event in told if event.name == cognition.Cognition.failed_event.name]
+    assert isinstance(failed.data, cognition.StepTimedOutData)
+    assert (failed.data.turn_id, failed.data.stimulus) == ("slow-batch", "bot.perceived")
+    (perceived,) = [event for event in told if event.name == cognition.InputEvent.name]
+    assert isinstance(perceived.data, cognition.InputData)
+    assert perceived.data.participants == (_ADA, _BOB)

@@ -357,27 +357,29 @@ def attention_bias_for_turn(
     actor ids map to them, what is currently focused); this function decides how that
     context combines into the turn's bias. It reads device identity only — never what
     happened, never stimulus insistence — so nothing here arbitrates per stimulus.
+
+    A ``bot.perceived`` batch is biased percept by percept, each with the envelope source
+    it arrived on: the candidates are the current focus, then each percept's device in
+    arrival order, once each. No percept outranks another.
     """
 
     focus = focused_device if focused_device is not None and focused_device in device_names else None
-    if isinstance(stimulus, mosfet.InputEventData):
-        target_reference: str | None = stimulus.target_device
-        if target_reference is None and envelope_source:
-            target_reference = device_source_refs.get(envelope_source)
-        stimulus_references = (
-            (target_reference,) if target_reference is not None and target_reference in device_names else ()
-        )
+    if isinstance(stimulus, hsm.Event) and isinstance(stimulus.data, mosfet.PerceivedData):
+        arrivals = tuple((percept.stimulus, percept.source) for percept in stimulus.data.percepts)
     else:
-        observed_source = stimulus.source if isinstance(stimulus, hsm.Event) else ""
-        observed_reference: str | None = device_source_refs.get(observed_source) if observed_source else None
-        stimulus_references = (
-            (observed_reference,) if observed_reference is not None and observed_reference in device_names else ()
-        )
+        arrivals = ((stimulus, envelope_source),)
     ordered: list[str] = []
     if focus is not None:
         ordered.append(focus)
-    for reference in stimulus_references:
-        if reference not in ordered:
+    for arrived, source in arrivals:
+        if isinstance(arrived, mosfet.InputEventData):
+            reference: str | None = arrived.target_device
+            if reference is None and source:
+                reference = device_source_refs.get(source)
+        else:
+            observed_source = arrived.source if isinstance(arrived, hsm.Event) else ""
+            reference = device_source_refs.get(observed_source) if observed_source else None
+        if reference is not None and reference in device_names and reference not in ordered:
             ordered.append(reference)
     return focus, tuple(ordered)
 
