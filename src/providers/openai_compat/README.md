@@ -74,6 +74,10 @@ the model's JSON did not parse), items that are not event selections, an event t
 fails its event's branch schema (the diagnostic names the event and the failing keys, for example
 `object value included additional keys: reason`). Any other response that fails raises `ProcessingError` (or
 `TextGenerationError`). Every diagnostic names the cause's type and message, never the values the model sent.
+A request that fails raises `RequestError` naming what failed, the SDK error's type and its HTTP status when it has
+one, streamed or not: for example `OpenAI-compatible chat completion request failed (APIStatusError, HTTP 503).`
+It never carries the response body or anything sent; the SDK error is its `__cause__`. So a failed turn the bot
+perceives, and the log line it leaves, tell a rate limit from a server error or a timeout.
 
 A user message may carry ordered content parts: `text.TextPart` and `text.ImagePart` (a typed `mosfet.media.Image`).
 Chat Completions receives them as `text` and `image_url` parts and the Responses API as `input_text` and `input_image`

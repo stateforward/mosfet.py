@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import dataclasses
+import typing
 
 import httpx
 import openai
@@ -241,8 +243,99 @@ def test_chat_client_wraps_responses_api_failure() -> None:
         ),
     )
 
-    with pytest.raises(chat_client.RequestError, match="OpenAI Responses API request failed."):
+    with pytest.raises(chat_client.RequestError, match=r"OpenAI Responses API request failed \(ValueError\)\."):
         _ = client.create_response(input=[{"role": "user", "content": "hello"}])
+
+
+_SECRET_BODY = "upstream said: prompt was 'call me at +15555550100'"
+
+
+def _status_error(status: int) -> openai.APIStatusError:
+    request = httpx.Request("POST", "http://127.0.0.1:9/v1/chat/completions")
+    response = httpx.Response(status, request=request, text=_SECRET_BODY)
+    return openai.APIStatusError(_SECRET_BODY, response=response, body={"error": _SECRET_BODY})
+
+
+@dataclasses.dataclass
+class FailingCompletions:
+    error: Exception
+
+    def create(self, **kwargs: object) -> object:
+        del kwargs
+        raise self.error
+
+
+def test_a_failed_chat_completion_names_the_sdk_error_type_and_http_status_never_the_body() -> None:
+    # Live (builder check round 3 on the cpa proxy, G3): 12 of 466 calls failed with only "RequestError:
+    # OpenAI-compatible chat completion request failed.", so a 429, a 5xx and a timeout looked the same.
+    client = ChatClient(
+        model="luna",
+        api_key="test-api-key",
+        client=FakeOpenAIClient(chat=FakeChat(completions=FailingCompletions(_status_error(503)))),
+    )
+
+    with pytest.raises(chat_client.RequestError) as raised:
+        _ = client.create_chat_completion(messages=[{"role": "user", "content": "hello"}])
+
+    assert str(raised.value) == "OpenAI-compatible chat completion request failed (APIStatusError, HTTP 503)."
+    assert isinstance(raised.value.__cause__, openai.APIStatusError)
+
+
+def test_a_failed_request_without_a_status_names_the_sdk_error_type_alone() -> None:
+    request = httpx.Request("POST", "http://127.0.0.1:9/v1/chat/completions")
+    client = ChatClient(
+        model="luna",
+        api_key="test-api-key",
+        client=FakeOpenAIClient(chat=FakeChat(completions=FailingCompletions(openai.APITimeoutError(request)))),
+    )
+
+    with pytest.raises(chat_client.RequestError) as raised:
+        _ = client.create_chat_completion(messages=[{"role": "user", "content": "hello"}])
+
+    assert str(raised.value) == "OpenAI-compatible chat completion request failed (APITimeoutError)."
+
+
+@dataclasses.dataclass
+class _FailingAsyncCompletions:
+    error: Exception
+
+    async def create(self, **kwargs: object) -> object:
+        del kwargs
+        raise self.error
+
+
+@dataclasses.dataclass
+class _FailingAsyncChat:
+    completions: _FailingAsyncCompletions
+
+
+@dataclasses.dataclass
+class _FailingAsyncClient:
+    chat: _FailingAsyncChat
+
+
+def test_a_failed_streamed_chat_completion_names_the_sdk_error_type_and_http_status_never_the_body() -> None:
+    client = ChatClient(
+        model="luna",
+        api_key="test-api-key",
+        async_client=typing.cast(
+            chat_client.AsyncOpenAIClient,
+            typing.cast(
+                object, _FailingAsyncClient(chat=_FailingAsyncChat(_FailingAsyncCompletions(_status_error(429))))
+            ),
+        ),
+    )
+
+    async def run() -> None:
+        async for _ in client.stream_chat_completion(messages=[{"role": "user", "content": "hello"}]):
+            pass
+
+    with pytest.raises(chat_client.RequestError) as raised:
+        asyncio.run(run())
+
+    message = str(raised.value)
+    assert message == "OpenAI-compatible streamed chat completion request failed (APIStatusError, HTTP 429)."
+    assert _SECRET_BODY not in message
 
 
 @dataclasses.dataclass

@@ -31,7 +31,19 @@ async def _no_api_key_async() -> str:
 
 
 class RequestError(RuntimeError):
-    """Raised when an OpenAI-compatible chat completion or Responses API request fails."""
+    """Raised when an OpenAI-compatible chat completion or Responses API request fails.
+
+    The message names what failed, the SDK error's type, and its HTTP status when it has one (for example
+    ``OpenAI-compatible chat completion request failed (APIStatusError, HTTP 503).``), never the response
+    body or any value sent; the SDK error is the ``__cause__``.
+    """
+
+
+def _failed(what: str, error: Exception) -> RequestError:
+    """The ``RequestError`` for ``what`` failing with ``error``: its type and HTTP status, never its body."""
+
+    status = f", HTTP {error.status_code}" if isinstance(error, openai.APIStatusError) else ""
+    return RequestError(f"{what} failed ({type(error).__name__}{status}).")
 
 
 def _empty_headers() -> dict[str, str]:
@@ -394,8 +406,7 @@ class ChatClient(ChatCompletionClient, ResponsesClient):
         try:
             response = client.chat.completions.create(**kwargs)
         except Exception as error:
-            message = "OpenAI-compatible chat completion request failed."
-            raise RequestError(message) from error
+            raise _failed("OpenAI-compatible chat completion request", error) from error
         return _json_object(response, "OpenAI-compatible chat completion response must be a JSON object.")
 
     @typing.override
@@ -421,12 +432,12 @@ class ChatClient(ChatCompletionClient, ResponsesClient):
         try:
             stream = await self._async_client().chat.completions.create(**kwargs)
         except Exception as error:
-            raise RequestError("OpenAI-compatible streamed chat completion request failed.") from error
+            raise _failed("OpenAI-compatible streamed chat completion request", error) from error
         try:
             async for chunk in stream:
                 yield _json_object(chunk, "OpenAI-compatible chat completion chunk must be a JSON object.")
         except Exception as error:
-            raise RequestError("OpenAI-compatible chat completion stream failed.") from error
+            raise _failed("OpenAI-compatible chat completion stream", error) from error
         finally:
             await stream.close()
 
@@ -464,8 +475,7 @@ class ChatClient(ChatCompletionClient, ResponsesClient):
         try:
             response = client.responses.create(**kwargs)
         except Exception as error:
-            message = "OpenAI Responses API request failed."
-            raise RequestError(message) from error
+            raise _failed("OpenAI Responses API request", error) from error
         return _json_object(response, "OpenAI Responses API response must be a JSON object.")
 
     def _client(self) -> OpenAIClient:
