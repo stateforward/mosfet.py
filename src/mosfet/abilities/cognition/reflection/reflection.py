@@ -669,6 +669,18 @@ class Reflection(processing.Processing):
         )
 
     @staticmethod
+    def _fail_step_timeout(ctx: hsm.Context, instance: "Reflection", event: hsm.Event[typing.Any]) -> None:
+        # The step outlasted its bound and its child acknowledged the cancel: the step timed out, the cancel did not.
+        operation_id = processing.active_operation_id(instance)
+        processing.dispatch_terminal_failure(
+            ctx,
+            instance,
+            operation_id=operation_id,
+            metadata=dict(event.metadata),
+            failure=ability.FailureData(message="Reflection step timed out."),
+        )
+
+    @staticmethod
     def _request_reboot(ctx: hsm.Context, instance: "Reflection", event: hsm.Event[typing.Any]) -> None:
         # Child teardown / revision-reboot / cancel-timeout path (not detach terminal).
         processing.request_reboot(ctx, instance, event, reason="cognition_child_teardown_failed")
@@ -1374,7 +1386,7 @@ class Reflection(processing.Processing):
             hsm.transition(
                 hsm.on(processing.CancelledEvent),
                 hsm.guard(_matches_cancelled),
-                hsm.effect(_fail_cancel_timeout),
+                hsm.effect(_fail_step_timeout),
                 hsm.target("/Reflection/idle"),
             ),
             hsm.transition(

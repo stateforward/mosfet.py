@@ -429,6 +429,7 @@ def test_reflection_stubborn_child_cancel_timeout_requests_reboot(
     failures = [event for event in lifecycle if event.name == cognition.Reflection.failed_event.name]
     reboots = [event for event in lifecycle if event.name == mosfet.RebootEvent.name]
     assert len(failures) == 1
+    assert failures[0].data == ability.FailureData(message="Reflection child cancellation timed out.")
     assert len(reboots) == 1
     assert reboots[0].data == mosfet.RebootEventData(reason="cognition_child_teardown_failed")
     assert state.endswith("/rebooting")
@@ -553,8 +554,10 @@ def test_reflection_select_timeout_cancels_child_and_fails_turn() -> None:
     lifecycle, state, cancelled = asyncio.run(run())
 
     assert cancelled
+    # The step timed out and its cancel was acknowledged: the turn fails as a step timeout, with no reboot.
     assert len(lifecycle) == 1
     assert lifecycle[0].name == cognition.Reflection.failed_event.name
+    assert lifecycle[0].data == ability.FailureData(message="Reflection step timed out.")
     assert state.endswith("/idle")
 
 
@@ -597,8 +600,11 @@ def test_reflection_change_timeout_cancels_exact_attempt_and_fails_turn() -> Non
     lifecycle, state, cancelled = asyncio.run(run())
 
     assert cancelled
+    # Live round 4 (F2): the revision outlasted the step and acknowledged its cancel, so nothing timed out
+    # cancelling; the turn fails as a step timeout, with no reboot.
     assert len(lifecycle) == 1
     assert lifecycle[0].name == cognition.Reflection.failed_event.name
+    assert lifecycle[0].data == ability.FailureData(message="Reflection step timed out.")
     assert state.endswith("/idle")
 
 
