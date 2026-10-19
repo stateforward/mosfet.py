@@ -5,8 +5,9 @@ assistant. It learns who people are: a voice it has never heard is a fact it is 
 belongs to, what to call them, and whether to ask at all are its own choices. A person may have several voices
 (a cold, a phone, a whisper), and each voice is exactly one person's. Willy knows its own voice too.
 
-Everything runs locally, on the lab model server (CT 108; see `.env.example`): the language model, its
-embeddings, streaming speech to text, speech and voice design, voiceprints, diarization and tone of voice.
+Everything runs locally. The lab model server (CT 108; see `.env.example`) serves the language model, its
+embeddings, streaming speech to text, voiceprints, diarization and tone of voice. Speech and voice design run on
+the Breeze engine anygame's family shares on CT 107, where Willy has one voice of its own (see Mouth below).
 
 ## The bot file
 
@@ -23,7 +24,12 @@ with one `bot.define` that constructs every part inline, and runs it with `bot.r
   tone of voice.
 - **Mouth.** One `speaking.Speaking`, in the one voice Willy is given when it is born (`bot.voice`: the first
   time Willy starts, its model conceives a voice from its traits and the lab designs it). Every room's computer
-  hears it and plays it on that room's speaker, like an intercom.
+  hears it and plays it on that room's speaker, like an intercom. The lab's speech engine is the Breeze engine
+  anygame's family shares on CT 107. Willy is allowed none of its voices (`bot.voice` with no `allowed=`), so
+  it designs one of its own there and is never born as one of the family's or the sidekicks' voices. The engine
+  keeps only a voice's id and its description, and speaks every line from that description, so nothing in it is
+  marked as Willy's: Willy knows its voice by the id its memory keeps (the `self_voice` row in the data dir) and
+  checks on every start that the engine still holds it.
 - **Mind.** `bot.cognition` on the lab's language model, its intuition on a decision model (`typesafe.Processor`
   on the local system_one server `TYPESAFE_BASE_URL` names, never a chat model), with associations, consolidation, autonomy, routines
   and the speech seed that takes heard speech into a conversation. Its memory recalls by the lab's
@@ -53,6 +59,10 @@ Willy keeps its memory and every voiceprint in one SQLite file, `<data dir>/memo
 `bot.run` has created private (`0700`), and one that cannot be opened fails Willy's start there. The process options, exit codes and stop bound are `bot.run`'s
 ([`docs/runtime.md`](../../docs/runtime.md)). A missing or malformed setting or secret, or an unreadable or
 malformed household file, ends the process with exit `1`, naming it, before anything starts.
+
+The data dir is also how Willy knows its voice. A new or wiped data dir forgets the id of the voice Willy
+designed, so its next start designs one more voice on the shared engine and speaks in that one; the earlier
+voice stays on the engine, unused, until someone deletes it there. Keep the data dir to keep Willy's voice.
 
 ## A room's far side
 
@@ -90,7 +100,7 @@ reason; the room's name, the url, the token and every sound and image never are 
 | `WILLY_EMBED_URL`, `WILLY_EMBED_MODEL` | required | memory's embeddings (`:8014/v1`, `embeddinggemma-2`, 768 dimensions) |
 | `WILLY_STT_URL` | required | streaming speech to text, a `ws://` root (`:8001`) |
 | `WILLY_TRANSCRIBE_URL` | required | batch transcription, which Willy hears its own name through (`:8001/v1`) |
-| `WILLY_TTS_URL` | required | speech, its voices and its voice designer (`:8002`) |
+| `WILLY_TTS_URL` | required | speech, its voices and its voice designer: the Breeze engine anygame's family shares on CT 107 (`192.168.2.32:8002`) |
 | `WILLY_VOICEPRINT_URL`, `WILLY_DIAR_URL`, `WILLY_EMOTION_URL` | required | voiceprints (`:8003`), diarization (`:8005`), tone (`:8004`) |
 | `WILLY_HOST`, `WILLY_PORT` | `127.0.0.1`, `8765` | where the rooms' computers are served |
 | `WILLY_ROOMS` | `living-room:shelf` | each room and what its computer sits on, `room:object,...`; rooms are placed 10 m apart in the order given |
@@ -171,7 +181,8 @@ is offered; a link makes a declared child's voice hers; two voices in one turn a
 
 ## Live check
 
-`tests/test_live.py` runs Willy against the lab model server itself, CT 108 at the addresses in `.env.example`:
+`tests/test_live.py` runs Willy against the lab itself, at the addresses in `.env.example`: CT 108, and the Breeze
+speech engine on CT 107:
 
 ```sh
 cd examples/willy && set -a && . ./.env.example && set +a && WILLY_LIVE=1 uv run pytest -m live tests/test_live.py -q
@@ -179,9 +190,10 @@ cd examples/willy && set -a && . ./.env.example && set +a && WILLY_LIVE=1 uv run
 
 It has two gates, and both must hold: it is marked `live`, so `-m "not live"` (CI, and the command above under
 Tests) deselects it, and it is skipped unless `WILLY_LIVE=1`. With `WILLY_LIVE=1` nothing is skipped: a missing
-`WILLY_*` setting fails naming it, and a lab service that does not answer fails naming its unit, so a down server
-never passes. It assumes `mosfet-llm` and the speech and embedding units are up; if anygame holds the lab's GPUs,
-the runbook (`lab-ct108.md`) says how to stop and start the units.
+`WILLY_*` setting fails naming it, and a lab service that does not answer fails naming its unit and where it runs,
+so a down server never passes. It assumes `mosfet-llm` and CT 108's speech and embedding units are up (the runbook,
+`lab-ct108.md`, says how to stop and start them), and that anygame's `sidekick-tts-engine-breeze` answers on
+CT 107. That engine is the family's: the check never restarts it.
 
 The test writes its own `bot.define` of Willy's shape on the real parts and the lab's models, with one room served
 on loopback and `willy_example.room` as its far side; the far side's sound card is a scripted microphone and

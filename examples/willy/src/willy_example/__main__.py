@@ -24,7 +24,8 @@ learn its own voice. The conversation, shared by communication and the mouth. An
 and plays it on that room's speaker, like an intercom.
 
 Then one ``bot.define`` constructs every other part inline: Willy's traits, the source of its voice (the lab's
-speech engine, which designs it at Willy's birth), its cognition on the lab's language model with its intuition on the
+shared speech engine, which designs it at Willy's birth; Willy is allowed none of the engine's other voices, so it
+is born only as the one it designs), its cognition on the lab's language model with its intuition on the
 decision model and the speech seed that takes heard speech into a conversation, its ear and its sense of its own name, its mouth, its
 conversations, its capacity to know people under the owner's household, and one computer per room, set on the
 object the owner names in that room. With ``WILLY_CAMERA=1`` a face registry and an eye join them, seeing through

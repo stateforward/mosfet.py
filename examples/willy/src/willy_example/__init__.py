@@ -161,8 +161,11 @@ class Settings(pydantic.BaseModel):
     tts_url: str = pydantic.Field(
         alias="WILLY_TTS_URL",
         min_length=1,
-        description="The speech engine's root: its voices, its voice designer, and speech under /v1.",
-        examples=["http://192.168.2.2:8002"],
+        description=(
+            "The speech engine's root: its voices, its voice designer, and speech under /v1. The lab's is the "
+            "Breeze engine anygame's family shares on CT 107."
+        ),
+        examples=["http://192.168.2.32:8002"],
     )
     voiceprint_url: str = pydantic.Field(
         alias="WILLY_VOICEPRINT_URL",

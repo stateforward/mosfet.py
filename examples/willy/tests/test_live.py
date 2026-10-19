@@ -5,8 +5,9 @@
 Two gates, and both must hold: every test here is ``live``, so ``-m "not live"`` (CI, and every other gate)
 deselects it, and it is skipped unless ``WILLY_LIVE=1``. With ``WILLY_LIVE=1`` nothing is skipped: a missing or
 malformed ``WILLY_*`` setting is a failure naming it, and so is a lab service that does not answer, so a down
-server never passes silently. The lab is CT 108 (``.env.example``; its runbook is ``lab-ct108.md``): if anygame
-holds the GPUs, step L1 fails naming the unit that is down.
+server never passes silently. The lab is CT 108 (``.env.example``; its runbook is ``lab-ct108.md``), except speech:
+Willy speaks on the Breeze engine anygame's family shares on CT 107 (``sidekick-tts-engine-breeze``), which this
+check never restarts. If a unit is down, step L1 fails naming it and where it runs.
 
 The test writes its own ``bot.define`` of Willy's shape, as the bot file does, on the real parts: the lab's
 language model (``openai_compat.Processor``), memory on its embeddings, the voice registry on an
@@ -121,14 +122,17 @@ _POLL_SECONDS = 0.1
 # listening.overlap instead.
 _HEARD = frozenset({conversation.OutputEvent.name, listening.OverlapEvent.name})
 _SECRETS_DIRECTORY = pathlib.Path("/run/secrets")
-# Each of the lab's services, by the setting that names it and the unit that serves it (lab-ct108.md).
+# Where each unit runs: the lab model server's runbook, or anygame's CT 107, whose speech engine Willy shares.
+_CT108 = "lab-ct108.md"
+_CT107 = "anygame's CT 107 (192.168.2.32), which mosfet never restarts"
+# Each of the lab's services, by the setting that names it, the unit that serves it and where that unit runs.
 _HEALTH = (
-    ("WILLY_STT_URL", "mosfet-stt"),
-    ("WILLY_TTS_URL", "mosfet-tts"),
-    ("WILLY_VOICEPRINT_URL", "mosfet-voiceprint"),
-    ("WILLY_EMOTION_URL", "mosfet-emotion"),
-    ("WILLY_DIAR_URL", "mosfet-diar"),
-    ("WILLY_EMBED_URL", "mosfet-embed"),
+    ("WILLY_STT_URL", "mosfet-stt", _CT108),
+    ("WILLY_TTS_URL", "sidekick-tts-engine-breeze", _CT107),
+    ("WILLY_VOICEPRINT_URL", "mosfet-voiceprint", _CT108),
+    ("WILLY_EMOTION_URL", "mosfet-emotion", _CT108),
+    ("WILLY_DIAR_URL", "mosfet-diar", _CT108),
+    ("WILLY_EMBED_URL", "mosfet-embed", _CT108),
 )
 # What A and B say: the world's speech, which never names a tool, a person or a reply.
 _A_ARRIVES = "Hi, is anybody home? I just got back from the store."
@@ -377,7 +381,12 @@ async def _step(name: str, bound: float) -> collections.abc.AsyncGenerator[None]
 
 
 async def _answers(
-    client: httpx.AsyncClient, variable: str, unit: str, url: str, api_key: pydantic.SecretStr | None = None
+    client: httpx.AsyncClient,
+    variable: str,
+    unit: str,
+    where: str,
+    url: str,
+    api_key: pydantic.SecretStr | None = None,
 ) -> httpx.Response:
     """GET ``url``, with ``api_key`` as its bearer when given (a keyed server answers 401 without it), else none."""
 
@@ -386,10 +395,10 @@ async def _answers(
         response = await client.get(url, headers=headers)
     except httpx.HTTPError as error:
         raise AssertionError(
-            f"L1 preflight: {unit} ({variable}) does not answer at {url}: {type(error).__name__}; see lab-ct108.md"
+            f"L1 preflight: {unit} ({variable}) does not answer at {url}: {type(error).__name__}; see {where}"
         ) from None
     assert response.status_code == 200, (
-        f"L1 preflight: {unit} ({variable}) answered {response.status_code} at {url}; see lab-ct108.md"
+        f"L1 preflight: {unit} ({variable}) answered {response.status_code} at {url}; see {where}"
     )
     return response
 
@@ -398,7 +407,7 @@ async def _preflight(settings: willy_example.Settings, api_key: pydantic.SecretS
     async with httpx.AsyncClient(timeout=_PREFLIGHT) as client:
         # The model server is asked with the key Willy's model client sends; the speech units take none.
         listed = await _answers(
-            client, "WILLY_LLM_URL", "mosfet-llm", f"{settings.llm_url.rstrip('/')}/models", api_key
+            client, "WILLY_LLM_URL", "mosfet-llm", _CT108, f"{settings.llm_url.rstrip('/')}/models", api_key
         )
         models = {model.id for model in _Models.model_validate_json(listed.content).data}
         assert settings.model in models, f"L1 preflight: mosfet-llm does not serve WILLY_MODEL; it serves {models}"
@@ -411,7 +420,10 @@ async def _preflight(settings: willy_example.Settings, api_key: pydantic.SecretS
             "WILLY_EMBED_URL": settings.embed_url,
         }
         _ = await asyncio.gather(
-            *(_answers(client, variable, unit, f"{_root(urls[variable])}/healthz") for variable, unit in _HEALTH)
+            *(
+                _answers(client, variable, unit, where, f"{_root(urls[variable])}/healthz")
+                for variable, unit, where in _HEALTH
+            )
         )
 
 
