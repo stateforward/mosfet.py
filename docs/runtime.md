@@ -6,14 +6,17 @@ them from its `__main__` with `bot.run`, the way an hsm program defines and star
 ```python
 from mosfet import bot
 from mosfet.devices import computer
-from mosfet.providers import openai_compat, websocket
+from mosfet.providers import openai_compat, typesafe, websocket
 
 if __name__ == "__main__":
     process = bot.process()
     server = websocket.Server(verifier=websocket.HmacTokens(process.secrets.get("computer_token_secret")))
     greeter = bot.define(
         "greeter",
-        bot.cognition(openai_compat.Processor(client=openai_compat.ChatClient(model="qwen3-coder"))),
+        bot.cognition(
+            openai_compat.Processor(client=openai_compat.ChatClient(model="qwen3-coder")),
+            intuition=typesafe.Processor(base_url="http://127.0.0.1:8102"),
+        ),
         bot.attach(computer.Computer(id="desk", transport=server)),
     )
     bot.run(greeter, actors=(server,), process=process)
@@ -222,7 +225,8 @@ or `stop_grace_period`.
 ```bash
 docker run --init --read-only --tmpfs /run/mosfet:uid=10001,gid=10001,mode=0700 --tmpfs /tmp \
   -v minimal-data:/var/lib/mosfet --env OPENAI_BASE_URL=... --env OPENAI_MODEL=... \
-  -v "$PWD/openai_api_key:/run/secrets/openai_api_key:ro" minimal-bot
+  -v "$PWD/openai_api_key:/run/secrets/openai_api_key:ro" \
+  -v "$PWD/typesafe_api_key:/run/secrets/typesafe_api_key:ro" minimal-bot
 ```
 
 Secrets come from `/run/secrets`, which `Process.secrets` reads first; the image holds none. A bind-mounted

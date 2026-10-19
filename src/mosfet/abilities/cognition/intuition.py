@@ -266,9 +266,6 @@ class OutputData(pydantic.BaseModel):
     )
 
 
-IntuitionProcessor: typing.TypeAlias = processing.Processor
-
-
 @dataclasses.dataclass
 class ConfidenceTuner:
     """Self-tuning confidence baseline for escalate-to-reasoning.
@@ -458,7 +455,9 @@ def _selections_from_output(
 class Intuition(processing.Processing):
     """Fast cognitive ability: multi-dispatch when handled; self-tuning confidence gates System 2.
 
-    Processor-reported ``confidence`` updates a per-instance baseline. When confidence is
+    It decides on a ``processing.DecisionProcessor``, a decision model, never a chat model;
+    any other processor is a ``TypeError``. Processor-reported ``confidence`` updates a
+    per-instance baseline. When confidence is
     low relative to that baseline, environment actions still dispatch, but the terminal is
     unhandled so Cognition cascades to reasoning. High confidence non-empty terminals keep
     the selection list (no cascade). Empty selections and explicit unhandled
@@ -482,7 +481,7 @@ class Intuition(processing.Processing):
         schema=types.FailureData,
     )
     instructions: typing.ClassVar[str] = DEFAULT_INSTRUCTIONS
-    _processor: processing.Processor
+    _processor: processing.DecisionProcessor
     _instructions: str
     _confidence_tuner: ConfidenceTuner
     _confidence_gate: int | None
@@ -1075,13 +1074,17 @@ class Intuition(processing.Processing):
         *,
         id: ability.AbilityId | None = None,
         clock: hsm.Clock | None = None,
-        processor: IntuitionProcessor,
+        processor: processing.DecisionProcessor,
         instructions: str | None = None,
         confidence_floor: int = _DEFAULT_CONFIDENCE_FLOOR,
         confidence_tuner: ConfidenceTuner | None = None,
         confidence_gate: int | None = None,
         max_effort: Effort | None = _DEFAULT_MAX_EFFORT,
     ) -> None:
+        # Precondition (R-6): intuition decides on a decision model, never a chat model. The checker
+        # sees the annotation; this holds for a caller it cannot see.
+        if processing.DecisionProcessor not in type(processor).__mro__:
+            raise TypeError(f"Intuition decides on a processing.DecisionProcessor, not a {type(processor).__name__}.")
         if not 0 <= confidence_floor <= 100:
             raise ValueError("confidence_floor must be an integer between 0 and 100.")
         if confidence_gate is not None and not 0 <= confidence_gate <= 100:
@@ -1110,5 +1113,4 @@ __all__ = [
     "OutputEvent",
     "Intuition",
     "OutputData",
-    "IntuitionProcessor",
 ]

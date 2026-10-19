@@ -1,16 +1,17 @@
 """The phone bot file: ``python -m phone_bot_example`` runs ``alice`` on this host, holding the line until stopped.
 
 Reads the owner's :class:`~phone_bot_example.Settings` from the environment (the OpenAI and Gemini keys, the
-optional LiveKit line and the model overrides). The process options (``MOSFET_*`` or flags) are ``bot.process``'s.
-A missing or malformed setting ends the process with exit ``1``, naming it, before anything starts.
+decision model's local system_one server or hosted TypeSafe's key, the optional LiveKit line and the model
+overrides). The process options (``MOSFET_*`` or flags) are ``bot.process``'s. A missing or malformed setting ends
+the process with exit ``1``, naming it, before anything starts.
 
 A few parts come first, as variables, because two parts share each of them (one instance handed to two
 constructors). The ear, which the mouth tells what it is saying, so the bot can learn its own voice. The
 conversation, shared by communication and the mouth. And the mouth, the one ``speaking.Speaking`` the bot speaks
 through, out of the speaker at the handset's mouthpiece.
 
-Then one ``bot.define`` constructs every other part inline: its cognition on the OpenAI reasoning model with the
-speech seed that takes heard speech into a conversation, its phone on the LiveKit line (its earpiece at the
+Then one ``bot.define`` constructs every other part inline: its cognition on the OpenAI reasoning model with its
+intuition on the decision model and the speech seed that takes heard speech into a conversation, its phone on the LiveKit line (its earpiece at the
 robot's ear, its close-talk mouthpiece at the mouth), its ear, its mouth and its conversations. ``bot.run`` starts
 the person standing in front of it first, as a shared actor, who says out loud each line typed at this terminal,
 and the observer that logs what the bot does.
@@ -34,6 +35,7 @@ from mosfet.providers import livekit
 from mosfet.providers import mlx_audio
 from mosfet.providers import openai_compat
 from mosfet.providers import pyannote
+from mosfet.providers import typesafe
 from mosfet.providers.livekit import signaling
 from mosfet.providers.livekit.audio import PcmWavDecoder
 
@@ -113,6 +115,10 @@ if __name__ == "__main__":
                     base_url=settings.openai_base_url,
                 ),
                 provider="openai_terra_reasoning",
+            ),
+            intuition=typesafe.Processor(
+                base_url=settings.typesafe_base_url,
+                api_key=settings.typesafe_key(),
             ),
             associative=True,
             consolidation=True,

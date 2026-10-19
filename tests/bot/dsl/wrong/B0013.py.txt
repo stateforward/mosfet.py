@@ -17,7 +17,7 @@ DialEvent = hsm.Event[DialData](name="phone.dial", kind=event.EventKind, schema=
 
 model = bot.define(
     "dialer",
-    bot.cognition(support.Silent()),
+    bot.cognition(support.Silent(), intuition=support.Undecided()),
     bot.attach(phone.Phone()),
     bot.initial(bot.target("idle")),
     bot.state("idle", bot.transition(bot.on(DialEvent), bot.target("../idle"))),

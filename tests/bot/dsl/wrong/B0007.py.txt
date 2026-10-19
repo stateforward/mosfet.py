@@ -5,4 +5,4 @@ from mosfet.devices import phone
 
 from tests.bot.dsl import support
 
-model = bot.define("greeter", bot.cognition(support.Silent()), bot.attach(phone.Phone(id="firmware")))
+model = bot.define("greeter", bot.cognition(support.Silent(), intuition=support.Undecided()), bot.attach(phone.Phone(id="firmware")))

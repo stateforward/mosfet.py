@@ -16,6 +16,9 @@ TypeSafe AI provider for stateforward.mosfet: the `system_one` label-tier
   is left unoffered — fail-closed at the menu, before any API call. Confidence rides
   the SDK's ChoiceAnswer confidence on the same scale as every other provider.
 
+A bot file gives it to intuition, apart from the processor its cognition reasons on:
+`bot.cognition(processor, intuition=typesafe.Processor(base_url=..., api_key=...))`.
+
 ## Servers and keys
 
 `Processor(base_url=..., api_key=...)` and `AsyncSystemOneClient(base_url=..., api_key=...)`

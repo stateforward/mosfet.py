@@ -1,7 +1,7 @@
 warning[people_without_associative]: ability `people` knows people the bot is never told of
   --> greeter.py:12:5
    |
-12 |     bot.cognition(support.Silent(), memory=mind),
+12 |     bot.cognition(support.Silent(), intuition=support.Undecided(), memory=mind),
    |     ^^^^^^^^^^^^^ no associations
 ...
 14 |     bot.attach(people.People(memory=mind)),
@@ -11,6 +11,6 @@ warning[people_without_associative]: ability `people` knows people the bot is ne
    = note: allow it with `bot.allow("people_without_associative")` if this is deliberate
 help: give the cognition its associations: `associative=True`
    |
-12 |     bot.cognition(support.Silent(), associative=True, memory=mind),
+12 |     bot.cognition(support.Silent(), associative=True, intuition=support.Undecided(), memory=mind),
    |                                   ~~~~~~~~~~~~~~~~~~
    = explain: bot.explain("people_without_associative")

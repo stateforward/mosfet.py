@@ -102,7 +102,8 @@ if [[ "$mode" == "compose" ]]; then
   compose_dir="$(mktemp -d "$PWD/examples/minimal_bot/secrets/.smoke.XXXXXX")"
   chmod 0755 "$compose_dir"
   printf placeholder > "$compose_dir/openai_api_key"
-  chmod 0444 "$compose_dir/openai_api_key"
+  printf placeholder > "$compose_dir/typesafe_api_key"
+  chmod 0444 "$compose_dir/openai_api_key" "$compose_dir/typesafe_api_key"
   # The example's env_file is the operator's .env; the smoke replaces it with the closed local endpoint.
   printf '%s\n' \
     'services:' \
@@ -113,7 +114,9 @@ if [[ "$mode" == "compose" ]]; then
     '      OPENAI_MODEL: smoke' \
     'secrets:' \
     '  openai_api_key:' \
-    "    file: $compose_dir/openai_api_key" > "$compose_dir/override.yaml"
+    "    file: $compose_dir/openai_api_key" \
+    '  typesafe_api_key:' \
+    "    file: $compose_dir/typesafe_api_key" > "$compose_dir/override.yaml"
 
   echo "docker_smoke: compose up becomes healthy" >&2
   compose config --quiet
@@ -137,7 +140,7 @@ echo "docker_smoke: build $image" >&2
 docker build --build-arg PROJECT=examples/minimal_bot --file docker/Dockerfile --tag "$image" .
 
 docker volume create --label "$label" "$secrets_volume" >/dev/null
-secrets 'printf placeholder > /secrets/openai_api_key && chmod 0444 /secrets/openai_api_key'
+secrets 'printf placeholder > /secrets/openai_api_key && printf placeholder > /secrets/typesafe_api_key && chmod 0444 /secrets/openai_api_key /secrets/typesafe_api_key'
 
 echo "docker_smoke: hardened run becomes healthy" >&2
 bot="$(docker run --detach --label "$label" --init --read-only \

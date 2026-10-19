@@ -50,6 +50,8 @@ ALL = [
     "B0016",
     "B0022",
     "B0023",
+    "B0024",
+    "B0025",
     "ability_without_tools",
     "command_without_examples",
     "instruction_like_traits",

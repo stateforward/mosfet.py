@@ -1,7 +1,7 @@
 error[B0008]: `bot.attach` is written inside `bot.cognition`
  --> greeter.py:8:63
   |
-8 | model = bot.define("…", bot.cognition(support.Silent(), bot.attach(phone.Phone())))
+8 | model = bot.define("…", bot.cognition(support.Silent(), bot.attach(phone.Phone()), intuition=support.Undecided()))
   |                                                         ^^^^^^^^^^^^^^^^^^^^^^^^^ `bot.attach` belongs to `bot.define`
   |
   = note: `bot.cognition` takes no `bot.attach`; every part of a bot is given to `bot.define`

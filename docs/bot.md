@@ -25,7 +25,7 @@ opens and reads nothing; the model holds the very instances the file built.
 >>> greeter = bot.define(
 ...     "greeter",
 ...     bot.traits("warm", "curious"),
-...     bot.cognition(testing.Scripted()),
+...     bot.cognition(testing.Scripted(), intuition=testing.Decider()),
 ...     bot.attach(computer.Computer(id="desk")),
 ... )
 >>> greeter.qualified_name
@@ -89,7 +89,7 @@ what each bot is made of, and never a value given to a part:
 | Element | What it gives the bot |
 |---|---|
 | `bot.traits(*traits)` | The owner's fixed seed of the bot's nature: short descriptors such as `"curious"`, never instructions. With traits, the bot has a persona that it develops itself. At most one. |
-| `bot.cognition(processor, /, *, memory=None, associative=False, consolidation=False, autonomy=False, seeds=(), routines=None)` | Its mind: intuition, reasoning and reflection on `processor`, plus each faculty switched on, all on one memory (a fresh in-memory `memory.Memory()` when none is given). `seeds` are native behaviors its autonomy runs, and need `autonomy=True`. `routines` is the wall clock routines keep time on. Exactly one. |
+| `bot.cognition(processor, /, *, intuition, memory=None, associative=False, consolidation=False, autonomy=False, seeds=(), routines=None)` | Its mind: reasoning and reflection on `processor`, intuition on `intuition`, a `processing.DecisionProcessor` (see [Intuition decides on a decision model](#intuition-decides-on-a-decision-model)), plus each faculty switched on, all on one memory (a fresh in-memory `memory.Memory()` when none is given). `seeds` are native behaviors its autonomy runs, and need `autonomy=True`. `routines` is the wall clock routines keep time on. Exactly one. |
 | `bot.voice(catalog, /, *, designer=None, languages=("en",))` | The source it is given its voice from when it is born (see [Hearing, speaking and a voice](#hearing-speaking-and-a-voice)). At most one. |
 | `bot.attach(instance)` | A device it holds, keyed by its `id`, or an ability it acquires. |
 | `bot.input(ability)` | A sense organ: the body fans every environment stimulus out to its input abilities, in parallel. |
@@ -119,6 +119,22 @@ with no transport is a computer with no remote side, unplugged. `websocket.Serve
 `audio.Speaker()` and needs only its `encoder`. `docker.Host` derives its capacity from its runtime,
 and `sandbox.Spec` gives `HOME` the workspace.
 
+## Intuition decides on a decision model
+
+Intuition is the bot's fast first decision on every turn: it chooses among the events the turn offers, each with
+its confidence, and hands what it does not decide to reasoning. It runs on a decision model, never a chat model, so
+`bot.cognition` takes it apart from its processor: `intuition=` is a `processing.DecisionProcessor`. Reasoning,
+reflection, consolidation and the voice inception stay on `processor`. The decision processor is
+`typesafe.Processor(...)` (`from mosfet.providers import typesafe`), on one of two servers:
+
+* hosted TypeSafe, its default, with the hosted key (`api_key=`, or `TYPESAFE_API_KEY` in the environment);
+* a local system_one server, given as `base_url=` (for example `http://127.0.0.1:8102`); the environment's hosted
+  key is never sent to it.
+
+In a test, the offline one is `testing.Decider()`, which makes only the choices the test writes down and otherwise
+hands the turn to reasoning. A cognition without `intuition=` is `B0024`; a chat processor given as `intuition=` is
+`B0025`.
+
 ## Objects and placements
 
 A desk, a table or a shelf is an `environment.Object`: a physical thing with an id and a place that
@@ -133,7 +149,7 @@ on it through its own `placement=`, and `surface(offset)` is where a thing set o
 Placement(position=Position(x=2.5, y=1.0, z=0.0), threshold_db=None, on='desk')
 >>> keeper = bot.define(
 ...     "keeper",
-...     bot.cognition(testing.Scripted()),
+...     bot.cognition(testing.Scripted(), intuition=testing.Decider()),
 ...     bot.attach(computer.Computer(id="computer", placement=desk.surface())),
 ... )
 >>> [part.id for part in bot.describe(keeper).bots[0].parts]
@@ -172,7 +188,7 @@ the bot was given. `bot.describe` lists `voice` among its faculties and the seed
 ...     "talker",
 ...     bot.traits("warm", "patient"),
 ...     bot.voice(Shelf(), languages=("en",)),
-...     bot.cognition(testing.Scripted(), autonomy=True, seeds=(communication.speech_heard_seed(),)),
+...     bot.cognition(testing.Scripted(), intuition=testing.Decider(), autonomy=True, seeds=(communication.speech_heard_seed(),)),
 ...     bot.output(speaking.Speaking(encoder=encoder)),
 ...     bot.attach(computer.Computer(id="kitchen")),
 ... )
@@ -202,7 +218,7 @@ registries the ears and eyes own, it offers the bot `people.link`, `people.unlin
 >>> household = (memory.Member(id="ada", name="Ada", role="child", born=2018),)
 >>> house = bot.define(
 ...     "house",
-...     bot.cognition(testing.Scripted(), memory=mind, associative=True),
+...     bot.cognition(testing.Scripted(), intuition=testing.Decider(), memory=mind, associative=True),
 ...     bot.attach(computer.Computer(id="kitchen")),
 ...     bot.attach(people.People(memory=mind, household=household)),
 ... )
@@ -339,7 +355,7 @@ do when it rings:
 >>> timer = bot.define(
 ...     "timer",
 ...     bot.traits("attentive"),
-...     bot.cognition(testing.Scripted()),
+...     bot.cognition(testing.Scripted(), intuition=testing.Decider()),
 ...     bot.attribute("minutes", int, 0),
 ...     bot.initial(bot.target("idle")),
 ...     bot.state("idle", bot.transition(bot.on(SetEvent), bot.effect(remember), bot.target("../running"))),
@@ -429,10 +445,10 @@ returns them, and `bot.allow` allows one for a bot when it is deliberate:
 >>> import warnings
 >>> with warnings.catch_warnings():
 ...     warnings.simplefilter("ignore", bot.LintWarning)
-...     lonely = bot.define("lonely", bot.cognition(testing.Scripted()))
+...     lonely = bot.define("lonely", bot.cognition(testing.Scripted(), intuition=testing.Decider()))
 >>> [found.code for found in bot.check(lonely)]
 ['no_devices']
->>> quiet = bot.define("lonely", bot.cognition(testing.Scripted()), bot.allow("no_devices"))
+>>> quiet = bot.define("lonely", bot.cognition(testing.Scripted(), intuition=testing.Decider()), bot.allow("no_devices"))
 >>> bot.check(quiet)
 ()
 
@@ -454,7 +470,16 @@ if __name__ == "__main__":
     server = websocket.Server(verifier=websocket.HmacTokens(process.secrets.get("computer_token_secret")))
     greeter = bot.define(
         "greeter",
-        bot.cognition(openai_compat.Processor(client=openai_compat.ChatClient(model=settings.model))),
+        bot.cognition(
+            openai_compat.Processor(client=openai_compat.ChatClient(model=settings.model)),
+            intuition=typesafe.Processor(
+                base_url=settings.typesafe_base_url,
+                # A local system_one server takes no key and is never sent hosted TypeSafe's.
+                api_key=None
+                if settings.typesafe_base_url is not None
+                else process.secrets.get("typesafe_api_key").get_secret_value(),
+            ),
+        ),
         bot.attach(computer.Computer(id="desk", transport=server)),
     )
     bot.run(greeter, actors=(server,), process=process)

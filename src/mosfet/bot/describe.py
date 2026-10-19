@@ -11,7 +11,7 @@ constructor, a timeout, a faculty or a firmware attribute appears in it:
 >>> from mosfet.devices import computer
 >>> model = bot.define(
 ...     "greeter",
-...     bot.cognition(testing.Scripted(), associative=True),
+...     bot.cognition(testing.Scripted(), intuition=testing.Decider(), associative=True),
 ...     bot.attach(computer.Computer(id="desk")),
 ... )
 >>> outline = bot.describe(model).bots[0]

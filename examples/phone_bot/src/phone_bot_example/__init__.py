@@ -126,7 +126,8 @@ class Settings(pydantic.BaseModel):
     """The owner's settings for the phone bot, read from the process environment by ``__main__``.
 
     Each field is read from the first of its variables that is set; a variable set to the empty string is unset.
-    The OpenAI and Gemini keys are required. The LiveKit line is optional: with no URL the phone has no line, and
+    The OpenAI and Gemini keys are required. The bot's intuition decides on hosted TypeSafe, whose key is then
+    required too, unless a local system_one server is named, which takes no key and is never sent the hosted one. The LiveKit line is optional: with no URL the phone has no line, and
     the bot can still be talked to in its room. With a URL, the token is ``BOT_LIVEKIT_TOKEN``, or one minted
     from the API key and secret for the line's identity and room. A value is never shown in an error: the error
     names the variable.
@@ -153,6 +154,21 @@ class Settings(pydantic.BaseModel):
         validation_alias=pydantic.AliasChoices("BOT_REASONING_MODEL", "BOT_OPENAI_REASONING_MODEL"),
         description="The model the bot thinks with.",
         examples=[DEFAULT_OPENAI_REASONING_MODEL],
+    )
+    typesafe_base_url: str | None = pydantic.Field(
+        default=None,
+        min_length=1,
+        validation_alias=pydantic.AliasChoices("TYPESAFE_BASE_URL"),
+        description="The local system_one server the bot's intuition decides on; unset, it decides on hosted TypeSafe.",
+        examples=["http://127.0.0.1:8102"],
+    )
+    typesafe_api_key: pydantic.SecretStr | None = pydantic.Field(
+        default=None,
+        validation_alias=pydantic.AliasChoices("TYPESAFE_API_KEY"),
+        description=(
+            "Hosted TypeSafe's key, required unless TYPESAFE_BASE_URL names a local system_one server, which takes"
+            " none and is never sent it."
+        ),
     )
     gemini_api_key: pydantic.SecretStr = pydantic.Field(
         validation_alias=pydantic.AliasChoices("BOT_GEMINI_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY"),
@@ -309,6 +325,25 @@ class Settings(pydantic.BaseModel):
                 "BOT_LIVEKIT_URL needs BOT_LIVEKIT_TOKEN, or BOT_LIVEKIT_API_KEY and BOT_LIVEKIT_API_SECRET"
             )
         return self
+
+    @pydantic.model_validator(mode="after")
+    def _hosted_typesafe_needs_its_key(self) -> typing.Self:
+        if self.typesafe_base_url is None and self.typesafe_api_key is None:
+            raise ValueError(
+                "TYPESAFE_API_KEY: hosted TypeSafe's key, or TYPESAFE_BASE_URL for a local system_one server"
+            )
+        return self
+
+    def typesafe_key(self) -> str | None:
+        """The key intuition's decision model is asked with: hosted TypeSafe's, and none for a local system_one server.
+
+        A local server is never sent the hosted key, even when ``TYPESAFE_API_KEY`` is set.
+        """
+
+        if self.typesafe_base_url is not None:
+            return None
+        assert self.typesafe_api_key is not None
+        return self.typesafe_api_key.get_secret_value()
 
     def line_token(self) -> str | None:
         """The token the line joins with: the one given, or one minted now for its identity and room; none off a line."""

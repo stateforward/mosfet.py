@@ -7,7 +7,7 @@ from tests.bot.dsl import support
 
 model = bot.define(
     "greeter",
-    bot.cognition(support.Silent()),
+    bot.cognition(support.Silent(), intuition=support.Undecided()),
     computer.Computer(),
     bot.attach(computer.Computer),
     bot.input(computer.Computer(id="desk")),

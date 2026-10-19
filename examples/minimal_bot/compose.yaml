@@ -1,6 +1,8 @@
 # minimal_bot under compose: the generic image (docker/Dockerfile) built for this project, pointed at the lab
 # box's OpenAI-compatible endpoint. Copy .env.example to .env and fill it in, and put the endpoint's API key,
-# or any non-empty placeholder when the endpoint needs none, in secrets/openai_api_key. README.md has the steps.
+# or any non-empty placeholder when the endpoint needs none, in secrets/openai_api_key, and hosted TypeSafe's key
+# in secrets/typesafe_api_key (an empty file with TYPESAFE_BASE_URL set: a local system_one server takes no key and
+# the bot never reads it). README.md has the steps.
 services:
   minimal:
     build:
@@ -20,6 +22,7 @@ services:
       - minimal-data:/var/lib/mosfet
     secrets:
       - openai_api_key
+      - typesafe_api_key
     env_file: .env
     # bot.run exits within its stop grace (MOSFET_STOP_GRACE, 8 s) plus 1.5 s.
     stop_grace_period: 10s
@@ -34,3 +37,5 @@ volumes:
 secrets:
   openai_api_key:
     file: ./secrets/openai_api_key
+  typesafe_api_key:
+    file: ./secrets/typesafe_api_key

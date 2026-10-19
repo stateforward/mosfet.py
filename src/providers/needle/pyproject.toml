@@ -1,7 +1,7 @@
 [project]
 name = "mosfet-provider-needle"
 dynamic = ["version"]
-description = "Cactus Compute Needle 3 local tool-calling provider for the Intuition reflex tier of stateforward.mosfet."
+description = "Cactus Compute Needle 3 local tool-calling provider for stateforward.mosfet: a language-model processor, never intuition's decision processor."
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [

@@ -28,7 +28,7 @@ def test_define_returns_the_bot_model_with_its_members_in_order() -> None:
     model = bot.define(
         "greeter",
         bot.traits("curious"),
-        bot.cognition(support.Silent()),
+        bot.cognition(support.Silent(), intuition=support.Undecided()),
         bot.attach(phone.Phone(id="desk")),
         bot.attach(audio.Speaker()),
     )
@@ -47,7 +47,7 @@ def test_define_returns_the_bot_model_with_its_members_in_order() -> None:
 
 
 def test_define_is_the_redefinable_bot_walk_with_its_validator_and_finalizer() -> None:
-    elements_ = [bot.cognition(support.Silent()), bot.attach(phone.Phone(id="desk"))]
+    elements_ = [bot.cognition(support.Silent(), intuition=support.Undecided()), bot.attach(phone.Phone(id="desk"))]
 
     model = bot.RedefinableBot(qualified_name="/greeter", owned_elements=list(elements_)).redefine(
         bot.Model(qualified_name=""), []
@@ -59,7 +59,9 @@ def test_define_is_the_redefinable_bot_walk_with_its_validator_and_finalizer() -
 
 
 def test_redefine_makes_a_new_model_and_leaves_the_old_one_alone() -> None:
-    model = bot.define("greeter", bot.cognition(support.Silent()), bot.attach(phone.Phone(id="desk")))
+    model = bot.define(
+        "greeter", bot.cognition(support.Silent(), intuition=support.Undecided()), bot.attach(phone.Phone(id="desk"))
+    )
 
     more = bot.redefine(model, bot.attach(audio.Speaker()), bot.traits("patient"))
 
@@ -81,7 +83,9 @@ def _member(model: bot.Model, key: str) -> object:
 
 
 def test_an_id_given_again_by_redefine_is_a_duplicate_with_both_places() -> None:
-    model = bot.define("greeter", bot.cognition(support.Silent()), bot.attach(phone.Phone(id="desk")))
+    model = bot.define(
+        "greeter", bot.cognition(support.Silent(), intuition=support.Undecided()), bot.attach(phone.Phone(id="desk"))
+    )
 
     with pytest.raises(bot.DefinitionError) as caught:
         _ = bot.redefine(model, bot.attach(audio.Speaker(id="desk")))
@@ -104,7 +108,9 @@ def test_a_definition_error_is_hsms_validation_error_and_the_bots() -> None:
     assert str(error).endswith("error: could not define bot `greeter`: 1 error")
 
 
-@pytest.mark.parametrize("code", ["B0001", "B0002", "B0010", "B0011", "B0020", "B0021", "B0022", "B0023"])
+@pytest.mark.parametrize(
+    "code", ["B0001", "B0002", "B0010", "B0011", "B0020", "B0021", "B0022", "B0023", "B0024", "B0025"]
+)
 def test_each_validator_error_renders_its_golden(code: str, here: pathlib.Path) -> None:
     path = support.copy(code, here)
 
@@ -124,7 +130,7 @@ def test_people_on_the_cognitions_own_memory_defines() -> None:
 
     model = bot.define(
         "house",
-        bot.cognition(support.Silent(), memory=mind, associative=True),
+        bot.cognition(support.Silent(), intuition=support.Undecided(), memory=mind, associative=True),
         bot.attach(phone.Phone()),
         bot.attach(people.People(memory=mind)),
     )
@@ -138,7 +144,7 @@ def test_people_beside_a_cognition_with_no_memory_is_b0020_naming_the_fresh_one(
     with pytest.raises(bot.DefinitionError) as caught:
         _ = bot.define(
             "house",
-            bot.cognition(support.Silent(), associative=True),
+            bot.cognition(support.Silent(), intuition=support.Undecided(), associative=True),
             bot.attach(phone.Phone()),
             bot.attach(people.People(memory=memory.Memory())),
         )
@@ -156,7 +162,7 @@ def test_people_given_by_name_is_b0020_at_its_attachment() -> None:
     with pytest.raises(bot.DefinitionError) as caught:
         _ = bot.define(
             "house",
-            bot.cognition(support.Silent(), memory=memory.Memory(), associative=True),
+            bot.cognition(support.Silent(), intuition=support.Undecided(), memory=memory.Memory(), associative=True),
             bot.attach(phone.Phone()),
             bot.attach(folks),
         )
@@ -177,7 +183,7 @@ def test_a_cognition_memory_that_is_no_memory_is_b0006_only() -> None:
     with pytest.raises(bot.DefinitionError) as caught:
         _ = bot.define(
             "house",
-            bot.cognition(support.Silent(), memory=mind, associative=True),
+            bot.cognition(support.Silent(), intuition=support.Undecided(), memory=mind, associative=True),
             bot.attach(phone.Phone()),
             bot.attach(people.People(memory=memory.Memory())),
         )
@@ -202,7 +208,7 @@ def test_a_speaking_only_acquired_is_not_the_voices_mouth() -> None:
             "greeter",
             bot.traits("warm"),
             bot.voice(support.Shelf()),
-            bot.cognition(support.Silent()),
+            bot.cognition(support.Silent(), intuition=support.Undecided()),
             bot.attach(speaking.Speaking(encoder=support.Voices())),
             bot.attach(phone.Phone()),
         )
@@ -219,7 +225,7 @@ def test_one_speaking_given_to_bot_output_twice_is_still_one_mouth() -> None:
             "greeter",
             bot.traits("warm"),
             bot.voice(support.Shelf()),
-            bot.cognition(support.Silent()),
+            bot.cognition(support.Silent(), intuition=support.Undecided()),
             bot.output(mouth),
             bot.output(mouth),
             bot.attach(phone.Phone()),
@@ -236,20 +242,92 @@ _PROCESSORS = (
 )
 
 
-def test_a_bot_without_cognition_is_told_where_a_processor_and_the_offline_one_come_from() -> None:
+_DECISIONS = (
+    "`processing.DecisionProcessor`",
+    "`typesafe.Processor(...)`",
+    "`from mosfet.providers import typesafe`",
+    "`testing.Decider()`",
+    "`from mosfet.bot import testing`",
+)
+
+
+def test_a_bot_without_cognition_is_told_where_both_processors_and_the_offline_ones_come_from() -> None:
     with pytest.raises(bot.DefinitionError) as caught:
         _ = bot.define("greeter", bot.attach(phone.Phone()))
 
     (missing,) = caught.value.diagnostics
     assert missing.code == "B0002"
     assert missing.help is not None
-    for named in _PROCESSORS:
+    for named in (*_PROCESSORS, *_DECISIONS):
         assert named in missing.help.message
+    assert missing.help.suggestion is not None
+    assert missing.help.suggestion.replacement == ", bot.cognition(processor, intuition=typesafe.Processor())"
+
+
+def test_a_cognition_without_intuition_is_b0024_told_where_a_decision_processor_comes_from() -> None:
+    with pytest.raises(bot.DefinitionError) as caught:
+        _ = bot.define("greeter", bot.cognition(support.Silent()), bot.attach(phone.Phone()))
+
+    (missing,) = caught.value.diagnostics
+    assert (missing.code, missing.message) == ("B0024", "`bot.cognition` has no intuition")
+    assert missing.help is not None
+    for named in _DECISIONS:
+        assert named in missing.help.message
+    assert missing.help.suggestion is not None
+    assert (missing.help.suggestion.replacement, missing.help.suggestion.applicability) == (
+        ", intuition=typesafe.Processor()",
+        "maybe-incorrect",
+    )
+
+
+def test_a_chat_processor_given_as_intuition_is_b0025_named_by_its_type() -> None:
+    with pytest.raises(bot.DefinitionError) as caught:
+        _ = bot.define(
+            "greeter",
+            bot.cognition(
+                support.Silent(),
+                intuition=typing.cast(processing.DecisionProcessor, typing.cast(object, support.Silent())),
+            ),
+            bot.attach(phone.Phone()),
+        )
+
+    (chatting,) = caught.value.diagnostics
+    assert (chatting.code, chatting.message) == (
+        "B0025",
+        "`bot.cognition(intuition=)` is given a chat processor, not a decision processor",
+    )
+    assert chatting.primary.label == "this is a `Silent`"
+    assert chatting.help is not None
+    for named in _DECISIONS:
+        assert named in chatting.help.message
+
+
+def test_an_intuition_that_is_no_processor_is_b0006_taking_a_decision_processor() -> None:
+    with pytest.raises(bot.DefinitionError) as caught:
+        _ = bot.define(
+            "greeter",
+            bot.cognition(support.Silent(), intuition=typing.cast(processing.DecisionProcessor, len)),
+            bot.attach(phone.Phone()),
+        )
+
+    (wrong,) = caught.value.diagnostics
+    assert (wrong.code, wrong.message) == (
+        "B0006",
+        "`bot.cognition(intuition=)` takes a decision processor (`processing.DecisionProcessor`), "
+        + "not `builtin_function_or_method`",
+    )
+    assert wrong.help is not None
+    for named in _DECISIONS:
+        assert named in wrong.help.message
 
 
 def test_a_cognition_given_no_processor_is_told_where_a_processor_and_the_offline_one_come_from() -> None:
     with pytest.raises(bot.DefinitionError) as caught:
-        _ = bot.define("greeter", bot.cognition(typing.cast(processing.Processor, len)), bot.attach(phone.Phone()))
+        _ = bot.define(
+            "greeter",
+            bot.cognition(typing.cast(processing.Processor, len), intuition=support.Undecided()),
+            bot.attach(phone.Phone()),
+        )
 
     (wrong,) = caught.value.diagnostics
     assert (wrong.code, wrong.message) == (
@@ -287,7 +365,7 @@ def test_a_part_started_and_stopped_again_is_unstarted_and_defines() -> None:
         await hsm.stop(handset, environment)
 
     asyncio.run(run())
-    model = bot.define("greeter", bot.cognition(support.Silent()), bot.attach(handset))
+    model = bot.define("greeter", bot.cognition(support.Silent(), intuition=support.Undecided()), bot.attach(handset))
 
     assert list(model.members) == ["/greeter", "/greeter/.cognition", "/greeter/phone"]
     assert model.findings == []
@@ -297,7 +375,7 @@ def test_a_missing_name_is_b0001_and_the_elements_are_still_walked(here: pathlib
     path = here / "greeter.py"
     _ = path.write_text(
         "from mosfet import bot\nfrom mosfet.devices import phone\nfrom tests.bot.dsl import support\n\n"
-        + "model = bot.define(bot.cognition(support.Silent()), bot.input(phone.Phone()))\n",
+        + "model = bot.define(bot.cognition(support.Silent(), intuition=support.Undecided()), bot.input(phone.Phone()))\n",
         encoding="utf-8",
     )
 
@@ -366,7 +444,7 @@ def test_a_step_timeout_that_is_not_positive_is_b0011() -> None:
     with pytest.raises(bot.DefinitionError) as caught:
         _ = bot.define(
             "greeter",
-            bot.cognition(support.Silent()),
+            bot.cognition(support.Silent(), intuition=support.Undecided()),
             bot.attach(phone.Phone()),
             bot.timeouts(step=datetime.timedelta(0)),
         )
@@ -433,6 +511,8 @@ def test_each_explanation_shows_its_mistake_and_the_fix(explanation: diagnostics
         "B0021",
         "B0022",
         "B0023",
+        "B0024",
+        "B0025",
     ],
 )
 def test_every_define_code_has_an_explanation(code: str) -> None:

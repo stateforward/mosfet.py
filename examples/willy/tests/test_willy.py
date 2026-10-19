@@ -288,7 +288,12 @@ async def willy(
             "willy",
             bot.traits(*willy_example.DEFAULT_TRAITS.traits),
             bot.cognition(
-                model, memory=store, associative=True, autonomy=True, seeds=(communication.speech_heard_seed(),)
+                model,
+                intuition=testing.Decider(),
+                memory=store,
+                associative=True,
+                autonomy=True,
+                seeds=(communication.speech_heard_seed(),),
             ),
             bot.input(hearing),
             bot.output(voice),

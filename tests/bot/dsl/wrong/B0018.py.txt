@@ -4,4 +4,4 @@ from mosfet import bot
 
 from tests.bot.dsl import support
 
-model = bot.define("greeter", bot.cognition(support.Silent()), bot.allow("no_device"))
+model = bot.define("greeter", bot.cognition(support.Silent(), intuition=support.Undecided()), bot.allow("no_device"))

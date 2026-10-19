@@ -9,6 +9,6 @@ model = bot.define(
     "greeter",
     bot.traits("warm", "patient"),
     bot.voice(support.Shelf()),
-    bot.cognition(support.Silent()),
+    bot.cognition(support.Silent(), intuition=support.Undecided()),
     bot.attach(phone.Phone()),
 )

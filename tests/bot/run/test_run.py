@@ -69,7 +69,7 @@ def _raising_reasoning(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_a_model_passed_twice_is_b0105_and_exits_78(here: pathlib.Path, capsys: pytest.CaptureFixture[str]) -> None:
-    model = bot.define("quiet", bot.cognition(testing.Scripted()), bot.allow("no_devices"))
+    model = bot.define("quiet", bot.cognition(testing.Scripted(), intuition=testing.Decider()), bot.allow("no_devices"))
 
     assert _exit(lambda: bot.run(model, model, process=_process(here))) == 78
 
@@ -84,8 +84,8 @@ def test_a_model_passed_twice_is_b0105_and_exits_78(here: pathlib.Path, capsys: 
 
 def test_two_models_with_one_name_are_b0104(here: pathlib.Path, capsys: pytest.CaptureFixture[str]) -> None:
     first, second = (
-        bot.define("quiet", bot.cognition(testing.Scripted()), bot.allow("no_devices")),
-        bot.define("quiet", bot.cognition(testing.Scripted()), bot.allow("no_devices")),
+        bot.define("quiet", bot.cognition(testing.Scripted(), intuition=testing.Decider()), bot.allow("no_devices")),
+        bot.define("quiet", bot.cognition(testing.Scripted(), intuition=testing.Decider()), bot.allow("no_devices")),
     )
 
     assert _exit(lambda: bot.run(first, second, process=_process(here))) == 78
@@ -97,7 +97,7 @@ def test_two_models_with_one_name_are_b0104(here: pathlib.Path, capsys: pytest.C
 
 
 def test_an_actor_that_is_not_one_is_b0106(here: pathlib.Path, capsys: pytest.CaptureFixture[str]) -> None:
-    model = bot.define("quiet", bot.cognition(testing.Scripted()), bot.allow("no_devices"))
+    model = bot.define("quiet", bot.cognition(testing.Scripted(), intuition=testing.Decider()), bot.allow("no_devices"))
     processor = testing.Scripted()
 
     assert (
@@ -115,7 +115,7 @@ def test_an_actor_that_is_not_one_is_b0106(here: pathlib.Path, capsys: pytest.Ca
 
 
 def test_every_mistake_is_reported_at_once(here: pathlib.Path, capsys: pytest.CaptureFixture[str]) -> None:
-    model = bot.define("quiet", bot.cognition(testing.Scripted()), bot.allow("no_devices"))
+    model = bot.define("quiet", bot.cognition(testing.Scripted(), intuition=testing.Decider()), bot.allow("no_devices"))
 
     code = _exit(lambda: bot.run(model, model, actors=(typing.cast(hsm.Instance, object()),), process=_process(here)))
 
@@ -128,7 +128,10 @@ def test_every_mistake_is_reported_at_once(here: pathlib.Path, capsys: pytest.Ca
 @pytest.mark.parametrize("count", [0, 33])
 def test_a_process_runs_one_to_32_bots(here: pathlib.Path, capsys: pytest.CaptureFixture[str], count: int) -> None:
     models = [
-        bot.define(f"bot_{index}", bot.cognition(testing.Scripted()), bot.allow("no_devices")) for index in range(count)
+        bot.define(
+            f"bot_{index}", bot.cognition(testing.Scripted(), intuition=testing.Decider()), bot.allow("no_devices")
+        )
+        for index in range(count)
     ]
 
     assert _exit(lambda: bot.run(*models, process=_process(here))) == 78
@@ -145,7 +148,7 @@ def test_something_that_is_not_a_model_is_a_type_error(here: pathlib.Path) -> No
 def test_a_bot_that_cannot_be_built_is_b0102_and_exits_78_after_making_the_data_dir_private(
     here: pathlib.Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    model = bot.define("quiet", bot.cognition(testing.Scripted()), bot.allow("no_devices"))
+    model = bot.define("quiet", bot.cognition(testing.Scripted(), intuition=testing.Decider()), bot.allow("no_devices"))
     _raising_reasoning(monkeypatch)
 
     assert _exit(lambda: bot.run(model, process=_process(here))) == 78
@@ -161,7 +164,7 @@ def test_a_bot_that_cannot_be_built_is_b0102_and_exits_78_after_making_the_data_
 def test_mosfet_traceback_shows_the_cause(
     here: pathlib.Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    model = bot.define("quiet", bot.cognition(testing.Scripted()), bot.allow("no_devices"))
+    model = bot.define("quiet", bot.cognition(testing.Scripted(), intuition=testing.Decider()), bot.allow("no_devices"))
     _raising_reasoning(monkeypatch)
     process = bot.process(argv=["--data-dir", str(here / "data")], environ={"MOSFET_TRACEBACK": "1"})
 
@@ -180,7 +183,10 @@ def test_a_data_dir_that_cannot_be_created_exits_78(here: pathlib.Path, capsys: 
     assert (
         _exit(
             lambda: bot.run(
-                bot.define("quiet", bot.cognition(testing.Scripted()), bot.allow("no_devices")), process=process
+                bot.define(
+                    "quiet", bot.cognition(testing.Scripted(), intuition=testing.Decider()), bot.allow("no_devices")
+                ),
+                process=process,
             )
         )
         == 78
@@ -194,7 +200,16 @@ def test_without_a_process_bot_run_reads_this_ones_flags(
     del here
     monkeypatch.setattr(sys, "argv", ["greeter", "--bogus"])
 
-    assert _exit(lambda: bot.run(bot.define("quiet", bot.cognition(testing.Scripted()), bot.allow("no_devices")))) == 64
+    assert (
+        _exit(
+            lambda: bot.run(
+                bot.define(
+                    "quiet", bot.cognition(testing.Scripted(), intuition=testing.Decider()), bot.allow("no_devices")
+                )
+            )
+        )
+        == 64
+    )
     err = capsys.readouterr().err
     assert err.startswith("error[B0107]: bad process option: unknown option `--bogus`")
     assert "test_run.py:" in err
@@ -207,7 +222,13 @@ _RUN_EXPLANATIONS = [explanation for explanation in diagnostics.EXPLANATIONS if 
 
 
 def _namespace() -> dict[str, object]:
-    return {"bot": bot, "phone": phone, "mosfet": mosfet, "processor": testing.Scripted()}
+    return {
+        "bot": bot,
+        "phone": phone,
+        "mosfet": mosfet,
+        "processor": testing.Scripted(),
+        "decider": testing.Decider(),
+    }
 
 
 @pytest.mark.parametrize("explanation", _RUN_EXPLANATIONS, ids=[explanation.code for explanation in _RUN_EXPLANATIONS])
@@ -399,6 +420,7 @@ from mosfet.bot import testing
 from mosfet.devices import phone
 
 processor = testing.Scripted()
+decider = testing.Decider()
 """
 
 

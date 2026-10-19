@@ -185,6 +185,15 @@ class Settings(pydantic.BaseModel):
         ),
         examples=["required", "auto"],
     )
+    typesafe_base_url: str | None = pydantic.Field(
+        default=None,
+        alias="TYPESAFE_BASE_URL",
+        min_length=1,
+        description=(
+            "The local system_one server the bot's intuition decides on; unset, it decides on hosted TypeSafe."
+        ),
+        examples=["http://127.0.0.1:8102"],
+    )
     socket: pathlib.Path = pydantic.Field(
         alias="BUILDER_SANDBOX_SOCKET",
         description="The rootless Docker or Podman API socket the bench runs on; it has no safe default.",

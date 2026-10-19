@@ -34,7 +34,7 @@ WRONG = """from mosfet import bot
 from mosfet.bot import testing
 from mosfet.devices import computer
 
-greeter = bot.define("Greeter", bot.cognition(testing.Scripted()), bot.attach(computer.Computer(id="desk")))
+greeter = bot.define("Greeter", bot.cognition(testing.Scripted(), intuition=testing.Decider()), bot.attach(computer.Computer(id="desk")))
 """
 FIXED = WRONG.replace('"Greeter"', '"greeter"')
 PASSED = "1 passed in 0.01s\n"

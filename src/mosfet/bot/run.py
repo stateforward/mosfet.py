@@ -7,7 +7,9 @@ machines::
         process = bot.process()
         server = websocket.Server(verifier=websocket.HmacTokens(process.secrets.get("computer_token_secret")))
         greeter = bot.define(
-            "greeter", bot.cognition(processor), bot.attach(computer.Computer(id="desk", transport=server))
+            "greeter",
+            bot.cognition(processor, intuition=decider),
+            bot.attach(computer.Computer(id="desk", transport=server)),
         )
         bot.run(greeter, actors=(server,), process=process)
 

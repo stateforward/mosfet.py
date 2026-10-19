@@ -6,7 +6,11 @@ A bot file is a plain Python file that defines its bots and runs them::
         process = bot.process()
         greeter = bot.define(
             "greeter",
-            bot.cognition(processor, memory=memory.Memory(database=str(process.data_dir / "memory.sqlite3"))),
+            bot.cognition(
+                processor,
+                intuition=decider,
+                memory=memory.Memory(database=str(process.data_dir / "memory.sqlite3")),
+            ),
             bot.attach(computer.Computer(id="desk")),
         )
         bot.run(greeter, process=process)

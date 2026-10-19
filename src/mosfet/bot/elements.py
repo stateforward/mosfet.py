@@ -100,10 +100,11 @@ class TraitsElement(Member, kind=TraitsKind):
 
 @dataclasses.dataclass(kw_only=True)
 class CognitionElement(Member, hsm.NamespaceElement, kind=CognitionKind):
-    """The bot's cognition: its processor, its memory, and which faculties it has."""
+    """The bot's cognition: its processor, its intuition's decision processor, its memory, and its faculties."""
 
     function: typing.ClassVar[str] = "bot.cognition"
     processor: object = None
+    intuition: object = None
     memory: object = None
     associative: bool = False
     consolidation: bool = False
@@ -346,7 +347,8 @@ def misplaced(
     of ``primary`` into that element, machine-applicable only when applying it with every other rewrite
     of the pass defines clean: a part keeps its id when no other part has it, and is given a free one
     when ``node``, the expression written, is its constructor call; a second ``bot.cognition`` or
-    ``bot.register`` is never certain. ``None`` when no element takes it, so the caller says what
+    ``bot.register`` is never certain, and nor is a processor's ``bot.cognition``, which also needs the
+    decision processor its intuition decides on. ``None`` when no element takes it, so the caller says what
     ``where`` takes instead.
     """
 
@@ -366,14 +368,15 @@ def misplaced(
             applicability="machine-applicable" if certain else "maybe-incorrect",
         )
 
-    def single(element: type[Element[typing.Any]], function: str) -> diagnostics.Suggestion | None:
+    def single(element: type[Element[typing.Any]], function: str, more: str = "") -> diagnostics.Suggestion | None:
+        # ``more`` is a further argument the element needs, which the bot file may not import: never certain.
         if model is None or written == "...":
             return None
         taken = function in model.suggested_elements or any(
             isinstance(given, element) for given in model.owned_elements
         )
         model.suggested_elements.add(function)
-        return rewrite(f"{function}({written})", not taken)
+        return rewrite(f"{function}({written}{more})", not taken and not more)
 
     def attached() -> diagnostics.Suggestion | None:
         if model is None or written == "...":
@@ -390,8 +393,11 @@ def misplaced(
 
     if isinstance(value, mosfet.device.Device):
         return found("a device", "bot.attach", attached())
+    if isinstance(value, processing.DecisionProcessor):
+        return found("a decision processor", "bot.cognition(processor, intuition=...)", None)
     if isinstance(value, processing.Processor):
-        return found("a processor", "bot.cognition", single(RedefinableCognition, "bot.cognition"))
+        intuition = ", intuition=typesafe.Processor()"
+        return found("a processor", "bot.cognition", single(RedefinableCognition, "bot.cognition", intuition))
     if isinstance(value, memory.StmMemory):
         return found("a sensory register", "bot.register", single(RedefinableRegister, "bot.register"))
     if isinstance(value, memory.Memory):
@@ -617,10 +623,11 @@ class RedefinableTraits(_Single[TraitsElement]):
 
 @dataclasses.dataclass(kw_only=True)
 class RedefinableCognition(_Single[CognitionElement]):
-    """``bot.cognition``: the processor, the memory, the faculty flags, and its faculty markers."""
+    """``bot.cognition``: the processor, intuition's decision processor, the memory, the faculty flags and markers."""
 
     function: typing.ClassVar[str] = "bot.cognition"
     processor: object = None
+    intuition: object = None
     memory: object = None
     associative: bool = False
     consolidation: bool = False
@@ -633,6 +640,7 @@ class RedefinableCognition(_Single[CognitionElement]):
         member = CognitionElement(
             qualified_name=posixpath.join(model.qualified_name, ".cognition"),
             processor=self.processor,
+            intuition=self.intuition,
             memory=self.memory,
             associative=self.associative,
             consolidation=self.consolidation,
@@ -896,6 +904,7 @@ def cognition(
     processor: processing.Processor,
     /,
     *faculties: Element[hsm.Element],
+    intuition: processing.DecisionProcessor | None = None,
     memory: memory.Memory | None = None,
     associative: bool = False,
     consolidation: bool = False,
@@ -903,11 +912,15 @@ def cognition(
     seeds: collections.abc.Sequence[behavior.Seed] = (),
     routines: schedule.WallClock | None = None,
 ) -> RedefinableCognition:
-    """The bot's cognition, thinking with ``processor`` (``bot.cognition(processor, associative=True)``).
+    """The bot's cognition, thinking with ``processor`` (``bot.cognition(processor, intuition=decider)``).
 
     Args:
-        processor: What selects the bot's events on each turn.
+        processor: What reasons, reflects and consolidates: the model that selects the bot's events on a
+            turn its intuition hands on.
         faculties: Faculty elements that take their own sub-elements; none exists yet.
+        intuition: The decision processor (a ``processing.DecisionProcessor``) intuition decides on, the
+            bot's fast first decision on every turn: never a chat model. It is required; ``bot.define``
+            reports a cognition without one (B0024), or given a chat processor (B0025).
         memory: The memory every faculty shares; a fresh in-memory one when omitted.
         associative: Whether it recalls associations before it decides.
         consolidation: Whether it consolidates what it remembers.
@@ -920,6 +933,7 @@ def cognition(
 
     return RedefinableCognition(
         processor=processor,
+        intuition=intuition,
         memory=memory,
         associative=associative,
         consolidation=consolidation,

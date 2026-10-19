@@ -80,8 +80,10 @@ def test_a_lint_is_a_user_warning_and_the_model_keeps_it(here: pathlib.Path) -> 
 def test_allow_silences_a_lint_for_that_bot_only() -> None:
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
-        quiet = bot.define("quiet", bot.cognition(support.Silent()), bot.allow("no_devices"))
-        loud = bot.define("loud", bot.cognition(support.Silent()))
+        quiet = bot.define(
+            "quiet", bot.cognition(support.Silent(), intuition=support.Undecided()), bot.allow("no_devices")
+        )
+        loud = bot.define("loud", bot.cognition(support.Silent(), intuition=support.Undecided()))
 
     assert [record.message.diagnostic.code for record in caught if isinstance(record.message, bot.LintWarning)] == [
         "no_devices"
@@ -96,7 +98,7 @@ def test_check_returns_what_define_found() -> None:
         model = bot.define(
             "greeter",
             bot.traits("never stop talking"),
-            bot.cognition(support.Silent()),
+            bot.cognition(support.Silent(), intuition=support.Undecided()),
             bot.timeouts(),
             bot.attach(phone.Phone()),
         )
@@ -109,7 +111,7 @@ def test_timeouts_that_set_only_the_step_timeout_set_a_timeout() -> None:
     model = bot.define(
         "greeter",
         bot.traits("curious"),
-        bot.cognition(support.Silent()),
+        bot.cognition(support.Silent(), intuition=support.Undecided()),
         bot.timeouts(step=datetime.timedelta(minutes=3)),
         bot.attach(phone.Phone()),
     )
@@ -123,7 +125,7 @@ def test_one_pass_reports_errors_and_lints_but_no_lint_about_a_part_that_failed(
     path = here / "greeter.py"
     _ = path.write_text(
         "from mosfet import bot\nfrom mosfet.devices import phone\nfrom tests.bot.dsl import support\n\n"
-        + "model = bot.define('greeter', bot.cognition(support.Silent()), bot.attach(phone.Phone), bot.timeouts())\n",
+        + "model = bot.define('greeter', bot.cognition(support.Silent(), intuition=support.Undecided()), bot.attach(phone.Phone), bot.timeouts())\n",
         encoding="utf-8",
     )
 
@@ -149,8 +151,13 @@ class Silent(processing.Processor):
         return ()
 
 
+class Undecided(processing.DecisionProcessor):
+    async def process(self, input, *, drafts=None):
+        return ()
+
+
 def test_a_bot_that_perceives_nothing():
-    bot.define("greeter", bot.cognition(Silent()))
+    bot.define("greeter", bot.cognition(Silent(), intuition=Undecided()))
 """
 
 
@@ -198,21 +205,36 @@ def test_pytests_warning_option_makes_a_lint_fail(tmp_path: pathlib.Path) -> Non
 )
 def test_instruction_like_traits_catches_instructions(trait: str) -> None:
     with pytest.warns(bot.LintWarning, match="instruction_like_traits"):
-        _ = bot.define("greeter", bot.traits(trait), bot.cognition(support.Silent()), bot.attach(phone.Phone()))
+        _ = bot.define(
+            "greeter",
+            bot.traits(trait),
+            bot.cognition(support.Silent(), intuition=support.Undecided()),
+            bot.attach(phone.Phone()),
+        )
 
 
 @pytest.mark.parametrize("trait", ["patient", "curious about people", "warm", "speaks French", "loves a quiet morning"])
 def test_instruction_like_traits_lets_a_trait_be(trait: str) -> None:
     with warnings.catch_warnings():
         warnings.simplefilter("error")
-        _ = bot.define("greeter", bot.traits(trait), bot.cognition(support.Silent()), bot.attach(phone.Phone()))
+        _ = bot.define(
+            "greeter",
+            bot.traits(trait),
+            bot.cognition(support.Silent(), intuition=support.Undecided()),
+            bot.attach(phone.Phone()),
+        )
 
 
 def test_a_trait_longer_than_twelve_words_is_an_instruction() -> None:
     long = "a bot that is " + " ".join(["very"] * 10) + " kind"
 
     with pytest.warns(bot.LintWarning, match="more than 12 words"):
-        _ = bot.define("greeter", bot.traits(long), bot.cognition(support.Silent()), bot.attach(phone.Phone()))
+        _ = bot.define(
+            "greeter",
+            bot.traits(long),
+            bot.cognition(support.Silent(), intuition=support.Undecided()),
+            bot.attach(phone.Phone()),
+        )
 
 
 def test_an_input_ability_is_a_sense_for_no_devices_and_unused_register() -> None:
@@ -220,7 +242,7 @@ def test_an_input_ability_is_a_sense_for_no_devices_and_unused_register() -> Non
         warnings.simplefilter("error")
         _ = bot.define(
             "greeter",
-            bot.cognition(support.Silent()),
+            bot.cognition(support.Silent(), intuition=support.Undecided()),
             bot.input(memory.Memory(id="senses")),
             bot.register(memory.StmMemory()),
         )
@@ -232,7 +254,7 @@ def test_people_on_a_cognition_with_associations_is_not_linted() -> None:
     mind = memory.Memory()
     model = bot.define(
         "house",
-        bot.cognition(support.Silent(), memory=mind, associative=False),
+        bot.cognition(support.Silent(), intuition=support.Undecided(), memory=mind, associative=False),
         bot.attach(phone.Phone()),
         bot.attach(people.People(memory=mind)),
         bot.allow("people_without_associative"),
@@ -241,7 +263,7 @@ def test_people_on_a_cognition_with_associations_is_not_linted() -> None:
         warnings.simplefilter("error")
         heard = bot.define(
             "house",
-            bot.cognition(support.Silent(), memory=mind, associative=True),
+            bot.cognition(support.Silent(), intuition=support.Undecided(), memory=mind, associative=True),
             bot.attach(phone.Phone()),
             bot.attach(people.People(memory=mind)),
         )
@@ -257,7 +279,7 @@ def test_people_without_associative_rewrites_a_written_flag() -> None:
         warnings.simplefilter("ignore")
         model = bot.define(
             "house",
-            bot.cognition(support.Silent(), memory=mind, associative=False),
+            bot.cognition(support.Silent(), intuition=support.Undecided(), memory=mind, associative=False),
             bot.attach(phone.Phone()),
             bot.attach(people.People(memory=mind)),
         )
@@ -274,7 +296,10 @@ def test_an_ability_with_tools_is_not_linted() -> None:
     with warnings.catch_warnings():
         warnings.simplefilter("error")
         _ = bot.define(
-            "greeter", bot.cognition(support.Silent()), bot.attach(phone.Phone()), bot.attach(memory.Memory())
+            "greeter",
+            bot.cognition(support.Silent(), intuition=support.Undecided()),
+            bot.attach(phone.Phone()),
+            bot.attach(memory.Memory()),
         )
 
 
@@ -286,7 +311,12 @@ def test_an_unknown_lint_is_b0018_with_the_nearest_name(here: pathlib.Path) -> N
 
 def test_allow_is_given_once() -> None:
     with pytest.raises(bot.DefinitionError) as caught:
-        _ = bot.define("greeter", bot.cognition(support.Silent()), bot.allow("no_devices"), bot.allow("empty_timeouts"))
+        _ = bot.define(
+            "greeter",
+            bot.cognition(support.Silent(), intuition=support.Undecided()),
+            bot.allow("no_devices"),
+            bot.allow("empty_timeouts"),
+        )
 
     assert [found.code for found in caught.value.diagnostics] == ["B0009"]
 
@@ -300,7 +330,7 @@ def test_a_nested_state_its_parent_enters_is_reached_and_one_only_an_unreached_s
         warnings.simplefilter("ignore")
         model = bot.define(
             "ticker",
-            bot.cognition(support.Silent()),
+            bot.cognition(support.Silent(), intuition=support.Undecided()),
             bot.initial(bot.target("outer")),
             bot.state("outer", bot.initial(bot.target("inner")), bot.state("inner")),
             bot.state("orphan", bot.transition(bot.on("go"), bot.target("../stranded"))),
@@ -323,7 +353,7 @@ def test_a_firmware_is_something_the_bot_perceives_and_a_command_with_examples_i
         warnings.simplefilter("error")
         model = bot.define(
             "timer",
-            bot.cognition(support.Silent()),
+            bot.cognition(support.Silent(), intuition=support.Undecided()),
             bot.initial(bot.target("idle")),
             bot.state("idle", bot.transition(bot.on(command), bot.target("../idle"))),
         )

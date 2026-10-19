@@ -1,4 +1,4 @@
-"""Needle processor: the Intuition reflex tier as local grammar-constrained tool calling.
+"""Needle processor: local grammar-constrained tool calling, a language-model processor intuition never runs on.
 
 The mapping is structural, not behavioral:
 
@@ -6,7 +6,7 @@ The mapping is structural, not behavioral:
   model-facing payload schema is the tool's parameters and its schema description is the tool
   description. Needle tool names must be identifiers, so canonical event names are mapped to
   identifier-safe names and mapped back on return. Deliberative handoff events are not
-  offered: the reflex tier's way of deferring is to call nothing.
+  offered: the processor's way of deferring is to call nothing.
 - **text** is the turn exactly as a model may see it (``InputData.model_facing_content``) under
   the inherited text-only ``image_capacity``: the engine cannot see, so the projection is one
   text part and any image renders only as an omitted placeholder. ``instructions`` are the
@@ -17,11 +17,10 @@ The mapping is structural, not behavioral:
   (``validation.ungrounded``) are not returned — the engine's own evidence says those
   arguments were not in the turn.
 - **confidence** is the engine's calibrated response confidence (0-1), normalized to the
-  shared 0-100 scale and stamped on every returned call. Dispatch policy stays with
-  Intuition's confidence gate.
+  shared 0-100 scale and stamped on every returned call. Dispatch policy stays with the
+  host.
 - **no calls** (off-topic refusal, or every call withheld into ``suppressed_calls``) is the
-  explicit unhandled envelope, which the host cascades to deliberative reasoning — never a
-  handled-empty selection.
+  explicit unhandled envelope — never a handled-empty selection.
 """
 
 from __future__ import annotations

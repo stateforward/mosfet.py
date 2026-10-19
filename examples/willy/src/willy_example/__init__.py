@@ -127,6 +127,13 @@ class Settings(pydantic.BaseModel):
     model: str = pydantic.Field(
         alias="WILLY_MODEL", min_length=1, description="The model that endpoint serves.", examples=["qwen3.8-27b"]
     )
+    typesafe_base_url: str | None = pydantic.Field(
+        default=None,
+        alias="TYPESAFE_BASE_URL",
+        min_length=1,
+        description=("The local system_one server Willy's intuition decides on; unset, it decides on hosted TypeSafe."),
+        examples=["http://127.0.0.1:8102"],
+    )
     embed_url: str = pydantic.Field(
         alias="WILLY_EMBED_URL",
         min_length=1,

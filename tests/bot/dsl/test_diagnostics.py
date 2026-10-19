@@ -23,11 +23,11 @@ from mosfet.devices import computer, phone
 
 API_KEY = "sk-SENTINEL-NEIGHBOUR"
 
-processor, server = object(), object()
+processor, decider, server = object(), object(), object()
 
 greeter = bot.define(
     "greeter",
-    bot.cognition(processor),
+    bot.cognition(processor, intuition=decider),
     bot.attach(computer.Computer(id="desk", transport=server)),
     bot.attach(phone.Phone(id="desk")), bot.traits("sk-SENTINEL-SAME-LINE", 4242),
 )
@@ -215,8 +215,8 @@ def test_a_span_without_columns_underlines_its_whole_line(greeter: pathlib.Path)
 
     lines = diagnostics.render(diagnostic).splitlines()
 
-    assert "12 |     bot.cognition(processor)," in lines
-    assert "   |     ^^^^^^^^^^^^^^^^^^^^^^^^^ hsm says so" in lines
+    assert "12 |     bot.cognition(processor, intuition=decider)," in lines
+    assert "   |     " + "^" * len("bot.cognition(processor, intuition=decider),") + " hsm says so" in lines
 
 
 def test_without_source_only_the_header_and_location_print() -> None:

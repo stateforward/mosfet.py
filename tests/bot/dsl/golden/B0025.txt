@@ -1,0 +1,11 @@
+error[B0025]: `bot.cognition(intuition=)` is given a chat processor, not a decision processor
+ --> greeter.py:8:73
+  |
+8 | model = bot.define("…", bot.cognition(support.Silent(), intuition=support.Silent()), bot.attach(phone.Phone()))
+  |                                                                   ^^^^^^^^^^^^^^^^ this is a `Silent`
+  |
+  = note: a chat model writes and calls tools; intuition chooses among the offered events, each with its confidence, so it decides on a decision model, never a chat model
+help: give `intuition=` a `processing.DecisionProcessor`: `typesafe.Processor(...)` (`from mosfet.providers import typesafe`), hosted or on a local system_one server; in a test, the offline one is `testing.Decider()` (`from mosfet.bot import testing`)
+  = explain: bot.explain("B0025")
+
+error: could not define bot `greeter`: 1 error

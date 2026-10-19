@@ -4,4 +4,6 @@ from mosfet import bot
 from mosfet.bot import testing
 
 if __name__ == "__main__":
-    bot.run(bot.define("quiet", bot.cognition(testing.Scripted()), bot.allow("no_devices")))
+    bot.run(
+        bot.define("quiet", bot.cognition(testing.Scripted(), intuition=testing.Decider()), bot.allow("no_devices"))
+    )

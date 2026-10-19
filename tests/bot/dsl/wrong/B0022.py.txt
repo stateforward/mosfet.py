@@ -9,7 +9,7 @@ from tests.bot.dsl import support
 model = bot.define(
     "greeter",
     bot.voice(support.Shelf()),
-    bot.cognition(support.Silent()),
+    bot.cognition(support.Silent(), intuition=support.Undecided()),
     bot.output(speaking.Speaking(encoder=support.Voices())),
     bot.attach(phone.Phone()),
 )

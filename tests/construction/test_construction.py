@@ -197,7 +197,14 @@ def test_defining_a_bot_does_no_io_and_starts_nothing(tmp_path: pathlib.Path) ->
             model = bot.define(
                 "greeter",
                 bot.traits("curious"),
-                bot.cognition(_Processor(), memory=store, associative=True, consolidation=True, autonomy=True),
+                bot.cognition(
+                    _Processor(),
+                    intuition=_Processor(),
+                    memory=store,
+                    associative=True,
+                    consolidation=True,
+                    autonomy=True,
+                ),
                 bot.attach(phone.Phone(id="desk")),
                 bot.input(memory.Memory(id="senses")),
                 bot.output(memory.Memory(id="voice")),

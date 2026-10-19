@@ -13,6 +13,6 @@ def _minute(ctx: object, instance: object, event: object) -> datetime.timedelta:
 
 model = bot.define(
     "ticker",
-    bot.cognition(support.Silent()),
+    bot.cognition(support.Silent(), intuition=support.Undecided()),
     bot.state("waiting", bot.transition(bot.after(_minute), bot.target("../waiting"))),
 )

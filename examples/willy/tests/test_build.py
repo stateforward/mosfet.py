@@ -37,7 +37,10 @@ _REQUIRED = {
     "WILLY_EMOTION_URL": f"http://{_CLOSED}",
     "WILLY_DIAR_URL": f"http://{_CLOSED}",
 }
-_SECRETS = {"OPENAI_API_KEY": "key-5d1a", "COMPUTER_TOKEN_SECRET": "secret-8e3f"}
+_SECRETS = {"OPENAI_API_KEY": "key-5d1a", "TYPESAFE_API_KEY": "key-9b07", "COMPUTER_TOKEN_SECRET": "secret-8e3f"}
+# A local system_one server for intuition to decide on: it takes no key, so the bot file needs none for it.
+_LOCAL_DECIDER = {"TYPESAFE_BASE_URL": f"http://{_CLOSED}"}
+_KEYLESS = {name: secret for name, secret in _SECRETS.items() if name != "TYPESAFE_API_KEY"}
 _HOUSEHOLD = [
     {"id": "gabe", "name": "Gabe", "role": "adult"},
     {"id": "ada", "name": "Ada", "role": "child", "born": 2018},
@@ -187,13 +190,16 @@ def test_the_env_example_is_the_lab_and_every_setting_in_it_is_valid() -> None:
 
     settings = willy_example.Settings.model_validate(given)
 
-    # Every address is the lab model server's; nothing in it is a secret but the keyless placeholder.
+    # Every required address is the lab model server's, and the decision server is reached through a local forward;
+    # nothing in it is a secret but the lab's keyless placeholder, and the local decision server takes no key at all.
     assert set(_REQUIRED) <= set(given)
     assert all("192.168.2.2" in given[name] for name in _REQUIRED if name.endswith("_URL"))
     assert (settings.model, settings.embed_model) == ("qwen3.8-27b", "embeddinggemma-2")
     assert [room.id for room in settings.rooms] == ["living-room"]
     assert given["OPENAI_API_KEY"] == "local"
-    assert not {"COMPUTER_TOKEN_SECRET", "OPENAI_API_KEY_FILE"} & set(given)
+    assert settings.typesafe_base_url == "http://127.0.0.1:8102"
+    secrets = {"COMPUTER_TOKEN_SECRET", "OPENAI_API_KEY_FILE", "TYPESAFE_API_KEY", "TYPESAFE_API_KEY_FILE"}
+    assert not secrets & set(given)
 
 
 def test_the_household_example_is_a_household() -> None:
@@ -213,7 +219,7 @@ def _environ(**given: str) -> dict[str, str]:
     environ = {
         name: value
         for name, value in os.environ.items()
-        if not name.startswith(("OTEL_", "BOT_OTEL_", "OPENAI_", "WILLY_", "MOSFET_", "COMPUTER_"))
+        if not name.startswith(("OTEL_", "BOT_OTEL_", "OPENAI_", "TYPESAFE_", "WILLY_", "MOSFET_", "COMPUTER_"))
     }
     _ = environ.pop("PYTHONPATH", None)
     environ.update(given, BOT_OTEL_DISABLED="1")
@@ -226,7 +232,10 @@ def _free_port() -> int:
         return typing.cast(tuple[str, int], probe.getsockname())[1]
 
 
-def test_python_m_defines_willy_and_serves_the_house_until_sigterm(tmp_path: pathlib.Path) -> None:
+@pytest.mark.parametrize(("decider", "secrets"), [({}, _SECRETS), (_LOCAL_DECIDER, _KEYLESS)], ids=["hosted", "local"])
+def test_python_m_defines_willy_and_serves_the_house_until_sigterm(
+    tmp_path: pathlib.Path, decider: dict[str, str], secrets: dict[str, str]
+) -> None:
     ready = tmp_path / "ready"
     child = subprocess.Popen(
         [
@@ -243,7 +252,8 @@ def test_python_m_defines_willy_and_serves_the_house_until_sigterm(tmp_path: pat
         cwd=tmp_path,
         env=_environ(
             **_REQUIRED,
-            **_SECRETS,
+            **secrets,
+            **decider,
             WILLY_PORT=str(_free_port()),
             WILLY_ROOMS="kitchen:counter,den:shelf",
             WILLY_HOUSEHOLD_FILE=_household(tmp_path, json.dumps(_HOUSEHOLD)),
@@ -275,7 +285,7 @@ def test_python_m_defines_willy_and_serves_the_house_until_sigterm(tmp_path: pat
     # One file database, shared by memory and the voiceprints, in a data dir only its owner can enter.
     assert (tmp_path / "data" / "memory.sqlite3").exists()
     assert stat.S_IMODE((tmp_path / "data").stat().st_mode) == 0o700
-    for secret in _SECRETS.values():
+    for secret in secrets.values():
         assert secret.encode() not in stderr
 
 

@@ -1,14 +1,14 @@
 error[B0021]: `bot.cognition` is given seeds but no autonomy to run them
-  --> greeter.py:11:43
+  --> greeter.py:11:74
    |
-11 |     bot.cognition(support.Silent(), seeds=(communication.speech_heard_seed(),)),
-   |                                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ these never run
+11 |     bot.cognition(support.Silent(), intuition=support.Undecided(), seeds=(communication.speech_heard_seed(),)),
+   |                                                                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ these never run
    |
    = note: a seed is a native behavior that autonomy runs before the bot deliberates; without autonomy nothing runs it
 help: give the cognition its autonomy: `autonomy=True`
    |
-11 |     bot.cognition(support.Silent(), autonomy=True, seeds=(communication.speech_heard_seed(),)),
-   |                                     ~~~~~~~~~~~~~~~
+11 |     bot.cognition(support.Silent(), intuition=support.Undecided(), autonomy=True, seeds=(communication.speech_heard_seed(),)),
+   |                                                                    ~~~~~~~~~~~~~~~
    = explain: bot.explain("B0021")
 
 error: could not define bot `greeter`: 1 error

@@ -129,10 +129,10 @@ def _focus_selection(*, device: object) -> processing.Events:
 
 
 def _run_intuition(
-    processor: processing.Processor,
+    processor: processing.DecisionProcessor,
     *,
     operation_id: str,
-) -> tuple[types.CompletionData, processing.Processor]:
+) -> tuple[types.CompletionData, processing.DecisionProcessor]:
     async def run() -> types.CompletionData:
         ctx = shared_hsm_context()
         actor = _SelectionActor()
@@ -152,6 +152,27 @@ def _run_intuition(
         )
 
     return asyncio.run(run()), processor
+
+
+class _Chatting(processing.Processor):
+    """A chat model's processor: it writes and calls tools, so it is no decision processor."""
+
+    @typing.override
+    async def process(
+        self, input: processing.InputData, *, drafts: processing.DraftSink | None = None
+    ) -> processing.Events:
+        del input, drafts
+        return ()
+
+
+def test_intuition_decides_only_on_a_decision_processor() -> None:
+    # A caller the type checker cannot see: what is given is checked, not promised.
+    chatting = typing.cast(processing.DecisionProcessor, typing.cast(object, _Chatting()))
+
+    with pytest.raises(TypeError, match="processing.DecisionProcessor"):
+        _ = intuition.Intuition(processor=chatting)
+
+    assert not hasattr(intuition, "IntuitionProcessor")
 
 
 def test_intuition_never_uses_metadata_for_coordination() -> None:

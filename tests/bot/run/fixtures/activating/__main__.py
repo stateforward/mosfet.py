@@ -9,6 +9,10 @@ if __name__ == "__main__":
     process = bot.process()
     marker = process.data_dir / "activating"
     bot.run(
-        bot.define("slow", bot.cognition(testing.Scripted()), bot.attach(doubles.MarkingDevice(marker))),
+        bot.define(
+            "slow",
+            bot.cognition(testing.Scripted(), intuition=testing.Decider()),
+            bot.attach(doubles.MarkingDevice(marker)),
+        ),
         process=process,
     )

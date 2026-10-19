@@ -32,20 +32,25 @@ bot's behalf.
 ```python
 from mosfet import bot
 from mosfet.devices import computer
-from mosfet.providers import openai_compat
+from mosfet.providers import openai_compat, typesafe
 
 # Reached at its desk; what it does about what is typed there is its own.
 greeter = bot.define(
     "greeter",
     bot.traits("warm", "curious"),
-    bot.cognition(openai_compat.Processor(client=openai_compat.ChatClient(model="qwen3-coder"))),
+    bot.cognition(
+        openai_compat.Processor(client=openai_compat.ChatClient(model="qwen3-coder")),
+        # Intuition is never a chat model: it decides on TypeSafe, hosted or a local system_one server.
+        intuition=typesafe.Processor(base_url="http://127.0.0.1:8102"),
+    ),
     bot.attach(computer.Computer(id="desk")),
 )
 ```
 
 `bot.define` returns the bot as data. `bot.start` (or `bot.run`, for a process) builds its body,
 `mosfet.Bot`, around the very parts the file constructed: the devices it holds, the abilities it
-composes, and one cognition. The hsm states and transitions given beside them are the bot's
+composes, and one cognition, whose intuition decides on a decision model while it reasons on a language
+model. The hsm states and transitions given beside them are the bot's
 firmware, the machinery its owner wrote for it. [`docs/bot.md`](docs/bot.md) is the guide to the
 DSL. See [`examples/`](examples/README.md) for complete programs, including a phone bot that answers
 a real call over LiveKit.
@@ -84,6 +89,7 @@ if __name__ == "__main__":
         bot.traits(*settings.traits.traits),
         bot.cognition(
             openai_compat.Processor(client=openai_compat.ChatClient(model=settings.model, base_url=settings.base_url)),
+            intuition=typesafe.Processor(base_url=settings.typesafe_base_url, api_key=...),
             memory=memory.Memory(database=str(process.data_dir / "memory.sqlite3")),
             associative=True,
             consolidation=True,
@@ -142,7 +148,7 @@ device-free bot on any OpenAI-compatible endpoint:
 
 ```bash
 uv sync --project examples/minimal_bot
-OPENAI_BASE_URL=http://127.0.0.1:8080/v1 OPENAI_MODEL=... OPENAI_API_KEY=... \
+OPENAI_BASE_URL=http://127.0.0.1:8080/v1 OPENAI_MODEL=... OPENAI_API_KEY=... TYPESAFE_API_KEY=... \
   examples/minimal_bot/.venv/bin/python -m minimal_bot_example --ready-file /tmp/ready
 ```
 

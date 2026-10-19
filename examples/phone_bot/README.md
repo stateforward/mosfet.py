@@ -31,6 +31,9 @@ with `BOT_VERBOSE=1`.
 - Docker, or `livekit-server --dev`, for the local SFU
 - `uv` + Python 3.13
 - `BOT_OPENAI_API_KEY` (or `OPENAI_API_KEY`) and `BOT_GEMINI_API_KEY` (or `GEMINI_API_KEY` / `GOOGLE_API_KEY`)
+- `TYPESAFE_API_KEY` for hosted TypeSafe, the decision model the bot's intuition decides on; or
+  `TYPESAFE_BASE_URL`, a local system_one server (for example `http://127.0.0.1:8102`), which takes no key
+  and is never sent `TYPESAFE_API_KEY`
 - macOS `say` and `afconvert`, for saying something to the bot in its room
 
 ### The line

@@ -1,8 +1,8 @@
 error[B0020]: ability `people` knows people in a memory that is not the cognition's
   --> greeter.py:14:37
    |
-12 |     bot.cognition(support.Silent(), memory=mind, associative=True),
-   |                                            ---- the cognition's memory
+12 |     bot.cognition(support.Silent(), intuition=support.Undecided(), memory=mind, associative=True),
+   |                                                                           ---- the cognition's memory
 ...
 14 |     bot.attach(people.People(memory=memory.Memory())),
    |                                     ^^^^^^^^^^^^^^^ not the cognition's memory

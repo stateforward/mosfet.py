@@ -1,8 +1,10 @@
 """Willy's bot file: ``python -m willy_example`` runs the household bot on this host.
 
 Reads the owner's :class:`~willy_example.Settings` from the environment (the lab model server's ``WILLY_*_URL``
-addresses and models, and the optional room, camera, trait and household variables) and two secrets:
-``openai_api_key`` (a placeholder for the lab's keyless servers) and ``computer_token_secret``, the key every
+addresses and models, ``TYPESAFE_BASE_URL``, and the optional room, camera, trait and household variables) and
+its secrets: ``openai_api_key`` (a placeholder for the lab's keyless servers), ``typesafe_api_key`` (hosted
+TypeSafe's key, for the decision model Willy's intuition decides on; read only when ``TYPESAFE_BASE_URL`` is unset,
+since a local system_one server takes none and is never sent it) and ``computer_token_secret``, the key every
 room's far side signs its token with. Each is the Docker secret, the file named by ``<NAME>_FILE``, or
 ``<NAME>``. The process options (``MOSFET_*`` or flags) are ``bot.process``'s. A missing or malformed setting or
 secret, or an unreadable or malformed household file, ends the process with exit ``1``, naming it, before
@@ -22,8 +24,8 @@ learn its own voice. The conversation, shared by communication and the mouth. An
 and plays it on that room's speaker, like an intercom.
 
 Then one ``bot.define`` constructs every other part inline: Willy's traits, the source of its voice (the lab's
-speech engine, which designs it at Willy's birth), its cognition on the lab's language model with the speech
-seed that takes heard speech into a conversation, its ear and its sense of its own name, its mouth, its
+speech engine, which designs it at Willy's birth), its cognition on the lab's language model with its intuition on the
+decision model and the speech seed that takes heard speech into a conversation, its ear and its sense of its own name, its mouth, its
 conversations, its capacity to know people under the owner's household, and one computer per room, set on the
 object the owner names in that room. With ``WILLY_CAMERA=1`` a face registry and an eye join them, seeing through
 the rooms' cameras with the OpenCV Zoo's YuNet and SFace.
@@ -52,6 +54,7 @@ from mosfet.providers import opencv
 from mosfet.providers import openai_compat
 from mosfet.providers import speech_server
 from mosfet.providers import sqlite_memory
+from mosfet.providers import typesafe
 from mosfet.providers import websocket
 
 from willy_example import (
@@ -154,6 +157,13 @@ if __name__ == "__main__":
             openai_compat.Processor(
                 client=openai_compat.ChatClient(model=settings.model, base_url=settings.llm_url, api_key=api_key),
                 provider="willy",
+            ),
+            intuition=typesafe.Processor(
+                base_url=settings.typesafe_base_url,
+                # A local system_one server takes no key and is never sent hosted TypeSafe's.
+                api_key=None
+                if settings.typesafe_base_url is not None
+                else process.secrets.get("typesafe_api_key").get_secret_value(),
             ),
             memory=store,
             associative=True,

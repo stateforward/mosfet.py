@@ -10,8 +10,9 @@ warnings. `bot.explain("<code>")` prints any entry below.
 
 The examples assume `from mosfet import bot`, `from mosfet.devices import phone`,
 `from mosfet.abilities import communication, memory, people, speaking`, `import hsm`, `import mosfet`,
-`import datetime`, `import pydantic`, a `processor` (a `processing.Processor`), an `environment`, a
-`catalog` (a `vocal.voice.Catalog`) and `voices` (an encoder factory `(key, description) -> encoder`).
+`import datetime`, `import pydantic`, a `processor` (a `processing.Processor`), a `decider` (a
+`processing.DecisionProcessor`), an `environment`, a `catalog` (a `vocal.voice.Catalog`) and `voices`
+(an encoder factory `(key, description) -> encoder`).
 
 - [`B0001`](#b0001) (error): the bot's name is missing or not lower snake case
 - [`B0002`](#b0002) (error): the bot has no `bot.cognition`
@@ -36,6 +37,8 @@ The examples assume `from mosfet import bot`, `from mosfet.devices import phone`
 - [`B0021`](#b0021) (error): `bot.cognition` is given seeds but no autonomy
 - [`B0022`](#b0022) (error): `bot.voice` is given to a bot with no traits
 - [`B0023`](#b0023) (error): `bot.voice` is given to a bot without exactly one `speaking.Speaking` in `bot.output`
+- [`B0024`](#b0024) (error): `bot.cognition` has no intuition
+- [`B0025`](#b0025) (error): `bot.cognition(intuition=)` is given a chat processor
 - [`B0101`](#b0101) (error): a model is started again while its parts run
 - [`B0102`](#b0102) (error): a part raised while `bot.start` built the bot
 - [`B0103`](#b0103) (error): `bot.start` is given something that is not an `Environment`
@@ -63,13 +66,13 @@ Why: The name is the bot's topology name and a telemetry attribute, so it is bou
 Wrong:
 
 ```python
-model = bot.define("Greeter Bot", bot.cognition(processor), bot.attach(phone.Phone()))
+model = bot.define("Greeter Bot", bot.cognition(processor, intuition=decider), bot.attach(phone.Phone()))
 ```
 
 Right:
 
 ```python
-model = bot.define("greeter_bot", bot.cognition(processor), bot.attach(phone.Phone()))
+model = bot.define("greeter_bot", bot.cognition(processor, intuition=decider), bot.attach(phone.Phone()))
 ```
 
 ## B0002
@@ -78,7 +81,7 @@ model = bot.define("greeter_bot", bot.cognition(processor), bot.attach(phone.Pho
 
 Every bot has exactly one `bot.cognition`, the mind that perceives and decides.
 
-Why: A body with no cognition can hold devices but can never choose anything to do with them. `bot.cognition(processor)` thinks with a `processing.Processor` (`from mosfet.abilities import processing`). In a test, the offline one is `testing.Scripted()` (`from mosfet.bot import testing`), which makes only the choices the test writes down.
+Why: A body with no cognition can hold devices but can never choose anything to do with them. `bot.cognition(processor, intuition=decider)` thinks with a `processing.Processor` (`from mosfet.abilities import processing`), and its intuition decides with a `processing.DecisionProcessor`, such as `typesafe.Processor(...)` (`from mosfet.providers import typesafe`). In a test, the offline ones are `testing.Scripted()` and `testing.Decider()` (`from mosfet.bot import testing`), which make only the choices the test writes down.
 
 Wrong:
 
@@ -89,7 +92,7 @@ model = bot.define("greeter", bot.attach(phone.Phone()))
 Right:
 
 ```python
-model = bot.define("greeter", bot.cognition(processor), bot.attach(phone.Phone()))
+model = bot.define("greeter", bot.cognition(processor, intuition=decider), bot.attach(phone.Phone()))
 ```
 
 ## B0003
@@ -105,7 +108,7 @@ Wrong:
 ```python
 model = bot.define(
     "greeter",
-    bot.cognition(processor),
+    bot.cognition(processor, intuition=decider),
     bot.attach(phone.Phone()),
     bot.attach(phone.Phone()),
 )
@@ -116,7 +119,7 @@ Right:
 ```python
 model = bot.define(
     "greeter",
-    bot.cognition(processor),
+    bot.cognition(processor, intuition=decider),
     bot.attach(phone.Phone()),
     bot.attach(phone.Phone(id="handset")),
 )
@@ -133,13 +136,13 @@ Why: The bot file builds its parts and passes in what they need; the bot holds t
 Wrong:
 
 ```python
-model = bot.define("greeter", bot.cognition(processor), bot.attach(phone.Phone))
+model = bot.define("greeter", bot.cognition(processor, intuition=decider), bot.attach(phone.Phone))
 ```
 
 Right:
 
 ```python
-model = bot.define("greeter", bot.cognition(processor), bot.attach(phone.Phone(id="phone")))
+model = bot.define("greeter", bot.cognition(processor, intuition=decider), bot.attach(phone.Phone(id="phone")))
 ```
 
 ## B0005
@@ -154,33 +157,33 @@ Wrong:
 
 ```python
 handset = await mosfet.started(environment, phone.Phone(), phone.Phone.model)
-model = bot.define("greeter", bot.cognition(processor), bot.attach(handset))
+model = bot.define("greeter", bot.cognition(processor, intuition=decider), bot.attach(handset))
 ```
 
 Right:
 
 ```python
-model = bot.define("greeter", bot.cognition(processor), bot.attach(phone.Phone()))
+model = bot.define("greeter", bot.cognition(processor, intuition=decider), bot.attach(phone.Phone()))
 ```
 
 ## B0006
 
 **error:** an element is given something it does not take
 
-`bot.attach` takes a device or an ability; `bot.input` and `bot.output` take an ability; `bot.register` takes a `memory.StmMemory`; `bot.cognition` takes a `processing.Processor` first, `memory=` takes a `memory.Memory` and `seeds=` takes `behavior.Seed`s; `bot.voice` takes a `vocal.voice.Catalog` first, `designer=` takes a `vocal.voice.Designer` and `languages=` takes language tags. The help names the element that takes what was given.
+`bot.attach` takes a device or an ability; `bot.input` and `bot.output` take an ability; `bot.register` takes a `memory.StmMemory`; `bot.cognition` takes a `processing.Processor` first, `intuition=` takes a `processing.DecisionProcessor`, `memory=` takes a `memory.Memory` and `seeds=` takes `behavior.Seed`s; `bot.voice` takes a `vocal.voice.Catalog` first, `designer=` takes a `vocal.voice.Designer` and `languages=` takes language tags. The help names the element that takes what was given.
 
 Why: Each element is one part of the body: a device is held, a sense organ is an input, a processor is cognition's. Giving a part to the wrong element would wire it where it cannot work.
 
 Wrong:
 
 ```python
-model = bot.define("greeter", bot.cognition(processor), bot.input(phone.Phone()))
+model = bot.define("greeter", bot.cognition(processor, intuition=decider), bot.input(phone.Phone()))
 ```
 
 Right:
 
 ```python
-model = bot.define("greeter", bot.cognition(processor), bot.attach(phone.Phone()))
+model = bot.define("greeter", bot.cognition(processor, intuition=decider), bot.attach(phone.Phone()))
 ```
 
 ## B0007
@@ -194,13 +197,13 @@ Why: Cognition addresses the body, its cognition and its firmware by those keys,
 Wrong:
 
 ```python
-model = bot.define("greeter", bot.cognition(processor), bot.attach(phone.Phone(id="bot")))
+model = bot.define("greeter", bot.cognition(processor, intuition=decider), bot.attach(phone.Phone(id="bot")))
 ```
 
 Right:
 
 ```python
-model = bot.define("greeter", bot.cognition(processor), bot.attach(phone.Phone(id="phone")))
+model = bot.define("greeter", bot.cognition(processor, intuition=decider), bot.attach(phone.Phone(id="phone")))
 ```
 
 ## B0008
@@ -214,13 +217,13 @@ Why: A bot is one flat list of parts; nesting would suggest an ownership the bod
 Wrong:
 
 ```python
-model = bot.define("greeter", bot.cognition(processor, bot.attach(phone.Phone())))
+model = bot.define("greeter", bot.cognition(processor, bot.attach(phone.Phone()), intuition=decider))
 ```
 
 Right:
 
 ```python
-model = bot.define("greeter", bot.cognition(processor), bot.attach(phone.Phone()))
+model = bot.define("greeter", bot.cognition(processor, intuition=decider), bot.attach(phone.Phone()))
 ```
 
 ## B0009
@@ -238,7 +241,7 @@ model = bot.define(
     "greeter",
     bot.traits("curious"),
     bot.traits("patient"),
-    bot.cognition(processor),
+    bot.cognition(processor, intuition=decider),
     bot.attach(phone.Phone()),
 )
 ```
@@ -249,7 +252,7 @@ Right:
 model = bot.define(
     "greeter",
     bot.traits("curious", "patient"),
-    bot.cognition(processor),
+    bot.cognition(processor, intuition=decider),
     bot.attach(phone.Phone()),
 )
 ```
@@ -265,13 +268,13 @@ Why: Traits are the owner's fixed seed of who the bot is. The bot grows its own 
 Wrong:
 
 ```python
-model = bot.define("greeter", bot.traits(), bot.cognition(processor), bot.attach(phone.Phone()))
+model = bot.define("greeter", bot.traits(), bot.cognition(processor, intuition=decider), bot.attach(phone.Phone()))
 ```
 
 Right:
 
 ```python
-model = bot.define("greeter", bot.traits("curious"), bot.cognition(processor), bot.attach(phone.Phone()))
+model = bot.define("greeter", bot.traits("curious"), bot.cognition(processor, intuition=decider), bot.attach(phone.Phone()))
 ```
 
 ## B0011
@@ -287,7 +290,7 @@ Wrong:
 ```python
 model = bot.define(
     "greeter",
-    bot.cognition(processor),
+    bot.cognition(processor, intuition=decider),
     bot.attach(phone.Phone()),
     bot.timeouts(processing=datetime.timedelta(0)),
 )
@@ -298,7 +301,7 @@ Right:
 ```python
 model = bot.define(
     "greeter",
-    bot.cognition(processor),
+    bot.cognition(processor, intuition=decider),
     bot.attach(phone.Phone()),
     bot.timeouts(processing=datetime.timedelta(seconds=30)),
 )
@@ -322,7 +325,7 @@ class SetData(pydantic.BaseModel):
 SetEvent = hsm.Event(name="timer.set", kind=mosfet.event.EventKind, schema=SetData)
 model = bot.define(
     "timer",
-    bot.cognition(processor),
+    bot.cognition(processor, intuition=decider),
     bot.initial(bot.target("idle")),
     bot.state("idle", bot.transition(bot.on(SetEvent), bot.target("../idle"))),
 )
@@ -338,7 +341,7 @@ class SetData(pydantic.BaseModel):
 SetEvent = hsm.Event(name="timer.set", kind=mosfet.event.EventKind, schema=SetData)
 model = bot.define(
     "timer",
-    bot.cognition(processor),
+    bot.cognition(processor, intuition=decider),
     bot.initial(bot.target("idle")),
     bot.state("idle", bot.transition(bot.on(SetEvent), bot.target("../idle"))),
 )
@@ -362,7 +365,7 @@ class DialData(pydantic.BaseModel):
 DialEvent = hsm.Event(name="phone.dial", kind=mosfet.event.EventKind, schema=DialData)
 model = bot.define(
     "dialer",
-    bot.cognition(processor),
+    bot.cognition(processor, intuition=decider),
     bot.attach(phone.Phone()),
     bot.initial(bot.target("idle")),
     bot.state("idle", bot.transition(bot.on(DialEvent), bot.target("../idle"))),
@@ -379,7 +382,7 @@ class DialData(pydantic.BaseModel):
 DialEvent = hsm.Event(name="dialer.dial", kind=mosfet.event.EventKind, schema=DialData)
 model = bot.define(
     "dialer",
-    bot.cognition(processor),
+    bot.cognition(processor, intuition=decider),
     bot.attach(phone.Phone()),
     bot.initial(bot.target("idle")),
     bot.state("idle", bot.transition(bot.on(DialEvent), bot.target("../idle"))),
@@ -397,13 +400,13 @@ Why: The firmware is a real state machine: it starts in the state its `bot.initi
 Wrong:
 
 ```python
-model = bot.define("ticker", bot.cognition(processor), bot.state("waiting"))
+model = bot.define("ticker", bot.cognition(processor, intuition=decider), bot.state("waiting"))
 ```
 
 Right:
 
 ```python
-model = bot.define("ticker", bot.cognition(processor), bot.initial(bot.target("waiting")), bot.state("waiting"))
+model = bot.define("ticker", bot.cognition(processor, intuition=decider), bot.initial(bot.target("waiting")), bot.state("waiting"))
 ```
 
 ## B0015
@@ -421,13 +424,13 @@ def log(ctx, instance, event):
     print(event.name)
 
 
-model = bot.define("greeter", bot.cognition(processor), bot.attach(phone.Phone()), hsm.observe(log))
+model = bot.define("greeter", bot.cognition(processor, intuition=decider), bot.attach(phone.Phone()), hsm.observe(log))
 ```
 
 Right:
 
 ```python
-model = bot.define("greeter", bot.cognition(processor), bot.attach(phone.Phone()))
+model = bot.define("greeter", bot.cognition(processor, intuition=decider), bot.attach(phone.Phone()))
 ```
 
 ## B0016
@@ -446,7 +449,7 @@ class Lamp(mosfet.device.Device):
         pass
 
 
-model = bot.define("greeter", bot.cognition(processor), bot.attach(Lamp()))
+model = bot.define("greeter", bot.cognition(processor, intuition=decider), bot.attach(Lamp()))
 ```
 
 Right:
@@ -457,7 +460,7 @@ class Lamp(mosfet.device.Device):
         super().__init__(id=id)
 
 
-model = bot.define("greeter", bot.cognition(processor), bot.attach(Lamp()))
+model = bot.define("greeter", bot.cognition(processor, intuition=decider), bot.attach(Lamp()))
 ```
 
 ## B0017
@@ -471,13 +474,13 @@ Why: Each element says what a part is to the body; a bare part has no place in i
 Wrong:
 
 ```python
-model = bot.define("greeter", bot.cognition(processor), phone.Phone())
+model = bot.define("greeter", bot.cognition(processor, intuition=decider), phone.Phone())
 ```
 
 Right:
 
 ```python
-model = bot.define("greeter", bot.cognition(processor), bot.attach(phone.Phone()))
+model = bot.define("greeter", bot.cognition(processor, intuition=decider), bot.attach(phone.Phone()))
 ```
 
 ## B0018
@@ -491,13 +494,13 @@ Why: Allowing a lint that does not exist allows nothing, so the warning it was m
 Wrong:
 
 ```python
-model = bot.define("greeter", bot.cognition(processor), bot.allow("no_device"))
+model = bot.define("greeter", bot.cognition(processor, intuition=decider), bot.allow("no_device"))
 ```
 
 Right:
 
 ```python
-model = bot.define("greeter", bot.cognition(processor), bot.allow("no_devices"))
+model = bot.define("greeter", bot.cognition(processor, intuition=decider), bot.allow("no_devices"))
 ```
 
 ## B0019
@@ -514,7 +517,7 @@ Wrong:
 desk = mosfet.environment.Object(id="desk")
 model = bot.define(
     "greeter",
-    bot.cognition(processor),
+    bot.cognition(processor, intuition=decider),
     bot.attach(phone.Phone(placement=desk.surface())),
     bot.attach(desk),
 )
@@ -526,7 +529,7 @@ Right:
 desk = mosfet.environment.Object(id="desk")
 model = bot.define(
     "greeter",
-    bot.cognition(processor),
+    bot.cognition(processor, intuition=decider),
     bot.attach(phone.Phone(placement=desk.surface())),
 )
 ```
@@ -545,7 +548,7 @@ Wrong:
 mind = memory.Memory()
 model = bot.define(
     "house",
-    bot.cognition(processor, memory=mind, associative=True),
+    bot.cognition(processor, intuition=decider, memory=mind, associative=True),
     bot.attach(phone.Phone()),
     bot.attach(people.People(memory=memory.Memory())),
 )
@@ -557,7 +560,7 @@ Right:
 mind = memory.Memory()
 model = bot.define(
     "house",
-    bot.cognition(processor, memory=mind, associative=True),
+    bot.cognition(processor, intuition=decider, memory=mind, associative=True),
     bot.attach(phone.Phone()),
     bot.attach(people.People(memory=mind)),
 )
@@ -576,7 +579,7 @@ Wrong:
 ```python
 model = bot.define(
     "listener",
-    bot.cognition(processor, seeds=(communication.speech_heard_seed(),)),
+    bot.cognition(processor, intuition=decider, seeds=(communication.speech_heard_seed(),)),
     bot.attach(phone.Phone()),
 )
 ```
@@ -586,7 +589,7 @@ Right:
 ```python
 model = bot.define(
     "listener",
-    bot.cognition(processor, autonomy=True, seeds=(communication.speech_heard_seed(),)),
+    bot.cognition(processor, intuition=decider, autonomy=True, seeds=(communication.speech_heard_seed(),)),
     bot.attach(phone.Phone()),
 )
 ```
@@ -605,7 +608,7 @@ Wrong:
 model = bot.define(
     "greeter",
     bot.voice(catalog),
-    bot.cognition(processor),
+    bot.cognition(processor, intuition=decider),
     bot.output(speaking.Speaking(encoder=voices)),
     bot.attach(phone.Phone()),
 )
@@ -618,7 +621,7 @@ model = bot.define(
     "greeter",
     bot.traits("warm", "patient"),
     bot.voice(catalog),
-    bot.cognition(processor),
+    bot.cognition(processor, intuition=decider),
     bot.output(speaking.Speaking(encoder=voices)),
     bot.attach(phone.Phone()),
 )
@@ -639,7 +642,7 @@ model = bot.define(
     "greeter",
     bot.traits("warm", "patient"),
     bot.voice(catalog),
-    bot.cognition(processor),
+    bot.cognition(processor, intuition=decider),
     bot.attach(phone.Phone()),
 )
 ```
@@ -651,10 +654,50 @@ model = bot.define(
     "greeter",
     bot.traits("warm", "patient"),
     bot.voice(catalog),
-    bot.cognition(processor),
+    bot.cognition(processor, intuition=decider),
     bot.output(speaking.Speaking(encoder=voices)),
     bot.attach(phone.Phone()),
 )
+```
+
+## B0024
+
+**error:** `bot.cognition` has no intuition
+
+`bot.cognition` takes `intuition=`, the `processing.DecisionProcessor` its intuition decides on: `typesafe.Processor(...)` (`from mosfet.providers import typesafe`), hosted TypeSafe by default or a local system_one server given as its `base_url`. In a test, the offline one is `testing.Decider()` (`from mosfet.bot import testing`). The suggestion writes `intuition=typesafe.Processor()`, which may need its address and key.
+
+Why: Intuition is the bot's fast first decision on every turn: it chooses among the offered events, each with its confidence, and hands what it cannot decide to reasoning. A decision model does that; a chat model does not, so intuition never runs on cognition's processor.
+
+Wrong:
+
+```python
+model = bot.define("greeter", bot.cognition(processor), bot.attach(phone.Phone()))
+```
+
+Right:
+
+```python
+model = bot.define("greeter", bot.cognition(processor, intuition=decider), bot.attach(phone.Phone()))
+```
+
+## B0025
+
+**error:** `bot.cognition(intuition=)` is given a chat processor
+
+`intuition=` takes a `processing.DecisionProcessor`, a decision model's processor, such as `typesafe.Processor(...)` (`from mosfet.providers import typesafe`); in a test, `testing.Decider()`. Any other `processing.Processor` is a chat model's: it is cognition's processor, given first.
+
+Why: A chat model writes and calls tools; intuition chooses among the offered events with a confidence for each. Intuition on a chat model would be slow reasoning wearing a fast decision's name.
+
+Wrong:
+
+```python
+model = bot.define("greeter", bot.cognition(processor, intuition=processor), bot.attach(phone.Phone()))
+```
+
+Right:
+
+```python
+model = bot.define("greeter", bot.cognition(processor, intuition=decider), bot.attach(phone.Phone()))
 ```
 
 ## B0101
@@ -668,7 +711,7 @@ Why: A part is one real thing: a phone is held by one body, and a memory remembe
 Wrong:
 
 ```python
-model = bot.define("greeter", bot.cognition(processor), bot.attach(phone.Phone()))
+model = bot.define("greeter", bot.cognition(processor, intuition=decider), bot.attach(phone.Phone()))
 greeter = await bot.start(environment, model)
 again = await bot.start(environment, model)
 ```
@@ -676,8 +719,8 @@ again = await bot.start(environment, model)
 Right:
 
 ```python
-greeter = await bot.start(environment, bot.define("greeter", bot.cognition(processor), bot.attach(phone.Phone())))
-helper = await bot.start(environment, bot.define("helper", bot.cognition(processor), bot.attach(phone.Phone())))
+greeter = await bot.start(environment, bot.define("greeter", bot.cognition(processor, intuition=decider), bot.attach(phone.Phone())))
+helper = await bot.start(environment, bot.define("helper", bot.cognition(processor, intuition=decider), bot.attach(phone.Phone())))
 ```
 
 ## B0102
@@ -691,14 +734,14 @@ Why: A mistake is reported where it was written. A part that only fails once it 
 Wrong:
 
 ```python
-model = bot.define("greeter", bot.cognition(processor), bot.attach(phone.Phone()))
+model = bot.define("greeter", bot.cognition(processor, intuition=decider), bot.attach(phone.Phone()))
 greeter = await bot.start(environment, model)  # building its cognition raised
 ```
 
 Right:
 
 ```python
-model = bot.define("greeter", bot.cognition(processor), bot.attach(phone.Phone()))
+model = bot.define("greeter", bot.cognition(processor, intuition=decider), bot.attach(phone.Phone()))
 greeter = await bot.start(environment, model)  # once what the cause names is fixed
 ```
 
@@ -713,14 +756,14 @@ Why: An environment is where a bot's stimuli come from and the scope its parts a
 Wrong:
 
 ```python
-model = bot.define("greeter", bot.cognition(processor), bot.attach(phone.Phone()))
+model = bot.define("greeter", bot.cognition(processor, intuition=decider), bot.attach(phone.Phone()))
 greeter = await bot.start(hsm.Context(), model)
 ```
 
 Right:
 
 ```python
-model = bot.define("greeter", bot.cognition(processor), bot.attach(phone.Phone()))
+model = bot.define("greeter", bot.cognition(processor, intuition=decider), bot.attach(phone.Phone()))
 greeter = await bot.start(environment, model)
 ```
 
@@ -735,16 +778,16 @@ Why: A bot's name is its supervisor's name, its topology name and its telemetry 
 Wrong:
 
 ```python
-greeter = bot.define("greeter", bot.cognition(processor), bot.attach(phone.Phone()))
-helper = bot.define("greeter", bot.cognition(processor), bot.attach(phone.Phone()))
+greeter = bot.define("greeter", bot.cognition(processor, intuition=decider), bot.attach(phone.Phone()))
+helper = bot.define("greeter", bot.cognition(processor, intuition=decider), bot.attach(phone.Phone()))
 bot.run(greeter, helper)
 ```
 
 Right:
 
 ```python
-greeter = bot.define("greeter", bot.cognition(processor), bot.attach(phone.Phone()))
-helper = bot.define("helper", bot.cognition(processor), bot.attach(phone.Phone()))
+greeter = bot.define("greeter", bot.cognition(processor, intuition=decider), bot.attach(phone.Phone()))
+helper = bot.define("helper", bot.cognition(processor, intuition=decider), bot.attach(phone.Phone()))
 bot.run(greeter, helper)
 ```
 
@@ -759,14 +802,14 @@ Why: A model holds the very parts its bot file built, and a part is held by one 
 Wrong:
 
 ```python
-greeter = bot.define("greeter", bot.cognition(processor), bot.attach(phone.Phone()))
+greeter = bot.define("greeter", bot.cognition(processor, intuition=decider), bot.attach(phone.Phone()))
 bot.run(greeter, greeter)
 ```
 
 Right:
 
 ```python
-greeter = bot.define("greeter", bot.cognition(processor), bot.attach(phone.Phone()))
+greeter = bot.define("greeter", bot.cognition(processor, intuition=decider), bot.attach(phone.Phone()))
 bot.run(greeter)
 ```
 
@@ -781,14 +824,14 @@ Why: The process starts each actor on its class's model; anything else has nothi
 Wrong:
 
 ```python
-greeter = bot.define("greeter", bot.cognition(processor), bot.attach(phone.Phone()))
+greeter = bot.define("greeter", bot.cognition(processor, intuition=decider), bot.attach(phone.Phone()))
 bot.run(greeter, actors=(processor,))
 ```
 
 Right:
 
 ```python
-greeter = bot.define("greeter", bot.cognition(processor), bot.attach(phone.Phone()))
+greeter = bot.define("greeter", bot.cognition(processor, intuition=decider), bot.attach(phone.Phone()))
 bot.run(greeter)
 ```
 
@@ -825,7 +868,7 @@ Wrong:
 ```python
 model = bot.define(
     "greeter",
-    bot.cognition(processor),
+    bot.cognition(processor, intuition=decider),
     bot.attach(phone.Phone()),
     bot.attach(memory.StmMemory()),
 )
@@ -836,7 +879,7 @@ Right:
 ```python
 model = bot.define(
     "greeter",
-    bot.cognition(processor),
+    bot.cognition(processor, intuition=decider),
     bot.attach(phone.Phone()),
     bot.register(memory.StmMemory()),
 )
@@ -860,7 +903,7 @@ class SetData(pydantic.BaseModel):
 SetEvent = hsm.Event(name="timer.set", kind=mosfet.event.EventKind, schema=SetData)
 model = bot.define(
     "timer",
-    bot.cognition(processor),
+    bot.cognition(processor, intuition=decider),
     bot.initial(bot.target("idle")),
     bot.state("idle", bot.transition(bot.on(SetEvent), bot.target("../idle"))),
 )
@@ -876,7 +919,7 @@ class SetData(pydantic.BaseModel):
 SetEvent = hsm.Event(name="timer.set", kind=mosfet.event.EventKind, schema=SetData)
 model = bot.define(
     "timer",
-    bot.cognition(processor),
+    bot.cognition(processor, intuition=decider),
     bot.initial(bot.target("idle")),
     bot.state("idle", bot.transition(bot.on(SetEvent), bot.target("../idle"))),
 )
@@ -893,13 +936,13 @@ Why: An element that changes nothing reads as if it did something. Remove it, or
 Wrong:
 
 ```python
-model = bot.define("greeter", bot.cognition(processor), bot.attach(phone.Phone()), bot.timeouts())
+model = bot.define("greeter", bot.cognition(processor, intuition=decider), bot.attach(phone.Phone()), bot.timeouts())
 ```
 
 Right:
 
 ```python
-model = bot.define("greeter", bot.cognition(processor), bot.attach(phone.Phone()))
+model = bot.define("greeter", bot.cognition(processor, intuition=decider), bot.attach(phone.Phone()))
 ```
 
 ## instruction_like_traits
@@ -916,7 +959,7 @@ Wrong:
 model = bot.define(
     "greeter",
     bot.traits("always reply in French"),
-    bot.cognition(processor),
+    bot.cognition(processor, intuition=decider),
     bot.attach(phone.Phone()),
 )
 ```
@@ -927,7 +970,7 @@ Right:
 model = bot.define(
     "greeter",
     bot.traits("curious", "speaks French"),
-    bot.cognition(processor),
+    bot.cognition(processor, intuition=decider),
     bot.attach(phone.Phone()),
 )
 ```
@@ -943,13 +986,13 @@ Why: A bot that perceives nothing is allowed, and doing nothing is a choice it m
 Wrong:
 
 ```python
-model = bot.define("greeter", bot.cognition(processor))
+model = bot.define("greeter", bot.cognition(processor, intuition=decider))
 ```
 
 Right:
 
 ```python
-model = bot.define("greeter", bot.cognition(processor), bot.attach(phone.Phone()))
+model = bot.define("greeter", bot.cognition(processor, intuition=decider), bot.attach(phone.Phone()))
 ```
 
 ## people_without_associative
@@ -966,7 +1009,7 @@ Wrong:
 mind = memory.Memory()
 model = bot.define(
     "house",
-    bot.cognition(processor, memory=mind),
+    bot.cognition(processor, intuition=decider, memory=mind),
     bot.attach(phone.Phone()),
     bot.attach(people.People(memory=mind)),
 )
@@ -978,7 +1021,7 @@ Right:
 mind = memory.Memory()
 model = bot.define(
     "house",
-    bot.cognition(processor, memory=mind, associative=True),
+    bot.cognition(processor, intuition=decider, memory=mind, associative=True),
     bot.attach(phone.Phone()),
     bot.attach(people.People(memory=mind)),
 )
@@ -997,7 +1040,7 @@ Wrong:
 ```python
 model = bot.define(
     "ticker",
-    bot.cognition(processor),
+    bot.cognition(processor, intuition=decider),
     bot.initial(bot.target("waiting")),
     bot.state("waiting"),
     bot.state("ringing"),
@@ -1009,7 +1052,7 @@ Right:
 ```python
 model = bot.define(
     "ticker",
-    bot.cognition(processor),
+    bot.cognition(processor, intuition=decider),
     bot.initial(bot.target("waiting")),
     bot.state("waiting", bot.transition(bot.on("ring"), bot.target("../ringing"))),
     bot.state("ringing"),
@@ -1029,7 +1072,7 @@ Wrong:
 ```python
 model = bot.define(
     "greeter",
-    bot.cognition(processor),
+    bot.cognition(processor, intuition=decider),
     bot.register(memory.StmMemory()),
     bot.allow("no_devices"),
 )
@@ -1040,7 +1083,7 @@ Right:
 ```python
 model = bot.define(
     "greeter",
-    bot.cognition(processor),
+    bot.cognition(processor, intuition=decider),
     bot.attach(phone.Phone()),
     bot.register(memory.StmMemory()),
 )

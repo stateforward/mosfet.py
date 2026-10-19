@@ -21,7 +21,9 @@ its doubles constructed inline:
 >>> from mosfet.bot import testing
 >>> from mosfet.devices import computer
 >>> model = testing.Scripted()
->>> greeter = bot.define("greeter", bot.cognition(model), bot.attach(computer.Computer(id="desk")))
+>>> greeter = bot.define(
+...     "greeter", bot.cognition(model, intuition=testing.Decider()), bot.attach(computer.Computer(id="desk"))
+... )
 >>> async def run() -> str:
 ...     async with testing.running(greeter) as running:
 ...         return testing.snapshot(running.bot).State

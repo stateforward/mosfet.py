@@ -8,7 +8,7 @@ from tests.bot.dsl import support
 desk = environment.Object(id="desk")
 model = bot.define(
     "greeter",
-    bot.cognition(support.Silent()),
+    bot.cognition(support.Silent(), intuition=support.Undecided()),
     bot.attach(computer.Computer(id="computer", placement=desk.surface())),
     bot.attach(desk),
 )

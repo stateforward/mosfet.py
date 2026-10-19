@@ -94,6 +94,7 @@ from mosfet.devices import audio, computer
 from mosfet.providers import openai_compat
 from mosfet.providers import speech_server
 from mosfet.providers import sqlite_memory
+from mosfet.providers import typesafe
 from mosfet.providers import websocket
 from willy_example import room
 
@@ -480,19 +481,30 @@ def test_willy_is_born_hears_a_stranger_learns_them_and_forgets_them(
         api_key = runtime.Secrets(directory=_SECRETS_DIRECTORY, environ=os.environ).get("openai_api_key")
     except runtime.MissingSecretError:
         pytest.fail("WILLY_LIVE=1 needs the openai_api_key secret: OPENAI_API_KEY=local in .env.example does")
+    # The local system_one server takes no key and is never sent the hosted one; only hosted TypeSafe needs its key.
+    decision_key: pydantic.SecretStr | None = None
+    if settings.typesafe_base_url is None:
+        try:
+            decision_key = runtime.Secrets(directory=_SECRETS_DIRECTORY, environ=os.environ).get("typesafe_api_key")
+        except runtime.MissingSecretError:
+            pytest.fail("WILLY_LIVE=1 on hosted TypeSafe (TYPESAFE_BASE_URL unset) needs the typesafe_api_key secret")
     # The OTEL JSONL files are written under the working directory: the test's data directory.
     monkeypatch.chdir(tmp_path)
     _ = telemetry.configure(service_name="willy-live")
     report = Report()
     try:
-        asyncio.run(_live(settings, api_key, tmp_path, report))
+        asyncio.run(_live(settings, api_key, decision_key, tmp_path, report))
     finally:
         telemetry.reset()
         report.save(tmp_path / "live-report.jsonl")
 
 
 async def _live(
-    settings: willy_example.Settings, api_key: pydantic.SecretStr, data_dir: pathlib.Path, report: Report
+    settings: willy_example.Settings,
+    api_key: pydantic.SecretStr,
+    decision_key: pydantic.SecretStr | None,
+    data_dir: pathlib.Path,
+    report: Report,
 ) -> None:
     async with _step("L1 preflight", _PREFLIGHT):
         await _preflight(settings, api_key)
@@ -577,6 +589,10 @@ async def _live(
             ),
             bot.cognition(
                 model,
+                intuition=typesafe.Processor(
+                    base_url=settings.typesafe_base_url,
+                    api_key=None if decision_key is None else decision_key.get_secret_value(),
+                ),
                 memory=store,
                 associative=True,
                 consolidation=True,

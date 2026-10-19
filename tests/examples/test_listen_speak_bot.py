@@ -67,6 +67,7 @@ else:
     )
 
 _KEY = "gemini-key-5d1a"
+_DECISION_KEY = "typesafe-key-9b07"
 _WAIT = 10.0
 _RATE_HZ = 16_000
 # Starting the child imports mosfet and the providers before the bot file runs; that is not under test.
@@ -84,10 +85,12 @@ def _example_root() -> pathlib.Path:
 # --- The owner's settings ---------------------------------------------------------------------------------------
 
 
-def test_the_gemini_key_alone_takes_every_default() -> None:
-    settings = example.Settings.model_validate({"BOT_GEMINI_API_KEY": _KEY})
+def test_the_keys_alone_take_every_default() -> None:
+    settings = example.Settings.model_validate({"BOT_GEMINI_API_KEY": _KEY, "TYPESAFE_API_KEY": _DECISION_KEY})
 
     assert settings.gemini_api_key.get_secret_value() == _KEY
+    # Intuition decides on hosted TypeSafe, with its key.
+    assert (settings.typesafe_base_url, settings.typesafe_key()) == (None, _DECISION_KEY)
     assert settings.gemini_model == example.DEFAULT_GEMINI_MODEL == "gemini-3.5-flash"
     assert settings.vad_model == example.DEFAULT_SILERO_VAD_MODEL == "mlx-community/silero-vad"
     assert settings.stt_model is None
@@ -121,7 +124,7 @@ def test_the_gemini_key_alone_takes_every_default() -> None:
 )
 def test_every_setting_reads_each_of_its_variables(variable: str, field: str, value: str) -> None:
     given = {"GEMINI_API_KEY": "another-key"} if field != "gemini_api_key" else {}
-    settings = example.Settings.model_validate({**given, variable: value})
+    settings = example.Settings.model_validate({**given, "TYPESAFE_API_KEY": _DECISION_KEY, variable: value})
 
     read = getattr(settings, field)
     assert (read.get_secret_value() if isinstance(read, pydantic.SecretStr) else read) == value
@@ -131,6 +134,7 @@ def test_the_lab_wiring_is_read_from_the_environment() -> None:
     settings = example.Settings.model_validate(
         {
             "BOT_GEMINI_API_KEY": _KEY,
+            "TYPESAFE_API_KEY": _DECISION_KEY,
             "BOT_SPEECH_SERVER_STREAM_URL": "ws://lab.test:8001",
             "BOT_SPEECH_SERVER_URL": "http://lab.test:8003",
             "BOT_SPEECH_SERVER_TTS_URL": "http://lab.test:8002",
@@ -146,10 +150,27 @@ def test_the_lab_wiring_is_read_from_the_environment() -> None:
 
 def test_an_empty_variable_is_unset() -> None:
     settings = example.Settings.model_validate(
-        {"BOT_GEMINI_API_KEY": _KEY, "BOT_GEMINI_MODEL": "", "BOT_SPEECH_SERVER_TTS_URL": ""}
+        {
+            "BOT_GEMINI_API_KEY": _KEY,
+            "TYPESAFE_API_KEY": _DECISION_KEY,
+            "BOT_GEMINI_MODEL": "",
+            "BOT_SPEECH_SERVER_TTS_URL": "",
+        }
     )
 
     assert (settings.gemini_model, settings.tts_url) == (example.DEFAULT_GEMINI_MODEL, None)
+
+
+def test_hosted_typesafe_needs_its_key_and_a_local_system_one_server_is_never_sent_it() -> None:
+    with pytest.raises(pydantic.ValidationError) as missing:
+        _ = example.Settings.model_validate({"BOT_GEMINI_API_KEY": _KEY})
+
+    assert "TYPESAFE_API_KEY" in str(missing.value)
+    assert _KEY not in str(missing.value)
+    # A local system_one server takes no key, and the hosted key in the environment never reaches it.
+    local = {"BOT_GEMINI_API_KEY": _KEY, "TYPESAFE_BASE_URL": "http://127.0.0.1:8102"}
+    assert example.Settings.model_validate(local).typesafe_key() is None
+    assert example.Settings.model_validate({**local, "TYPESAFE_API_KEY": _DECISION_KEY}).typesafe_key() is None
 
 
 def test_a_missing_key_is_named_and_no_value_is_shown() -> None:
@@ -177,16 +198,20 @@ def _environ() -> dict[str, str]:
     environ = {
         name: value
         for name, value in os.environ.items()
-        if not name.startswith(("OTEL_", "BOT_", "GEMINI_", "GOOGLE_", "VA_", "MOSFET_"))
+        if not name.startswith(("OTEL_", "BOT_", "GEMINI_", "GOOGLE_", "TYPESAFE_", "VA_", "MOSFET_"))
     }
     _ = environ.pop("PYTHONPATH", None)
     environ["BOT_OTEL_DISABLED"] = "1"
     return environ
 
 
-def test_python_m_names_a_missing_key_and_exits_1(tmp_path: pathlib.Path) -> None:
+@pytest.mark.parametrize(
+    ("given", "missing"),
+    [("TYPESAFE_API_KEY", "BOT_GEMINI_API_KEY"), ("BOT_GEMINI_API_KEY", "TYPESAFE_API_KEY")],
+)
+def test_python_m_names_a_missing_key_and_exits_1(tmp_path: pathlib.Path, given: str, missing: str) -> None:
     env_file = tmp_path / ".env"
-    _ = env_file.write_text("BOT_GEMINI_MODEL=gemini-test\n", encoding="utf-8")
+    _ = env_file.write_text(f"BOT_GEMINI_MODEL=gemini-test\n{given}={_KEY}\n", encoding="utf-8")
     finished = subprocess.run(
         [sys.executable, "-m", "listen_speak_bot_example", "--env", str(env_file), "--assets-dir", str(tmp_path)],
         cwd=tmp_path,
@@ -198,7 +223,8 @@ def test_python_m_names_a_missing_key_and_exits_1(tmp_path: pathlib.Path) -> Non
 
     assert finished.returncode == 1, finished.stderr.decode(errors="replace")
     assert finished.stdout == b""
-    assert b"BOT_GEMINI_API_KEY" in finished.stderr
+    assert missing.encode() in finished.stderr
+    assert _KEY.encode() not in finished.stderr
     # Nothing was heard, so nothing was rendered.
     assert not (tmp_path / "hey_gabe.wav").exists()
 
@@ -326,7 +352,7 @@ def test_speech_reaches_the_bot_from_a_voice_it_does_not_know_on_the_local_path(
     listener = bot.define(
         "listen_speak",
         bot.traits(*example.DEFAULT_TRAITS.traits),
-        bot.cognition(_Hanging()),
+        bot.cognition(_Hanging(), intuition=testing.Decider()),
         bot.input(hearing),
     )
 
@@ -448,7 +474,9 @@ def _hear_on_the_lab(*choices: testing.Choice) -> _Ran:
             listener = bot.define(
                 "listen_speak",
                 bot.traits(*example.DEFAULT_TRAITS.traits),
-                bot.cognition(model, autonomy=True, seeds=(communication.speech_heard_seed(),)),
+                bot.cognition(
+                    model, intuition=testing.Decider(), autonomy=True, seeds=(communication.speech_heard_seed(),)
+                ),
                 bot.input(hearing),
                 bot.output(voiced),
                 bot.attach(communication.Communication(conversations=(talk,), speaking=voiced)),
@@ -513,7 +541,9 @@ class _Closing:
 
 def test_hear_closes_its_workers_when_the_run_never_settles() -> None:
     workers = (_Closing(), _Closing())
-    listener = bot.define("listen_speak", bot.cognition(_Hanging()), bot.allow("no_devices"))
+    listener = bot.define(
+        "listen_speak", bot.cognition(_Hanging(), intuition=testing.Decider()), bot.allow("no_devices")
+    )
 
     async def run() -> None:
         with pytest.raises(TimeoutError):
@@ -758,7 +788,7 @@ def test_on_the_lab_the_bot_is_given_its_voice_at_birth_and_keeps_it_for_life(tm
                     designer=speech_server.Designer("http://lab.test:8002", source=example.LAB_SOURCE, client=voices),
                     languages=example.LANGUAGES,
                 ),
-                bot.cognition(maker, memory=memory.Memory(database=str(database))),
+                bot.cognition(maker, intuition=testing.Decider(), memory=memory.Memory(database=str(database))),
                 bot.output(speaking.Speaking(encoder=given)),
                 # Being born is all it does here: it has nothing to hear, and it is never woken.
                 bot.allow("no_devices"),

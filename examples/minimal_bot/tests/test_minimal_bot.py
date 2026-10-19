@@ -14,6 +14,8 @@ import subprocess
 import sys
 import time
 
+import pytest
+
 from mosfet import bot
 from mosfet.abilities import memory
 from mosfet.bot import testing
@@ -29,7 +31,7 @@ def test_a_device_free_bot_on_one_memory_starts_activates_and_stops_with_a_scrip
     model = testing.Scripted()
     minimal = bot.define(
         "minimal",
-        bot.cognition(model, memory=memory.Memory(), associative=True, consolidation=True),
+        bot.cognition(model, intuition=testing.Decider(), memory=memory.Memory(), associative=True, consolidation=True),
         bot.allow("no_devices"),
     )
 
@@ -51,7 +53,7 @@ def _child(tmp_path: pathlib.Path, environ: dict[str, str], *flags: str) -> subp
     given = {
         name: value
         for name, value in os.environ.items()
-        if not name.startswith(("OTEL_", "BOT_OTEL_", "OPENAI_", "MOSFET_"))
+        if not name.startswith(("OTEL_", "BOT_OTEL_", "OPENAI_", "TYPESAFE_", "MOSFET_"))
     }
     _ = given.pop("PYTHONPATH", None)
     given.update(environ, BOT_OTEL_DISABLED="1")
@@ -64,12 +66,22 @@ def _child(tmp_path: pathlib.Path, environ: dict[str, str], *flags: str) -> subp
     )
 
 
-def test_python_m_serves_the_bot_until_sigterm(tmp_path: pathlib.Path) -> None:
+# Intuition decides on hosted TypeSafe with the typesafe_api_key secret, or on a local system_one server, which
+# takes no key, so the bot file reads no typesafe_api_key for it.
+@pytest.mark.parametrize(
+    ("decider", "keys"),
+    [({}, ("openai_api_key", "typesafe_api_key")), ({"TYPESAFE_BASE_URL": "http://127.0.0.1:9"}, ("openai_api_key",))],
+    ids=["hosted", "local"],
+)
+def test_python_m_serves_the_bot_until_sigterm(
+    tmp_path: pathlib.Path, decider: dict[str, str], keys: tuple[str, ...]
+) -> None:
     ready = tmp_path / "ready"
     secrets = tmp_path / "secrets"
     secrets.mkdir()
-    _ = (secrets / "openai_api_key").write_text("key\n", encoding="utf-8")
-    child = _child(tmp_path, _ENDPOINT, "--secrets-dir", str(secrets), "--ready-file", str(ready))
+    for key in keys:
+        _ = (secrets / key).write_text("key\n", encoding="utf-8")
+    child = _child(tmp_path, {**_ENDPOINT, **decider}, "--secrets-dir", str(secrets), "--ready-file", str(ready))
     try:
         deadline = time.monotonic() + _START_BOUND
         while not ready.exists():
@@ -93,7 +105,12 @@ def test_python_m_serves_the_bot_until_sigterm(tmp_path: pathlib.Path) -> None:
 
 
 def test_python_m_without_the_endpoint_or_the_secret_exits_1_naming_it(tmp_path: pathlib.Path) -> None:
-    for environ, named in (({}, b"OPENAI_BASE_URL and OPENAI_MODEL"), (_ENDPOINT, b"openai_api_key")):
+    keyed = {**_ENDPOINT, "OPENAI_API_KEY": "key"}
+    for environ, named in (
+        ({}, b"OPENAI_BASE_URL and OPENAI_MODEL"),
+        (_ENDPOINT, b"openai_api_key"),
+        (keyed, b"typesafe_api_key"),
+    ):
         child = _child(tmp_path, environ, "--secrets-dir", str(tmp_path / "absent"))
         _, stderr = child.communicate(timeout=_START_BOUND)
 

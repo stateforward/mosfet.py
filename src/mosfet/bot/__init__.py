@@ -11,7 +11,7 @@ model here):
 >>> model = bot.define(
 ...     "greeter",
 ...     bot.traits("curious"),
-...     bot.cognition(testing.Scripted()),
+...     bot.cognition(testing.Scripted(), intuition=testing.Decider()),
 ...     bot.attach(phone.Phone()),
 ... )
 
@@ -53,7 +53,7 @@ firmware (``mosfet.bot.firmware``), the machinery its owner wrote for it:
 >>> SetEvent = hsm.Event[SetData](name="timer.set", kind=event.EventKind, schema=SetData)
 >>> timer = bot.define(
 ...     "timer",
-...     bot.cognition(testing.Scripted()),
+...     bot.cognition(testing.Scripted(), intuition=testing.Decider()),
 ...     bot.initial(bot.target("idle")),
 ...     bot.state("idle", bot.transition(bot.on(SetEvent), bot.target("../running"))),
 ...     bot.state("running", bot.transition(bot.after(datetime.timedelta(minutes=10)), bot.target("../idle"))),

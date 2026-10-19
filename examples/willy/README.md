@@ -24,7 +24,8 @@ with one `bot.define` that constructs every part inline, and runs it with `bot.r
 - **Mouth.** One `speaking.Speaking`, in the one voice Willy is given when it is born (`bot.voice`: the first
   time Willy starts, its model conceives a voice from its traits and the lab designs it). Every room's computer
   hears it and plays it on that room's speaker, like an intercom.
-- **Mind.** `bot.cognition` on the lab's language model, with associations, consolidation, autonomy, routines
+- **Mind.** `bot.cognition` on the lab's language model, its intuition on a decision model (`typesafe.Processor`
+  on the local system_one server `TYPESAFE_BASE_URL` names, never a chat model), with associations, consolidation, autonomy, routines
   and the speech seed that takes heard speech into a conversation. Its memory recalls by the lab's
   EmbeddingGemma 2 vectors.
 - **Name.** `identity.Identity`: Willy is born nameless and may take a name when someone gives it one.
@@ -96,14 +97,16 @@ reason; the room's name, the url, the token and every sound and image never are 
 | `WILLY_CAMERA`, `WILLY_FACE_MODELS` | `0`, unset | `1` to see; the directory holding `face_detection_yunet_2023mar.onnx` and `face_recognition_sface_2021dec.onnx` |
 | `WILLY_TRAITS` | `warm,patient,curious,honest` | the owner's traits for Willy, comma separated |
 | `WILLY_HOUSEHOLD_FILE` | unset | a JSON list of who lives in the house; unset, nobody is declared and Willy learns everyone |
+| `TYPESAFE_BASE_URL` | unset | the local system_one server Willy's intuition decides on (`http://127.0.0.1:8102` in `.env.example`), whose `/v1/systemone` answer must carry a `model` field, which typesafe-sdk 0.6.0 requires; unset, hosted TypeSafe |
 
 Every address is required: where the owner's model server is has no safe default. A room's name is the id of its
 computer and the peer its far side connects as: 3 to 63 lower-case letters, digits or hyphens, starting with a
 letter.
 
 Secrets are files under `secrets/` (see [`secrets/README.md`](secrets/README.md)): `computer_token_secret`,
-which every room's far side signs its token with, and `openai_api_key`, a placeholder for the lab's keyless
-servers (`OPENAI_API_KEY=local` in `.env` does as well).
+which every room's far side signs its token with, `openai_api_key`, a placeholder for the lab's keyless
+servers (`OPENAI_API_KEY=local` in `.env` does as well), and, for hosted TypeSafe only (`TYPESAFE_BASE_URL`
+unset), `typesafe_api_key`, its key. The local system_one server takes no key, and Willy never sends it one.
 
 ## The household, and where safety sits
 

@@ -11,10 +11,11 @@ them fail), and :func:`check` returns them as diagnostics:
 >>> from mosfet.bot import testing
 >>> with warnings.catch_warnings():
 ...     warnings.simplefilter("ignore", bot.LintWarning)
-...     lonely = bot.define("lonely", bot.cognition(testing.Scripted()))
+...     lonely = bot.define("lonely", bot.cognition(testing.Scripted(), intuition=testing.Decider()))
 >>> [found.code for found in bot.check(lonely)]
 ['no_devices']
->>> bot.check(bot.define("lonely", bot.cognition(testing.Scripted()), bot.allow("no_devices")))
+>>> mind = bot.cognition(testing.Scripted(), intuition=testing.Decider())
+>>> bot.check(bot.define("lonely", mind, bot.allow("no_devices")))
 ()
 
 A new lint is a function here, added to :data:`LINTS` with its golden test and its explanation.

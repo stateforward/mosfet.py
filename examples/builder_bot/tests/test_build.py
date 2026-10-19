@@ -33,7 +33,10 @@ _REQUIRED = {
     "OPENAI_MODEL": "local-model",
     "BUILDER_SANDBOX_SOCKET": "/nonexistent/podman.sock",
 }
-_SECRETS = {"OPENAI_API_KEY": "key-5d1a", "COMPUTER_TOKEN_SECRET": "secret-8e3f"}
+_SECRETS = {"OPENAI_API_KEY": "key-5d1a", "TYPESAFE_API_KEY": "key-9b07", "COMPUTER_TOKEN_SECRET": "secret-8e3f"}
+# A local system_one server for intuition to decide on: it takes no key, so the bot file needs none for it.
+_LOCAL_DECIDER = {"TYPESAFE_BASE_URL": "http://127.0.0.1:9"}
+_KEYLESS = {name: secret for name, secret in _SECRETS.items() if name != "TYPESAFE_API_KEY"}
 # Starting the child imports mosfet and the providers before the bot file runs; that is not under test.
 _RUN_BOUND = 60.0
 # Stop grace (8 s default) plus the 1.5 s bounded process exit and scheduling slack.
@@ -268,7 +271,7 @@ def _environ(**given: str) -> dict[str, str]:
     environ = {
         name: value
         for name, value in os.environ.items()
-        if not name.startswith(("OTEL_", "BOT_OTEL_", "OPENAI_", "BUILDER_", "MOSFET_"))
+        if not name.startswith(("OTEL_", "BOT_OTEL_", "OPENAI_", "TYPESAFE_", "BUILDER_", "MOSFET_"))
     }
     _ = environ.pop("PYTHONPATH", None)
     environ.update(given, BOT_OTEL_DISABLED="1")
@@ -281,7 +284,10 @@ def _free_port() -> int:
         return typing.cast(tuple[str, int], probe.getsockname())[1]
 
 
-def test_python_m_defines_the_builder_and_serves_it_until_sigterm(tmp_path: pathlib.Path) -> None:
+@pytest.mark.parametrize(("decider", "secrets"), [({}, _SECRETS), (_LOCAL_DECIDER, _KEYLESS)], ids=["hosted", "local"])
+def test_python_m_defines_the_builder_and_serves_it_until_sigterm(
+    tmp_path: pathlib.Path, decider: dict[str, str], secrets: dict[str, str]
+) -> None:
     ready = tmp_path / "ready"
     with _daemon({_IMAGE: {_LABEL: _HEAD}}) as socket:
         child = subprocess.Popen(
@@ -299,7 +305,8 @@ def test_python_m_defines_the_builder_and_serves_it_until_sigterm(tmp_path: path
             cwd=tmp_path,
             env=_environ(
                 **{**_REQUIRED, "BUILDER_SANDBOX_SOCKET": str(socket)},
-                **_SECRETS,
+                **secrets,
+                **decider,
                 BUILDER_COMPUTER_PORT=str(_free_port()),
             ),
             stdout=subprocess.PIPE,
@@ -325,7 +332,7 @@ def test_python_m_defines_the_builder_and_serves_it_until_sigterm(tmp_path: path
     assert stdout == b""
     assert not ready.exists()
     assert (tmp_path / "data" / "memory.sqlite3").exists()
-    for secret in _SECRETS.values():
+    for secret in secrets.values():
         assert secret.encode() not in stderr
 
 

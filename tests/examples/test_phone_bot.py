@@ -55,7 +55,11 @@ else:
     )
     person = example.person
 
-_KEYS = {"BOT_OPENAI_API_KEY": "openai-key-5d1a", "BOT_GEMINI_API_KEY": "gemini-key-8e3f"}
+_KEYS = {
+    "BOT_OPENAI_API_KEY": "openai-key-5d1a",
+    "BOT_GEMINI_API_KEY": "gemini-key-8e3f",
+    "TYPESAFE_API_KEY": "typesafe-key-9b07",
+}
 _WAIT = 10.0
 # Starting the child imports mosfet and the providers before the bot file runs; that is not under test.
 _RUN_BOUND = 90.0
@@ -198,6 +202,20 @@ def test_the_dial_plan_is_optional_number_to_identity_aliases() -> None:
         _ = example.Settings.model_validate({**_KEYS, "BOT_LIVEKIT_DIAL_PLAN": "5550142"})
 
 
+def test_hosted_typesafe_needs_its_key_and_a_local_system_one_server_is_never_sent_it() -> None:
+    keyless = {name: given for name, given in _KEYS.items() if name != "TYPESAFE_API_KEY"}
+    with pytest.raises(pydantic.ValidationError) as missing:
+        _ = example.Settings.model_validate(keyless)
+
+    assert "TYPESAFE_API_KEY" in str(missing.value)
+    assert not [secret for secret in keyless.values() if secret in str(missing.value)]
+    assert example.Settings.model_validate(_KEYS).typesafe_key() == _KEYS["TYPESAFE_API_KEY"]
+    # A local system_one server takes no key, and the keyless key in the environment never reaches it.
+    local = {"TYPESAFE_BASE_URL": "http://127.0.0.1:8102"}
+    assert example.Settings.model_validate({**keyless, **local}).typesafe_key() is None
+    assert example.Settings.model_validate({**_KEYS, **local}).typesafe_key() is None
+
+
 def test_a_missing_key_is_named_and_no_value_is_shown() -> None:
     with pytest.raises(pydantic.ValidationError) as missing:
         _ = example.Settings.model_validate({"BOT_OPENAI_API_KEY": "openai-key-5d1a", "BOT_VERBOSE": "1"})
@@ -265,7 +283,9 @@ def _environ(**given: str) -> dict[str, str]:
     environ = {
         name: value
         for name, value in os.environ.items()
-        if not name.startswith(("OTEL_", "BOT_", "OPENAI_", "GEMINI_", "GOOGLE_", "LIVEKIT_", "VA_", "MOSFET_"))
+        if not name.startswith(
+            ("OTEL_", "BOT_", "OPENAI_", "GEMINI_", "GOOGLE_", "LIVEKIT_", "TYPESAFE_", "VA_", "MOSFET_")
+        )
     }
     _ = environ.pop("PYTHONPATH", None)
     environ.update(given, BOT_OTEL_DISABLED="1")
@@ -317,11 +337,13 @@ def test_python_m_holds_the_line_until_sigterm(tmp_path: pathlib.Path) -> None:
         assert secret.encode() not in stderr
 
 
-def test_python_m_names_a_missing_key_and_exits_1(tmp_path: pathlib.Path) -> None:
+@pytest.mark.parametrize("missing", ["BOT_GEMINI_API_KEY", "TYPESAFE_API_KEY"])
+def test_python_m_names_a_missing_key_and_exits_1(tmp_path: pathlib.Path, missing: str) -> None:
+    given = {name: secret for name, secret in _KEYS.items() if name != missing}
     finished = subprocess.run(
         [sys.executable, "-m", "phone_bot_example", "--data-dir", str(tmp_path / "data")],
         cwd=tmp_path,
-        env=_environ(BOT_OPENAI_API_KEY=_KEYS["BOT_OPENAI_API_KEY"]),
+        env=_environ(**given),
         stdin=subprocess.DEVNULL,
         capture_output=True,
         timeout=_RUN_BOUND,
@@ -330,8 +352,9 @@ def test_python_m_names_a_missing_key_and_exits_1(tmp_path: pathlib.Path) -> Non
 
     assert finished.returncode == 1, finished.stderr.decode(errors="replace")
     assert finished.stdout == b""
-    assert b"BOT_GEMINI_API_KEY" in finished.stderr
-    assert _KEYS["BOT_OPENAI_API_KEY"].encode() not in finished.stderr
+    assert missing.encode() in finished.stderr
+    for secret in given.values():
+        assert secret.encode() not in finished.stderr
 
 
 def test_the_bot_file_is_one_inline_bot_define() -> None:
@@ -356,11 +379,15 @@ def test_the_bot_file_is_one_inline_bot_define() -> None:
             assert not (isinstance(node, ast.Attribute) and node.attr == "define" and name != "person.py"), name
 
 
-def test_the_bot_file_thinks_with_one_model_and_shares_one_memory() -> None:
+def test_the_bot_file_thinks_with_one_model_decides_on_another_and_shares_one_memory() -> None:
     main = _sources()["__main__.py"]
 
     # One processor (D-W8-8): the example keeps its reasoning model; cognition owns the one memory.
     assert main.count("openai_compat.Processor(") == 1
+    # Its intuition is never a chat model (R-6): it decides on TypeSafe, hosted or a local system_one server.
+    assert main.count("intuition=typesafe.Processor(") == 1
+    # Asked with hosted TypeSafe's key, or none at all for a local system_one server.
+    assert "api_key=settings.typesafe_key()" in main
     assert 'provider="openai_terra_reasoning"' in main
     assert "seeds=(communication.speech_heard_seed(),)" in main
     for faculty in ("associative=True", "consolidation=True", "autonomy=True"):
@@ -749,7 +776,7 @@ def test_a_bot_spoken_to_or_not_is_offered_its_phone_and_the_mouth_it_speaks_thr
         model = testing.Scripted()
         listener = bot.define(
             example.NAME,
-            bot.cognition(model),
+            bot.cognition(model, intuition=testing.Decider()),
             bot.attach(handset),
             bot.output(speaking.Speaking(encoder=_Silent(), speaker=mouth)),
         )
@@ -806,7 +833,7 @@ def test_speech_in_the_room_reaches_the_bot_from_a_voice_it_does_not_know_and_it
     model = testing.Scripted()
     listener = bot.define(
         example.NAME,
-        bot.cognition(model, autonomy=True, seeds=(communication.speech_heard_seed(),)),
+        bot.cognition(model, intuition=testing.Decider(), autonomy=True, seeds=(communication.speech_heard_seed(),)),
         bot.attach(_handset()),
         bot.input(hearing),
         bot.output(mouth),
@@ -858,7 +885,7 @@ from mosfet.environment import Environment
 async def main():
     environment = Environment()
     started = [
-        await bot.start(environment, bot.define(name, bot.cognition(testing.Scripted()), bot.attach(phone.Phone())))
+        await bot.start(environment, bot.define(name, bot.cognition(testing.Scripted(), intuition=testing.Decider()), bot.attach(phone.Phone())))
         for name in ("alice", "bob")
     ]
     print(json.dumps(sorted({(payload["name"], payload.get("owner")) for payload, url in published}, key=str)))
@@ -962,6 +989,7 @@ def test_phone_bot_e2e_cognition_wires_speech_event_to_conversation() -> None:
     from mosfet.providers import gemini
     from mosfet.providers import mlx_audio
     from mosfet.providers import openai_compat
+    from mosfet.providers import typesafe
 
     settings = example.Settings.model_validate(os.environ)
     store = memory.Memory()
@@ -996,6 +1024,10 @@ def test_phone_bot_e2e_cognition_wires_speech_event_to_conversation() -> None:
                     base_url=settings.openai_base_url,
                 ),
                 provider="openai_terra_reasoning",
+            ),
+            intuition=typesafe.Processor(
+                base_url=settings.typesafe_base_url,
+                api_key=settings.typesafe_key(),
             ),
             memory=store,
             associative=True,

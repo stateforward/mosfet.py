@@ -18,7 +18,7 @@ SetEvent = hsm.Event[SetData](name="timer.set", kind=event.EventKind, schema=Set
 
 model = bot.define(
     "timer",
-    bot.cognition(support.Silent()),
+    bot.cognition(support.Silent(), intuition=support.Undecided()),
     bot.initial(bot.target("idle")),
     bot.state("idle", bot.transition(bot.on(SetEvent), bot.target("../running"))),
     bot.state("running", bot.transition(bot.on("timer.done"), bot.target("../idle"))),

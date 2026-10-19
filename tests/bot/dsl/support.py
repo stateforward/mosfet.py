@@ -1,4 +1,4 @@
-"""Shared helpers for the bot DSL tests: a processor that selects nothing, a voice source and a mouth
+"""Shared helpers for the bot DSL tests: a processor and a decision processor that select nothing, a voice source and a mouth
 for a bot born with a voice, the wrong bot files, and the runner for the explanations' examples.
 
 Each file under ``wrong/`` is a deliberately wrong bot file, kept as ``.py.txt`` so the type checker
@@ -31,6 +31,17 @@ GOLDEN = pathlib.Path(__file__).parent / "golden"
 
 class Silent(processing.Processor):
     """A processor that selects nothing: enough to define a bot, never asked to think in these tests."""
+
+    @typing.override
+    async def process(
+        self, input: processing.InputData, *, drafts: processing.DraftSink | None = None
+    ) -> processing.Events:
+        del input, drafts
+        return ()
+
+
+class Undecided(processing.DecisionProcessor):
+    """A decision processor that selects nothing: the intuition a bot is defined with, never asked to decide here."""
 
     @typing.override
     async def process(
@@ -195,6 +206,7 @@ async def execute(source: str) -> None:
     namespace: dict[str, object] = {
         **_NAMESPACE_MODULES,
         "processor": Silent(),
+        "decider": Undecided(),
         "environment": environment,
         "catalog": Shelf(),
         "voices": Voices(),
