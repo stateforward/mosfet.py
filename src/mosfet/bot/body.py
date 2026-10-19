@@ -6,7 +6,9 @@ import asyncio
 import collections.abc
 import dataclasses
 import datetime
+import json
 import logging
+import time
 import typing
 import uuid
 import weakref
@@ -28,6 +30,7 @@ from mosfet import telemetry
 from mosfet.telemetry import observer
 from mosfet.telemetry import span
 from mosfet.environment import SoundEvent, VisualEvent, Environment, require_environment_scope, space
+from mosfet.event import event_json_value
 from mosfet.telemetry.hsm import Traced, deliver
 
 _LOG = logging.getLogger(__name__)
@@ -42,6 +45,15 @@ _OWNED_DEVICES_ATTRIBUTE = "owned_devices"
 _FIRMWARE_ATTRIBUTE = "firmware"
 _LIFECYCLE_SCOPE = "bot.lifecycle"
 _FIRMWARE_SCOPE = "bot.firmware"
+_TURN_SCOPE = "bot.turn"
+# How many arrivals the body holds for the next turn: a count only, visible in the snapshot.
+_HELD_PERCEPTS_ATTRIBUTE = "held_percepts"
+# A turn takes the longest arrival-order prefix of what is held within these bounds, and always at
+# least one item: the bounds split a backlog into consecutive turns and never leave anything out.
+# Bytes are the summed canonical JSON of the taken stimuli (a quarter of the prompt and episode
+# budget); participants are their order-preserving union, under the payloads' own bound of 32.
+_MAX_PERCEIVED_BYTES = 65_536
+_MAX_PERCEIVED_PARTICIPANTS = 32
 # Attributes are a closed set from code: whether the firmware started (ok), failed or timed out.
 _FIRMWARE_STARTS = metrics.get_meter(_FIRMWARE_SCOPE).create_counter(
     "bot.firmware.start.count",
@@ -52,6 +64,24 @@ _DEGRADED = metrics.get_meter(_LIFECYCLE_SCOPE).create_counter(
     "bot.lifecycle.degraded.count",
     unit="{transition}",
     description="Count of Bot transitions into the degraded lifecycle state, by the stage whose bound expired.",
+)
+# No attributes: how many percepts each turn took together.
+_PERCEPT_COUNT = metrics.get_meter(_TURN_SCOPE).create_histogram(
+    "bot.turn.percept.count",
+    unit="{stimulus}",
+    description="Percepts each turn took together: one stimulus, or a bot.perceived batch of up to eight.",
+)
+# ``bot.handoff.kind`` is a closed set of two from code: device_stimulus, ability_product.
+_PERCEPT_WAIT = metrics.get_meter(_TURN_SCOPE).create_histogram(
+    "bot.turn.percept.wait",
+    unit="s",
+    description="Seconds each percept was held while the bot was busy before a turn took it, by handoff kind.",
+)
+# ``reason`` is a closed set of four from code: deactivated, rebooted, degraded, stopped.
+_PERCEPTS_RELEASED = metrics.get_meter(_TURN_SCOPE).create_counter(
+    "bot.turn.percept.released.count",
+    unit="{stimulus}",
+    description="Held percepts released unperceived because the bot left active, by why it left.",
 )
 # ``terminal`` is the lifecycle terminal's event name: a closed set of four from code.
 _UNDELIVERED = metrics.get_meter(_LIFECYCLE_SCOPE).create_counter(
@@ -99,6 +129,18 @@ _FirmwareFailedEvent = hsm.Event[_FirmwareStepData](
     kind=hsm.ErrorEventKind,
     schema=_FirmwareStepData,
 )
+
+
+@dataclasses.dataclass(frozen=True)
+class _Held:
+    """One arrival a busy body holds for its next turn: the event exactly as it arrived, and when.
+
+    ``held_at`` is a monotonic reading for telemetry only (``bot.turn.percept.wait``); no behavior
+    reads it.
+    """
+
+    event: hsm.Event[typing.Any]
+    held_at: float
 
 
 @dataclasses.dataclass(frozen=True)
@@ -375,6 +417,11 @@ class Bot(Traced):
     # (success, timeout failure) and when deactivation abandons the turn lifetime.
     # Guards read it only alongside a live turn operation — never alone.
     _processing_focus_candidates: tuple[str, ...]
+    # What reached the body for a turn, oldest first: the defer queue made explicit, durable
+    # across any number of turns (not step scratch). Only _hold_percept appends to it; only a
+    # turn's take and the release on leaving active remove from it, so it is empty whenever the
+    # body is idle. Its count is the declared held_percepts attribute.
+    _held: tuple[_Held, ...]
     _innate_ability_instances: tuple[abilities.Ability[typing.Any, typing.Any], ...]
     # The machinery the bot's owner wrote for it: started after every part is attached, stopped first.
     _firmware: hsm.Instance | None
@@ -469,6 +516,7 @@ class Bot(Traced):
         self._cognition_id = None
         self._focused_device = None
         self._processing_focus_candidates = ()
+        self._held = ()
         self._innate_ability_instances = tuple(ability_type() for ability_type in self._innate_abilities)
         self._input = tuple(input)
         self._output = tuple(output)
@@ -1017,12 +1065,51 @@ class Bot(Traced):
         )
 
     @staticmethod
-    def _processing_completed_with_focus(ctx: hsm.Context, instance: "Bot", event: hsm.Event[typing.Any]) -> bool:
-        return Bot._processing_completed(ctx, instance, event) and Bot._has_focused_device(ctx, instance, event)
+    def _holds_percepts(ctx: hsm.Context, instance: "Bot", event: hsm.Event[typing.Any]) -> bool:
+        del ctx, event
+        return bool(instance._held)
 
     @staticmethod
-    def _processing_failed_with_focus(ctx: hsm.Context, instance: "Bot", event: hsm.Event[typing.Any]) -> bool:
-        return Bot._processing_failed(ctx, instance, event) and Bot._has_focused_device(ctx, instance, event)
+    def _holds_percepts_with_focus(ctx: hsm.Context, instance: "Bot", event: hsm.Event[typing.Any]) -> bool:
+        # One guard: hsm keeps a transition's last guard only, so two would not both hold.
+        return Bot._holds_percepts(ctx, instance, event) and Bot._has_focused_device(ctx, instance, event)
+
+    @staticmethod
+    def _hold_percept(ctx: hsm.Context, instance: "Bot", event: hsm.Event[typing.Any]) -> None:
+        """Hold what reached the body, in arrival order, for the turn that will perceive it."""
+
+        del ctx
+        # Telemetry only (bot.turn.percept.wait): no behavior reads held_at.
+        instance._held = (*instance._held, _Held(event=event, held_at=time.monotonic()))
+        _ = instance.set(_HELD_PERCEPTS_ATTRIBUTE, len(instance._held))
+
+    @staticmethod
+    def _release_held(ctx: hsm.Context, instance: "Bot", event: hsm.Event[typing.Any]) -> None:
+        """Release what is still held as the body leaves active: counted and logged, never silent.
+
+        The reason is read from the typed payload of what took the body out of active: a
+        deactivation, a reboot, the processing cancellation bound that degrades it, or (any other
+        exit) the body being stopped.
+        """
+
+        del ctx
+        released = len(instance._held)
+        if not released:
+            return
+        instance._held = ()
+        _ = instance.set(_HELD_PERCEPTS_ATTRIBUTE, 0)
+        data = event.data
+        reason = (
+            "deactivated"
+            if isinstance(data, events.DeactivateEventData)
+            else "rebooted"
+            if isinstance(data, events.RebootEventData)
+            else "degraded"
+            if isinstance(data, _ProcessingOperationData)
+            else "stopped"
+        )
+        _PERCEPTS_RELEASED.add(released, {"reason": reason})
+        _LOG.info("Bot released held percepts count=%d reason=%s", released, reason)
 
     @staticmethod
     def _resolved_processing_timeout(instance: "Bot") -> datetime.timedelta:
@@ -1081,6 +1168,53 @@ class Bot(Traced):
 
     @staticmethod
     async def _dispatch_bot_processing(ctx: hsm.Context, instance: "Bot", event: hsm.Event) -> None:
+        del event
+        # The take runs first and synchronously (the activity starts eagerly on entry), so nothing
+        # held can slip between it and the turn: the longest arrival-order prefix of what is held
+        # within the count, byte and participant bounds, and always at least one item. Only size
+        # and identity are read; nothing is ranked, filtered or dropped.
+        held = instance._held
+        if not held:
+            raise AssertionError("a turn starts only with something held")
+        arrivals: list[tuple[_Held, mosfet.InputData, tuple[mosfet.Participant, ...], str]] = []
+        weight = 0
+        union: list[mosfet.Participant] = []
+        for item in held[: events.MAX_PERCEPTS]:
+            if isinstance(item.event.data, events.InputEventData):
+                # The device's stamped participants ride forward unchanged (none when it knows no one).
+                arrived: mosfet.InputData = item.event.data
+                stamped = item.event.data.participants
+                kind = "device_stimulus"
+            elif isinstance(item.event.data, cognition.InputData):
+                # Sensory / contribution products hand cognition.InputEvent (Listening pattern).
+                # Body admits the handoff; it does not inspect conversation or other product domains.
+                # The producer's stamped participants ride forward unchanged.
+                arrived = item.event.data.stimulus
+                stamped = item.event.data.participants
+                kind = "ability_product"
+            else:
+                raise AssertionError(f"unsupported body processing event data: {type(item.event.data)!r}")
+            try:
+                size = len(json.dumps(event_json_value(arrived)))
+            except (TypeError, ValueError):
+                # Unmeasurable is over the bound: it is taken, alone, when it is first.
+                size = _MAX_PERCEIVED_BYTES + 1
+            joined = list(union)
+            for participant in stamped:
+                if participant not in joined:
+                    joined.append(participant)
+            if arrivals and (weight + size > _MAX_PERCEIVED_BYTES or len(joined) > _MAX_PERCEIVED_PARTICIPANTS):
+                break
+            arrivals.append((item, arrived, stamped, kind))
+            weight += size
+            union = joined
+        instance._held = held[len(arrivals) :]
+        _ = instance.set(_HELD_PERCEPTS_ATTRIBUTE, len(instance._held))
+        taken_at = time.monotonic()  # telemetry only
+        for item, _arrived, _stamped, kind in arrivals:
+            _PERCEPT_WAIT.record(taken_at - item.held_at, {"bot.handoff.kind": kind})
+        _PERCEPT_COUNT.record(len(arrivals))
+        first = arrivals[0][0].event
         # The span covers admitting the stimulus and handing it to cognition, and stops there:
         # the wait below ends by cancellation on every ordinary turn, which is not a failure of
         # the handoff.
@@ -1089,29 +1223,38 @@ class Bot(Traced):
             scope="bot.body",
             component="body",
             stage="cognition_handoff",
-            context=telemetry.event_context(event),
+            context=telemetry.event_context(first),
         ) as active:
-            if isinstance(event.data, events.InputEventData):
-                stimulus = event.data
-                # The device's stamped participants ride forward unchanged (none when it knows no one).
-                participants = event.data.participants
-                active.set_attribute("bot.handoff.kind", "device_stimulus")
-            elif isinstance(event.data, cognition.InputData):
-                # Sensory / contribution products hand cognition.InputEvent (Listening pattern).
-                # Body admits the handoff; it does not inspect conversation or other product domains.
-                # The producer's stamped participants ride forward unchanged.
-                stimulus = event.data.stimulus
-                participants = event.data.participants
-                active.set_attribute("bot.handoff.kind", "ability_product")
+            if len(arrivals) == 1:
+                # A single percept is its own perception: cognition gets exactly what arrived.
+                _item, stimulus, participants, kind = arrivals[0]
+                envelope_source = first.source
+                active.set_attribute("bot.handoff.kind", kind)
             else:
-                raise AssertionError(f"unsupported body processing event data: {type(event.data)!r}")
+                # Everything taken is perceived together, in arrival order, each percept unchanged
+                # with the source it arrived on and its own participants. The turn's participants are
+                # their order-preserving union.
+                percepts = tuple(
+                    events.PerceptData(stimulus=arrived, source=item.event.source, participants=stamped)
+                    for item, arrived, stamped, _kind in arrivals
+                )
+                stimulus = dataclasses.replace(
+                    events.PerceivedEvent.with_data(events.PerceivedData(percepts=percepts)),
+                    id=first.id,
+                    source=hsm.id(instance),
+                )
+                participants = tuple(union)
+                envelope_source = hsm.id(instance)
+                active.set_attribute("bot.handoff.kind", "perceived")
+            active.set_attribute("bot.turn.percept.count", len(arrivals))
+            active.set_attribute("bot.turn.percept.held.count", len(instance._held))
             # Attention bias is cognition-owned (cognition.types.attention_bias_for_turn):
             # the body stamps identity context and applies the verdict mechanically. The
             # bias reads device identity only — never what happened, never insistence —
-            # so nothing here arbitrates per stimulus.
+            # so nothing here arbitrates per stimulus; a batch is biased percept by percept.
             focus, focus_candidates = cognition.types.attention_bias_for_turn(
                 stimulus,
-                envelope_source=event.source,
+                envelope_source=envelope_source,
                 device_names=instance._devices,
                 device_source_refs=instance._device_source_refs,
                 focused_device=instance._focused_device,
@@ -1130,7 +1273,7 @@ class Bot(Traced):
         # Live turn capability + activity-owned timer. The cancel-token capability is minted with
         # the timer id so a cancelled confirmation can match immediately (before the cancelling
         # activity runs). Successful terminals retire both; timeout keeps only the cancel token.
-        request_id = event.id
+        request_id = first.id
         assert request_id
         _ = await processing.start_operation(instance, request_id)
         timer: _ProcessingOperation | None = None
@@ -1140,14 +1283,14 @@ class Bot(Traced):
                 scope="bot.body",
                 component="body",
                 stage="cognition_dispatch",
-                context=telemetry.event_context(event),
+                context=telemetry.event_context(first),
             ):
                 input_event = telemetry.inject_context(
                     dataclasses.replace(
                         cognition.InputEvent.with_data_and_id(cognition_input, request_id),
                         source=hsm.id(instance),
                         target=hsm.id(instance._cognition),
-                        metadata=dict(event.metadata),
+                        metadata=dict(first.metadata),
                     )
                 )
                 _ = hsm.dispatch(ctx, instance._cognition, input_event)
@@ -1339,6 +1482,13 @@ class Bot(Traced):
         else:
             raise AssertionError(f"unsupported body processing event data: {type(event.data)!r}")
         instance._focused_device = Bot._target_device_reference(instance, processing_data, event.source)
+
+    @staticmethod
+    def _focus_first_held(ctx: hsm.Context, instance: "Bot", event: hsm.Event[typing.Any]) -> None:
+        # Reflex floor at a turn's end: an unoccupied body turns to look at what arrived first.
+        # Arrival order only, never rank: exactly what replaying the first held stimulus did.
+        del event
+        Bot._focus_event_target(ctx, instance, instance._held[0].event)
 
     @staticmethod
     def _dispatch_focus_device_action(ctx: hsm.Context, instance: "Bot", event: hsm.Event[typing.Any]) -> None:
@@ -1772,6 +1922,7 @@ class Bot(Traced):
         "Bot",
         hsm.attribute(_OWNED_DEVICES_ATTRIBUTE),
         hsm.attribute(_FIRMWARE_ATTRIBUTE),
+        hsm.attribute(_HELD_PERCEPTS_ATTRIBUTE, 0),
         hsm.initial(hsm.target("inactive")),
         # Every accepted bot.deactivate gets exactly one public terminal under its id: inactive
         # and degraded answer it at once, the stop states supersede the request they are running
@@ -2007,6 +2158,8 @@ class Bot(Traced):
             hsm.initial(hsm.target("unfocused")),
             # Devices are up by now (started during activation), so their runtime ids are real.
             hsm.entry(_describe_owned_devices),
+            # Whatever is still held when the body leaves active is released, counted, not replayed.
+            hsm.exit(_release_held),
             hsm.transition(
                 hsm.on(events.RebootEvent),
                 hsm.guard(_reboot_requested_by_cognition),
@@ -2043,10 +2196,12 @@ class Bot(Traced):
                 # insistence — so the turn is granted blind to content and the body turns
                 # to look. What (if anything) to do with it is cognition's, and ignoring
                 # is a real answer. Per-stimulus bias lives in cognition, never here.
+                # The turn takes what it perceives from what the body holds, so the occasion is held
+                # first, like anything that arrives while the bot is busy.
                 hsm.transition(
                     hsm.on(events.InputEvent),
                     hsm.guard(_input_targets_configured_device),
-                    hsm.effect(_focus_event_target),
+                    hsm.effect(_hold_percept, _focus_event_target),
                     hsm.target("../processing"),
                 ),
                 # Sensory / contribution products: explicit cognition.InputEvent handoff
@@ -2054,7 +2209,7 @@ class Bot(Traced):
                 # Bot grants Cognition the turn; it does not inspect or route the stimulus.
                 hsm.transition(
                     hsm.on(cognition.InputEvent),
-                    hsm.effect(_focus_event_target),
+                    hsm.effect(_hold_percept, _focus_event_target),
                     hsm.target("../processing"),
                 ),
             ),
@@ -2071,18 +2226,36 @@ class Bot(Traced):
                 hsm.transition(
                     hsm.on(events.InputEvent),
                     hsm.guard(_input_targets_configured_device),
+                    hsm.effect(_hold_percept),
                     hsm.target("../processing"),
                 ),
                 hsm.transition(
                     hsm.on(cognition.InputEvent),
+                    hsm.effect(_hold_percept),
                     hsm.target("../processing"),
                 ),
+            ),
+            # Every turn ends here. Something held starts the next turn at once, which perceives it
+            # with whatever else is held; an unoccupied body first turns to what arrived first.
+            # Otherwise the body idles where its attention is.
+            hsm.choice(
+                "turn_ended",
+                hsm.transition(hsm.guard(_holds_percepts_with_focus), hsm.target("processing")),
+                hsm.transition(hsm.guard(_holds_percepts), hsm.effect(_focus_first_held), hsm.target("processing")),
+                hsm.transition(hsm.guard(_has_focused_device), hsm.target("focused")),
+                hsm.transition(hsm.target("unfocused")),
             ),
             hsm.state(
                 "processing",
                 hsm.activity(_dispatch_bot_processing),
-                hsm.defer(events.InputEvent),
-                hsm.defer(cognition.InputEvent),
+                # A happening survives a busy turn: what arrives is held, and the next turn
+                # perceives it together with everything else held, in arrival order.
+                hsm.transition(
+                    hsm.on(events.InputEvent),
+                    hsm.guard(_input_targets_configured_device),
+                    hsm.effect(_hold_percept),
+                ),
+                hsm.transition(hsm.on(cognition.InputEvent), hsm.effect(_hold_percept)),
                 hsm.transition(
                     hsm.on(events.ClearFocusEvent),
                     hsm.guard(_ability_selected_clear_focus),
@@ -2100,27 +2273,15 @@ class Bot(Traced):
                 ),
                 hsm.transition(
                     hsm.on(events.ProcessingCompletedEvent),
-                    hsm.guard(_processing_completed_with_focus),
-                    hsm.effect(_retire_bot_turn),
-                    hsm.target("../focused"),
-                ),
-                hsm.transition(
-                    hsm.on(events.ProcessingCompletedEvent),
                     hsm.guard(_processing_completed),
                     hsm.effect(_retire_bot_turn),
-                    hsm.target("../unfocused"),
-                ),
-                hsm.transition(
-                    hsm.on(events.ProcessingFailedEvent),
-                    hsm.guard(_processing_failed_with_focus),
-                    hsm.effect(_retire_bot_turn),
-                    hsm.target("../focused"),
+                    hsm.target("../turn_ended"),
                 ),
                 hsm.transition(
                     hsm.on(events.ProcessingFailedEvent),
                     hsm.guard(_processing_failed),
                     hsm.effect(_retire_bot_turn),
-                    hsm.target("../unfocused"),
+                    hsm.target("../turn_ended"),
                 ),
                 hsm.transition(
                     hsm.on(_ProcessingTimedOutEvent),
@@ -2132,20 +2293,17 @@ class Bot(Traced):
             hsm.state(
                 "cancelling_processing",
                 hsm.activity(_cancelling_processing_activity),
-                hsm.defer(events.InputEvent),
-                hsm.defer(cognition.InputEvent),
                 hsm.transition(
-                    hsm.on(cognition.CancelledEvent, processing.CancelledEvent),
-                    hsm.guard(_matches_cognition_cancelled),
-                    hsm.guard(_has_focused_device),
-                    hsm.effect(_dispatch_processing_timeout_failure),
-                    hsm.target("../focused"),
+                    hsm.on(events.InputEvent),
+                    hsm.guard(_input_targets_configured_device),
+                    hsm.effect(_hold_percept),
                 ),
+                hsm.transition(hsm.on(cognition.InputEvent), hsm.effect(_hold_percept)),
                 hsm.transition(
                     hsm.on(cognition.CancelledEvent, processing.CancelledEvent),
                     hsm.guard(_matches_cognition_cancelled),
                     hsm.effect(_dispatch_processing_timeout_failure),
-                    hsm.target("../unfocused"),
+                    hsm.target("../turn_ended"),
                 ),
                 hsm.transition(
                     hsm.on(_ProcessingCancelTimedOutEvent),

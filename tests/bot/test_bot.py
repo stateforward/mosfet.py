@@ -20,6 +20,7 @@ import collections.abc
 import dataclasses
 import datetime
 import io
+import json
 import inspect
 import math
 import os
@@ -64,7 +65,7 @@ from tests.hsm_instance_state import (
 from tests import metric_reader
 from tests.devices.phone.handset import carrier_spans, published_names
 from tests.bot.lifecycle_replies import LifecycleReplies, started_replies
-from tests.hsm_model import transition_map
+from tests.hsm_model import choice_transitions, transition_map
 from tests.type_helpers import object_dict
 
 
@@ -1794,12 +1795,54 @@ def test_bot_model_tracks_activation_focus_and_processing_state() -> None:
     assert not any(
         "_focus_event_target" in effect for effect in transitions["/Bot/active/focused"]["bot.input"][0].effect
     )
+
     # A happening survives a busy turn. Unlike a tick, which only ever asserted "it is now
     # later", a fact about the world is still true when the body finishes thinking, and
-    # nothing re-announces a call that connected while the bot was blocked.
-    assert "bot.input" in deferred_map["/Bot/active/processing"]
-    assert "bot.input" in deferred_map["/Bot/active/cancelling_processing"]
-    assert "bot.ability.cognition.input" in deferred_map["/Bot/active/processing"]
+    # nothing re-announces a call that connected while the bot was blocked. The body holds it
+    # itself, never in the runtime's defer list, and the occasion that wakes an idle body is
+    # held the same way, so every turn takes what it perceives from one place.
+    def behaviors(names: collections.abc.Iterable[str]) -> list[str]:
+        # The boundary observer adds its own effect to every transition; only the body's count here.
+        return [name.rpartition("/")[2] for name in names if "/observer/" not in name]
+
+    for busy_state in ("/Bot/active/processing", "/Bot/active/cancelling_processing"):
+        for name in ("bot.input", "bot.ability.cognition.input"):
+            assert name not in deferred_map.get(busy_state, {})
+            (hold,) = transitions[busy_state][name]
+            assert not hold.target
+            assert behaviors(hold.effect) == ["_hold_percept"]
+    for attention_state in ("/Bot/active/unfocused", "/Bot/active/focused"):
+        for name in ("bot.input", "bot.ability.cognition.input"):
+            occasion = transitions[attention_state][name][0]
+            assert behaviors(occasion.effect)[0] == "_hold_percept"
+            assert occasion.target == "/Bot/active/processing"
+    # Every turn terminal ends at one choice: something held starts the next turn at once (an
+    # unoccupied body first turns to what arrived first), otherwise the body idles where its
+    # attention is. The fallback is last and unguarded.
+    for busy_state, name in (
+        ("/Bot/active/processing", "bot.processing.completed"),
+        ("/Bot/active/processing", "bot.processing.failed"),
+        ("/Bot/active/cancelling_processing", "bot.ability.cognition.cancelled"),
+        ("/Bot/active/cancelling_processing", "bot.ability.processing.cancelled"),
+    ):
+        assert [terminal.target for terminal in transitions[busy_state][name]] == ["/Bot/active/turn_ended"]
+    branches = choice_transitions(model, "/Bot/active/turn_ended")
+    assert [
+        (
+            (branch.guard or "").rpartition("/")[2],
+            behaviors(branch.effect),
+            branch.target,
+        )
+        for branch in branches
+    ] == [
+        ("_holds_percepts_with_focus", [], "/Bot/active/processing"),
+        ("_holds_percepts", ["_focus_first_held"], "/Bot/active/processing"),
+        ("_has_focused_device", [], "/Bot/active/focused"),
+        ("", [], "/Bot/active/unfocused"),
+    ]
+    # Whatever is still held when the body leaves active is released and counted, not replayed.
+    active_state = typing.cast(hsm.StateElement, model.members["/Bot/active"])
+    assert behaviors(active_state.exit) == ["_release_held"]
     assert "bot.ability.cognition.output" in transitions["/Bot/active/processing"]
     assert "bot.ability.failed" in transitions["/Bot/active/processing"]
     # Focus is declared on active (transition_map may inherit it into child keys). Clear is
@@ -3603,7 +3646,7 @@ def test_focused_agent_ability_can_clear_focus() -> None:
     assert actions == [no_output("stay on phone"), clear_output("done")]
 
 
-def test_bot_processing_state_defers_repeated_input_until_processing_completes() -> None:
+def test_bot_processing_state_holds_repeated_input_until_processing_completes() -> None:
     async def run() -> tuple[str, list[int], list[cognition.types.OutputData]]:
         release = asyncio.Event()
         ability = BlockingAbility(release=release)
@@ -3667,7 +3710,7 @@ def test_bot_focus_change_during_processing_does_not_swallow_completion() -> Non
     assert actions == [no_output("priority:3")]
 
 
-def test_bot_processing_state_defers_observed_phone_event_until_processing_completes() -> None:
+def test_bot_processing_state_holds_observed_phone_event_until_processing_completes() -> None:
     async def run() -> tuple[str, list[processing.InputData], list[cognition.types.OutputData]]:
         release = asyncio.Event()
         ability = BlockingSequenceAbility(
@@ -3744,7 +3787,7 @@ def test_bot_processing_state_ignores_device_event_while_processing() -> None:
     assert actions == [no_output("initial")]
 
 
-def test_deferred_input_replays_after_focus_device_completion() -> None:
+def test_held_input_is_perceived_after_focus_device_completion() -> None:
     async def run() -> tuple[str, bool, list[processing.InputData], list[cognition.types.OutputData]]:
         release = asyncio.Event()
         ability = BlockingSequenceAbility(
@@ -3792,7 +3835,7 @@ def test_deferred_input_replays_after_focus_device_completion() -> None:
     ]
 
 
-def test_deferred_input_replays_after_clear_focus_completion() -> None:
+def test_held_input_is_perceived_after_clear_focus_completion() -> None:
     async def run() -> tuple[str, bool, list[processing.InputData], list[cognition.types.OutputData]]:
         release = asyncio.Event()
         ability = BlockingSequenceAbility(
@@ -3840,10 +3883,6 @@ def test_deferred_input_replays_after_clear_focus_completion() -> None:
     ]
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="H3 (wave 12): the busy body defers, so each queued stimulus takes a whole turn of its own.",
-)
 def test_a_line_typed_while_the_bot_is_busy_is_perceived_on_the_next_turn() -> None:
     """A line typed during a turn waits one turn, not one turn per stimulus queued ahead of it.
 
@@ -3931,6 +3970,433 @@ def test_a_line_typed_while_the_bot_is_busy_is_perceived_on_the_next_turn() -> N
         {"ref": "person-42", "role": "source", "own": False}
     ]
     assert len(calls) == 2
+
+
+# A busy body holds what reaches it (wave 12): the next turn takes the longest arrival-order prefix of
+# what is held within 8 percepts, 64 KiB and 32 participants, and always at least one.
+
+
+class GatedProcessor(processing.DecisionProcessor):
+    """Records what each call perceived; call ``n`` waits at ``gates[n]`` when it has one. Chooses nothing."""
+
+    calls: list[processing.InputData]
+    gates: dict[int, asyncio.Event]
+
+    def __init__(self, gates: dict[int, asyncio.Event] | None = None) -> None:
+        self.calls = []
+        self.gates = dict(gates or {})
+
+    @typing.override
+    async def process(
+        self, input: processing.InputData, *, drafts: processing.DraftSink | None = None
+    ) -> processing.Events:
+        self.calls.append(input)
+        gate = self.gates.get(len(self.calls))
+        if gate is not None:
+            _ = await gate.wait()
+        return ()
+
+
+class CancelGatedCognition(CapturingCognition):
+    """Cognition whose cancel request waits at a gate, so the body stays cancelling while things arrive."""
+
+    gate: asyncio.Event
+    pending: set[asyncio.Future[bool]]
+
+    def __init__(self, processor: processing.DecisionProcessor, *, gate: asyncio.Event) -> None:
+        super().__init__(processor)
+        self.gate = gate
+        self.pending = set()
+
+    @typing.override
+    def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[bool]:
+        if event.name != cognition.CancelEvent.name:
+            return super().dispatch(ctx, event)
+        deliver = super().dispatch
+
+        async def later() -> bool:
+            _ = await self.gate.wait()
+            return await deliver(ctx, event)
+
+        task = asyncio.ensure_future(later())
+        self.pending.add(task)
+        return task
+
+
+class HoldingTimeoutAgent(AbilityAgent):
+    # Long enough for a recovered turn to finish; the cancellation bound is then 100 ms too.
+    _processing_timeout: typing.ClassVar[datetime.timedelta] = datetime.timedelta(milliseconds=100)
+
+
+def happening_input(
+    device: str,
+    situation: str,
+    *,
+    participants: tuple[mosfet.Participant, ...] = (),
+) -> mosfet.InputEventData:
+    return mosfet.InputEventData(
+        target_device=device,
+        observation=mosfet.StimulusData.from_event(HappeningEvent.with_data(HappeningData(situation=situation))),
+        participants=participants,
+    )
+
+
+async def arrive(active_bot: Bot, data: mosfet.InputEventData, arrival_id: str) -> None:
+    _ = await active_bot.dispatch(
+        active_bot.context(),
+        dataclasses.replace(mosfet.InputEvent.with_data_and_id(data, arrival_id), source=data.target_device or ""),
+    )
+
+
+def held_percepts(active_bot: Bot) -> object:
+    """The body's declared held count, as its snapshot shows it."""
+
+    attributes = typing.cast(collections.abc.Mapping[str, object], active_bot.take_snapshot().Attributes or {})
+    (count,) = [value for key, value in attributes.items() if key.endswith("/held_percepts")]
+    return count
+
+
+def perceived_stimuli(given: object) -> list[mosfet.InputData]:
+    assert isinstance(given, hsm.Event)
+    batch = typing.cast(hsm.Event[typing.Any], given).data
+    assert isinstance(batch, mosfet.PerceivedData)
+    return [percept.stimulus for percept in batch.percepts]
+
+
+def test_a_single_held_stimulus_is_handed_to_cognition_exactly_as_it_arrived() -> None:
+    """One held item is its own perception: the turn id is its id and cognition gets it unchanged."""
+
+    ada = mosfet.Participant(ref="ada", role=mosfet.ParticipantRole.SOURCE)
+    queued = happening_input("phone", "rang", participants=(ada,))
+
+    async def run() -> tuple[list[hsm.Event[typing.Any]], object, str]:
+        gate = asyncio.Event()
+        cognitive = CapturingCognition(GatedProcessor({1: gate}))
+        active_bot = AbilityAgent(devices=configured_devices("phone"), cognition=cognitive)
+        _ = await start_bot_with_devices(active_bot)
+        await arrive(active_bot, happening_input("phone", "first"), "turn-1")
+        await wait_until(lambda: len(cognitive.input_events) == 1)
+        await arrive(active_bot, queued, "queued-1")
+        _ = gate.set()
+        await wait_until(lambda: len(cognitive.input_events) == 2 and active_bot.state() == "/Bot/active/focused")
+        return cognitive.input_events, held_percepts(active_bot), active_bot.state() or ""
+
+    handed, held, state = asyncio.run(run())
+
+    assert handed[1].id == "queued-1"
+    data = handed[1].data
+    assert isinstance(data, cognition.InputData)
+    assert data.stimulus == queued
+    assert data.participants == (ada,)
+    assert held == 0
+    assert state == "/Bot/active/focused"
+
+
+def test_a_backlog_longer_than_a_turn_takes_splits_into_consecutive_turns_in_order() -> None:
+    queued = [happening_input("phone", f"happening-{index}") for index in range(10)]
+
+    async def run() -> tuple[list[processing.InputData], object, object]:
+        gate = asyncio.Event()
+        processor = GatedProcessor({1: gate})
+        active_bot = AbilityAgent(devices=configured_devices("phone"), cognition=as_cognition(processor))
+        _ = await start_bot_with_devices(active_bot)
+        await arrive(active_bot, happening_input("phone", "busy"), "turn-1")
+        await wait_until(lambda: len(processor.calls) == 1)
+        for index, data in enumerate(queued):
+            await arrive(active_bot, data, f"queued-{index}")
+        held_while_busy = held_percepts(active_bot)
+        _ = gate.set()
+        await wait_until(lambda: len(processor.calls) == 3 and active_bot.state() == "/Bot/active/focused")
+        await settle()
+        return processor.calls, held_while_busy, held_percepts(active_bot)
+
+    calls, held_while_busy, held_after = asyncio.run(run())
+
+    assert held_while_busy == 10
+    assert perceived_stimuli(calls[1].input) == queued[:8]
+    assert perceived_stimuli(calls[2].input) == queued[8:]
+    assert len(calls) == 3
+    assert held_after == 0
+
+
+def test_a_turn_takes_held_stimuli_up_to_its_byte_bound_and_a_lone_oversized_one_alone() -> None:
+    small = happening_input("phone", "small")
+    over_the_rest = happening_input("phone", "x" * (70 * 1024))
+    oversized = happening_input("phone", "y" * (300 * 1024))
+    after = happening_input("phone", "after")
+
+    async def run() -> list[processing.InputData]:
+        gate = asyncio.Event()
+        processor = GatedProcessor({1: gate})
+        active_bot = AbilityAgent(devices=configured_devices("phone"), cognition=as_cognition(processor))
+        _ = await start_bot_with_devices(active_bot)
+        await arrive(active_bot, happening_input("phone", "busy"), "turn-1")
+        await wait_until(lambda: len(processor.calls) == 1)
+        for index, data in enumerate((small, over_the_rest, oversized, after)):
+            await arrive(active_bot, data, f"queued-{index}")
+        _ = gate.set()
+        await wait_until(lambda: len(processor.calls) == 5 and active_bot.state() == "/Bot/active/focused")
+        await settle()
+        return processor.calls
+
+    calls = asyncio.run(run())
+
+    assert [call.input for call in calls[1:]] == [small, over_the_rest, oversized, after]
+
+
+def test_a_turn_takes_held_stimuli_while_their_participants_fit_and_the_next_one_waits() -> None:
+    first = tuple(mosfet.Participant(ref=f"person-{index}", role=mosfet.ParticipantRole.SOURCE) for index in range(20))
+    others = tuple(
+        mosfet.Participant(ref=f"person-{index}", role=mosfet.ParticipantRole.SOURCE) for index in range(20, 40)
+    )
+    a = happening_input("phone", "a", participants=first)
+    again = happening_input("phone", "again", participants=first)
+    b = happening_input("phone", "b", participants=others)
+
+    async def run() -> list[cognition.InputData]:
+        gate = asyncio.Event()
+        ability = processing.Processing(processor=GatedProcessor({1: gate}))
+        cognitive = InputRecordingCognition(ability)
+        active_bot = AbilityAgent(devices=configured_devices("phone"), cognition=cognitive)
+        _ = await start_bot_with_devices(active_bot)
+        await arrive(active_bot, happening_input("phone", "busy"), "turn-1")
+        await wait_until(lambda: len(cognitive.inputs) == 1)
+        for index, data in enumerate((a, again, b)):
+            await arrive(active_bot, data, f"queued-{index}")
+        _ = gate.set()
+        await wait_until(lambda: len(cognitive.inputs) == 3 and active_bot.state() == "/Bot/active/focused")
+        await settle()
+        return cognitive.inputs
+
+    inputs = asyncio.run(run())
+
+    assert perceived_stimuli(inputs[1].stimulus) == [a, again]
+    assert inputs[1].participants == first
+    assert inputs[2].stimulus == b
+    assert inputs[2].participants == others
+    assert len(inputs) == 3
+
+
+def test_what_arrives_during_a_turn_is_perceived_by_the_next_with_everything_else_held() -> None:
+    a, b, c, d = (happening_input("phone", situation) for situation in "abcd")
+
+    async def run() -> list[processing.InputData]:
+        first_turn, second_turn = asyncio.Event(), asyncio.Event()
+        processor = GatedProcessor({1: first_turn, 2: second_turn})
+        active_bot = AbilityAgent(devices=configured_devices("phone"), cognition=as_cognition(processor))
+        _ = await start_bot_with_devices(active_bot)
+        await arrive(active_bot, happening_input("phone", "busy"), "turn-1")
+        await wait_until(lambda: len(processor.calls) == 1)
+        await arrive(active_bot, a, "a")
+        await arrive(active_bot, b, "b")
+        _ = first_turn.set()
+        await wait_until(lambda: len(processor.calls) == 2)
+        await arrive(active_bot, c, "c")
+        await arrive(active_bot, d, "d")
+        _ = second_turn.set()
+        await wait_until(lambda: len(processor.calls) == 3 and active_bot.state() == "/Bot/active/focused")
+        await settle()
+        return processor.calls
+
+    calls = asyncio.run(run())
+
+    assert perceived_stimuli(calls[1].input) == [a, b]
+    assert perceived_stimuli(calls[2].input) == [c, d]
+    assert len(calls) == 3
+
+
+def test_a_cancelling_body_holds_what_arrives_and_the_next_turn_perceives_it() -> None:
+    a, b = happening_input("phone", "a"), happening_input("phone", "b")
+
+    async def run() -> tuple[list[processing.InputData], list[mosfet.ProcessingFailedEventData], str]:
+        cancel_gate = asyncio.Event()
+        processor = GatedProcessor({1: asyncio.Event()})
+        active_bot = HoldingTimeoutAgent(
+            devices=configured_devices("phone"), cognition=CancelGatedCognition(processor, gate=cancel_gate)
+        )
+        _ = await start_bot_with_devices(active_bot)
+        await arrive(active_bot, happening_input("phone", "hangs"), "turn-1")
+        await wait_until(lambda: active_bot.state() == "/Bot/active/cancelling_processing")
+        await arrive(active_bot, a, "a")
+        await arrive(active_bot, b, "b")
+        _ = cancel_gate.set()
+        await wait_until(lambda: len(processor.calls) == 2 and active_bot.state() == "/Bot/active/focused")
+        return processor.calls, active_bot.failures, active_bot.state() or ""
+
+    calls, failures, state = asyncio.run(run())
+
+    assert perceived_stimuli(calls[1].input) == [a, b]
+    assert [failure.message for failure in failures] == ["Bot processing timed out after 0.1 seconds."]
+    assert state == "/Bot/active/focused"
+
+
+def _released_count(metrics: metric_reader.Reader, reason: str) -> float:
+    return sum(
+        point.value
+        for point in metrics.points("bot.turn.percept.released.count")
+        if point.attributes == {"reason": reason}
+    )
+
+
+def test_a_body_that_degrades_while_holding_counts_what_it_released(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    async def run() -> tuple[str, object, int]:
+        processor = GatedProcessor({1: asyncio.Event()})
+        active_bot = HoldingTimeoutAgent(
+            devices=configured_devices("phone"), cognition=CapturingCognition(processor, swallow_cancel=True)
+        )
+        _ = await start_bot_with_devices(active_bot)
+        await arrive(active_bot, happening_input("phone", "hangs"), "turn-1")
+        await wait_until(lambda: len(processor.calls) == 1)
+        await arrive(active_bot, happening_input("phone", "a"), "a")
+        await arrive(active_bot, happening_input("phone", "b"), "b")
+        await wait_until(lambda: active_bot.state() == "/Bot/degraded")
+        await settle()
+        return active_bot.state() or "", held_percepts(active_bot), len(processor.calls)
+
+    with metric_reader.recording(tmp_path, monkeypatch) as metrics:
+        before = _released_count(metrics, "degraded")
+        state, held, calls = asyncio.run(run())
+        after = _released_count(metrics, "degraded")
+
+    assert state == "/Bot/degraded"
+    assert after - before == 2
+    assert held == 0
+    assert calls == 1
+
+
+def test_a_body_deactivated_or_rebooted_while_holding_counts_what_it_released_and_never_replays_it(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    async def deactivate() -> tuple[str, object]:
+        processor = GatedProcessor({1: asyncio.Event()})
+        active_bot = AbilityAgent(devices=configured_devices("phone"), cognition=as_cognition(processor))
+        environment = await start_bot_with_devices(active_bot)
+        await arrive(active_bot, happening_input("phone", "busy"), "turn-1")
+        await wait_until(lambda: len(processor.calls) == 1)
+        await arrive(active_bot, happening_input("phone", "a"), "a")
+        await arrive(active_bot, happening_input("phone", "b"), "b")
+        _ = await active_bot.detach(environment)
+        await wait_until(lambda: active_bot.state() == "/Bot/inactive")
+        return active_bot.state() or "", held_percepts(active_bot)
+
+    async def reboot() -> tuple[str, object, int]:
+        processor = GatedProcessor({1: asyncio.Event()})
+        cognition_ability = as_cognition(processor)
+        active_bot = AbilityAgent(devices=configured_devices("phone"), cognition=cognition_ability)
+        environment = await start_bot_with_devices(active_bot)
+        await arrive(active_bot, happening_input("phone", "busy"), "turn-1")
+        await wait_until(lambda: len(processor.calls) == 1)
+        for index in range(3):
+            await arrive(active_bot, happening_input("phone", f"held-{index}"), f"held-{index}")
+        _ = await hsm.dispatch(
+            environment,
+            active_bot,
+            dataclasses.replace(
+                mosfet.RebootEvent.with_data(mosfet.RebootEventData(reason="cognition_child_teardown_failed")),
+                id="reboot-turn",
+                source=hsm.id(cognition_ability),
+                target=hsm.id(active_bot),
+            ),
+        )
+        await wait_until(lambda: active_bot.state() == "/Bot/active/unfocused")
+        await settle()
+        return active_bot.state() or "", held_percepts(active_bot), len(processor.calls)
+
+    with metric_reader.recording(tmp_path, monkeypatch) as metrics:
+        deactivated_before = _released_count(metrics, "deactivated")
+        rebooted_before = _released_count(metrics, "rebooted")
+        deactivated_state, deactivated_held = asyncio.run(deactivate())
+        rebooted_state, rebooted_held, rebooted_calls = asyncio.run(reboot())
+        deactivated_after = _released_count(metrics, "deactivated")
+        rebooted_after = _released_count(metrics, "rebooted")
+
+    assert deactivated_state == "/Bot/inactive"
+    assert deactivated_after - deactivated_before == 2
+    assert deactivated_held == 0
+    # Nothing held survives into the next activation: the rebooted body idles, unprompted.
+    assert rebooted_state == "/Bot/active/unfocused"
+    assert rebooted_after - rebooted_before == 3
+    assert rebooted_held == 0
+    assert rebooted_calls == 1
+
+
+def test_an_unoccupied_body_turns_to_what_arrived_first_and_an_occupied_one_keeps_its_focus() -> None:
+    """Reflex floor at a turn's end, by arrival order: never by rank."""
+
+    browser, phone = happening_input("browser", "opened"), happening_input("phone", "rang")
+
+    async def run(busy_output: cognition.types.OutputData) -> list[cognition.InputData]:
+        release = asyncio.Event()
+        ability = BlockingSequenceAbility(release=release, block_on_call=2, outputs=(no_output("look"), busy_output))
+        cognitive = InputRecordingCognition(ability)
+        active_bot = AbilityAgent(devices=configured_devices("phone", "browser"), cognition=cognitive)
+        _ = await start_bot_with_devices(active_bot)
+        await arrive(active_bot, happening_input("phone", "first"), "turn-1")
+        await wait_until(lambda: len(cognitive.inputs) == 1 and active_bot.state() == "/Bot/active/focused")
+        await arrive(active_bot, happening_input("phone", "busy"), "turn-2")
+        await wait_until(lambda: len(cognitive.inputs) == 2)
+        await arrive(active_bot, browser, "browser-first")
+        await arrive(active_bot, phone, "phone-second")
+        _ = release.set()
+        await wait_until(lambda: len(cognitive.inputs) == 3 and active_bot.state() == "/Bot/active/focused")
+        return cognitive.inputs
+
+    unoccupied = asyncio.run(run(clear_output("let go")))
+    occupied = asyncio.run(run(no_output("stay")))
+
+    assert perceived_stimuli(unoccupied[2].stimulus) == [browser, phone]
+    assert unoccupied[2].focus == "browser"
+    assert unoccupied[2].focus_candidates == ("browser", "phone")
+    assert perceived_stimuli(occupied[2].stimulus) == [browser, phone]
+    assert occupied[2].focus == "phone"
+    assert occupied[2].focus_candidates == ("phone", "browser")
+
+
+def test_a_turn_records_how_many_percepts_it_took_and_how_long_each_waited(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    async def run() -> None:
+        gate = asyncio.Event()
+        processor = GatedProcessor({1: gate})
+        active_bot = AbilityAgent(devices=configured_devices("phone"), cognition=as_cognition(processor))
+        _ = await start_bot_with_devices(active_bot)
+        await arrive(active_bot, happening_input("phone", "busy"), "turn-1")
+        await wait_until(lambda: len(processor.calls) == 1)
+        await arrive(active_bot, happening_input("phone", "a"), "a")
+        product = cognition.InputData(stimulus=HappeningEvent.with_data(HappeningData(situation="heard")))
+        _ = await active_bot.dispatch(
+            active_bot.context(),
+            dataclasses.replace(cognition.InputEvent.with_data_and_id(product, "product"), source="ears"),
+        )
+        _ = gate.set()
+        await wait_until(lambda: len(processor.calls) == 2 and active_bot.state() == "/Bot/active/focused")
+
+    def totals(points: tuple[metric_reader.Point, ...]) -> dict[str, tuple[int, float]]:
+        return {json.dumps(point.attributes, sort_keys=True): (point.count, point.sum) for point in points}
+
+    with metric_reader.recording(tmp_path, monkeypatch) as metrics:
+        count_before = totals(metrics.points("bot.turn.percept.count"))
+        wait_before = totals(metrics.points("bot.turn.percept.wait"))
+        asyncio.run(run())
+        count_after = totals(metrics.points("bot.turn.percept.count"))
+        wait_after = totals(metrics.points("bot.turn.percept.wait"))
+
+    # Closed attribute sets: none on the count, only the handoff kind on the wait.
+    assert set(count_after) == {"{}"}
+    assert set(wait_after) <= {
+        '{"bot.handoff.kind": "ability_product"}',
+        '{"bot.handoff.kind": "device_stimulus"}',
+    }
+    turns, percepts = count_after["{}"]
+    prior_turns, prior_percepts = count_before.get("{}", (0, 0.0))
+    assert (turns - prior_turns, percepts - prior_percepts) == (2, 3)
+    waited = {key: count - wait_before.get(key, (0, 0.0))[0] for key, (count, _total) in wait_after.items()}
+    assert waited == {
+        '{"bot.handoff.kind": "ability_product"}': 1,
+        '{"bot.handoff.kind": "device_stimulus"}': 2,
+    }
 
 
 def test_bot_processing_state_rejects_malformed_input_event_data() -> None:
