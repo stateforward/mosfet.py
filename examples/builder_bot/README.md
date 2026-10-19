@@ -140,7 +140,7 @@ chmod 0600 examples/builder_bot/secrets/*
 | `BUILDER_COMPUTER_HOST`, `BUILDER_COMPUTER_PORT` | env | `127.0.0.1`, `8765` | Where the computer is served |
 | `BUILDER_COMPUTER_PEER` | env | `builder-desk` | The name the computer's far side connects as (its peer id) |
 | `computer_token_secret` | secret, required | | The key the terminal's token is signed with |
-| `BUILDER_PERSON_ID` | env | unset | Who uses the computer, stamped on what it observes |
+| `BUILDER_PERSON_ID` | env, recommended | unset | Who uses the computer. Each line they type and button they click is stamped with them as its source, so on each turn they start, memory's `present` lane recalls their earlier lines, not only the recent ones; unset, what they do names no one |
 | `BUILDER_TRAITS` | env | `careful,curious,candid` | The owner's traits for the bot, comma separated |
 
 `builder_bot_example.Settings` reads the variables; an empty one is unset. A secret is read from `--secrets-dir`
