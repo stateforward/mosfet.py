@@ -109,6 +109,50 @@ by Alembic. There is no `alembic.ini`;
 4. Run `tests/bot/abilities/memory/test_store.py`; its drift test fails until the
    migrated schema matches `metadata` again. Never edit a revision that has shipped.
 
+## Turns while the bot is busy
+
+The body runs one turn at a time. What reaches it for a turn while one runs (a device's
+`bot.input`, or an ability's `cognition.InputEvent` such as a handed-back step failure, a
+recollection or a routine tick) is held, in arrival order, and nothing is ranked, filtered or
+dropped. How many are held is the body's declared `held_percepts` attribute, a count in its
+snapshot. Every turn terminal (completed, failed, or a confirmed cancel) ends at the
+`active/turn_ended` choice: with something held the next turn starts at once, and a body
+focused on no device first turns to the device of what arrived first, by arrival and never by
+rank; with nothing held the body idles focused or unfocused.
+
+A turn takes the longest arrival-order prefix of what is held, within 8
+percepts, 64 KiB of the stimuli's summed canonical JSON, and 32 participants (their
+order-preserving union), and always at least one. The bounds read only size and identity and
+split a longer backlog into consecutive turns; a lone stimulus over the byte bound is taken
+alone. A turn that takes one stimulus hands cognition exactly what arrived, under the stimulus'
+id, as before. Two or more are one `mosfet.PerceivedEvent` (`bot.perceived`, never a tool):
+`mosfet.PerceivedData.percepts` holds each `mosfet.PerceptData` in arrival order, with the
+stimulus unchanged, the source it arrived on and its producer's participants. The turn's id is
+the first percept's, and its participants are the union.
+
+Cognition takes the batch as one turn. Attention is biased percept by percept: the focus first,
+then each percept's device in arrival order, once each. Autonomy matches each percept by its own
+name, and a matched behavior meets that percept alone, with its own participants; the turn is
+handled only when every percept was, and otherwise intuition perceives the whole batch after the
+behaviors' selections were dispatched. Those selections ride the turn on into deliberation
+(`cognition.types.TurnData.acted`, an `ActedData` of the percepts behaviors handled and what they
+selected): intuition and reasoning are told them as a fact of the turn, after the world and self
+blocks, and the turn's output and its episode carry them first, ahead of deliberation's. The
+prompt renders the batch with each percept as a child element in order. Images across percepts
+share the model's `media.ImageCapacity`, which admits newest in document order first, as within
+any one stimulus. The turn is remembered as one episode of `bot.perceived`, every percept kept,
+under the participants' union. A failed or timed-out step of a batch names `bot.perceived` as its
+stimulus and is handed back once, unless every percept was itself a failed step.
+
+Leaving `active` (deactivation, reboot, the cancel bound that degrades the body, or stopping)
+releases whatever is still held: never replayed, counted in
+`bot.turn.percept.released.count` {reason: deactivated, rebooted, degraded, stopped} and logged
+with its count. Telemetry: `bot.turn.percept.count` (percepts each turn took, no attributes),
+`bot.turn.percept.wait` {`bot.handoff.kind`: device_stimulus, ability_product} (seconds each
+percept was held before a turn took it), and the `bot.body.cognition_handoff` span's
+`bot.handoff.kind` (`perceived` for a batch) with `bot.turn.percept.count` and
+`bot.turn.percept.held.count`; no id, name or content is ever an attribute.
+
 ## Episodic memory
 
 `memory.Memory` is the bot's one durable memory, a state machine reached by message only
@@ -219,8 +263,8 @@ whenever Reflection settles a turn; each time Routines stops broken or removed r
 restarts changed ones, and starts new ones. Detaching Routines stops them. A tick
 (`bot.behavior.tick`: name, trigger, `scheduled_at`, `fired_at`, and the selections the
 routine emitted) goes from Routines to Cognition to the body as a
-`cognition.InputEvent` observing that tick; the body defers it during a turn, and the next
-turn decides what to do with it. `verify_apply` checks a routine by forcing one tick on a
+`cognition.InputEvent` observing that tick; the body holds it during a turn, and the next
+turn perceives it with whatever else was held and decides what to do with it. `verify_apply` checks a routine by forcing one tick on a
 fake timer clock. Telemetry: `bot.behavior.routine.tick.count` {trigger, outcome},
 `bot.behavior.routine.active`, and `bot.behavior.routine.reconcile` / `.start` / `.stop`
 spans; routine names are never attributes.

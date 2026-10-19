@@ -95,7 +95,7 @@ what each bot is made of, and never a value given to a part:
 | `bot.input(ability)` | A sense organ: the body fans every environment stimulus out to its input abilities, in parallel. |
 | `bot.output(ability)` | An effector port, off the stimulus fan-out. |
 | `bot.register(store)` | The body's sensory register (a `memory.StmMemory`), recording every admitted stimulus. At most one. |
-| `bot.timeouts(*, processing=None, deactivation=None, attachment=None, step=None)` | The bot's bounds, each positive; an omitted one keeps its default. `processing`, `deactivation` and `attachment` are the body's own; `step` bounds each step of a turn in cognition (two minutes by default) and each step of its reflection (its select step, its revision and each authoring call, and stopping either), and a step that outlasts it fails only its turn, which the bot then perceives, as it perceives a step that fails; a step that fails or outlasts it on a turn taken up for a failed step is not handed back again. At most one. |
+| `bot.timeouts(*, processing=None, deactivation=None, attachment=None, step=None)` | The bot's bounds, each positive; an omitted one keeps its default. `processing`, `deactivation` and `attachment` are the body's own; `step` bounds each step of a turn in cognition (two minutes by default) and each step of its reflection (its select step, its revision and each authoring call, and stopping either), and a step that outlasts it fails only its turn, which the bot then perceives, as it perceives a step that fails; a step that fails or outlasts it on a turn taken up only for failed steps is not handed back again. At most one. |
 | `bot.allow(*lints)` | Lints allowed for this bot (see [Diagnostics](#diagnostics)). |
 | `bot.state`, `bot.transition`, `bot.on`, `bot.after`, ... | The hsm element functions, re-exported as the same objects: the bot's [firmware](#the-bots-firmware). |
 
@@ -302,7 +302,8 @@ decides for the bot:
 
 * `testing.Scripted(*choices)` is a model whose choices a test writes down. It records every call,
   makes each `testing.Choice(stimulus=, event=, data=)` once, only on a turn woken by that stimulus
-  that offers that event, and otherwise selects nothing. `calls()`, `offered_names()`,
+  that offers that event, and otherwise selects nothing. A turn that perceived several stimuli
+  together is woken by `bot.perceived`. `calls()`, `offered_names()`,
   `woken_by(name)` and `reflected()` read what it was given.
 * `testing.running(model, *, actors=(), clock=None, observe=())` starts the bot for an `async with`
   block, after the shared actors it needs, in an environment keeping time on `clock` when one is given
