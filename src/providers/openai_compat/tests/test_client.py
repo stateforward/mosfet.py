@@ -127,7 +127,7 @@ def test_chat_client_builds_sdk_client(monkeypatch: pytest.MonkeyPatch) -> None:
         constructed.append(dict(kwargs))
         return FakeAsyncOpenAIClient(chat=FakeAsyncChat(completions))
 
-    monkeypatch.setattr(chat_client, "AsyncOpenAI", fake_async_openai)
+    monkeypatch.setattr(chat_client, "KeylessAsyncOpenAI", fake_async_openai)
     client = ChatClient(
         model="compatible-model",
         base_url="https://llm.example.test/v1/",
@@ -164,7 +164,7 @@ def test_chat_client_does_not_send_openai_key_to_custom_base_url(monkeypatch: py
         return FakeAsyncOpenAIClient(chat=FakeAsyncChat(completions))
 
     monkeypatch.setenv("OPENAI_API_KEY", "real-openai-key")
-    monkeypatch.setattr(chat_client, "AsyncOpenAI", fake_async_openai)
+    monkeypatch.setattr(chat_client, "KeylessAsyncOpenAI", fake_async_openai)
     client = ChatClient(
         model="compatible-model",
         base_url="https://llm.example.test/v1/",
@@ -193,7 +193,7 @@ def test_chat_client_defaults_to_the_loopback_endpoint_and_sends_it_no_openai_ke
         return FakeAsyncOpenAIClient(chat=FakeAsyncChat(completions))
 
     monkeypatch.setenv("OPENAI_API_KEY", "real-openai-key")
-    monkeypatch.setattr(chat_client, "AsyncOpenAI", fake_async_openai)
+    monkeypatch.setattr(chat_client, "KeylessAsyncOpenAI", fake_async_openai)
     client = ChatClient(model="local-model")
 
     _ = asyncio.run(client.create_chat_completion(messages=[{"role": "user", "content": "hello"}]))
@@ -378,6 +378,36 @@ def test_a_cancelled_chat_completion_cancels_its_http_request() -> None:
     asyncio.run(run())
 
 
+def test_a_keyless_sdk_client_asks_without_an_authorization_header(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Willy live check (D-W8-21 D3, run3): on openai 2.54 a keyless client raised "Could not resolve
+    authentication method" before sending anything, so the keyless speech servers were never asked. A client
+    built without a key sends its requests, whole and streamed, sync and async, with no Authorization header."""
+
+    monkeypatch.setenv("OPENAI_API_KEY", "real-openai-key")
+    seen: list[httpx.Headers] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        seen.append(request.headers)
+        return httpx.Response(200, json=_EMBEDDINGS_RESPONSE)
+
+    async def ask() -> None:
+        built = chat_client.sdk(
+            base_url="http://127.0.0.1:9/v1", api_key=None, timeout_seconds=5.0, default_headers={}, asynchronous=True
+        )
+        assert isinstance(built, openai.AsyncOpenAI)
+        sdk = built.with_options(http_client=httpx.AsyncClient(transport=httpx.MockTransport(handle)))
+        _ = await sdk.embeddings.create(model="local", input=["a"])
+
+    built = chat_client.sdk(base_url="http://127.0.0.1:9/v1", api_key=None, timeout_seconds=5.0, default_headers={})
+    assert isinstance(built, openai.OpenAI)
+    sdk = built.with_options(http_client=httpx.Client(transport=httpx.MockTransport(handle)))
+    _ = sdk.embeddings.create(model="local", input=["a"])
+    asyncio.run(ask())
+
+    assert len(seen) == 2
+    assert all("authorization" not in headers for headers in seen)
+
+
 @dataclasses.dataclass
 class FakeEmbeddings:
     response: object
@@ -533,7 +563,7 @@ def test_embedding_client_builds_its_sdk_client_once(monkeypatch: pytest.MonkeyP
         return FakeEmbeddingsSDK(embeddings=embeddings)
 
     monkeypatch.setenv("OPENAI_API_KEY", "real-openai-key")
-    monkeypatch.setattr(chat_client, "OpenAI", fake_openai)
+    monkeypatch.setattr(chat_client, "KeylessOpenAI", fake_openai)
     client = EmbeddingClient(
         model="embeddinggemma-2",
         base_url="https://spark.example.test/v1/",

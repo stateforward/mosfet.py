@@ -18,7 +18,8 @@ The package owns the OpenAI SDK dependency for providers that expose the Chat Co
 and a `base_url` and optional `api_key` for any endpoint but the local one, to `ChatClient`, then use that client
 through `TextGenerator` or `Processing`. `base_url` defaults to the loopback endpoint `http://127.0.0.1:8080/v1`, where
 a local llama.cpp server listens, so `ChatClient(model="local-model")` reaches it; a cloud endpoint, OpenAI's
-included, is always named.
+included, is always named. A client given no key (chat, embeddings, speech and transcription alike) asks its endpoint
+with no `Authorization` header at all, and never sends `OPENAI_API_KEY` to any endpoint but OpenAI's.
 
 ```python
 from bot.abilities.language.text import InputData, TextMessage, TextRole

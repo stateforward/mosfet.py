@@ -30,6 +30,34 @@ async def _no_api_key_async() -> str:
     return ""
 
 
+class KeylessOpenAI(OpenAI):
+    """The SDK client for an endpoint that takes no key: its requests carry no ``Authorization`` header.
+
+    The SDK (2.54) refuses to send a request with neither a key nor a per-request omitted ``Authorization``
+    header. A keyless local server needs neither, so this client asks it without one.
+    """
+
+    @typing.override
+    def _validate_headers(
+        self,
+        headers: collections.abc.Mapping[str, str | openai.Omit],
+        custom_headers: collections.abc.Mapping[str, str | openai.Omit],
+    ) -> None:
+        del headers, custom_headers
+
+
+class KeylessAsyncOpenAI(AsyncOpenAI):
+    """The async SDK client for an endpoint that takes no key: its requests carry no ``Authorization`` header."""
+
+    @typing.override
+    def _validate_headers(
+        self,
+        headers: collections.abc.Mapping[str, str | openai.Omit],
+        custom_headers: collections.abc.Mapping[str, str | openai.Omit],
+    ) -> None:
+        del headers, custom_headers
+
+
 class RequestError(RuntimeError):
     """Raised when an OpenAI-compatible chat completion or Responses API request fails.
 
@@ -322,14 +350,15 @@ def sdk(
         key = os.environ.get("OPENAI_API_KEY")
         if not key:
             raise ValueError("api_key is required when base_url is the default OpenAI API endpoint.")
+    # Without a key, the client asks with no Authorization header at all (KeylessOpenAI).
     if asynchronous:
-        return AsyncOpenAI(
+        return (AsyncOpenAI if key is not None else KeylessAsyncOpenAI)(
             api_key=_no_api_key_async if key is None else key,
             base_url=base_url,
             timeout=timeout_seconds,
             default_headers=dict(default_headers) or None,
         )
-    return OpenAI(
+    return (OpenAI if key is not None else KeylessOpenAI)(
         api_key=_no_api_key if key is None else key,
         base_url=base_url,
         timeout=timeout_seconds,
