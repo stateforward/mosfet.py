@@ -128,7 +128,12 @@ it.
 ## Biometric privacy
 
 Voice and face prints never leave the memory database: they never reach the model, a prompt, memory's episodes or
-telemetry. The model sees only opaque refs (`voice:3f2a…`) and whether each is someone it knows. A print nobody
+telemetry. The model sees only opaque refs (`voice:3f2a…`) and whether each is someone it knows. Not even
+`BOT_OTEL_CAPTURE=full`, the local debugging switch that logs every event's payload, writes a print or any
+recording of anyone's voice or image: a print is logged as `<biometric:Print>`, and raw audio and image bytes as
+their kind and length only (`<media:audio:32000 bytes>`). It does write text: transcripts of what anyone said,
+prompts and model output reach `otel-logs.jsonl`, so leave it off unless you are debugging. Privacy wins over
+debugging detail. A print nobody
 is known by is pruned 30 days after it was last heard (at most 1000 are kept); a print of someone named or declared is
 kept, and one linked to a person nobody has named is still pruned.
 Forgetting a person erases their prints with them. A voice heard over Willy's own (an overlap, while it is

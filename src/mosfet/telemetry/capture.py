@@ -12,12 +12,14 @@ request and response payloads only.
 Privacy: full capture writes user text, transcripts, prompts, model output, and behavior source
 to the local log file. It is a development switch (``EXCEPTIONS.md``, PY-LOG-002). Credentials
 are never written: mapping keys that name a credential are replaced with ``<redacted>`` and
-string values shaped like bearer tokens or API keys are masked, at every depth. Image content is
-never written either: a ``mosfet.media.Image`` anywhere in a payload, including nested inside a
-Pydantic model, becomes ``<image:<media_type>:<N> bytes>``; raw bytes become ``<bytes:N>``; and an
-RFC 2397 base64 data URL becomes ``<data-url:<media_type>:<N> chars>``. Biometric values are
-never written: any instance of ``Biometric`` (a voiceprint, a face print), at any depth, becomes
-``<biometric:<ClassName>>``, so no vector that identifies a person reaches the log file.
+string values shaped like bearer tokens or API keys are masked, at every depth. Media is never
+written either, only its kind and length, ``<media:<kind>:<N> bytes>``: a ``mosfet.media.Image``
+anywhere in a payload (``<media:image:N bytes>``), raw bytes anywhere, a Pydantic model's bytes field
+included (``kind`` is the top-level type of the ``media_type`` beside it, ``<media:audio:N bytes>`` for
+a heard sound's PCM, else ``bytes``), and an RFC 2397 base64 data URL (its decoded length). Privacy
+wins over debugging detail: no recording of anyone's voice or image reaches the log file. Biometric
+values are never written: any instance of ``Biometric`` (a voiceprint, a face print), at any depth,
+becomes ``<biometric:<ClassName>>``, so no vector that identifies a person reaches the log file.
 
 Log bodies carry the payload; attributes stay low-cardinality (component, stage, event name).
 """
@@ -54,6 +56,15 @@ _SECRET_VALUE = re.compile(
     r"(\bBearer\s+\S+|\bsk-[A-Za-z0-9_\-]{8,}|\bxai-[A-Za-z0-9_\-]{8,}|\bAIza[0-9A-Za-z_\-]{20,})"
 )
 _DATA_URL = re.compile(r"data:([A-Za-z0-9!#$&^_.+-]+/[A-Za-z0-9!#$&^_.+-]+);base64,([A-Za-z0-9+/_-]+=*)")
+# IANA top-level media types: a marker's kind is one of these, or ``bytes`` when the media type is unknown.
+_MEDIA_KINDS = frozenset({"application", "audio", "font", "image", "message", "model", "multipart", "text", "video"})
+
+
+def _media(media_type: object, size: int) -> str:
+    """The marker written for media: its kind (``media_type``'s top-level type, else ``bytes``) and length."""
+
+    kind = media_type.split("/", 1)[0].lower() if isinstance(media_type, str) else ""
+    return f"<media:{kind if kind in _MEDIA_KINDS else 'bytes'}:{size} bytes>"
 
 
 class Biometric(pydantic.BaseModel):
@@ -78,14 +89,15 @@ def payload_enabled() -> bool:
     return full_enabled() or os.environ.get(_CAPTURE_PAYLOAD_ENV, "").strip().lower() in _TRUE_VALUES
 
 
-def _beside_source(source: object, dumped: object, *, depth: int) -> AnyValue:
+def _beside_source(source: object, dumped: object, *, depth: int, media_type: object = None) -> AnyValue:
     """Project ``dumped`` (the JSON dump of ``source``) while walking ``source`` beside it.
 
-    The dump alone has already turned an ``Image``'s bytes into base64 text, so finding an image
-    nested at any depth inside a model means walking the model's own values next to its dump.
-    Leaves keep the dump's JSON form; an ``Image`` source is replaced by its size marker and a
-    ``Biometric`` source by its class marker, so neither the image bytes nor the biometric
-    values in the dump are written.
+    The dump alone has already turned an ``Image``'s bytes, and any bytes field, into base64 text, so
+    finding media nested at any depth inside a model means walking the model's own values next to its
+    dump. Leaves keep the dump's JSON form; an ``Image`` or bytes source is replaced by its media marker
+    (bytes take their kind from the ``media_type`` beside them, passed down as ``media_type``) and a
+    ``Biometric`` source by its class marker, so neither media nor biometric values in the dump are
+    written.
     """
 
     if depth > _MAX_DEPTH:
@@ -93,7 +105,9 @@ def _beside_source(source: object, dumped: object, *, depth: int) -> AnyValue:
     if isinstance(source, Biometric):
         return f"<biometric:{type(source).__name__}>"
     if isinstance(source, media.Image):
-        return f"<image:{source.media_type}:{len(source.content)} bytes>"
+        return _media(source.media_type, len(source.content))
+    if isinstance(source, bytes | bytearray):
+        return _media(media_type, len(source))
     if isinstance(source, pydantic.RootModel):
         return _beside_source(typing.cast(object, source.root), dumped, depth=depth)
     if isinstance(dumped, dict):
@@ -107,8 +121,11 @@ def _beside_source(source: object, dumped: object, *, depth: int) -> AnyValue:
             source_values = list(typing.cast(collections.abc.Mapping[object, object], source).values())
             if len(source_values) == len(dumped_mapping):
                 sources = source_values
+        beside = dumped_mapping.get("media_type")
         return {
-            key: _REDACTED if _SECRET_KEY.search(key) else _beside_source(item_source, item, depth=depth + 1)
+            key: _REDACTED
+            if _SECRET_KEY.search(key)
+            else _beside_source(item_source, item, depth=depth + 1, media_type=beside)
             for (key, item), item_source in zip(dumped_mapping.items(), sources, strict=True)
         }
     if (
@@ -126,14 +143,15 @@ def _beside_source(source: object, dumped: object, *, depth: int) -> AnyValue:
     return jsonable(typing.cast(object, dumped), _depth=depth)
 
 
-def jsonable(value: object, *, _depth: int = 0) -> AnyValue:
-    """Convert a value to an OTEL ``AnyValue`` JSON tree with credentials and image content redacted.
+def jsonable(value: object, *, _depth: int = 0, _media_type: object = None) -> AnyValue:
+    """Convert a value to an OTEL ``AnyValue`` JSON tree with credentials and media redacted.
 
     Recursion is bounded by ``_MAX_DEPTH``; past it the subtree becomes ``<truncated:max-depth>``.
-    Mapping keys that name a credential and string values shaped like one are masked. A
-    ``media.Image`` at any depth becomes ``<image:<media_type>:<N> bytes>``, raw bytes become
-    ``<bytes:N>``, and a base64 data URL inside a string becomes ``<data-url:<media_type>:<N> chars>``.
-    A ``Biometric`` at any depth becomes ``<biometric:<ClassName>>``.
+    Mapping keys that name a credential and string values shaped like one are masked. Media becomes
+    its kind and length, ``<media:<kind>:<N> bytes>``: a ``media.Image`` at any depth, raw bytes at
+    any depth (their kind from the ``media_type`` beside them, else ``bytes``), and a base64 data URL
+    inside a string (its decoded length). A ``Biometric`` at any depth becomes
+    ``<biometric:<ClassName>>``.
     """
 
     if _depth > _MAX_DEPTH:
@@ -143,10 +161,10 @@ def jsonable(value: object, *, _depth: int = 0) -> AnyValue:
     if value is None or isinstance(value, (bool, int, float)):
         return value
     if isinstance(value, str):
-        without_media = _DATA_URL.sub(lambda match: f"<data-url:{match[1]}:{len(match[2])} chars>", value)
+        without_media = _DATA_URL.sub(lambda match: _media(match[1], len(match[2].rstrip("=")) * 3 // 4), value)
         return _SECRET_VALUE.sub(_REDACTED, without_media)
     if isinstance(value, (bytes, bytearray)):
-        return f"<bytes:{len(value)}>"
+        return _media(_media_type, len(value))
     if isinstance(value, enum.Enum):
         member_value = typing.cast(object, value.value)
         return jsonable(member_value, _depth=_depth + 1)
@@ -161,8 +179,11 @@ def jsonable(value: object, *, _depth: int = 0) -> AnyValue:
         return jsonable(fields, _depth=_depth + 1)
     if isinstance(value, collections.abc.Mapping):
         mapping = typing.cast(collections.abc.Mapping[object, object], value)
+        beside = mapping.get("media_type")
         return {
-            str(key): _REDACTED if _SECRET_KEY.search(str(key)) else jsonable(item, _depth=_depth + 1)
+            str(key): _REDACTED
+            if _SECRET_KEY.search(str(key))
+            else jsonable(item, _depth=_depth + 1, _media_type=beside)
             for key, item in mapping.items()
         }
     if isinstance(value, collections.abc.Iterable) and not isinstance(value, (str, bytes, bytearray)):

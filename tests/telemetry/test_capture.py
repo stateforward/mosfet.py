@@ -173,18 +173,18 @@ _PNG = b"\x89PNG\r\n\x1a\n" + bytes(range(256)) * 4
 _PNG_BASE64 = base64.b64encode(_PNG).decode("ascii")
 
 
-def test_jsonable_redacts_data_urls_to_media_type_and_length() -> None:
+def test_jsonable_redacts_data_urls_to_their_media_kind_and_length() -> None:
     url = f"data:image/png;base64,{_PNG_BASE64}"
 
     tree = capture.jsonable({"image_url": {"url": url}, "note": f"see {url} here"})
 
-    marker = f"<data-url:image/png:{len(_PNG_BASE64)} chars>"
+    marker = f"<media:image:{len(_PNG)} bytes>"
     assert tree == {"image_url": {"url": marker}, "note": f"see {marker} here"}
 
 
 def test_jsonable_redacts_images_at_every_depth() -> None:
     image = media.Image(content=_PNG, media_type="image/png", width_px=1, height_px=1)
-    marker = f"<image:image/png:{len(_PNG)} bytes>"
+    marker = f"<media:image:{len(_PNG)} bytes>"
     message = text.TextMessage(
         role=text.TextRole.USER, content=(text.TextPart(text="look"), text.ImagePart(image=image))
     )
@@ -218,7 +218,7 @@ def test_jsonable_redacts_images_inside_embedding_requests() -> None:
     tree = capture.jsonable(request)
 
     assert _PNG_BASE64 not in json.dumps(tree)
-    assert f"<image:image/png:{len(_PNG)} bytes>" in json.dumps(tree)
+    assert f"<media:image:{len(_PNG)} bytes>" in json.dumps(tree)
 
 
 def test_full_capture_never_exports_image_bytes_from_event_payloads(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -236,7 +236,46 @@ def test_full_capture_never_exports_image_bytes_from_event_payloads(monkeypatch:
     (record,) = _records()
     logged = pathlib.Path("otel-logs.jsonl").read_text(encoding="utf-8")
     assert _PNG_BASE64 not in logged
-    assert f"<image:image/png:{len(_PNG)} bytes>" in json.dumps(record["body"])
+    assert f"<media:image:{len(_PNG)} bytes>" in json.dumps(record["body"])
+
+
+_PCM = bytes(range(256)) * 8
+
+
+def test_jsonable_redacts_raw_audio_bytes_to_their_media_kind_and_length() -> None:
+    """D-W8-22 (Willy live check): full capture wrote every heard sound's PCM into the log as base64, a model's
+    bytes field dumped as text. Raw audio, like an image, is written as its media kind and length only."""
+
+    sound = environment.SoundData(audio=_PCM, media_type="audio/pcm", sample_rate_hz=16_000, channels=1)
+    marker = f"<media:audio:{len(_PCM)} bytes>"
+
+    tree = capture.jsonable({"sound": sound, "raw": _PCM, "mapped": {"media_type": "audio/wav", "audio": _PCM}})
+
+    assert isinstance(tree, dict)
+    assert tree["sound"] == {**typing.cast(dict[str, object], tree["sound"]), "audio": marker}
+    assert tree["raw"] == f"<media:bytes:{len(_PCM)} bytes>"
+    assert tree["mapped"] == {"media_type": "audio/wav", "audio": marker}
+    logged = json.dumps(tree)
+    assert base64.b64encode(_PCM).decode("ascii")[:24] not in logged
+    assert base64.urlsafe_b64encode(_PCM).decode("ascii")[:24] not in logged
+
+
+def test_full_capture_never_exports_audio_bytes_from_event_payloads(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("BOT_OTEL_CAPTURE", "full")
+    assert mosfet.telemetry.configure() is True
+    sound = environment.SoundData(audio=_PCM, media_type="audio/pcm", sample_rate_hz=16_000, channels=1)
+
+    capture.emit(
+        "bot.telemetry.test",
+        body={"event": environment.SoundEvent.with_data(sound)},
+        attributes={"component": "test"},
+    )
+
+    (record,) = _records()
+    logged = pathlib.Path("otel-logs.jsonl").read_text(encoding="utf-8")
+    assert base64.urlsafe_b64encode(_PCM).decode("ascii")[:24] not in logged
+    assert base64.b64encode(_PCM).decode("ascii")[:24] not in logged
+    assert f"<media:audio:{len(_PCM)} bytes>" in json.dumps(record["body"])
 
 
 _VECTOR = (0.6180339887, 0.2718281828, 0.1414213562)
