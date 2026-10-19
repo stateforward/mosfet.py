@@ -11,6 +11,7 @@ from mosfet.abilities.language import text
 
 import dataclasses
 import importlib
+import typing
 
 import hsm
 import pydantic
@@ -440,3 +441,95 @@ def test_participant_is_closed_hashable_and_equal_by_ref_and_role() -> None:
     assert caller == mosfet.Participant.model_validate({"ref": "caller", "role": "source"})
     assert caller != mosfet.Participant(ref="caller", role=mosfet.ParticipantRole.TARGET)
     assert hash(caller) == hash(mosfet.Participant(ref="caller", role=mosfet.ParticipantRole.SOURCE))
+
+
+def _percept(*, source: str = "desk") -> mosfet.PerceptData:
+    person = mosfet.Participant(ref="person-42", role=mosfet.ParticipantRole.SOURCE)
+    return mosfet.PerceptData(
+        stimulus=mosfet.InputEventData(target_device=source, observation=None, participants=(person,)),
+        source=source,
+        participants=(person,),
+    )
+
+
+def test_perceived_is_a_root_export_that_happens_to_the_bot_and_is_never_a_tool() -> None:
+    schema = object_dict(mosfet.PerceivedEvent.schema)
+
+    assert {"PerceivedEvent", "PerceivedData", "PerceptData"} <= set(mosfet.__all__)
+    assert mosfet.PerceivedEvent.name == "bot.perceived"
+    assert mosfet.PerceivedEvent.kind == mosfet.InputEvent.kind
+    assert mosfet.PerceivedEvent.kind != event.EventKind
+    assert schema == mosfet.PerceivedData.model_json_schema()
+
+
+def test_perceived_schema_describes_every_field_and_its_examples_validate() -> None:
+    perceived = object_dict(mosfet.PerceivedData.model_json_schema())
+    percept = object_dict(mosfet.PerceptData.model_json_schema())
+    percepts = object_dict(object_dict(perceived["properties"])["percepts"])
+
+    assert "arrived" in str(perceived["description"])
+    assert (percepts["minItems"], percepts["maxItems"]) == (2, 8)
+    assert "arrival" in str(percepts["description"])
+    assert percept["description"]
+    properties = object_dict(percept["properties"])
+    assert set(properties) == {"stimulus", "source", "participants"}
+    for name in ("stimulus", "source", "participants"):
+        field = object_dict(properties[name])
+        assert field["description"]
+        assert field["examples"]
+    assert object_dict(properties["participants"])["maxItems"] == 32
+    for example in typing.cast(list[object], perceived["examples"]):
+        assert len(mosfet.PerceivedData.model_validate(example).percepts) == 2
+    for example in typing.cast(list[object], percept["examples"]):
+        assert mosfet.PerceptData.model_validate(example).source == "desk"
+
+
+@pytest.mark.parametrize("count", [0, 1, 9], ids=["none", "one", "over-eight"])
+def test_perceived_takes_between_two_and_eight_percepts(count: int) -> None:
+    with pytest.raises(pydantic.ValidationError):
+        _ = mosfet.PerceivedData(percepts=tuple(_percept() for _ in range(count)))
+
+
+def test_perceived_keeps_its_percepts_in_the_order_given() -> None:
+    percepts = tuple(_percept(source=f"device-{index}") for index in range(8))
+
+    assert mosfet.PerceivedData(percepts=percepts).percepts == percepts
+
+
+def test_a_percept_carries_at_most_thirty_two_participants() -> None:
+    crowd = tuple(mosfet.Participant(ref=f"person-{index}", role=mosfet.ParticipantRole.SOURCE) for index in range(33))
+
+    with pytest.raises(pydantic.ValidationError):
+        _ = mosfet.PerceptData(stimulus=mosfet.InputEventData(), source="desk", participants=crowd)
+    assert (
+        len(mosfet.PerceptData(stimulus=mosfet.InputEventData(), source="desk", participants=crowd[:32]).participants)
+        == 32
+    )
+
+
+def test_a_percept_carries_an_observed_event_unchanged() -> None:
+    observed = dataclasses.replace(
+        SoundEvent.with_data_and_id(
+            SoundData(audio=b"ring", media_type="audio/pcm", sample_rate_hz=16_000, channels=1, kind="phone.ringing"),
+            "sound-1",
+        ),
+        source="phone-1",
+    )
+
+    percept = mosfet.PerceptData(stimulus=observed, source="phone-1")
+
+    assert percept.stimulus is observed
+    assert percept.participants == ()
+
+
+def test_perceived_and_percepts_are_frozen_and_closed() -> None:
+    percept = _percept()
+    perceived = mosfet.PerceivedData(percepts=(percept, percept))
+
+    assert mosfet.PerceivedData.model_config.get("frozen") is True
+    assert mosfet.PerceptData.model_config.get("frozen") is True
+    assert hash(perceived) == hash(mosfet.PerceivedData(percepts=(percept, percept)))
+    with pytest.raises(pydantic.ValidationError):
+        _ = mosfet.PerceptData.model_validate({"stimulus": {}, "source": "desk", "priority": 0})
+    with pytest.raises(pydantic.ValidationError):
+        _ = mosfet.PerceivedData.model_validate({"percepts": [{"stimulus": {}, "source": "desk"}] * 2, "ranked": True})

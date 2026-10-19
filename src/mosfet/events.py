@@ -306,6 +306,139 @@ ObservedBotEvent: typing.TypeAlias = SkipJsonSchema[
 ]
 InputData: typing.TypeAlias = InputEventData | ObservedBotEvent
 
+MAX_PERCEPTS: typing.Final = 8
+"""Most percepts one turn takes together; a longer backlog splits into consecutive turns, in order."""
+
+
+class PerceptData(pydantic.BaseModel):
+    """One thing that reached a busy bot, carried unchanged into the turn that perceives it.
+
+    A percept is exactly what arrived: the device's input, or the ability's product event, with the
+    envelope source it arrived on and the participants its producer stamped. Nothing about it is
+    ranked, summarized or interpreted; what it is worth is cognition's to decide.
+    """
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
+        arbitrary_types_allowed=True,
+        frozen=True,
+        extra="forbid",
+        json_schema_extra={
+            "description": (
+                "One stimulus that reached the bot while it was busy, exactly as it arrived: the device input or "
+                "the ability's product event, the source it arrived from, and who took part in it."
+            ),
+            "examples": [
+                {
+                    "stimulus": {
+                        "priority": 5,
+                        "observation": {
+                            "event": "computer.text.entered",
+                            "data": {
+                                "device_id": "desk",
+                                "person_id": "person-42",
+                                "participants": [{"ref": "person-42", "role": "source"}],
+                                "field_id": None,
+                                "text": "Are you there?",
+                            },
+                            "source": "desk",
+                        },
+                        "participants": [{"ref": "person-42", "role": "source"}],
+                    },
+                    "source": "desk",
+                    "participants": [{"ref": "person-42", "role": "source"}],
+                }
+            ],
+        },
+    )
+
+    stimulus: InputData = pydantic.Field(
+        description=(
+            "The stimulus unchanged: a device's bot.input payload, or the typed product event an input ability "
+            "(or cognition observing its own step) handed the bot."
+        ),
+        examples=[{"priority": 5, "observation": {"event": "device.phone.ringing", "data": {"call_id": "call-123"}}}],
+    )
+    source: str = pydantic.Field(
+        description=(
+            "Envelope source the stimulus arrived from: the nerve it came in on. Identity only; the body stamps it "
+            "when the stimulus reaches it so attention can tell which device it concerns."
+        ),
+        examples=["desk", "phone-1"],
+    )
+    participants: tuple[Participant, ...] = pydantic.Field(
+        default=(),
+        max_length=32,
+        description=(
+            "Who took part in this stimulus, as its producer stamped them, copied unchanged. Empty when the "
+            "producer knows no one."
+        ),
+        examples=[[{"ref": "person-42", "role": "source"}]],
+    )
+
+
+class PerceivedData(pydantic.BaseModel):
+    """Everything one turn took from what queued while the bot was busy, perceived together.
+
+    The percepts are in arrival order and nothing else: no percept outranks another, none is left
+    out for what it says, and the turn's bounds only split a longer backlog into consecutive turns.
+    A turn that takes a single stimulus is handed that stimulus itself, never this wrapper.
+    """
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
+        frozen=True,
+        extra="forbid",
+        json_schema_extra={
+            "description": (
+                "Everything that reached the bot while it was busy and was taken together by this turn, in the "
+                "order it arrived. Each percept keeps its own source and participants; what matters among them "
+                "is yours to decide."
+            ),
+            "examples": [
+                {
+                    "percepts": [
+                        {
+                            "stimulus": {
+                                "target_device": "phone",
+                                "priority": 0,
+                                "observation": {"event": "device.phone.ringing", "data": {"call_id": "call-123"}},
+                                "participants": [],
+                            },
+                            "source": "phone-1",
+                            "participants": [],
+                        },
+                        {
+                            "stimulus": {
+                                "priority": 5,
+                                "observation": {
+                                    "event": "computer.text.entered",
+                                    "data": {
+                                        "device_id": "desk",
+                                        "person_id": "person-42",
+                                        "participants": [{"ref": "person-42", "role": "source"}],
+                                        "field_id": None,
+                                        "text": "Are you there?",
+                                    },
+                                },
+                                "participants": [{"ref": "person-42", "role": "source"}],
+                            },
+                            "source": "desk",
+                            "participants": [{"ref": "person-42", "role": "source"}],
+                        },
+                    ]
+                }
+            ],
+        },
+    )
+
+    percepts: tuple[PerceptData, ...] = pydantic.Field(
+        min_length=2,
+        max_length=MAX_PERCEPTS,
+        description=(
+            "The stimuli this turn took, in the order they arrived; between two and eight of them. Order is "
+            "arrival only, never importance."
+        ),
+    )
+
 
 class FocusDeviceEventData(pydantic.BaseModel):
     """Command payload that requests moving bot focus to one configured device.
@@ -492,6 +625,12 @@ InputEvent = hsm.Event[InputEventData](
     name="bot.input",
     kind=InputEventKind,
     schema=InputEventData,
+)
+# What a turn perceives when more than one stimulus queued for it. Like bot.input it is something
+# that happens to the bot, so it keeps the default event kind and is never a model tool.
+PerceivedEvent = hsm.Event[PerceivedData](
+    name="bot.perceived",
+    schema=PerceivedData,
 )
 FocusDeviceEvent = hsm.Event[FocusDeviceEventData](
     name="bot.focus_device",

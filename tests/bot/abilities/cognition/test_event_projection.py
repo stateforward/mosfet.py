@@ -1,14 +1,16 @@
 """Direct contract tests for cognition-owned model-facing event projections."""
 
 import mosfet
-from mosfet import media
+from mosfet import event, media
 from mosfet.abilities import cognition, learning, memory
 from mosfet.abilities.language import text
+from mosfet.devices import computer
 from mosfet.environment import SoundData, SoundEvent
 
 import base64
 import dataclasses
 import datetime
+import json
 import pathlib
 import typing
 
@@ -515,3 +517,69 @@ def test_memory_content_never_raises_for_an_unrenderable_payload() -> None:
     assert len(parts) == 1
     assert 'omitted="content"' in _text(parts)
     assert "kept nowhere" not in _text(parts)
+
+
+def _typed_line(line: str, *, person: str, event_id: str) -> mosfet.PerceptData:
+    """A line a person typed on the desk computer, as the body holds it while the bot is busy."""
+
+    participant = mosfet.Participant(ref=person, role=mosfet.ParticipantRole.SOURCE)
+    typed = computer.TextEnteredData(device_id="desk", person_id=person, participants=(participant,), text=line)
+    return mosfet.PerceptData(
+        stimulus=mosfet.InputEventData(
+            observation=mosfet.StimulusData.from_event(computer.TextEnteredEvent.with_data_and_id(typed, event_id)),
+            participants=(participant,),
+        ),
+        source="desk",
+        participants=(participant,),
+    )
+
+
+def test_a_perceived_batch_renders_each_percept_as_a_child_in_arrival_order() -> None:
+    ring = dataclasses.replace(
+        SoundEvent.with_data_and_id(SoundData(audio=b"ring", kind="phone.ringing"), "ring-1"), source="phone-1"
+    )
+    batch = dataclasses.replace(
+        mosfet.PerceivedEvent.with_data_and_id(
+            mosfet.PerceivedData(
+                percepts=(
+                    _typed_line("first line", person="person-42", event_id="line-1"),
+                    mosfet.PerceptData(stimulus=ring, source="phone-1"),
+                    _typed_line("second line", person="person-7", event_id="line-2"),
+                )
+            ),
+            "line-1",
+        ),
+        source="bot-1",
+    )
+
+    rendered = _text(cognition.event.model_facing_content(batch, capacity=_TEXT_ONLY))
+
+    assert rendered.startswith('<events:perceived stimulus:event="bot.perceived" stimulus:id="line-1"')
+    assert '<percepts count="3">' in rendered
+    first, ringing, second = (
+        rendered.index('text="first line"'),
+        rendered.index('stimulus:event="environment.sound" stimulus:id="ring-1" stimulus:source="phone-1"'),
+        rendered.index('text="second line"'),
+    )
+    assert first < ringing < second
+    assert rendered.count('<events:percept source="desk">') == 2
+    assert '<events:percept source="phone-1">' in rendered
+    assert '<events:participant ref="person-42" role="source" own="false" />' in rendered
+    assert '<events:participant ref="person-7" role="source" own="false" />' in rendered
+
+
+def test_memory_of_a_perceived_batch_within_its_bound_keeps_every_percept() -> None:
+    lines = tuple(
+        _typed_line(f"{index}:" + "x" * 7_000, person=f"person-{index}", event_id=f"line-{index}") for index in range(8)
+    )
+    batch = mosfet.PerceivedEvent.with_data_and_id(mosfet.PerceivedData(percepts=lines), "line-0")
+    canonical = sum(len(json.dumps(event.event_json_value(percept.stimulus))) for percept in lines)
+    assert canonical <= 65_536
+
+    kept = _text(
+        cognition.event.memory_content(batch, capacity=_TEXT_ONLY, budget_bytes=memory.MAX_EPISODE_TEXT_BYTES // 2)
+    )
+
+    assert 'omitted="size"' not in kept
+    positions = [kept.index(f'text="{index}:') for index in range(8)]
+    assert positions == sorted(positions)
