@@ -47,15 +47,20 @@ generator = ResponsesTextGenerator(client=client, reasoning_effort=ReasoningEffo
 
 Both generators record token usage (including reasoning tokens) through `mosfet.telemetry.record_generator_usage`.
 
+`ChatClient` makes every chat completion, whole or streamed, through its `async_client` (an `openai.AsyncOpenAI`
+built lazily from the same endpoint, key and headers), and `ChatCompletionClient.create_chat_completion` is async.
+The request runs on the event loop, so cancelling the task that awaits `TextGenerator.generate` (a cognition step
+that outlasts its bound, or shutdown) closes the HTTP request, and the server stops generating for nobody. `client`
+(an `openai.OpenAI`) serves the Responses API.
+
 `TextGenerator.generate(input, deltas=...)` streams the completion (server-sent events through `ChatClient`'s
-`async_client`, an `openai.AsyncOpenAI` built lazily from the same endpoint, key and headers) and calls `deltas` with
-each `text.Delta` as it arrives: new content, or new arguments of one tool call. The returned output is assembled from
-the whole stream and is the same, authoritative result as without `deltas`. `Processor.process(input, drafts=...)` uses
-this to read the streamed `dispatch` arguments with `processing.DraftParser`, so a marked field (for example
-the `words` of each of `communication.respond`'s `parts`) reaches its target as a draft while the model is still
-writing it. Some endpoints cannot stream a tool call (a proxy that sends only `: ping` keep-alives and never a
-chunk), so their owner makes the processor with `Processor(..., stream=False)`: every call is then made whole, and
-`drafts` is never called.
+`async_client`) and calls `deltas` with each `text.Delta` as it arrives: new content, or new arguments of one tool
+call. The returned output is assembled from the whole stream and is the same, authoritative result as without
+`deltas`. `Processor.process(input, drafts=...)` uses this to read the streamed `dispatch` arguments with
+`processing.DraftParser`, so a marked field (for example the `words` of each of `communication.respond`'s `parts`)
+reaches its target as a draft while the model is still writing it. Some endpoints cannot stream a tool call (a
+proxy that sends only `: ping` keep-alives and never a chunk), so their owner makes the processor with
+`Processor(..., stream=False)`: every call is then made whole, and `drafts` is never called.
 `ResponsesTextGenerator` does not stream; it ignores `deltas`.
 
 Whenever events are offered, `Processor` sends `tool_choice: "required"`, so the endpoint must call `dispatch`. On

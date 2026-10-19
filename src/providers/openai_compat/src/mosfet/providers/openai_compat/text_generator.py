@@ -329,10 +329,13 @@ class TextGenerator(text.TextGenerator):
     async def generate(
         self, input: text.InputData, *, deltas: collections.abc.Callable[[text.Delta], None] | None = None
     ) -> text.OutputData:
-        """Generate the whole output; with ``deltas``, stream it and hand out each piece as it arrives."""
+        """Generate the whole output; with ``deltas``, stream it and hand out each piece as it arrives.
+
+        Either way the request runs on the event loop, so cancelling the awaiting task cancels the call in flight.
+        """
 
         if deltas is None:
-            return await asyncio.to_thread(self._generate_blocking, input)
+            return await self._generate_whole(input)
         return await self._generate_streaming(input, deltas)
 
     def _request(
@@ -375,12 +378,12 @@ class TextGenerator(text.TextGenerator):
             tool_calls=tool_calls,
         )
 
-    def _generate_blocking(self, input: text.InputData) -> text.OutputData:
+    async def _generate_whole(self, input: text.InputData) -> text.OutputData:
         messages, tools, extra_body, model = self._request(input)
         started = time.monotonic()
         response: collections.abc.Mapping[str, object] | None = None
         try:
-            response = self.client.create_chat_completion(
+            response = await self.client.create_chat_completion(
                 messages=messages,
                 tools=tools,
                 response_format=self.response_format,

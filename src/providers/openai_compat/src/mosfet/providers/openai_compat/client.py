@@ -54,14 +54,6 @@ def _empty_body() -> dict[str, object]:
     return {}
 
 
-class OpenAIChatCompletionsResource(typing.Protocol):
-    """OpenAI SDK chat completions resource used by this provider."""
-
-    def create(self, **kwargs: object) -> object:
-        """Create a chat completion with SDK-compatible keyword arguments."""
-        ...
-
-
 class OpenAIResponsesResource(typing.Protocol):
     """OpenAI SDK responses resource used by this provider."""
 
@@ -70,16 +62,9 @@ class OpenAIResponsesResource(typing.Protocol):
         ...
 
 
-class OpenAIChatResource(typing.Protocol):
-    """OpenAI SDK chat resource used by this provider."""
-
-    completions: OpenAIChatCompletionsResource
-
-
 class OpenAIClient(typing.Protocol):
-    """OpenAI SDK client shape used by this provider."""
+    """OpenAI SDK client shape (``openai.OpenAI``) used for the Responses API."""
 
-    chat: OpenAIChatResource
     responses: OpenAIResponsesResource
 
 
@@ -96,15 +81,19 @@ class AsyncChatStream(typing.Protocol):
 
 
 class AsyncOpenAIChatCompletionsResource(typing.Protocol):
-    """OpenAI SDK async chat completions resource used for streaming."""
+    """OpenAI SDK async chat completions resource: whole and streamed chat completions."""
 
-    async def create(self, **kwargs: object) -> AsyncChatStream:
-        """Create a streamed chat completion with SDK-compatible keyword arguments (``stream=True``)."""
+    async def create(self, **kwargs: object) -> object:
+        """Create a chat completion with SDK-compatible keyword arguments.
+
+        Returns the whole completion, or an ``AsyncChatStream`` when called with ``stream=True``. Cancelling the
+        awaiting task closes the HTTP request.
+        """
         ...
 
 
 class AsyncOpenAIChatResource(typing.Protocol):
-    """OpenAI SDK async chat resource used for streaming."""
+    """OpenAI SDK async chat resource: whole and streamed chat completions."""
 
     completions: AsyncOpenAIChatCompletionsResource
 
@@ -149,7 +138,7 @@ class AsyncOpenAIAudioResource(typing.Protocol):
 
 
 class AsyncOpenAIClient(typing.Protocol):
-    """OpenAI SDK async client shape (``openai.AsyncOpenAI``): streamed chat completions, speech and transcription."""
+    """OpenAI SDK async client shape (``openai.AsyncOpenAI``): chat completions, speech and transcription."""
 
     chat: AsyncOpenAIChatResource
     audio: AsyncOpenAIAudioResource
@@ -182,7 +171,7 @@ class ReasoningEffort(enum.StrEnum):
 class ChatCompletionClient(typing.Protocol):
     """Client interface used by stateforward.mosfet OpenAI-compatible text generators."""
 
-    def create_chat_completion(
+    async def create_chat_completion(
         self,
         *,
         messages: collections.abc.Sequence[dict[str, object]],
@@ -190,7 +179,10 @@ class ChatCompletionClient(typing.Protocol):
         response_format: object | None = None,
         extra_body: collections.abc.Mapping[str, object] | None = None,
     ) -> dict[str, object]:
-        """Create a chat completion response using provider-neutral JSON values."""
+        """Create a chat completion response using provider-neutral JSON values.
+
+        Cancelling the awaiting task cancels the request in flight, so a cancelled call stops generating.
+        """
         ...
 
     def stream_chat_completion(
@@ -351,8 +343,10 @@ class ChatClient(ChatCompletionClient, ResponsesClient):
 
     ``base_url`` defaults to the loopback endpoint ``http://127.0.0.1:8080/v1``, where a local llama.cpp server
     listens; a cloud endpoint is always named. ``model`` has no default: it is the endpoint's own name for a model.
-    Streamed chat completions go through ``async_client`` (an ``openai.AsyncOpenAI``, built lazily with the same
-    endpoint, key and headers when not injected), so chunks arrive on the event loop as the server sends them.
+    Chat completions, whole and streamed, go through ``async_client`` (an ``openai.AsyncOpenAI``, built lazily with
+    the same endpoint, key and headers when not injected): the request runs on the event loop, so cancelling the
+    task that awaits it closes the HTTP request, and chunks arrive as the server sends them. ``client`` (an
+    ``openai.OpenAI``, built the same way) serves the Responses API.
     """
 
     model: str
@@ -391,7 +385,7 @@ class ChatClient(ChatCompletionClient, ResponsesClient):
         return kwargs
 
     @typing.override
-    def create_chat_completion(
+    async def create_chat_completion(
         self,
         *,
         messages: collections.abc.Sequence[dict[str, object]],
@@ -399,12 +393,17 @@ class ChatClient(ChatCompletionClient, ResponsesClient):
         response_format: object | None = None,
         extra_body: collections.abc.Mapping[str, object] | None = None,
     ) -> dict[str, object]:
+        """Create the whole chat completion; cancelling the awaiting task closes the HTTP request.
+
+        Raises:
+            RequestError: The request failed.
+        """
+
         kwargs = self._chat_kwargs(
             messages=messages, tools=tools, response_format=response_format, extra_body=extra_body
         )
-        client = self._client()
         try:
-            response = client.chat.completions.create(**kwargs)
+            response = await self._async_client().chat.completions.create(**kwargs)
         except Exception as error:
             raise _failed("OpenAI-compatible chat completion request", error) from error
         return _json_object(response, "OpenAI-compatible chat completion response must be a JSON object.")
@@ -430,7 +429,8 @@ class ChatClient(ChatCompletionClient, ResponsesClient):
         kwargs["stream"] = True
         kwargs["stream_options"] = {"include_usage": True}
         try:
-            stream = await self._async_client().chat.completions.create(**kwargs)
+            # ``stream=True`` makes the SDK answer an ``AsyncChatStream``.
+            stream = typing.cast(AsyncChatStream, await self._async_client().chat.completions.create(**kwargs))
         except Exception as error:
             raise _failed("OpenAI-compatible streamed chat completion request", error) from error
         try:

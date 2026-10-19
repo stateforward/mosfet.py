@@ -251,7 +251,7 @@ class _FakeChatClient:
     model: str = "compat-model"
     calls: list[dict[str, object]] = dataclasses.field(default_factory=list)
 
-    def create_chat_completion(
+    async def create_chat_completion(
         self,
         *,
         messages: collections.abc.Sequence[dict[str, object]],
@@ -390,7 +390,7 @@ class _StreamingChatClient:
     model: str = "streamer"
     streamed: int = 0
 
-    def create_chat_completion(
+    async def create_chat_completion(
         self,
         *,
         messages: collections.abc.Sequence[dict[str, object]],

@@ -32,7 +32,7 @@ class FakeChatClient:
     response: dict[str, object]
     calls: list[ChatCompletionCall] = dataclasses.field(default_factory=list)
 
-    def create_chat_completion(
+    async def create_chat_completion(
         self,
         *,
         messages: collections.abc.Sequence[dict[str, object]],
@@ -686,7 +686,7 @@ def test_text_generator_records_otel_request_when_configured(
         )
         calls: list[ChatCompletionCall] = dataclasses.field(default_factory=list)
 
-        def create_chat_completion(
+        async def create_chat_completion(
             self,
             *,
             messages: collections.abc.Sequence[dict[str, object]],
@@ -925,7 +925,7 @@ class _ModelChatClient(FakeChatClient):
 def test_generator_records_join_the_callers_trace(
     path: str, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Both request paths hop to a worker thread; their records still belong to the calling span."""
+    """Chat awaits its request and Responses hops to a worker thread; both records join the calling span."""
 
     import json
 
@@ -1225,3 +1225,59 @@ def test_text_generator_without_deltas_keeps_the_whole_response_path() -> None:
     assert output.content == "ok"
     assert len(client.calls) == 1
     assert requests == []
+
+
+@dataclasses.dataclass
+class _HangingChatClient:
+    """A whole-response client whose create never returns, so a test can cancel the call while it is in flight."""
+
+    started: asyncio.Event = dataclasses.field(default_factory=asyncio.Event)
+    cancelled: asyncio.Event = dataclasses.field(default_factory=asyncio.Event)
+
+    async def create_chat_completion(
+        self,
+        *,
+        messages: collections.abc.Sequence[dict[str, object]],
+        tools: collections.abc.Sequence[object] = (),
+        response_format: object | None = None,
+        extra_body: collections.abc.Mapping[str, object] | None = None,
+    ) -> dict[str, object]:
+        del messages, tools, response_format, extra_body
+        self.started.set()
+        try:
+            _ = await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            self.cancelled.set()
+            raise
+        raise AssertionError("the call never returns")
+
+    def stream_chat_completion(
+        self,
+        *,
+        messages: collections.abc.Sequence[dict[str, object]],
+        tools: collections.abc.Sequence[object] = (),
+        response_format: object | None = None,
+        extra_body: collections.abc.Mapping[str, object] | None = None,
+    ) -> collections.abc.AsyncIterator[dict[str, object]]:
+        del messages, tools, response_format, extra_body
+        raise AssertionError("this fake serves whole responses only")
+
+
+def test_text_generator_cancelled_without_deltas_cancels_the_in_flight_call() -> None:
+    # Live (builder check round 4, F1): a reflection call cancelled at its step bound ran on in a worker
+    # thread for 344 s and generated 4512 tokens nobody read, on the shared model server.
+    async def run() -> None:
+        client = _HangingChatClient()
+        generator = TextGenerator(client=client)
+        call = asyncio.create_task(
+            generator.generate(text.InputData(messages=(text.TextMessage(role=text.TextRole.USER, content="hi"),)))
+        )
+        _ = await asyncio.wait_for(client.started.wait(), 1.0)
+
+        _ = call.cancel()
+
+        _ = await asyncio.wait_for(client.cancelled.wait(), 1.0)
+        with pytest.raises(asyncio.CancelledError):
+            _ = await call
+
+    asyncio.run(run())
