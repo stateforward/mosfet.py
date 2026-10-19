@@ -2,9 +2,10 @@
 
 System One answers label questions over a state document — Choice (one criterion),
 Score (graded, anchored), and Noul (typed likelihood). It is not a tool-calling
-models: it cannot author event payloads. The provider therefore maps the bot's
-Intuition reflex tier (per-event Noul selection, aggregate confidence) onto
-`system_one`, and stays out of payload-authoring tiers.
+model: it cannot author event payloads. It is a decision model, so `Processor` is a
+`processing.DecisionProcessor`: the provider maps the bot's Intuition reflex tier
+(per-event selection, aggregate confidence) onto `system_one`, and stays out of
+payload-authoring tiers.
 
 The selection budget is strict: the processor never authors payload fields. A
 chosen event with required payload keys is dispatched with `data=None`, and the

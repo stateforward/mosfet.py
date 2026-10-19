@@ -5,8 +5,9 @@ TypeSafe AI provider for stateforward.mosfet: the `system_one` label-tier
 
 - `AsyncSystemOneClient` — async `system_one` transport; SDK errors surface as
   `SystemOneError`.
-- `Processor` — maps a cognition turn to one batch of questions: a Choice over the
-  offered event menu (schema descriptions as criteria) plus a reserved pass criterion
+- `Processor` — a decision processor (`processing.DecisionProcessor`), the kind
+  intuition runs on. It maps a cognition turn to one batch of questions: a Choice
+  over the offered event menu (schema descriptions as criteria) plus a reserved pass criterion
   (the docs' own "none of the above" pattern), and per-payload-key Choices whose
   criteria are value options derived mechanically from the turn's own evidence
   (stimulus data mapping, then schema enum options). The answer label *is* the value,

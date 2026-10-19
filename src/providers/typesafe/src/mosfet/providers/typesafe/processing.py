@@ -1,5 +1,8 @@
 """TypeSafe label-tier processor: intuition reflex selection over `system_one`.
 
+`Processor` is a `processing.DecisionProcessor`: System One is a decision model, which chooses
+among the offered events with a confidence for each, so it is a processor intuition runs on.
+
 The mapping is structural, not behavioral:
 
 - **state** is the turn as the model may see it: the stimulus envelope (name, data) as a
@@ -139,8 +142,8 @@ class PayloadGroundingError(ProcessingError):
     """A chosen event required a payload key with no grounded candidates."""
 
 
-class Processor(processing.Processor):
-    """System One label-tier selection: one Choice over the offered event menu."""
+class Processor(processing.DecisionProcessor):
+    """System One label-tier selection, a decision processor: one Choice over the offered event menu."""
 
     _client_factory: collections.abc.Callable[[], AsyncSystemOneClient]
     _timeout: float | None
