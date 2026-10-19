@@ -52,7 +52,7 @@ class _SelectionActor(hsm.Instance):
     )
 
 
-class _SequenceProcessor(processing.Processor):
+class _SequenceProcessor(processing.DecisionProcessor):
     calls: list[processing.InputData]
     outputs: tuple[object, ...]
 
@@ -68,7 +68,7 @@ class _SequenceProcessor(processing.Processor):
         return typing.cast(processing.Events, self.outputs[min(len(self.calls) - 1, len(self.outputs) - 1)])
 
 
-class _CyclingProcessor(processing.Processor):
+class _CyclingProcessor(processing.DecisionProcessor):
     calls: list[processing.InputData]
     outputs: tuple[object, ...]
 
@@ -256,7 +256,7 @@ def test_intuition_retries_malformed_focus_selection_with_full_pydantic_feedback
     )
 
 
-class _HeldThenOfferedProcessor(processing.Processor):
+class _HeldThenOfferedProcessor(processing.DecisionProcessor):
     """First selects an event the turn does not offer, the way the live model picked a held sandbox write.
 
     Selections are parsed against the offered menu the way a provider's dispatch tool parses them.

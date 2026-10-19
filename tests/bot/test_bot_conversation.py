@@ -76,7 +76,7 @@ class IdentityTextDecoder(decoding.Decoder[typing.Any, str]):
         raise AssertionError(f"unexpected stimulus {input!r}")
 
 
-class ContributionProcessor(processing.Processor):
+class ContributionProcessor(processing.DecisionProcessor):
     """Inspect conversation products without selecting a body output port."""
 
     inputs: list[processing.InputData]
@@ -131,7 +131,7 @@ def _history_message(
     )
 
 
-class CountingProcessor(processing.Processor):
+class CountingProcessor(processing.DecisionProcessor):
     """Count cognition entries without selecting Speaking (idle after process)."""
 
     inputs: list[processing.InputData]
@@ -516,7 +516,7 @@ def test_bot_defers_second_conversation_contribution_until_idle() -> None:
         first_started = asyncio.Event()
         release_first = asyncio.Event()
 
-        class GatedSpeakProcessor(processing.Processor):
+        class GatedSpeakProcessor(processing.DecisionProcessor):
             inputs: list[processing.InputData]
 
             def __init__(self) -> None:

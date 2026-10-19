@@ -156,7 +156,7 @@ async def _verdict(event_name: str, limit: float = 10.0) -> dict[str, typing.Any
     raise AssertionError(f"the handset never took {event_name}")
 
 
-class _Unhandled(processing.Processor):
+class _Unhandled(processing.DecisionProcessor):
     """Intuition that recognizes nothing, so the turn cascades to reasoning."""
 
     @typing.override

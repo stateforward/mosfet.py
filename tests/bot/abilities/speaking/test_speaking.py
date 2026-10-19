@@ -1433,7 +1433,7 @@ def test_cognition_does_not_directly_select_speaking_output() -> None:
     from mosfet.device import Device
     from tests.bot.test_bot import as_cognition
 
-    class SpeakProcessor(processing.Processor):
+    class SpeakProcessor(processing.DecisionProcessor):
         inputs: list[processing.InputData]
 
         def __init__(self) -> None:

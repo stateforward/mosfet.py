@@ -500,7 +500,7 @@ def test_live_behavior_forms_after_n_natural_calls_without_preload() -> None:
 
     max_calls = int(os.environ.get("BOT_BEHAVIOR_NATURAL_MAX_CALLS", "10"))
 
-    class _EscalateIntuition(processing.Processor):
+    class _EscalateIntuition(processing.DecisionProcessor):
         @typing.override
         async def process(
             self, input: processing.InputData, *, drafts: processing.DraftSink | None = None

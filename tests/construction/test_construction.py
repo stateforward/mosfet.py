@@ -40,7 +40,7 @@ class _Forbidden(AssertionError):
     """A constructor reached an operation that belongs to start, not construction."""
 
 
-class _Processor(processing.Processor):
+class _Processor(processing.DecisionProcessor):
     """A processor that selects nothing; it exists only to be handed to a constructor."""
 
     @typing.override

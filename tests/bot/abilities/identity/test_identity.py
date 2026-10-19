@@ -575,7 +575,7 @@ def test_being_addressed_reaches_cognition_through_the_body() -> None:
     assert identity.AdoptEvent.name in offered
 
 
-class _DecidesNothing(processing.Processor):
+class _DecidesNothing(processing.DecisionProcessor):
     @override
     async def process(
         self, input: processing.InputData, *, drafts: processing.DraftSink | None = None

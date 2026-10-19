@@ -8,6 +8,7 @@ from mosfet.protocols import attachment
 from mosfet.behavior import storage as behavior_storage
 from mosfet.behavior import seed
 import mosfet
+from mosfet.bot import testing
 
 import asyncio
 import ast
@@ -271,7 +272,7 @@ def test_autonomy_origin_and_candidate_outcomes_use_explicit_choices() -> None:
         assert routes[-1].guard is None
 
     owner = cognition.Autonomy()
-    child = cognition.Intuition(processor=typing.cast(processing.Processor, object()))
+    child = cognition.Intuition(processor=testing.Decider())
     candidate_run_type = typing.cast(_CandidateModelFactory, getattr(autonomy_module, "_CandidateRun"))
     capability_type = typing.cast(_CandidateCapabilityFactory, getattr(autonomy_module, "_CandidateCapability"))
 

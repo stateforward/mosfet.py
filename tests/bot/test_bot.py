@@ -141,7 +141,7 @@ class ProbeAbility(processing.Processing):
         return self._probe.calls
 
 
-class IgnoreProcessor(processing.Processor):
+class IgnoreProcessor(processing.DecisionProcessor):
     calls: list[processing.InputData]
 
     def __init__(self) -> None:
@@ -201,7 +201,7 @@ def _as_output_data(
     return value
 
 
-class SequenceProcessor(processing.Processor):
+class SequenceProcessor(processing.DecisionProcessor):
     calls: list[processing.InputData]
     outputs: list[cognition.types.OutputData]
 
@@ -236,7 +236,7 @@ class SequenceAbility(processing.Processing):
         return self._seq.calls
 
 
-class CyclingSelectionProcessor(processing.Processor):
+class CyclingSelectionProcessor(processing.DecisionProcessor):
     calls: list[processing.InputData]
     outputs: tuple[cognition.types.OutputData, ...]
 
@@ -253,7 +253,7 @@ class CyclingSelectionProcessor(processing.Processor):
         return processing.coerce_event_selections(output) or ()
 
 
-class BlockingSequenceProcessor(processing.Processor):
+class BlockingSequenceProcessor(processing.DecisionProcessor):
     calls: list[processing.InputData]
     outputs: list[cognition.types.OutputData]
     release: asyncio.Event
@@ -294,7 +294,7 @@ class BlockingSequenceAbility(processing.Processing):
         return self._seq.calls
 
 
-class BlockingProcessor(processing.Processor):
+class BlockingProcessor(processing.DecisionProcessor):
     calls: list[int]
     release: asyncio.Event
 
@@ -323,7 +323,7 @@ class BlockingAbility(processing.Processing):
         return self._blocking.calls
 
 
-class FailingProcessor(processing.Processor):
+class FailingProcessor(processing.DecisionProcessor):
     @typing.override
     async def process(
         self, input: processing.InputData, *, drafts: processing.DraftSink | None = None
@@ -337,7 +337,7 @@ class FailingAbility(processing.Processing):
         super().__init__(processor=FailingProcessor())
 
 
-class NestedPrimaryProcessor(processing.Processor):
+class NestedPrimaryProcessor(processing.DecisionProcessor):
     calls: list[processing.InputData]
 
     def __init__(self) -> None:
@@ -381,7 +381,7 @@ class HangingAbility(processing.Processing):
         super().__init__(processor=HangingProcessor())
 
 
-class CancellableHangingProcessor(processing.Processor):
+class CancellableHangingProcessor(processing.DecisionProcessor):
     calls: list[int]
     cancelled: bool
 
@@ -423,7 +423,7 @@ class CapturingCognition(cognition.Cognition):
     input_events: list[hsm.Event[typing.Any]]
     swallow_cancel: bool
 
-    def __init__(self, processor: processing.Processor, *, swallow_cancel: bool = False) -> None:
+    def __init__(self, processor: processing.DecisionProcessor, *, swallow_cancel: bool = False) -> None:
         self.input_events = []
         self.swallow_cancel = swallow_cancel
         store = memory.Memory()
@@ -464,10 +464,13 @@ class InputRecordingCognition(Cognition):
     inputs: list[cognition.InputData]
 
     def __init__(self, processing_ability: processing.Processing) -> None:
+        processor = processing_ability.processor
+        if not isinstance(processor, processing.DecisionProcessor):
+            raise TypeError("InputRecordingCognition expects Processing on a processing.DecisionProcessor")
         self.inputs = []
         store = memory.Memory()
         super().__init__(
-            intuition=cognition.Intuition(processor=processing_ability.processor),
+            intuition=cognition.Intuition(processor=processor),
             reasoning=cognition.Reasoning(processor=_NoopReasoningProcessor()),
             reflection=_reflection_for_test(store),
             # Cognition attaches the bot's one memory; Reflection is its peer.
@@ -482,18 +485,18 @@ class InputRecordingCognition(Cognition):
 
 
 def as_cognition(
-    value: abilities.Ability[typing.Any, typing.Any] | processing.Processing | processing.Processor,
+    value: abilities.Ability[typing.Any, typing.Any] | processing.Processing | processing.DecisionProcessor,
 ) -> abilities.Ability[typing.Any, typing.Any]:
-    """Bot cognition is Cognition; wrap a leaf Processor as intuition for tests."""
+    """Bot cognition is Cognition; wrap a leaf DecisionProcessor as intuition for tests."""
 
     if isinstance(value, cognition.Cognition):
         return value
-    if isinstance(value, processing.Processor) and not isinstance(value, processing.Processing):
-        processor: processing.Processor = value
-    elif isinstance(value, processing.Processing):
+    if isinstance(value, processing.DecisionProcessor):
+        processor: processing.DecisionProcessor = value
+    elif isinstance(value, processing.Processing) and isinstance(value.processor, processing.DecisionProcessor):
         processor = value.processor
     else:
-        raise TypeError("as_cognition expects Cognition, Processing, or Processor")
+        raise TypeError("as_cognition expects Cognition, or Processing on a DecisionProcessor, or a DecisionProcessor")
     store = memory.Memory()
     return cognition.Cognition(
         intuition=cognition.Intuition(processor=processor),
@@ -3879,7 +3882,7 @@ def test_bot_processing_state_routes_ability_failure_to_failed_event() -> None:
 @pytest.mark.parametrize("fails", [False, True])
 def test_bot_processing_terminal_finishes_operation_timer_actor(fails: bool) -> None:
     async def run() -> tuple[str, dict[str, object]]:
-        processor: processing.Processor = FailingProcessor() if fails else NestedPrimaryProcessor()
+        processor: processing.DecisionProcessor = FailingProcessor() if fails else NestedPrimaryProcessor()
         cognition_ability = CapturingCognition(processor)
         active_bot = AbilityAgent(devices=configured_devices("phone"), cognition=cognition_ability)
         _ = await start_bot_with_devices(active_bot)

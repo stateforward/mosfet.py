@@ -19,7 +19,7 @@ from tests.bot.test_bot import AbilityAgent, start_bot_with_devices, wait_until
 _PNG = media.Image(content=b"\x89PNG\r\n\x1a\n" + b"still", media_type="image/png")
 
 
-class RecordingProcessor(processing.Processor):
+class RecordingProcessor(processing.DecisionProcessor):
     """Records every turn; on the first turn it selects ``look`` when told to."""
 
     inputs: list[processing.InputData]
@@ -54,7 +54,7 @@ class RecordingCognition(cognition.Cognition):
 
     input_events: list[hsm.Event[typing.Any]]
 
-    def __init__(self, processor: processing.Processor) -> None:
+    def __init__(self, processor: processing.DecisionProcessor) -> None:
         self.input_events = []
         store = memory.Memory()
         super().__init__(

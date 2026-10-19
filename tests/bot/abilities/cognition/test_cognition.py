@@ -332,7 +332,7 @@ class _BotActor(hsm.Instance):
         return False
 
 
-class RecordingIntuitionProcessor(processing.Processor):
+class RecordingIntuitionProcessor(processing.DecisionProcessor):
     """Return events (with optional patched confidence) or unhandled OutputData."""
 
     calls: list[processing.InputData]
@@ -370,7 +370,7 @@ class RecordingIntuitionProcessor(processing.Processor):
         return self.output
 
 
-class DelayedIntuitionProcessor(processing.Processor):
+class DelayedIntuitionProcessor(processing.DecisionProcessor):
     calls: list[processing.InputData]
     cancelled: bool
     release_first: asyncio.Event
@@ -481,7 +481,7 @@ class InvalidReasoningProcessor(processing.Processor):
         return _processor_events({"not": "valid-output"})
 
 
-class RecordingOutputOperation(processing.Processor):
+class RecordingOutputOperation(processing.DecisionProcessor):
     calls: list[processing.InputData]
     output: processing.Events | processing.Result[processing.Events] | None
 
@@ -683,7 +683,7 @@ class RecordingCognition(cognition.Cognition):
         intuition: cognition.Intuition | None = None,
         reasoning: cognition.Reasoning | None = None,
         autonomy: cognition.Autonomy | None = None,
-        intuition_processor: processing.Processor | None = None,
+        intuition_processor: processing.DecisionProcessor | None = None,
         reasoning_processor: processing.Processor | None = None,
         reflection: cognition.Reflection | None = None,
         store: memory.Memory | None = None,
@@ -794,7 +794,7 @@ def reasoning_input(
 
 def cognition_abilities(
     *,
-    intuition_processor: processing.Processor | None = None,
+    intuition_processor: processing.DecisionProcessor | None = None,
     reasoning_processor: processing.Processor | None = None,
 ) -> tuple[cognition.Intuition, cognition.Reasoning]:
     intuition = cognition.Intuition(
@@ -809,7 +809,7 @@ def cognition_abilities(
 
 def make_cognition(
     *,
-    intuition_processor: processing.Processor | None = None,
+    intuition_processor: processing.DecisionProcessor | None = None,
     reasoning_processor: processing.Processor | None = None,
     reflection: cognition.Reflection | None = None,
     autonomy: cognition.Autonomy | None = None,
@@ -1283,7 +1283,7 @@ def test_cognition_direct_cancellation_acknowledges_active_child(
     phase: str,
 ) -> None:
     async def run() -> tuple[list[hsm.Event[typing.Any]], str, tuple[str, ...]]:
-        intuition_processor: processing.Processor
+        intuition_processor: processing.DecisionProcessor
         if phase == "reasoning":
             intuition_processor = RecordingIntuitionProcessor(cognition.intuition.OutputData(reason="escalate"))
         else:
@@ -1435,7 +1435,7 @@ def test_cognition_stubborn_child_cancel_timeout_requests_reboot(
     assert operation_keys == ()
 
 
-class _SlowFirstStepProcessor(processing.Processor):
+class _SlowFirstStepProcessor(processing.DecisionProcessor):
     """A local model whose first step outlasts any step timeout, then answers every later one at once."""
 
     calls: int
@@ -1555,7 +1555,7 @@ def test_a_step_that_outlasts_the_step_timeout_fails_its_turn_as_a_typed_failure
     assert episodes["next-turn"].outcome is memory.Outcome.COMPLETED
 
 
-class _FailingStepProcessor(processing.Processor):
+class _FailingStepProcessor(processing.DecisionProcessor):
     """A model step that fails outright, every time, the way a malformed dispatch failed reasoning live."""
 
     calls: int
@@ -1735,7 +1735,7 @@ def test_cognition_forwards_reflection_reboot_to_bot_owner() -> None:
 
 
 def test_cancelled_turn_cannot_cancel_the_next_turn(monkeypatch: pytest.MonkeyPatch) -> None:
-    class TwoTurnHangingProcessor(processing.Processor):
+    class TwoTurnHangingProcessor(processing.DecisionProcessor):
         calls: list[processing.InputData]
         cancelled_calls: list[int]
         releases: tuple[asyncio.Event, asyncio.Event]
@@ -2584,7 +2584,7 @@ def test_intuition_low_confidence_escalates_to_reasoning_after_environment_actio
 def test_intuition_reads_confidence_from_patched_event_selections() -> None:
     """Tool-call path: confidence on each event payload is unpatched and drives the tuner."""
 
-    class _PatchedEventsProcessor(processing.Processor):
+    class _PatchedEventsProcessor(processing.DecisionProcessor):
         @typing.override
         async def process(
             self, input: processing.InputData, *, drafts: processing.DraftSink | None = None
@@ -2773,7 +2773,7 @@ class _BenchActor(hsm.Instance):
     )
 
 
-class _MenuBoundIntuitionProcessor(processing.Processor):
+class _MenuBoundIntuitionProcessor(processing.DecisionProcessor):
     """Selects events by name the way a provider's dispatch tool does: one not on the turn's menu is refused."""
 
     calls: list[processing.InputData]
@@ -4250,7 +4250,7 @@ def test_cognition_remembers_a_failed_turn_with_its_stimulus_and_no_acts() -> No
     assert kept.acts == ()
 
 
-class _RefusingIntuitionProcessor(processing.Processor):
+class _RefusingIntuitionProcessor(processing.DecisionProcessor):
     @typing.override
     async def process(
         self, input: processing.InputData, *, drafts: processing.DraftSink | None = None
