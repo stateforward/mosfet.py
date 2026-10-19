@@ -665,14 +665,18 @@ def test_a_person_whose_voice_is_already_taken_stops_waiting() -> None:
 # --- A phone bot's perception and capacity -----------------------------------------------------------------------
 
 
+# A second of speech: what a voice nobody knows needs to be made into a new voice from.
+_SPEECH = b"\x01\x00" * 16_000
+
+
 class _FixedVoiceActivityClassifier(voice.detection.VoiceActivityClassifier):
-    """Speech is the audio ``b"speech"``; anything else is silence."""
+    """Speech is the audio ``_SPEECH``, a second of it; anything else is silence."""
 
     @typing.override
     async def classify(self, input: bytes) -> voice.detection.ApplyData:
-        if input == b"speech":
+        if input == _SPEECH:
             return voice.detection.ApplyData(
-                segments=(voice.detection.VoiceDetectionSegment(start_seconds=0.0, end_seconds=0.1, confidence=0.9),)
+                segments=(voice.detection.VoiceDetectionSegment(start_seconds=0.0, end_seconds=1.0, confidence=0.9),)
             )
         return voice.detection.ApplyData(segments=())
 
@@ -811,7 +815,7 @@ def test_speech_in_the_room_reaches_the_bot_from_a_voice_it_does_not_know_and_it
 
     async def run() -> None:
         async with testing.running(listener, observe=(bot.observe(cognition.InputEvent, record),)) as running:
-            for sound in (b"speech", b"silence"):
+            for sound in (_SPEECH, b"silence"):
                 data = SoundData(audio=sound, media_type="audio/pcm", sample_rate_hz=16_000, channels=1)
                 _ = await hsm.dispatch(running.environment, running.bot, SoundEvent.with_data(data))
             await _until(lambda: bool(model.woken_by(conversation.OutputEvent.name)))

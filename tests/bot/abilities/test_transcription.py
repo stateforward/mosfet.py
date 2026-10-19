@@ -403,10 +403,11 @@ def test_a_turns_voice_is_identified_and_stamped() -> None:
         sessions = Sessions()
         classifier = FixedVoiceClassifier(voice.identification.VoiceEmbedding(embedding=(0.6, 0.8), model="m"))
         ear = await _ear(sessions, voice_classifier=classifier, registry=_registry())
-        await arrives(ear, heard(5))
+        # A second of a voice nobody knows: enough to make a new voice from (recognition.MIN_NEW_VOICE_SECONDS).
+        await arrives(ear, heard(10))
         await _wait(lambda: len(sessions.made) == 1 and bool(sessions.made[0].controllers))
         await sessions.made[0].say(
-            stream.TurnEndedEvent.with_data(stream.TurnEndedData(at_seconds=0.5, text="hello there"))
+            stream.TurnEndedEvent.with_data(stream.TurnEndedData(at_seconds=1.0, text="hello there"))
         )
         await _wait(lambda: bool(ear.handoffs))
         return ear, classifier
@@ -419,7 +420,41 @@ def test_a_turns_voice_is_identified_and_stamped() -> None:
     assert speech.source_ids == frozenset({ref})
     assert speech.participants == (identification.participant("voice", voice_heard.recognition.id),)
     # The turn's audio, all of it, was embedded once.
-    assert classifier.calls[0].segments[0].audio == _TENTH * 5
+    assert classifier.calls[0].segments[0].audio == _TENTH * 10
+
+
+@pytest.mark.parametrize(("tenths", "known", "named"), [(9, False, False), (10, False, True), (5, True, True)])
+def test_a_new_voice_is_made_only_from_at_least_a_second_of_it(tenths: int, known: bool, named: bool) -> None:
+    """D-W8-21 D7: a print from under a second of a voice is too little to make a voice ref from. A voice nobody
+    knows is made into a new voice only from at least 1.0 s of it; shorter, the turn is heard without naming it
+    and nothing is made. A voice already known is named from any length."""
+
+    now = datetime.datetime.now(datetime.UTC)
+    store = identification.InProcessStore(max_ids=16)
+    if known:
+        _ = store.enroll("voice", "known-a", identification.Print(vector=(0.6, 0.8), model="m"), False, _POLICY, at=now)
+
+    async def run() -> StreamingListening:
+        sessions = Sessions()
+        classifier = FixedVoiceClassifier(voice.identification.VoiceEmbedding(embedding=(0.6, 0.8), model="m"))
+        ear = await _ear(sessions, voice_classifier=classifier, registry=_registry(store))
+        await arrives(ear, heard(tenths))
+        await _wait(lambda: len(sessions.made) == 1 and bool(sessions.made[0].controllers))
+        await sessions.made[0].say(
+            stream.TurnEndedEvent.with_data(stream.TurnEndedData(at_seconds=tenths / 10, text="hello there"))
+        )
+        await _wait(lambda: bool(ear.handoffs))
+        return ear
+
+    ear = asyncio.run(run())
+
+    (speech,) = _speech(ear)
+    assert speech.content == "hello there"
+    assert len(speech.voices) == int(named)
+    if known:
+        assert speech.voices[0].recognition.id == "known-a"
+    held = store.prune("voice", unseen_before=now + datetime.timedelta(days=1), max_ids=16)
+    assert held == int(named)
 
 
 def test_the_bots_own_voice_enrolled_on_the_stream_path_is_never_a_source_and_its_id_is_told() -> None:
@@ -700,17 +735,18 @@ def test_a_diarizing_ear_identifies_each_speaker_of_the_turn() -> None:
         diarizer = TwoSpeakers()
         classifier = FixedVoiceClassifier(voice.identification.VoiceEmbedding(embedding=(0.6, 0.8), model="m"))
         ear = await _ear(sessions, voice_classifier=classifier, registry=_registry(), voice_diarizer=diarizer)
-        await arrives(ear, heard(10))
+        # A second of each speaker: enough to make a new voice from.
+        await arrives(ear, heard(20))
         await _wait(lambda: len(sessions.made) == 1 and bool(sessions.made[0].controllers))
-        await sessions.made[0].say(stream.TurnEndedEvent.with_data(stream.TurnEndedData(at_seconds=1.0, text="hi")))
+        await sessions.made[0].say(stream.TurnEndedEvent.with_data(stream.TurnEndedData(at_seconds=2.0, text="hi")))
         await _wait(lambda: bool(ear.handoffs))
         return ear, diarizer, classifier
 
     ear, diarizer, classifier = asyncio.run(run())
-    assert diarizer.calls[0].audio == _TENTH * 10
+    assert diarizer.calls[0].audio == _TENTH * 20
     assert len(classifier.calls[0].segments) == 2
     (speech,) = _speech(ear)
-    assert [(item.start_seconds, item.end_seconds) for item in speech.voices] == [(0.0, 0.5), (0.5, 1.0)]
+    assert [(item.start_seconds, item.end_seconds) for item in speech.voices] == [(0.0, 1.0), (1.0, 2.0)]
 
 
 _CHEERFUL = voice.Affect(label="happy", scores={"happy": 0.7, "neutral": 0.3}, valence=0.6, confidence=0.7)
@@ -765,21 +801,21 @@ def test_a_turns_backchannel_too_short_to_fingerprint_leaves_the_rest_identified
             voice.identification.VoiceEmbedding(embedding=(0.6, 0.8), model="m"), shortest=0.3
         )
         ear = await _ear(sessions, voice_classifier=classifier, registry=_registry(), voice_diarizer=UnevenSpeakers())
-        await arrives(ear, heard(10))
+        await arrives(ear, heard(14))
         await _wait(lambda: len(sessions.made) == 1 and bool(sessions.made[0].controllers))
         await sessions.made[0].say(
-            stream.TurnEndedEvent.with_data(stream.TurnEndedData(at_seconds=1.0, text="mm, yes, go on"))
+            stream.TurnEndedEvent.with_data(stream.TurnEndedData(at_seconds=1.4, text="mm, yes, go on"))
         )
         await _wait(lambda: bool(ear.handoffs))
         return ear, classifier
 
     ear, classifier = asyncio.run(run())
-    # A 0.2 s backchannel, then 0.8 s of the other voice: both sent to the classifier in one request.
-    assert [round(segment.duration_seconds, 3) for segment in classifier.calls[0].segments] == [0.2, 0.8]
+    # A 0.28 s backchannel, then 1.12 s of the other voice: both sent to the classifier in one request.
+    assert [round(segment.duration_seconds, 3) for segment in classifier.calls[0].segments] == [0.28, 1.12]
     (speech,) = _speech(ear)
     assert speech.content == "mm, yes, go on"
     (identified,) = speech.voices
-    assert (identified.start_seconds, identified.end_seconds) == (pytest.approx(0.2), pytest.approx(1.0))
+    assert (identified.start_seconds, identified.end_seconds) == (pytest.approx(0.28), pytest.approx(1.4))
     assert speech.source_ids == frozenset({identification.ref("voice", identified.recognition.id)})
 
 

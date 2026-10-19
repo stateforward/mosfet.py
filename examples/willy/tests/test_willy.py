@@ -37,7 +37,8 @@ from mosfet.providers import speech_server
 from mosfet.providers.speech_server import transcription
 
 _RATE_HZ = 16_000
-_UTTERANCE_SECONDS = 1.0
+# Two voices in one utterance get a second each: what a voice nobody knows needs to be made a new voice from.
+_UTTERANCE_SECONDS = 2.0
 _WAIT = 10.0
 # How many more turns a test waits through for something to have reached Willy's memory.
 _ATTEMPTS = 5
@@ -166,7 +167,7 @@ class House:
     prints: Prints
 
     async def say(self, *voices: int, room: str = "kitchen") -> None:
-        """One utterance in ``room``: each voice in turn, sharing one second of audio."""
+        """One utterance in ``room``: each voice in turn, sharing two seconds of audio."""
 
         share = _UTTERANCE_SECONDS / len(voices)
         sound = environment.SoundData(

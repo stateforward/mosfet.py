@@ -243,14 +243,18 @@ def test_the_bot_file_is_one_inline_bot_define() -> None:
 # --- One run, observed -----------------------------------------------------------------------------------------
 
 
+# A second of speech: what a voice nobody knows needs to be made into a new voice from.
+_SPEECH = b"\x01\x00" * 16_000
+
+
 class _FixedVoiceActivityClassifier(voice.detection.VoiceActivityClassifier):
-    """Speech is the audio ``b"speech"``; anything else is silence."""
+    """Speech is the audio ``_SPEECH``, a second of it; anything else is silence."""
 
     @typing.override
     async def classify(self, input: bytes) -> voice.detection.ApplyData:
-        if input == b"speech":
+        if input == _SPEECH:
             return voice.detection.ApplyData(
-                segments=(voice.detection.VoiceDetectionSegment(start_seconds=0.0, end_seconds=0.1, confidence=0.9),)
+                segments=(voice.detection.VoiceDetectionSegment(start_seconds=0.0, end_seconds=1.0, confidence=0.9),)
             )
         return voice.detection.ApplyData(segments=())
 
@@ -328,7 +332,7 @@ def test_speech_reaches_the_bot_from_a_voice_it_does_not_know_on_the_local_path(
 
     async def run() -> listening.SpeechData:
         async with testing.running(listener, observe=(bot.observe(cognition.InputEvent, record),)) as running:
-            for audio in (b"speech", b"silence"):
+            for audio in (_SPEECH, b"silence"):
                 _ = await hsm.dispatch(running.environment, running.bot, SoundEvent.with_data(_sound(audio)))
             async with asyncio.timeout(_WAIT):
                 while not heard:

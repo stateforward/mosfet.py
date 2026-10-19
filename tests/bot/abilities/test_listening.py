@@ -252,6 +252,25 @@ def voice_registry(identifier: identification.Identifier | None = None) -> ident
     )
 
 
+def known_voice_registry(embedding: voice.identification.VoiceEmbedding) -> identification.Registry:
+    """A voice registry that already knows ``embedding``'s voice, so a segment of any length is named by it.
+
+    A voice nobody knows is made into a new voice only from a second of it (``recognition.MIN_NEW_VOICE_SECONDS``).
+    """
+
+    assert embedding.model is not None
+    store = identification.InProcessStore(max_ids=16)
+    _ = store.enroll(
+        "voice",
+        "known-a",
+        identification.Print(vector=embedding.embedding, model=embedding.model),
+        False,
+        _POLICY,
+        at=datetime.datetime.now(datetime.UTC),
+    )
+    return voice_registry(identification.Matcher(store=store, policy=_POLICY))
+
+
 class SilentIdentifier(identification.Identifier):
     """An identifier that never answers, so the ear's own deadline is the only thing that ends a wait."""
 
@@ -654,13 +673,12 @@ def test_a_backchannel_too_short_to_fingerprint_is_heard_unidentified_beside_an_
 
 def test_listening_identifies_first_vad_segment_and_carries_id_through_window() -> None:
     async def run() -> tuple[list[cognition.InputData], list[voice.identification.InputData]]:
-        identifier = FixedVoiceClassifier(
-            voice.identification.VoiceEmbedding(embedding=(0.1, 0.2), model="fixture", confidence=0.95),
-        )
+        embedding = voice.identification.VoiceEmbedding(embedding=(0.1, 0.2), model="fixture", confidence=0.95)
+        identifier = FixedVoiceClassifier(embedding)
         listening_ability = RecordingListening(
             voice_activity_classifier=SequenceVoiceActivityClassifier(_VOICE_APPLY, _SILENCE_APPLY),
             voice_classifier=identifier,
-            registry=voice_registry(),
+            registry=known_voice_registry(embedding),
         )
         await start_ability_tree(None, listening_ability)
         await _apply_utterance(listening_ability, b"\x01\x00" * 240, silence=b"\x00\x00" * 240)
@@ -700,13 +718,12 @@ def test_listening_identifies_ambient_wav_sound_without_speech_decoder() -> None
     async def run() -> tuple[
         list[cognition.InputData], list[voice.identification.InputData], list[listening.FailedEventData]
     ]:
-        identifier = FixedVoiceClassifier(
-            voice.identification.VoiceEmbedding(embedding=(0.11, -0.07, 0.33), model="fixture", confidence=0.94),
-        )
+        embedding = voice.identification.VoiceEmbedding(embedding=(0.11, -0.07, 0.33), model="fixture", confidence=0.94)
+        identifier = FixedVoiceClassifier(embedding)
         listening_ability = RecordingListening(
             voice_activity_classifier=SequenceVoiceActivityClassifier(_VOICE_APPLY, _SILENCE_APPLY),
             voice_classifier=identifier,
-            registry=voice_registry(),
+            registry=known_voice_registry(embedding),
             speech_decoder=None,
         )
         await start_ability_tree(None, listening_ability)
@@ -746,11 +763,12 @@ def test_listening_identifies_ambient_wav_sound_without_speech_decoder() -> None
 
 def test_listening_calls_direct_classifier_once_and_reuses_id_for_each_vad_product() -> None:
     async def run() -> tuple[list[cognition.InputData], list[voice.identification.InputData]]:
-        identifier = FixedVoiceClassifier(voice.identification.VoiceEmbedding(embedding=(0.1, 0.2), model="fixture"))
+        embedding = voice.identification.VoiceEmbedding(embedding=(0.1, 0.2), model="fixture")
+        identifier = FixedVoiceClassifier(embedding)
         listening_ability = RecordingListening(
             voice_activity_classifier=SequenceVoiceActivityClassifier(_VOICE_APPLY, _VOICE_APPLY, _SILENCE_APPLY),
             voice_classifier=identifier,
-            registry=voice_registry(),
+            registry=known_voice_registry(embedding),
         )
         await start_ability_tree(None, listening_ability)
         for _ in range(3):
@@ -896,7 +914,8 @@ def _identified_utterance(
                 ),
             )
             await wait_until(lambda: bool(enroller.named(listening.EnrolledEvent)))
-        await _apply_utterance(listening_ability, b"\x01\x00" * 240, silence=b"\x00\x00" * 240)
+        # A second of the voice (48 kHz): enough to make a new voice of one nobody knows.
+        await _apply_utterance(listening_ability, b"\x01\x00" * 48_000, silence=b"\x00\x00" * 240)
         await wait_until(lambda: len(listening_ability.handoffs) == 1)
         return listening_ability.handoffs, identifier.calls, enroller.named(listening.EnrolledEvent)
 

@@ -36,6 +36,12 @@ from mosfet.abilities import identification
 _MAX_PRINTS = 16
 MAX_PARTICIPANTS = 32
 """The most participants a listening product carries: the device-stamped ones, then the voices heard."""
+MIN_NEW_VOICE_SECONDS = 1.0
+"""The shortest segment a new voice is made from: a voice nobody knows, heard for less, is left unidentified.
+
+A print from under a second of speech is too little to tell a voice by (D-W8-21 D7); a known voice is still
+named from a shorter segment.
+"""
 _IDENTIFICATION = metrics.get_meter("bot.abilities.listening").create_counter(
     "bot.identification.count",
     unit="{print}",
@@ -148,8 +154,9 @@ async def identify(
     """Who was heard in each segment, in order: one identify request to the registry, bounded by ``timeout``.
 
     A segment with no voiceprint, whose embedding cannot be printed, or that the registry does not answer
-    in time, is ``None``. With ``match_only`` (an overlap: the bot's own voice is in that audio too), a voice
-    nobody knows is ``None`` as well, and the registry makes no new voice from it.
+    in time, is ``None``. A voice nobody knows is made into a new voice only from a segment of at least
+    ``MIN_NEW_VOICE_SECONDS``; from a shorter one it is ``None``. With ``match_only`` (an overlap: the bot's own
+    voice is in that audio too), a voice nobody knows is ``None`` from any segment, and no new voice is made.
     """
 
     fingerprinted = [(index, embedding) for index, embedding in enumerate(embeddings) if embedding is not None]
@@ -168,7 +175,11 @@ async def identify(
                 identification.IdentifyEvent.with_data_and_id(
                     identification.IdentifyData(
                         prints=tuple(print_ for _, print_ in indexed),
-                        mint=(not match_only,) * len(indexed),
+                        mint=tuple(
+                            not match_only
+                            and segments[index].end_seconds - segments[index].start_seconds >= MIN_NEW_VOICE_SECONDS
+                            for index, _ in indexed
+                        ),
                     ),
                     f"{operation_id}:recognize:{uuid.uuid4().hex}",
                 ),
@@ -253,4 +264,14 @@ async def enroll(
     return identification.FailureKind.STORE_FAILED
 
 
-__all__ = ["MAX_PARTICIPANTS", "Embedder", "embed", "enroll", "identify", "merge", "stamps", "unidentified"]
+__all__ = [
+    "MAX_PARTICIPANTS",
+    "MIN_NEW_VOICE_SECONDS",
+    "Embedder",
+    "embed",
+    "enroll",
+    "identify",
+    "merge",
+    "stamps",
+    "unidentified",
+]
