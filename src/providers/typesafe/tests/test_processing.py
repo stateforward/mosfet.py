@@ -215,3 +215,43 @@ def test_state_document_carries_envelope_and_groundable_data() -> None:
     assert envelope["name"] == "environment.sound"
     data = typing.cast("dict[str, object]", turn["data"])
     assert data["kind"] == "phone.ringing"
+
+
+def test_the_processor_builds_its_client_for_the_given_system_one_server(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`base_url`, `api_key`, `model` and `timeout` reach the client the processor opens each turn (D-11-13)."""
+
+    from mosfet.providers.typesafe import processing as processing_module
+
+    stub = _stub_answers({"selection": (_PASS, 0.5)})
+    built: list[dict[str, object]] = []
+
+    def recording_client(**kwargs: object) -> _StubAsyncSystemOneClient:
+        built.append(kwargs)
+        return stub
+
+    monkeypatch.setattr(processing_module, "AsyncSystemOneClient", recording_client)
+    processor = Processor(base_url="http://127.0.0.1:8102", api_key="local-key", model="system-one", timeout=2.0)
+
+    _ = _run(processor, input_payload="ring turn", schemas=_answer_call_offered())
+
+    assert built == [
+        {"base_url": "http://127.0.0.1:8102", "api_key": "local-key", "model": "system-one", "timeout": 2.0}
+    ]
+    assert stub.opened == 1
+
+
+def test_the_processor_with_no_server_builds_a_hosted_client(monkeypatch: pytest.MonkeyPatch) -> None:
+    from mosfet.providers.typesafe import processing as processing_module
+
+    stub = _stub_answers({"selection": (_PASS, 0.5)})
+    built: list[dict[str, object]] = []
+
+    def recording_client(**kwargs: object) -> _StubAsyncSystemOneClient:
+        built.append(kwargs)
+        return stub
+
+    monkeypatch.setattr(processing_module, "AsyncSystemOneClient", recording_client)
+
+    _ = _run(Processor(), input_payload="ring turn", schemas=_answer_call_offered())
+
+    assert built == [{"base_url": None, "api_key": None, "model": None, "timeout": None}]

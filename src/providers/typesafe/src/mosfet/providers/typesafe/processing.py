@@ -156,11 +156,18 @@ class Processor(processing.DecisionProcessor):
         *,
         client: AsyncSystemOneClient | None = None,
         client_factory: collections.abc.Callable[[], AsyncSystemOneClient] | None = None,
+        base_url: str | None = None,
         api_key: str | None = None,
         model: str | None = None,
         timeout: float | None = None,
         pass_wording: str = _DEFAULT_PASS_WORDING,
     ) -> None:
+        """Decide on hosted TypeSafe, or on the local system_one server at ``base_url``.
+
+        An injected ``client`` or ``client_factory`` wins; otherwise each turn opens an
+        `AsyncSystemOneClient` built from ``base_url``, ``api_key``, ``model`` and ``timeout``.
+        """
+
         if client_factory is not None:
             resolved_factory = client_factory
         elif client is not None:
@@ -168,16 +175,10 @@ class Processor(processing.DecisionProcessor):
 
             def resolved_factory() -> AsyncSystemOneClient:
                 return resolved
-        elif api_key is not None or model is not None:
-            key = api_key
-            chosen_model = model
-
-            def resolved_factory() -> AsyncSystemOneClient:
-                return AsyncSystemOneClient(api_key=key, model=chosen_model, timeout=timeout)
         else:
 
             def resolved_factory() -> AsyncSystemOneClient:
-                return AsyncSystemOneClient(timeout=timeout)
+                return AsyncSystemOneClient(base_url=base_url, api_key=api_key, model=model, timeout=timeout)
 
         self._client_factory = resolved_factory
         self._timeout = timeout
