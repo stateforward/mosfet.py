@@ -35,6 +35,7 @@ import pydantic
 import pytest
 
 from tests.bot.abilities.cognition.metadata_contract import assert_metadata_key_prefix_is_absent
+from tests.bot.behavior.support import ManualTimers
 
 from mosfet.bot import body
 from mosfet.bot.body import Bot
@@ -731,8 +732,11 @@ class TimeoutAbilityAgent(AbilityAgent):
     _processing_timeout: typing.ClassVar[datetime.timedelta] = datetime.timedelta(milliseconds=1)
 
 
+QUICK_PROCESSING_TIMEOUT = datetime.timedelta(milliseconds=20)
+
+
 class QuickTimeoutAgent(AbilityAgent):
-    _processing_timeout: typing.ClassVar[datetime.timedelta] = datetime.timedelta(milliseconds=20)
+    _processing_timeout: typing.ClassVar[datetime.timedelta] = QUICK_PROCESSING_TIMEOUT
 
 
 class FastDeactivationTimeoutAgent(BasicAgent):
@@ -825,11 +829,35 @@ def configured_devices(*ids: str) -> tuple[Device, ...]:
     return tuple(Device(id=identity) for identity in ids)
 
 
-async def start_bot_with_devices(active_bot: Bot, *, placement: space.Placement | None = None) -> Environment:
-    environment = Environment()
+async def start_bot_with_devices(
+    active_bot: Bot, *, placement: space.Placement | None = None, clock: hsm.Clock | None = None
+) -> Environment:
+    environment = Environment(clock=clock)
     _ = await active_bot.attach(environment, placement=placement)
     await wait_until(lambda: active_bot.state() != "/Bot/activating")
     return environment
+
+
+async def _processing_wait(timers: ManualTimers) -> "asyncio.Future[datetime.datetime]":
+    """The newest unfired wait of a quick turn's processing timer, once its turn starts one."""
+
+    deadline = asyncio.get_running_loop().time() + 30.0
+    while asyncio.get_running_loop().time() < deadline:
+        for duration, waiter in reversed(timers.pending):
+            if duration == QUICK_PROCESSING_TIMEOUT and not waiter.done():
+                return waiter
+        await asyncio.sleep(0)
+    raise TimeoutError("no processing timer wait became pending")
+
+
+def _processing_wait_outcomes(timers: ManualTimers) -> list[str]:
+    """How each quick processing-timer wait ended, oldest first: fired, cancelled or pending."""
+
+    return [
+        "pending" if not waiter.done() else "cancelled" if waiter.cancelled() else "fired"
+        for duration, waiter in timers.pending
+        if duration == QUICK_PROCESSING_TIMEOUT
+    ]
 
 
 def test_cognition_reboot_request_cycles_bot_lifecycle(
@@ -4651,24 +4679,33 @@ def test_bot_rejects_current_processing_terminal_from_wrong_endpoint(wrong_endpo
 
 def test_bot_processing_state_times_out_hanging_ability() -> None:
     async def run() -> tuple[
-        str, bool, str | None, list[int], list[mosfet.ProcessingFailedEventData], list[cognition.types.OutputData]
+        str,
+        bool,
+        str | None,
+        list[int],
+        list[mosfet.ProcessingFailedEventData],
+        list[cognition.types.OutputData],
+        list[str],
     ]:
         ability = CancellableHangingAbility()
-        # First turn hangs forever (timeout cancels). Second turn returns immediately; use a
-        # recovery-scale timeout so the full Cognition pipeline can finish without racing 1ms.
+        timers = ManualTimers()
         active_bot = QuickTimeoutAgent(devices=configured_devices("phone"), cognition=ability)
 
-        _ = await start_bot_with_devices(active_bot)
+        _ = await start_bot_with_devices(active_bot, clock=timers)
         await active_bot.dispatch(
             active_bot.context(),
             mosfet.InputEvent.with_data(mosfet.InputEventData(target_device="phone", priority=3)),
         )
-        await wait_until(lambda: active_bot.state() == "/Bot/active/focused" and ability.cancelled)
+        # The first turn hangs until its processing timer fires; nothing else ends it.
+        first = await _processing_wait(timers)
+        first.set_result(datetime.datetime.now(datetime.UTC))
+        await wait_until(lambda: active_bot.state() == "/Bot/active/focused" and ability.cancelled, timeout=30.0)
         await active_bot.dispatch(
             active_bot.context(),
             mosfet.InputEvent.with_data(mosfet.InputEventData(target_device="phone", priority=4)),
         )
-        await wait_until(lambda: len(ability.calls) == 2 and active_bot.state() == "/Bot/active/focused")
+        # The second turn completes with its timer never fired, however long the pipeline takes.
+        await wait_until(lambda: len(ability.calls) == 2 and active_bot.state() == "/Bot/active/focused", timeout=30.0)
 
         return (
             active_bot.state(),
@@ -4677,9 +4714,10 @@ def test_bot_processing_state_times_out_hanging_ability() -> None:
             ability.calls,
             active_bot.failures,
             active_bot.actions,
+            _processing_wait_outcomes(timers),
         )
 
-    state, cancelled, ability_state, calls, failures, actions = asyncio.run(run())
+    state, cancelled, ability_state, calls, failures, actions, outcomes = asyncio.run(run())
 
     assert state == "/Bot/active/focused"
     assert cancelled
@@ -4689,6 +4727,7 @@ def test_bot_processing_state_times_out_hanging_ability() -> None:
     assert len(failures) == 1
     assert "timed out" in failures[0].message
     assert actions == [no_output("priority:4")]
+    assert outcomes == ["fired", "cancelled"]
 
 
 def test_bot_processing_timeout_recovery_finishes_cancellation() -> None:
@@ -4741,41 +4780,29 @@ def test_bot_processing_cancellation_timeout_fails_closed_and_rejects_next_turn(
     assert "timed out" in failures[0].message
 
 
-def test_completed_turn_cancels_processing_timer(monkeypatch: pytest.MonkeyPatch) -> None:
-    operations: list[hsm.Instance] = []
-    hsm_started = hsm.started
-
-    async def spy_started(
-        ctx: hsm.Context | None,
-        instance: hsm.Instance,
-        model: hsm.Model,
-        config: hsm.Config | None = None,
-    ) -> hsm.Instance:
-        if model.qualified_name == "/BotProcessingTimer":
-            operations.append(instance)
-        return await hsm_started(ctx, instance, model, config)
-
-    monkeypatch.setattr(hsm, "started", spy_started)
-
-    async def run() -> tuple[list[mosfet.ProcessingFailedEventData], list[cognition.types.OutputData]]:
+def test_completed_turn_cancels_processing_timer() -> None:
+    async def run() -> tuple[list[mosfet.ProcessingFailedEventData], list[cognition.types.OutputData], list[str]]:
+        timers = ManualTimers()
         active_bot = QuickTimeoutAgent(devices=configured_devices("phone"), cognition=IgnoreAbility())
-        _ = await start_bot_with_devices(active_bot)
+        _ = await start_bot_with_devices(active_bot, clock=timers)
         await active_bot.dispatch(
             active_bot.context(),
             mosfet.InputEvent.with_data(mosfet.InputEventData(target_device="phone", priority=3)),
         )
-        await wait_until(lambda: active_bot.state() == "/Bot/active/focused" and bool(active_bot.actions))
-        await asyncio.sleep(0.05)  # well past the 20ms turn timeout
-        return active_bot.failures, active_bot.actions
+        _ = await _processing_wait(timers)
+        await wait_until(
+            lambda: active_bot.state() == "/Bot/active/focused"
+            and bool(active_bot.actions)
+            and _processing_wait_outcomes(timers) != ["pending"],
+            timeout=30.0,
+        )
+        return active_bot.failures, active_bot.actions, _processing_wait_outcomes(timers)
 
-    failures, actions = asyncio.run(run())
+    failures, actions, outcomes = asyncio.run(run())
 
-    timer_stopped = bool(operations) and all(
-        operation.state() in {"", "/BotProcessingTimer"} for operation in operations
-    )
-
-    # Completing the turn exits processing; the owning activity stops the timer explicitly.
-    assert timer_stopped
+    # Completing the turn exits processing; the owning activity stops the timer, so its wait is
+    # cancelled rather than ever fired.
+    assert outcomes == ["cancelled"]
     assert failures == []
     assert actions == [no_output("priority:3")]
 
