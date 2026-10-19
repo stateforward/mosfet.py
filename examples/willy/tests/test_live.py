@@ -24,7 +24,8 @@ given, and what it chose) and never steered: whether Willy asks who A is, what i
 are its own, and they are written to the report (printed as they happen, so pytest shows them on a failure, and
 kept in ``live-report.jsonl``) and to OTEL JSONL in the data directory. Where the test needs a capacity used, it
 dispatches the event itself, standing in for a selection, or drives Speaking with a fixed reply, so whether
-Willy speaks is never the test's question. Each step is bounded, and a failure says which step and its bound:
+Willy speaks is never the test's question. A turn speech woke is one a conversation's speech woke, or speech heard
+while Willy was speaking (``listening.overlap``). Each step is bounded, and a failure says which step and its bound:
 
 * L1 preflight (10 s): the language model lists ``WILLY_MODEL``, and ``/healthz`` answers 200 on speech to text,
   speech, voiceprints, tone, diarization and embeddings.
@@ -113,7 +114,9 @@ _TRAILING_SILENCE_SECONDS = 1.5
 # How long the test waits, after the echo, for a turn before A speaks again to give Willy one.
 _ECHO_TURN_SECONDS = 20.0
 _POLL_SECONDS = 0.1
-_HEARD = conversation.OutputEvent.name
+# A turn heard speech woke: a conversation's speech, or speech heard over Willy's own (an overlap), which wakes
+# listening.overlap instead.
+_HEARD = frozenset({conversation.OutputEvent.name, listening.OverlapEvent.name})
 _SECRETS_DIRECTORY = pathlib.Path("/run/secrets")
 # Each of the lab's services, by the setting that names it and the unit that serves it (lab-ct108.md).
 _HEALTH = (
@@ -197,7 +200,7 @@ class Recorded(processing.Processor):
             if stimulus is None or stimulus.id in seen:
                 continue
             seen.add(stimulus.id)
-            if index >= after and stimulus.name == _HEARD:
+            if index >= after and stimulus.name in _HEARD:
                 yield call
 
 
