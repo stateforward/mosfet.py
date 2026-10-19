@@ -1079,6 +1079,8 @@ def test_device_tells_every_holder_with_bot_input() -> None:
         observation = event.data.observation
         assert observation is not None
         assert (observation.event, observation.data) == (COMMAND_EVENT.name, _CommandData(word="hello"))
+        # A device that names no one on its observation tells its holders no participant.
+        assert event.data.participants == ()
 
 
 def test_device_observation_hook_is_overridable() -> None:

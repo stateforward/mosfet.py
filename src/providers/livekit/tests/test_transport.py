@@ -19,7 +19,7 @@ from mosfet.environment import Environment
 from mosfet.protocols import attachment, transform, transport
 from mosfet.providers import livekit
 from tests import metric_reader
-from tests.devices.computer.remote import Controller, Holder, settle, start, wait_until
+from tests.devices.computer.remote import PERSON, Controller, Holder, settle, start, wait_until
 from tests.livekit_room_fakes import (
     FakeAudioFrame,
     FakeAudioSource,
@@ -1050,7 +1050,13 @@ def test_a_computer_typed_into_through_the_room_tells_its_holder() -> None:
 
     assert (
         computer.TextEnteredEvent.name,
-        computer.TextEnteredData(device_id="studio-laptop", person_id="p-1", field_id="name", text="hi"),
+        computer.TextEnteredData(
+            device_id="studio-laptop",
+            person_id="p-1",
+            participants=PERSON,
+            field_id="name",
+            text="hi",
+        ),
     ) in observations
     assert FIELD in shown(room)
     assert released and state == DETACHED

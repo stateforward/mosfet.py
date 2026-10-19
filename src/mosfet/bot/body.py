@@ -1083,8 +1083,8 @@ class Bot(Traced):
         ) as active:
             if isinstance(event.data, events.InputEventData):
                 stimulus = event.data
-                # A device report names no one; nobody stamped participants on it.
-                participants: tuple[events.Participant, ...] = ()
+                # The device's stamped participants ride forward unchanged (none when it knows no one).
+                participants = event.data.participants
                 active.set_attribute("bot.handoff.kind", "device_stimulus")
             elif isinstance(event.data, cognition.InputData):
                 # Sensory / contribution products hand cognition.InputEvent (Listening pattern).

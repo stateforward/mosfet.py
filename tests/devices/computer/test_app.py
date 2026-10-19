@@ -6,13 +6,23 @@ import pathlib
 import typing
 
 import hsm
-import mosfet
 import pytest
 
 from mosfet import media
 from mosfet.environment import Environment, SoundData, SoundEvent, VisualData, VisualEvent
 from tests import metric_reader
-from tests.devices.computer.remote import DEVICE_ID, FakeStream, Owner, ports, settle, start, stream, wait_until, wire
+from tests.devices.computer.remote import (
+    DEVICE_ID,
+    PERSON,
+    FakeStream,
+    Owner,
+    ports,
+    settle,
+    start,
+    stream,
+    wait_until,
+    wire,
+)
 
 PNG = media.Image(content=b"\x89PNG\r\n\x1a\n" + b"\x00" * 8, media_type="image/png")
 SCREEN = computer.ShowData(
@@ -119,7 +129,9 @@ def test_typing_into_a_focused_field_then_enter_tells_the_holder_once_and_clears
     assert (field.value, field.focused) == ("hi", True)
     (entered,) = observations
     assert entered.name == computer.TextEnteredEvent.name
-    assert entered.data == computer.TextEnteredData(device_id=DEVICE_ID, person_id="p-1", field_id="answer", text="hi")
+    assert entered.data == computer.TextEnteredData(
+        device_id=DEVICE_ID, person_id="p-1", participants=PERSON, field_id="answer", text="hi"
+    )
     assert after is not None
     (cleared,) = [element for element in after.elements if isinstance(element, computer.FieldElement)]
     assert cleared.value == ""
@@ -141,7 +153,9 @@ def test_typing_on_a_blank_screen_then_enter_tells_the_holder_the_text_with_no_f
     (entered,) = asyncio.run(run())
 
     assert entered.name == computer.TextEnteredEvent.name
-    assert entered.data == computer.TextEnteredData(device_id=DEVICE_ID, person_id="p-1", field_id=None, text="hi")
+    assert entered.data == computer.TextEnteredData(
+        device_id=DEVICE_ID, person_id="p-1", participants=PERSON, field_id=None, text="hi"
+    )
 
 
 def test_typing_with_no_field_focused_then_enter_tells_the_holder_and_focusing_a_field_drops_the_line() -> None:
@@ -164,8 +178,12 @@ def test_typing_with_no_field_focused_then_enter_tells_the_holder_and_focusing_a
 
     unfocused, focused = asyncio.run(run())
 
-    assert unfocused.data == computer.TextEnteredData(device_id=DEVICE_ID, person_id="p-1", field_id=None, text="h")
-    assert focused.data == computer.TextEnteredData(device_id=DEVICE_ID, person_id="p-1", field_id="answer", text="y")
+    assert unfocused.data == computer.TextEnteredData(
+        device_id=DEVICE_ID, person_id="p-1", participants=PERSON, field_id=None, text="h"
+    )
+    assert focused.data == computer.TextEnteredData(
+        device_id=DEVICE_ID, person_id="p-1", participants=PERSON, field_id="answer", text="y"
+    )
 
 
 def test_enter_on_an_empty_line_or_with_shift_tells_nobody() -> None:
@@ -199,7 +217,9 @@ def test_pressing_and_releasing_on_a_button_activates_it() -> None:
     (activated,) = asyncio.run(run())
 
     assert activated.name == computer.ActivatedEvent.name
-    assert activated.data == computer.ActivatedData(device_id=DEVICE_ID, person_id="p-1", element_id="send")
+    assert activated.data == computer.ActivatedData(
+        device_id=DEVICE_ID, person_id="p-1", participants=PERSON, element_id="send"
+    )
 
 
 @pytest.mark.parametrize(
@@ -238,7 +258,7 @@ def test_a_still_is_put_into_the_room_stamped_with_who_uses_the_computer() -> No
     assert isinstance(seen.data, VisualData)
     assert seen.data.image is PNG
     assert seen.data.kind == "computer.camera"
-    assert seen.data.participants == (mosfet.Participant(ref="p-1", role=mosfet.ParticipantRole.SOURCE),)
+    assert seen.data.participants == PERSON
     assert "device_id" not in VisualData.model_fields
 
 
@@ -259,7 +279,26 @@ def test_microphone_audio_is_put_into_the_room_as_the_type_never_relayed_back() 
         "computer.microphone",
         None,
     )
-    assert heard.data.participants == (mosfet.Participant(ref="p-1", role=mosfet.ParticipantRole.SOURCE),)
+    assert heard.data.participants == PERSON
+
+
+def test_a_typed_line_and_a_clicked_button_are_stamped_with_who_uses_the_computer() -> None:
+    # Live (builder check round 3, G1): what the person typed named no one, so recall had no person to follow.
+    async def run() -> list[hsm.Event[typing.Any]]:
+        remote = await started_app(Environment())
+        await on_screen(remote)
+        await click(remote, 0.5, 0.35)
+        await send(remote.app, key("y", text="y"))
+        await send(remote.app, key("Enter"))
+        await click(remote, 0.5, 0.65)
+        await wait_until(lambda: len(remote.owner.observations()) == 2)
+        return remote.owner.observations()
+
+    entered, activated = asyncio.run(run())
+
+    assert isinstance(entered.data, computer.TextEnteredData)
+    assert isinstance(activated.data, computer.ActivatedData)
+    assert entered.data.participants == activated.data.participants == PERSON
 
 
 def test_without_a_person_the_computer_stamps_no_participant() -> None:
@@ -267,11 +306,13 @@ def test_without_a_person_the_computer_stamps_no_participant() -> None:
         remote = await started_app(Environment(), person_id=None)
         await send(remote.app, computer.StillEvent.with_data(computer.StillData(image=PNG)))
         await send(remote.app, audio.InputEvent.with_data(audio.InputData(audio=b"remote voice")))
-        await wait_until(lambda: len(remote.owner.observations()) == 2)
+        await send(remote.app, key("h", text="h"))
+        await send(remote.app, key("Enter"))
+        await wait_until(lambda: len(remote.owner.observations()) == 3)
         return remote.owner.observations()
 
     for observation in asyncio.run(run()):
-        assert isinstance(observation.data, VisualData | SoundData)
+        assert isinstance(observation.data, VisualData | SoundData | computer.TextEnteredData)
         assert observation.data.participants == ()
 
 

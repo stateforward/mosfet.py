@@ -19,6 +19,7 @@ from mosfet.protocols import attachment, transport
 from tests import metric_reader
 from tests.devices.computer.remote import (
     DEVICE_ID,
+    PERSON,
     FakeStream,
     FakeTransport,
     Holder,
@@ -300,7 +301,10 @@ def test_what_a_person_does_is_told_to_the_holder_and_never_put_in_the_room() ->
     observations, room = asyncio.run(run())
 
     assert observations == [
-        (computer.ActivatedEvent.name, computer.ActivatedData(device_id=DEVICE_ID, person_id="p-1", element_id="send"))
+        (
+            computer.ActivatedEvent.name,
+            computer.ActivatedData(device_id=DEVICE_ID, person_id="p-1", participants=PERSON, element_id="send"),
+        )
     ]
     assert room == []
 
@@ -323,9 +327,29 @@ def test_keys_typed_on_the_remote_keyboard_are_told_to_the_holder() -> None:
     assert asyncio.run(run()) == [
         (
             computer.TextEnteredEvent.name,
-            computer.TextEnteredData(device_id=DEVICE_ID, person_id="p-1", field_id="name", text="hi"),
+            computer.TextEnteredData(
+                device_id=DEVICE_ID, person_id="p-1", participants=PERSON, field_id="name", text="hi"
+            ),
         )
     ]
+
+
+def test_the_holder_is_told_who_typed_as_the_computer_stamped_them() -> None:
+    # Live (builder check round 3, G1): the bot was told a line was typed, never by whom.
+    async def run() -> list[hsm.Event[typing.Any]]:
+        environment = Environment()
+        remote = await linked_computer(environment)
+        holder = await held(environment, remote.device)
+        for key, text in (("h", "h"), ("Enter", None)):
+            typed = hid.KeyEvent.with_data(hid.KeyData(action="down", key=key, code="", text=text))
+            _ = await remote.streams["keyboard"].dispatch(hsm.Context(), peer_send(json_message(typed)))
+        await wait_until(lambda: bool(holder.observations()))
+        return [event for event in holder.told if isinstance(event.data, mosfet.InputEventData)]
+
+    (told,) = asyncio.run(run())
+
+    assert isinstance(told.data, mosfet.InputEventData)
+    assert told.data.participants == PERSON
 
 
 def test_a_still_and_remote_audio_are_put_into_the_room_from_the_computer() -> None:

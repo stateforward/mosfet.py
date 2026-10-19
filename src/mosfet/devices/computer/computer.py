@@ -123,7 +123,9 @@ class Computer(mosfet.device.Device):
         computer's link registers with; the computer neither starts nor stops it. With no ``transport`` the
         computer is unplugged: it starts and runs with nothing else, and nothing reaches it. The default
         mouthpiece hears at the computer's ``placement``. ``clock`` is the computer's own ``hsm.Clock``
-        (see ``mosfet.device.Device``).
+        (see ``mosfet.device.Device``). ``person_id`` is who uses the computer: the computer stamps them as
+        the source participant of every line typed, button clicked, still and sound it captures; with
+        none, it names no one.
 
         Raises:
             ValueError: If ``link_timeout`` is not positive, or ``id``, ``peer_id`` or ``person_id`` is
@@ -273,4 +275,7 @@ class Computer(mosfet.device.Device):
         for model, kind in _OBSERVATION_KINDS.items():
             if isinstance(data, model):
                 _HOLDER_OBSERVATIONS.add(1, {"kind": kind})
-        self._tell_holders(ctx, event)
+        # Who typed or clicked rides forward as the app stamped them; the link names no one.
+        self._tell_holders(
+            ctx, event, participants=data.participants if isinstance(data, TextEnteredData | ActivatedData) else ()
+        )

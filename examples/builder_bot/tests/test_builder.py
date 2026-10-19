@@ -353,3 +353,44 @@ def test_what_the_model_chooses_reaches_the_screen_the_bench_and_the_next_turn(t
     ran = stimulus(ran_calls[0])
     assert isinstance(ran, hsm.Event) and isinstance(ran.data, sandbox.RanData)
     assert (ran.data.outcome, ran.data.exit_code, ran.data.stdout) == ("exited", 0, STDOUT)
+
+
+def test_the_persons_earlier_line_is_recalled_through_the_present_lane(tmp_path: pathlib.Path) -> None:
+    """Live (builder check round 3, G1): what the person typed is theirs, so a later line of theirs recalls it."""
+
+    shown = {"elements": [{"kind": "field", "id": "ask", "placeholder": "What should I build?", "focused": True}]}
+    model = testing.Scripted(
+        testing.Choice(stimulus=computer.LinkUpEvent.name, event=computer.ShowEvent.name, data=shown),
+    )
+
+    def typed(call: processing.InputData) -> str | None:
+        woke = stimulus(call)
+        if isinstance(woke, mosfet.StimulusData) and isinstance(woke.data, computer.TextEnteredData):
+            return woke.data.text
+        return None
+
+    async def run() -> tuple[processing.InputData, ...]:
+        async with bring_up(tmp_path, model) as builder:
+            person = await builder.sit_down()
+            await wait_until(lambda: "ask:" in "".join(person.screens()))
+            person.lines.put_nowait("write a timer bot file")
+            # The link-up turn and this line's turn are both reflected on: this line's turn is over and remembered.
+            await wait_until(
+                lambda: sum(isinstance(call.input, cognition.reflection.SelectInput) for call in model.calls()) >= 2
+            )
+            person.lines.put_nowait("any update on the file")
+            await wait_until(
+                lambda: any(
+                    typed(call) == "any update on the file" for call in model.woken_by(computer.TextEnteredEvent.name)
+                )
+            )
+            _ = await builder.stand_up(person)
+            return model.woken_by(computer.TextEnteredEvent.name)
+
+    calls = asyncio.run(run())
+
+    (later, *_) = (call for call in calls if typed(call) == "any update on the file")
+    assert isinstance(later.recalled, memory.AssociationsData)
+    (earlier,) = (item for item in later.recalled.items if "write a timer bot file" in item.text)
+    assert memory.Lane.PRESENT in earlier.lanes
+    assert earlier.involves == ("person-1",)

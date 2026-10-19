@@ -31,6 +31,8 @@ from mosfet.protocols import attachment, transform, transport
 from mosfet.telemetry.hsm import Traced
 
 DEVICE_ID = "studio-laptop"
+PERSON = (mosfet.Participant(ref="p-1", role=mosfet.ParticipantRole.SOURCE),)
+"""Who uses the computer the tests build (``person_id="p-1"``), as it stamps them: the source."""
 DISPLAY_CODEC = transform.JsonCodec(
     computer.ContentEvent, computer.LayoutEvent, max_message_bytes=computer.MAX_MESSAGE_BYTES
 )

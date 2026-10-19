@@ -5265,7 +5265,7 @@ def test_a_bot_gets_a_turn_because_something_happened_and_never_because_of_what(
         source="",
         target="",
     )
-    assert set(mosfet.InputEventData.model_fields) == {"target_device", "priority", "observation"}
+    assert set(mosfet.InputEventData.model_fields) == {"target_device", "priority", "observation", "participants"}
     # Doing nothing twice is not a failure, and the body is left exactly where it started.
     assert failures == []
     assert state == "/Bot/inactive"
@@ -6174,6 +6174,30 @@ def test_body_rebuild_carries_a_products_stamped_participants_into_cognition() -
         )
         await active_bot.dispatch(active_bot.context(), SoundEvent.with_data(heard))
         await close_hearing_speech(active_bot, environment, sample_rate_hz=48_000)
+        await wait_until(lambda: len(ability.calls) == 1)
+        inputs = list(cognitive.inputs)
+        _ = await active_bot.detach(environment)
+        return inputs
+
+    (handed,) = asyncio.run(run())
+
+    assert handed.participants == (ada,)
+
+
+def test_body_rebuild_carries_a_device_reports_stamped_participants_into_cognition() -> None:
+    """Live (builder check round 3, G1): a device report's stamped participants reach cognition unchanged."""
+
+    ada = mosfet.Participant(ref="ada", role=mosfet.ParticipantRole.SOURCE)
+
+    async def run() -> list[cognition.InputData]:
+        ability = IgnoreAbility()
+        cognitive = InputRecordingCognition(ability)
+        active_bot = AbilityAgent(devices=configured_devices("phone"), cognition=cognitive)
+        environment = await start_bot_with_devices(active_bot)
+        _ = await active_bot.dispatch(
+            active_bot.context(),
+            mosfet.InputEvent.with_data(mosfet.InputEventData(target_device="phone", participants=(ada,))),
+        )
         await wait_until(lambda: len(ability.calls) == 1)
         inputs = list(cognitive.inputs)
         _ = await active_bot.detach(environment)

@@ -22,7 +22,16 @@ from mosfet.protocols import attachment, transform, transport, yamux
 from mosfet.providers import websocket
 from mosfet.start import started
 from tests import metric_reader
-from tests.devices.computer.remote import DISPLAY_CODEC, Controller, Holder, json_message, settle, start, wait_until
+from tests.devices.computer.remote import (
+    DISPLAY_CODEC,
+    PERSON,
+    Controller,
+    Holder,
+    json_message,
+    settle,
+    start,
+    wait_until,
+)
 from tests.websocket_fakes import Browser, FakeListener, FakeServe, stream_open
 
 PEER_ID = "studio-laptop"
@@ -386,7 +395,13 @@ def test_a_computer_typed_into_through_the_server_tells_its_holder_and_shows_on_
     assert observations == [
         (
             computer.TextEnteredEvent.name,
-            computer.TextEnteredData(device_id=PEER_ID, person_id="p-1", field_id="name", text="hi"),
+            computer.TextEnteredData(
+                device_id=PEER_ID,
+                person_id="p-1",
+                participants=PERSON,
+                field_id="name",
+                text="hi",
+            ),
         )
     ]
     content = DISPLAY_CODEC.decode(shown[-1])

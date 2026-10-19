@@ -224,7 +224,23 @@ class InputEventData(pydantic.BaseModel):
                         "id": "call-123",
                         "source": "phone-1",
                     },
-                }
+                    "participants": [],
+                },
+                {
+                    "priority": 5,
+                    "observation": {
+                        "event": "computer.text.entered",
+                        "data": {
+                            "device_id": "desk",
+                            "person_id": "person-42",
+                            "participants": [{"ref": "person-42", "role": "source"}],
+                            "field_id": None,
+                            "text": "Hello?",
+                        },
+                        "source": "desk",
+                    },
+                    "participants": [{"ref": "person-42", "role": "source"}],
+                },
             ],
         },
     )
@@ -263,6 +279,15 @@ class InputEventData(pydantic.BaseModel):
                 "source": "phone-1",
             }
         ],
+    )
+    participants: tuple[Participant, ...] = pydantic.Field(
+        default=(),
+        max_length=32,
+        description=(
+            "Who took part in the observation, as the device that observed it stamped them; the body hands "
+            "them to cognition unchanged. Empty when the device knows no one (a ring, a link coming up)."
+        ),
+        examples=[[{"ref": "person-42", "role": "source"}]],
     )
 
 

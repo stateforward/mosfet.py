@@ -167,6 +167,7 @@ class App(Firmware):
             TextEnteredData(
                 device_id=instance._ports.device_id,
                 person_id=instance._person_id,
+                participants=instance._participants,
                 field_id=field_id,
                 text=typed,
             )
@@ -245,7 +246,12 @@ class App(Firmware):
         instance._pressed = None
         Firmware._count("pointer", "in", "delivered")
         activated = ActivatedEvent.with_data(
-            ActivatedData(device_id=instance._ports.device_id, person_id=instance._person_id, element_id=button.id)
+            ActivatedData(
+                device_id=instance._ports.device_id,
+                person_id=instance._person_id,
+                participants=instance._participants,
+                element_id=button.id,
+            )
         )
         Firmware._observe(ctx, instance, event, dataclasses.replace(activated, id=event.id))
 

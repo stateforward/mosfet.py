@@ -4,6 +4,7 @@ import json
 import typing
 
 import hsm
+import mosfet
 import pydantic
 import pytest
 
@@ -126,6 +127,17 @@ def test_heard_keeps_the_sound_it_was_given_as_is() -> None:
 def test_observations_bound_the_person_id(person_id: str) -> None:
     with pytest.raises(pydantic.ValidationError):
         _ = computer.ActivatedData(device_id="studio-laptop", person_id=person_id, element_id="b")
+
+
+def test_a_typed_line_and_a_click_name_at_most_the_one_person_who_uses_the_computer() -> None:
+    person = mosfet.Participant(ref="p-1", role=mosfet.ParticipantRole.SOURCE)
+
+    assert computer.TextEnteredData(device_id="studio-laptop", text="hello").participants == ()
+    assert computer.ActivatedData(device_id="studio-laptop", element_id="b").participants == ()
+    with pytest.raises(pydantic.ValidationError):
+        _ = computer.TextEnteredData(device_id="studio-laptop", text="hello", participants=(person, person))
+    with pytest.raises(pydantic.ValidationError):
+        _ = computer.ActivatedData(device_id="studio-laptop", element_id="b", participants=(person, person))
 
 
 def test_text_entered_must_carry_text() -> None:

@@ -39,6 +39,10 @@ PeerId = typing.Annotated[
     ),
 ]
 _COMPUTER_ID_DESCRIPTION = "The computer's id: the one the bot holding it knows it by."
+_PARTICIPANTS_DESCRIPTION = (
+    "Who did this, stamped by the computer: the person who uses it, as the source. Empty when the computer "
+    "knows no one."
+)
 PersonId = typing.Annotated[
     str,
     pydantic.Field(
@@ -331,14 +335,26 @@ class TextEnteredData(pydantic.BaseModel):
         frozen=True,
         json_schema_extra={
             "examples": [
-                {"device_id": "desk", "person_id": "person-42", "field_id": "answer", "text": "A bird house"},
-                {"device_id": "desk", "person_id": "person-42", "field_id": None, "text": "Hello?"},
+                {
+                    "device_id": "desk",
+                    "person_id": "person-42",
+                    "participants": [{"ref": "person-42", "role": "source"}],
+                    "field_id": "answer",
+                    "text": "A bird house",
+                },
+                {"device_id": "desk", "person_id": None, "participants": [], "field_id": None, "text": "Hello?"},
             ],
         },
     )
 
     device_id: mosfet.device.DeviceId = pydantic.Field(description=_COMPUTER_ID_DESCRIPTION)
     person_id: PersonId | None = pydantic.Field(default=None, description="Who uses the computer, when known.")
+    participants: tuple[mosfet.Participant, ...] = pydantic.Field(
+        default=(),
+        max_length=1,
+        description=_PARTICIPANTS_DESCRIPTION,
+        examples=[[{"ref": "person-42", "role": "source"}]],
+    )
     field_id: ElementId | None = pydantic.Field(
         default=None,
         description=(
@@ -360,12 +376,25 @@ class ActivatedData(pydantic.BaseModel):
     model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
         frozen=True,
         json_schema_extra={
-            "examples": [{"device_id": "desk", "person_id": "person-42", "element_id": "submit"}],
+            "examples": [
+                {
+                    "device_id": "desk",
+                    "person_id": "person-42",
+                    "participants": [{"ref": "person-42", "role": "source"}],
+                    "element_id": "submit",
+                }
+            ],
         },
     )
 
     device_id: mosfet.device.DeviceId = pydantic.Field(description=_COMPUTER_ID_DESCRIPTION)
     person_id: PersonId | None = pydantic.Field(default=None, description="Who uses the computer, when known.")
+    participants: tuple[mosfet.Participant, ...] = pydantic.Field(
+        default=(),
+        max_length=1,
+        description=_PARTICIPANTS_DESCRIPTION,
+        examples=[[{"ref": "person-42", "role": "source"}]],
+    )
     element_id: ElementId
 
 

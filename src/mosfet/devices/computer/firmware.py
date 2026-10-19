@@ -48,8 +48,9 @@ class Firmware(Traced):
     _device: hsm.Instance
     _ports: Ports
     _person_id: str | None
-    # Who the computer's captures come from, stamped on every stimulus it elevates. Computed once
-    # from the injected person, never inferred.
+    # Who the computer's captures and holder observations come from, stamped on every stimulus it
+    # elevates and on every line typed or button clicked. Computed once from the injected person,
+    # never inferred.
     _participants: tuple[mosfet.Participant, ...]
     # What the display shows. Firmware owns it and rebinds it, never mutates it.
     _content: ContentData

@@ -552,13 +552,25 @@ class Device(Traced, attachment.Attachment):
 
         self._tell_holders(ctx, event)
 
-    def _tell_holders(self, ctx: hsm.Context, event: hsm.Event[typing.Any]) -> None:
-        """Dispatch ``bot.input`` carrying ``event`` to every bot holding this device."""
+    def _tell_holders(
+        self,
+        ctx: hsm.Context,
+        event: hsm.Event[typing.Any],
+        *,
+        participants: tuple[mosfet.Participant, ...] = (),
+    ) -> None:
+        """Dispatch ``bot.input`` carrying ``event`` to every bot holding this device.
+
+        ``participants`` are the ones the device stamped on ``event``, copied onto the input
+        unchanged; a device whose observation names no one passes none.
+        """
 
         component = f"{type(self)._ingress_component}.holders"
         for owner in tuple(self._attachments):
             told = dataclasses.replace(
-                mosfet.InputEvent.with_data(mosfet.InputEventData(observation=mosfet.StimulusData.from_event(event))),
+                mosfet.InputEvent.with_data(
+                    mosfet.InputEventData(observation=mosfet.StimulusData.from_event(event), participants=participants)
+                ),
                 id=event.id or uuid.uuid4().hex,
                 source=hsm.id(self),
                 target=hsm.id(owner),

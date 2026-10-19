@@ -35,6 +35,8 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanE
 
 PEER = "builder-desk"
 DEVICE = "computer"
+PERSON = (mosfet.Participant(ref="person-1", role=mosfet.ParticipantRole.SOURCE),)
+"""Who uses the computer, as it stamps what they type and click: the source."""
 SECRET = pydantic.SecretStr("computer-secret")
 TOKENS = websocket.HmacTokens(SECRET)
 BOUND = datetime.timedelta(seconds=2)
@@ -335,7 +337,9 @@ def test_a_show_reaches_the_screen_and_its_layout_lets_a_click_activate_a_button
     assert "\x1b[1mBuilder\x1b[0m" in shown
     assert "print('hi')" in shown
     assert "ask: (What next?)" in shown
-    assert activated == [computer.ActivatedData(device_id=DEVICE, person_id="person-1", element_id="go")]
+    assert activated == [
+        computer.ActivatedData(device_id=DEVICE, person_id="person-1", participants=PERSON, element_id="go")
+    ]
 
 
 def test_a_typed_line_goes_into_the_focused_field_and_enter_sends_it_to_the_holder() -> None:
@@ -357,7 +361,9 @@ def test_a_typed_line_goes_into_the_focused_field_and_enter_sends_it_to_the_hold
     entered, typed = asyncio.run(run())
 
     assert entered == [
-        computer.TextEnteredData(device_id=DEVICE, person_id="person-1", field_id="ask", text="make a test")
+        computer.TextEnteredData(
+            device_id=DEVICE, person_id="person-1", participants=PERSON, field_id="ask", text="make a test"
+        )
     ]
     assert "ask: make a test [focused]" in typed
 
@@ -387,7 +393,11 @@ def test_a_typed_line_with_nothing_focused_reaches_the_holder_with_no_field(
 
     entered, notices = asyncio.run(run())
 
-    assert entered == [computer.TextEnteredData(device_id=DEVICE, person_id="person-1", field_id=None, text="hello")]
+    assert entered == [
+        computer.TextEnteredData(
+            device_id=DEVICE, person_id="person-1", participants=PERSON, field_id=None, text="hello"
+        )
+    ]
     assert "focused" not in notices
 
 
@@ -408,7 +418,9 @@ def test_a_line_as_long_as_the_terminal_types_reaches_the_holder_whole() -> None
     entered = asyncio.run(run())
 
     assert entered == [
-        computer.TextEnteredData(device_id=DEVICE, person_id="person-1", field_id="ask", text="x" * terminal.MAX_LINE)
+        computer.TextEnteredData(
+            device_id=DEVICE, person_id="person-1", participants=PERSON, field_id="ask", text="x" * terminal.MAX_LINE
+        )
     ]
 
 
@@ -435,7 +447,9 @@ def test_a_line_too_long_to_type_is_not_typed_and_the_terminal_says_so() -> None
     assert shown.strip() == "ask: (What next?) [focused]"
     assert notices == f"line too long: at most {terminal.MAX_LINE} characters, so nothing was typed\n"
     assert entered == [
-        computer.TextEnteredData(device_id=DEVICE, person_id="person-1", field_id="ask", text="make a test")
+        computer.TextEnteredData(
+            device_id=DEVICE, person_id="person-1", participants=PERSON, field_id="ask", text="make a test"
+        )
     ]
 
 
