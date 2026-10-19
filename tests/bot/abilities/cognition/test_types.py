@@ -73,14 +73,13 @@ def test_typed_focus_candidates_cannot_add_unconfigured_device() -> None:
     asyncio.run(run())
 
 
-def test_body_attention_policy_fails_closed_on_empty_candidates_and_clear_without_focus() -> None:
-    """Body-owned attention policy: empty candidates reject focus; clear needs live focus stamp."""
+def test_body_attention_policy_fails_closed_on_empty_candidates() -> None:
+    """Body-owned attention policy: empty candidates reject focus."""
 
     focus = processing.SelectedEvent(
         event=mosfet.FocusDeviceEvent.name,
         data=mosfet.FocusDeviceEventData(device="phone").model_dump(mode="json"),
     )
-    clear = processing.SelectedEvent(event=mosfet.ClearFocusEvent.name, data={})
     assert (
         mosfet.Bot.attention_selection_error(
             focus,
@@ -89,26 +88,6 @@ def test_body_attention_policy_fails_closed_on_empty_candidates_and_clear_withou
             enforce_candidates=True,
         )
         == "Processing selected focus_device outside available device candidates."
-    )
-    assert (
-        mosfet.Bot.attention_selection_error(
-            clear,
-            focus_candidates=("phone",),
-            configured_device_names=frozenset({"phone"}),
-            enforce_candidates=True,
-            focused_device=None,
-        )
-        == "Processing selected clear_focus with no focused device."
-    )
-    assert (
-        mosfet.Bot.attention_selection_error(
-            clear,
-            focus_candidates=("phone",),
-            configured_device_names=frozenset({"phone"}),
-            enforce_candidates=True,
-            focused_device="phone",
-        )
-        is None
     )
 
 

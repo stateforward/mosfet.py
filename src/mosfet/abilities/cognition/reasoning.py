@@ -138,15 +138,16 @@ class OutputData(pydantic.BaseModel):
                     "result": [
                         {
                             "target": "bot",
-                            "event": "bot.clear_focus",
-                            "reason": "Nothing is live on that device any more.",
+                            "event": "bot.focus_device",
+                            "data": {"device": "device-b"},
+                            "reason": "The ring came from that device.",
                         }
                     ],
                     "create": {
                         "event": "bot.behavior.create",
-                        "name": "ReleaseFocusWhenDeviceGoesQuiet",
+                        "name": "FocusTheRingingDevice",
                         "triggers": ["environment.sound"],
-                        "reason": "Same release-focus pattern across recalled episodes.",
+                        "reason": "Same focus-on-ring pattern across recalled episodes.",
                     },
                 },
             ],
@@ -642,7 +643,6 @@ class Reasoning(processing.Processing):
                         operation_id=operation_id,
                         source=instance,
                         focus_candidates=request.turn.input.focus_candidates,
-                        focused_device=request.turn.input.focus,
                         metadata=_public_metadata(metadata),
                         dispatch_trust=processing.DispatchTrust.MODEL,
                     )

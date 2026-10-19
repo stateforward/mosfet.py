@@ -3425,12 +3425,12 @@ def test_reflection_change_loads_existing_and_writes_update() -> None:
         f'triggers = ["{observed_trigger}"]',
     ).replace(
         "Select focus_device for the observed pattern.",
-        "Also clear focus before answer.",
+        "Also look at the phone before answer.",
     )
     written = behavior_events.ChangeData(
         name="AnswerIncomingRing",
         triggers=(observed_trigger,),
-        description="Also clear focus before answer.",
+        description="Also look at the phone before answer.",
         reason="revised from episodes",
         source=revised_source,
     )
@@ -3490,7 +3490,7 @@ def test_reflection_change_loads_existing_and_writes_update() -> None:
     assert change_input.intent == change_intent
     assert len(sources) == 1
     assert f'triggers = ["{observed_trigger}"]' in sources[0]
-    assert "clear focus" in sources[0]
+    assert "look at the phone before answer" in sources[0]
     assert "hsm.define" in sources[0]
 
 

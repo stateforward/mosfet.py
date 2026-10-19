@@ -859,7 +859,6 @@ class Intuition(processing.Processing):
                     operation_id=event.id or hsm.id(instance),
                     source=instance,
                     focus_candidates=data.request.turn.input.focus_candidates,
-                    focused_device=data.request.turn.input.focus,
                     metadata=dict(event.metadata),
                     dispatch_trust=processing.DispatchTrust.MODEL,
                 )

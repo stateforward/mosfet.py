@@ -57,7 +57,6 @@ class _FocusBotActor(hsm.Instance):
         hsm.state(
             "active",
             hsm.transition(hsm.on(mosfet.FocusDeviceEvent), hsm.effect(_accept_focus)),
-            hsm.transition(hsm.on(mosfet.ClearFocusEvent), hsm.effect(_accept_focus)),
         ),
     )
 
@@ -85,7 +84,6 @@ def test_build_processing_input_offers_ignore_from_cognition_snapshot() -> None:
         assert built.actors["cognition"] is cognition
         # Body attention is not invented when no bot actor topology enables it.
         assert mosfet.FocusDeviceEvent.name not in names
-        assert mosfet.ClearFocusEvent.name not in names
 
     asyncio.run(run())
 
@@ -104,7 +102,7 @@ def test_build_processing_input_without_authority_does_not_invent_ignore() -> No
 
 
 def test_build_processing_input_does_not_invent_focus_for_non_topology_bot() -> None:
-    """A bot map key alone is not enough — Focus/Clear must come from that actor's snapshot."""
+    """A bot map key alone is not enough — focus must come from that actor's snapshot."""
 
     built = cognition_input.build_processing_input(
         cognition_input.InputData(
@@ -115,11 +113,10 @@ def test_build_processing_input_does_not_invent_focus_for_non_topology_bot() -> 
     )
     names = {event.name for event in built.schemas}
     assert mosfet.FocusDeviceEvent.name not in names
-    assert mosfet.ClearFocusEvent.name not in names
 
 
 def test_build_processing_input_offers_focus_from_bot_snapshot() -> None:
-    """Focus/Clear appear only when the bot actor's live model-offerable transitions enable them."""
+    """Focus appears only when the bot actor's live model-offerable transitions enable it."""
 
     async def run() -> None:
         bot_actor = _FocusBotActor()
@@ -128,7 +125,6 @@ def test_build_processing_input_offers_focus_from_bot_snapshot() -> None:
         _ = await mosfet.started(ctx, bot_actor, bot_actor.model)
         offered = {event.name for event in processing.enabled_call_events(bot_actor)}
         assert mosfet.FocusDeviceEvent.name in offered
-        assert mosfet.ClearFocusEvent.name in offered
         built = cognition_input.build_processing_input(
             cognition_input.InputData(
                 stimulus=mosfet.InputEventData(target_device="phone", priority=0),
@@ -138,9 +134,7 @@ def test_build_processing_input_offers_focus_from_bot_snapshot() -> None:
         )
         names = {event.name for event in built.schemas}
         assert mosfet.FocusDeviceEvent.name in names
-        assert mosfet.ClearFocusEvent.name in names
         assert built.actor_events[mosfet.FocusDeviceEvent.name] == ("bot",)
-        assert built.actor_events[mosfet.ClearFocusEvent.name] == ("bot",)
 
     asyncio.run(run())
 

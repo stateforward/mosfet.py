@@ -84,7 +84,6 @@ def _phone_bot_intuition_schemas() -> tuple[hsm.Event[typing.Any], ...]:
 
     return (
         mosfet.FocusDeviceEvent,
-        mosfet.ClearFocusEvent,
         phone_events.AnswerCallEvent,
         phone_events.DeclineCallEvent,
         cognition_types.IgnoreEvent,

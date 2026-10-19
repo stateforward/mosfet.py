@@ -2308,7 +2308,6 @@ class Autonomy(ability.Ability[types.TurnData, types.CompletionData]):
                     operation_id=parent_id,
                     source=instance,
                     focus_candidates=cognition_input.focus_candidates,
-                    focused_device=cognition_input.focus,
                     metadata=public_metadata,
                     dispatch_trust=_candidate_dispatch_trust(result.capability.origin),
                 )

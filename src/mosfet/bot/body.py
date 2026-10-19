@@ -999,36 +999,18 @@ class Bot(Traced):
         )
 
     @staticmethod
-    def _ability_selected_clear_focus(
-        ctx: hsm.Context,
-        instance: "Bot",
-        event: hsm.Event[typing.Any],
-    ) -> bool:
-        del ctx
-        turn_id = _active_bot_turn_id(instance, event)
-        return (
-            isinstance(event.data, events.ClearFocusEventData)
-            and turn_id is not None
-            and _event_belongs_to_turn(event, turn_id)
-            and event.source == hsm.id(instance._cognition)
-            and event.target == hsm.id(instance)
-            and instance._focused_device is not None
-        )
-
-    @staticmethod
     def attention_selection_error(
         selection: processing.SelectedEvent,
         *,
         focus_candidates: tuple[str, ...],
         configured_device_names: frozenset[str],
         enforce_candidates: bool,
-        focused_device: str | None = None,
     ) -> str | None:
         """Mechanical body-side entry point for the cognition-owned attention policy.
 
         Cognition owns attention policy (``cognition.types.attention_selection_error``):
         this delegate applies the same verdict at body turn gates so illegal
-        focus/clear selections fail the turn instead of silently dropping. The body
+        focus selections fail the turn instead of silently dropping. The body
         never invents attention policy here — it enforces cognition's.
         """
 
@@ -1037,7 +1019,6 @@ class Bot(Traced):
             focus_candidates=focus_candidates,
             configured_device_names=configured_device_names,
             enforce_candidates=enforce_candidates,
-            focused_device=focused_device,
         )
 
     @staticmethod
@@ -1496,11 +1477,6 @@ class Bot(Traced):
         data = event.data
         assert isinstance(data, events.FocusDeviceEventData)
         instance._focused_device = data.device
-
-    @staticmethod
-    def _dispatch_clear_focus_action(ctx: hsm.Context, instance: "Bot", event: hsm.Event[typing.Any]) -> None:
-        del ctx, event
-        instance._focused_device = None
 
     def _focused_device_snapshot(self, *, strict: bool) -> hsm.Snapshot | None:
         focused_device = self._focused_device
@@ -2180,8 +2156,8 @@ class Bot(Traced):
             ),
             # Focus lives on active so menus built during processing entry still see it:
             # the processing activity nested-dispatches cognition before enter finishes, so a
-            # processing-only snapshot still reads as unfocused/focused. Clear lives only on
-            # focused + processing so idle unfocused snapshots do not offer clear_focus.
+            # processing-only snapshot still reads as unfocused/focused. Nothing the bot selects
+            # clears it: focus stays on a device until the bot focuses another (R-9).
             # Acceptance stays turn-gated by the guards (active bot turn + cognition source).
             hsm.transition(
                 hsm.on(events.FocusDeviceEvent),
@@ -2219,11 +2195,6 @@ class Bot(Traced):
                 # interrupt gets its turn without moving focus: a phone buzzing while you are
                 # idle draws your eye, the same buzz mid-conversation does not.
                 hsm.transition(
-                    hsm.on(events.ClearFocusEvent),
-                    hsm.guard(_ability_selected_clear_focus),
-                    hsm.effect(_dispatch_clear_focus_action),
-                ),
-                hsm.transition(
                     hsm.on(events.InputEvent),
                     hsm.guard(_input_targets_configured_device),
                     hsm.effect(_hold_percept),
@@ -2256,11 +2227,6 @@ class Bot(Traced):
                     hsm.effect(_hold_percept),
                 ),
                 hsm.transition(hsm.on(cognition.InputEvent), hsm.effect(_hold_percept)),
-                hsm.transition(
-                    hsm.on(events.ClearFocusEvent),
-                    hsm.guard(_ability_selected_clear_focus),
-                    hsm.effect(_dispatch_clear_focus_action),
-                ),
                 hsm.transition(
                     hsm.on(cognition.OutputEvent),
                     hsm.guard(_matches_bot_processing_output),

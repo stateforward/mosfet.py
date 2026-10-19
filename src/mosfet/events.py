@@ -466,27 +466,6 @@ class FocusDeviceEventData(pydantic.BaseModel):
     )
 
 
-class ClearFocusEventData(pydantic.BaseModel):
-    """Command payload that requests leaving the bot without a focused device.
-
-    Selection rationale belongs on the cognition selection envelope (``EventData.reason`` /
-    dispatch item ``reason``), not on this payload.
-    """
-
-    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
-        frozen=True,
-        json_schema_extra={
-            "description": (
-                "Clear body focus so no device is the active attention target. Use only when focus "
-                "should end (for example the focused device is gone). Do not use this as a default "
-                "response to user speech — prefer a behavior/topology route or reasoning input. Why this "
-                "was selected is selection-envelope reason, not a field here."
-            ),
-            "examples": [{}],
-        },
-    )
-
-
 class ProcessingCompletedEventData(pydantic.BaseModel):
     """Completion signal that the primary ability finished a processing turn."""
 
@@ -636,11 +615,6 @@ FocusDeviceEvent = hsm.Event[FocusDeviceEventData](
     name="bot.focus_device",
     kind=event.EventKind,
     schema=FocusDeviceEventData,
-)
-ClearFocusEvent = hsm.Event[ClearFocusEventData](
-    name="bot.clear_focus",
-    kind=event.EventKind,
-    schema=ClearFocusEventData,
 )
 ProcessingCompletedEvent = hsm.Event[ProcessingCompletedEventData](
     name="bot.processing.completed",

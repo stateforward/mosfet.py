@@ -118,7 +118,7 @@ class IgnoreData(pydantic.BaseModel):
             "description": (
                 "Deliberately ignore this stimulus: no device command, no focus change, no "
                 "speech. Required when no other offered event should run. Do not use a device "
-                "command, focus, or clear_focus as a stand-in for ignore. Put why on the "
+                "command or focus as a stand-in for ignore. Put why on the "
                 "selection envelope reason field, not on this empty payload."
             ),
             "examples": [{}],
@@ -333,12 +333,11 @@ def attention_selection_error(
     focus_candidates: tuple[str, ...],
     configured_device_names: frozenset[str],
     enforce_candidates: bool,
-    focused_device: str | None = None,
 ) -> str | None:
     """Return a fail-closed error for illegal attention selections, else None.
 
     Attention policy is owned by cognition: this validator decides which
-    focus/clear selections are legal for a turn. The body applies the verdict
+    focus selections are legal for a turn. The body applies the verdict
     mechanically at its turn gates (and here, pre-dispatch) — it never invents
     attention policy of its own.
     """
@@ -351,12 +350,6 @@ def attention_selection_error(
             return "Processing selected focus_device outside available device candidates."
         if configured_device_names and data.device not in configured_device_names:
             return "Processing selected focus_device outside available device candidates."
-        return None
-    if selection.event == mosfet.ClearFocusEvent.name:
-        if selection.target not in (None, "bot"):
-            return "Processing selected clear_focus for a non-bot target."
-        if not focused_device:
-            return "Processing selected clear_focus with no focused device."
         return None
     return None
 
@@ -378,7 +371,7 @@ def _is_body_turn_gate(actor: object) -> bool:
     """Whether this turn's ``bot`` actor applies the body attention turn-gate.
 
     The real body exposes the cognition-owned attention verdict as the public
-    ``attention_selection_error`` entry point and gates focus/clear on the live turn;
+    ``attention_selection_error`` entry point and gates focus on the live turn;
     unit-test doubles (plain ``hsm.Instance`` recipients) model acceptance themselves
     and gate nothing. Detect the gate structurally so this module never imports the
     body package (import cycle): pre-dispatch fails closed exactly when the body
@@ -437,7 +430,6 @@ async def dispatch_selected_events(
     operation_id: str,
     source: hsm.Instance,
     focus_candidates: tuple[str, ...],
-    focused_device: str | None = None,
     configured_device_names: frozenset[str] | None = None,
     metadata: collections.abc.Mapping[str, object] | None = None,
     dispatch_trust: processing.DispatchTrust = processing.DispatchTrust.MODEL,
@@ -448,10 +440,9 @@ async def dispatch_selected_events(
     selections as a handled terminal product, but it is not a body/device dispatch target
     (cognition only). Strip it before actor delivery.
 
-    Attention policy (focus/clear legality) is owned by cognition
+    Attention policy (focus legality) is owned by cognition
     (``attention_selection_error``); the body enforces the same verdict at its turn
-    gates. ``focused_device`` is the body-stamped current focus for this turn (not a
-    private field read). ``configured_device_names`` is injectable for hosts that know
+    gates. ``configured_device_names`` is injectable for hosts that know
     their device inventory; when omitted it is derived structurally from the actor map
     so this module never imports body or device packages.
     """
@@ -468,7 +459,6 @@ async def dispatch_selected_events(
     if not to_dispatch:
         return
 
-    current_focus = focused_device if focused_device else None
     for selection in to_dispatch:
         try:
             error = attention_selection_error(
@@ -476,7 +466,6 @@ async def dispatch_selected_events(
                 focus_candidates=candidates,
                 configured_device_names=configured,
                 enforce_candidates=enforce_candidates,
-                focused_device=current_focus,
             )
         except pydantic.ValidationError as validation_error:
             raise processing.SelectionRejectionError.from_validation(

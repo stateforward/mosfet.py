@@ -112,7 +112,7 @@ class ChangeData(pydantic.BaseModel):
                 {
                     "event": "bot.behavior.change",
                     "name": "GreetOnKnock",
-                    "reason": "Also clear focus before greeting.",
+                    "reason": "Also look at the door before greeting.",
                 }
             ],
         },
@@ -138,7 +138,7 @@ class ChangeData(pydantic.BaseModel):
             "Revised human-readable summary of what the behavior does, shown in inventory and reflection. "
             "The install keeps the caller-supplied description when present."
         ),
-        examples=["Say hello when a knock sound arrives, after clearing focus."],
+        examples=["Say hello when a knock sound arrives, after looking at the door."],
     )
     reason: str | None = pydantic.Field(
         default=None,
@@ -147,7 +147,7 @@ class ChangeData(pydantic.BaseModel):
             "Why this behavior is being revised now: the observed gap or regression the revision fixes. "
             "Recorded for reflection, never dispatched."
         ),
-        examples=["Also clear focus before greeting."],
+        examples=["Also look at the door before greeting."],
     )
     source: str | None = pydantic.Field(
         default=None,

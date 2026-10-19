@@ -85,10 +85,6 @@ def focus_output(device: str, reason: str) -> cognition.types.OutputData:
     )
 
 
-def clear_output(reason: str) -> cognition.types.OutputData:
-    return (cognition.types.EventData(event=mosfet.ClearFocusEvent.name, reason=reason),)
-
-
 def event_data_schema(event: hsm.Event[typing.Any]) -> dict[str, object]:
     return event_json_schema(event)
 
@@ -1644,7 +1640,6 @@ def test_bot_events_use_pydantic_schemas() -> None:
     completed_schema = object_dict(mosfet.ProcessingCompletedEvent.schema)
     failed_schema = object_dict(mosfet.ProcessingFailedEvent.schema)
     focus_device_schema = object_dict(mosfet.FocusDeviceEvent.schema)
-    clear_focus_schema = object_dict(mosfet.ClearFocusEvent.schema)
     activating_done_schema = object_dict(mosfet.ActivatingDoneEvent.schema)
     activating_failed_schema = object_dict(mosfet.ActivatingFailedEvent.schema)
     deactivating_done_schema = object_dict(mosfet.DeactivatingDoneEvent.schema)
@@ -1673,8 +1668,6 @@ def test_bot_events_use_pydantic_schemas() -> None:
     assert mosfet.InputEvent.kind != event_contract.EventKind
     assert mosfet.FocusDeviceEvent.name == "bot.focus_device"
     assert focus_device_schema == mosfet.FocusDeviceEventData.model_json_schema()
-    assert mosfet.ClearFocusEvent.name == "bot.clear_focus"
-    assert clear_focus_schema == mosfet.ClearFocusEventData.model_json_schema()
     assert mosfet.ProcessingCompletedEvent.name == "bot.processing.completed"
     assert completed_schema == mosfet.ProcessingCompletedEventData.model_json_schema()
     assert completed_schema["description"]
@@ -1873,13 +1866,10 @@ def test_bot_model_tracks_activation_focus_and_processing_state() -> None:
     assert behaviors(active_state.exit) == ["_release_held"]
     assert "bot.ability.cognition.output" in transitions["/Bot/active/processing"]
     assert "bot.ability.failed" in transitions["/Bot/active/processing"]
-    # Focus is declared on active (transition_map may inherit it into child keys). Clear is
-    # declared only on focused + processing so idle unfocused does not offer clear_focus.
+    # Focus is declared on active (transition_map may inherit it into child keys). Nothing clears
+    # it: focus stays on a device until the bot focuses another (R-9).
     assert "bot.focus_device" in transitions["/Bot/active"]
-    assert "bot.clear_focus" not in transitions.get("/Bot/active", {})
-    assert "bot.clear_focus" not in transitions["/Bot/active/unfocused"]
-    assert "bot.clear_focus" in transitions["/Bot/active/focused"]
-    assert "bot.clear_focus" in transitions["/Bot/active/processing"]
+    assert all("bot.clear_focus" not in state_transitions for state_transitions in transitions.values())
     assert "bot.processing.completed" in transitions["/Bot/active/processing"]
     assert "bot.processing.failed" in transitions["/Bot/active/processing"]
     assert "bot.processing.timed_out" in transitions["/Bot/active/processing"]
@@ -2067,12 +2057,12 @@ def test_bot_snapshot_merges_focused_device_transitions() -> None:
 
     assert phone_device.AnswerCallEvent.name not in before_focus
     assert phone_device.DeclineCallEvent.name not in before_focus
-    # Focus is available while active; clear only when focused (or mid-processing).
+    # Focus is available while active and nothing clears it (R-9).
     # Device call tools appear only with focus/device state.
     assert mosfet.FocusDeviceEvent.name in before_focus
-    assert mosfet.ClearFocusEvent.name not in before_focus
+    assert "bot.clear_focus" not in before_focus
     assert mosfet.FocusDeviceEvent.name in after_focus
-    assert mosfet.ClearFocusEvent.name in after_focus
+    assert "bot.clear_focus" not in after_focus
     assert phone_device.AnswerCallEvent.name in after_focus
     assert phone_device.DeclineCallEvent.name in after_focus
 
@@ -2104,8 +2094,8 @@ def test_bot_processing_operations_follow_focused_device_not_observed_device() -
     assert observed_sound.caller == "Front desk"
     offered = {event.name for event in observed_browser_input.schemas}
     assert mosfet.FocusDeviceEvent.name in offered
-    # Second turn while already focused: clear is on focused snapshot during processing entry.
-    assert mosfet.ClearFocusEvent.name in offered
+    # Second turn while already focused: focus is offered, and nothing to clear it (R-9).
+    assert "bot.clear_focus" not in offered
     assert phone_device.AnswerCallEvent.name in offered
     assert phone_device.DeclineCallEvent.name in offered
 
@@ -3543,15 +3533,15 @@ def test_bot_rejects_forged_focus_for_unconfigured_device() -> None:
 
 
 def test_bot_rejects_forged_focus_action_source_during_current_processing() -> None:
-    async def run() -> bool:
+    async def run() -> str | None:
         release = asyncio.Event()
         processor = BlockingSequenceProcessor(
             release=release,
             block_on_call=2,
-            outputs=(no_output("initial"), no_output("current")),
+            outputs=(no_output("initial"), no_output("current"), no_output("observe retained focus")),
         )
         cognitive = CapturingCognition(processor)
-        active_bot = AbilityAgent(devices=configured_devices("phone"), cognition=cognitive)
+        active_bot = AbilityAgent(devices=configured_devices("phone", "browser"), cognition=cognitive)
 
         _ = await start_bot_with_devices(active_bot)
         await active_bot.dispatch(
@@ -3565,14 +3555,15 @@ def test_bot_rejects_forged_focus_action_source_during_current_processing() -> N
         await active_bot.dispatch(
             active_bot.context(),
             mosfet.InputEvent.with_data_and_id(
-                mosfet.InputEventData(target_device="phone", priority=2),
+                mosfet.InputEventData(target_device="browser", priority=2),
                 "current-focus-source",
             ),
         )
         await wait_until(lambda: len(cognitive.input_events) == 2)
         request = cognitive.input_events[1]
+        # The browser is a candidate of this turn, so only the forged source refuses the focus.
         forged = dataclasses.replace(
-            mosfet.ClearFocusEvent.with_data(mosfet.ClearFocusEventData()),
+            mosfet.FocusDeviceEvent.with_data(mosfet.FocusDeviceEventData(device="browser")),
             id=f"{request.id}:intuition",
             source="forged-source",
             target=hsm.id(active_bot),
@@ -3581,10 +3572,17 @@ def test_bot_rejects_forged_focus_action_source_during_current_processing() -> N
         await active_bot.dispatch(active_bot.context(), forged)
         await asyncio.sleep(0)
         release.set()
-        await wait_until(lambda: active_bot.state() != "/Bot/active/processing")
-        return bot_has_focus(active_bot)
+        await wait_until(lambda: active_bot.state() == "/Bot/active/focused")
+        await active_bot.dispatch(
+            active_bot.context(),
+            mosfet.InputEvent.with_data(mosfet.InputEventData(target_device="phone", priority=3)),
+        )
+        await wait_until(lambda: len(cognitive.input_events) == 3)
+        observed = cognitive.input_events[2].data
+        assert isinstance(observed, cognition.InputData)
+        return observed.focus
 
-    assert asyncio.run(run())
+    assert asyncio.run(run()) == "phone"
 
 
 def test_focused_agent_rejects_focus_device_outside_processing_candidates() -> None:
@@ -3643,35 +3641,47 @@ def test_focused_agent_rejects_focus_device_outside_processing_candidates() -> N
     )
 
 
-def test_focused_agent_ability_can_clear_focus() -> None:
-    async def run() -> tuple[str, bool, list[processing.InputData], list[cognition.types.OutputData]]:
+def test_focus_stays_on_a_device_until_the_bot_focuses_another() -> None:
+    async def run() -> tuple[list[str], list[str | None], list[processing.InputData]]:
         ability = SequenceAbility(
-            no_output("stay on phone"),
-            clear_output("done"),
+            no_output("look at the phone"),
+            focus_output("browser", "turn to the browser"),
+            no_output("still on the browser"),
+            no_output("still on the browser later"),
         )
-        active_bot = AbilityAgent(devices=configured_devices("phone"), cognition=ability)
+        cognitive = InputRecordingCognition(ability)
+        active_bot = AbilityAgent(devices=configured_devices("phone", "browser"), cognition=cognitive)
 
         _ = await start_bot_with_devices(active_bot)
-        await active_bot.dispatch(
-            active_bot.context(),
-            mosfet.InputEvent.with_data(mosfet.InputEventData(target_device="phone", priority=3)),
-        )
-        await wait_until(lambda: len(ability.calls) == 1 and active_bot.state() == "/Bot/active/focused")
-        await active_bot.dispatch(
-            active_bot.context(),
-            mosfet.InputEvent.with_data(mosfet.InputEventData(target_device="phone", priority=5)),
-        )
-        await wait_until(lambda: active_bot.state() == "/Bot/active/unfocused")
+        states: list[str] = []
+        # The browser speaks up once, while the phone holds focus; then only the phone does.
+        for turn, device in enumerate(("phone", "browser", "phone", "phone"), start=1):
+            await active_bot.dispatch(
+                active_bot.context(),
+                mosfet.InputEvent.with_data(mosfet.InputEventData(target_device=device, priority=turn)),
+            )
+            await wait_until(
+                lambda turn=turn: len(ability.calls) == turn and active_bot.state() == "/Bot/active/focused"
+            )
+            states.append(active_bot.state())
 
-        return active_bot.state(), bot_has_focus(active_bot), ability.calls, active_bot.actions
+        return states, [turn.focus for turn in cognitive.inputs], ability.calls
 
-    state, focused_device, calls, actions = asyncio.run(run())
+    states, focuses, calls = asyncio.run(run())
 
-    assert state == "/Bot/active/unfocused"
-    assert not focused_device
-    assert len(calls) == 2
-    assert calls[1].input == mosfet.InputEventData(target_device="phone", priority=5)
-    assert actions == [no_output("stay on phone"), clear_output("done")]
+    # Only the start is unfocused: the first turn focuses the phone, the bot's own choice moves
+    # focus to the browser, and it stays there turn after turn; nothing offers to clear it (R-9).
+    assert states == ["/Bot/active/focused"] * 4
+    assert focuses == ["phone", "phone", "browser", "browser"]
+    assert all("bot.clear_focus" not in {event.name for event in call.schemas} for call in calls)
+    assert all(mosfet.FocusDeviceEvent.name in {event.name for event in call.schemas} for call in calls)
+
+
+def test_mosfet_exports_no_clear_focus() -> None:
+    assert not hasattr(mosfet, "ClearFocusEvent")
+    assert not hasattr(mosfet, "ClearFocusEventData")
+    assert "ClearFocusEvent" not in mosfet.__all__
+    assert "ClearFocusEventData" not in mosfet.__all__
 
 
 def test_bot_processing_state_holds_repeated_input_until_processing_completes() -> None:
@@ -3860,54 +3870,6 @@ def test_held_input_is_perceived_after_focus_device_completion() -> None:
         no_output("initial focus"),
         focus_output("browser", "change focus"),
         no_output("after focus change"),
-    ]
-
-
-def test_held_input_is_perceived_after_clear_focus_completion() -> None:
-    async def run() -> tuple[str, bool, list[processing.InputData], list[cognition.types.OutputData]]:
-        release = asyncio.Event()
-        ability = BlockingSequenceAbility(
-            release=release,
-            block_on_call=2,
-            outputs=(
-                no_output("initial focus"),
-                clear_output("clear before replay"),
-                no_output("after clear"),
-            ),
-        )
-        active_bot = AbilityAgent(devices=configured_devices("phone", "browser"), cognition=ability)
-
-        _ = await start_bot_with_devices(active_bot)
-        await active_bot.dispatch(
-            active_bot.context(),
-            mosfet.InputEvent.with_data(mosfet.InputEventData(target_device="phone", priority=1)),
-        )
-        await wait_until(lambda: len(ability.calls) == 1 and active_bot.state() == "/Bot/active/focused")
-
-        await active_bot.dispatch(
-            active_bot.context(),
-            mosfet.InputEvent.with_data(mosfet.InputEventData(target_device="phone", priority=2)),
-        )
-        await wait_until(lambda: len(ability.calls) == 2 and active_bot.state() == "/Bot/active/processing")
-        await active_bot.dispatch(
-            active_bot.context(),
-            mosfet.InputEvent.with_data(mosfet.InputEventData(target_device="browser", priority=3)),
-        )
-        assert len(ability.calls) == 2
-        _ = release.set()
-        await wait_until(lambda: len(ability.calls) == 3 and active_bot.state() == "/Bot/active/focused")
-
-        return active_bot.state(), bot_has_focus(active_bot), ability.calls, active_bot.actions
-
-    state, focused_device, calls, actions = asyncio.run(run())
-
-    assert state == "/Bot/active/focused"
-    assert focused_device
-    assert calls[2].input == mosfet.InputEventData(target_device="browser", priority=3)
-    assert actions == [
-        no_output("initial focus"),
-        clear_output("clear before replay"),
-        no_output("after clear"),
     ]
 
 
@@ -4355,31 +4317,57 @@ def test_an_unoccupied_body_turns_to_what_arrived_first_and_an_occupied_one_keep
 
     browser, phone = happening_input("browser", "opened"), happening_input("phone", "rang")
 
-    async def run(busy_output: cognition.types.OutputData) -> list[cognition.InputData]:
+    async def run(*, occupied: bool) -> cognition.InputData:
         release = asyncio.Event()
-        ability = BlockingSequenceAbility(release=release, block_on_call=2, outputs=(no_output("look"), busy_output))
+        ability = BlockingSequenceAbility(
+            release=release, block_on_call=2 if occupied else 1, outputs=(no_output("look"), no_output("stay"))
+        )
         cognitive = InputRecordingCognition(ability)
         active_bot = AbilityAgent(devices=configured_devices("phone", "browser"), cognition=cognitive)
         _ = await start_bot_with_devices(active_bot)
-        await arrive(active_bot, happening_input("phone", "first"), "turn-1")
-        await wait_until(lambda: len(cognitive.inputs) == 1 and active_bot.state() == "/Bot/active/focused")
-        await arrive(active_bot, happening_input("phone", "busy"), "turn-2")
-        await wait_until(lambda: len(cognitive.inputs) == 2)
+        if occupied:
+            await arrive(active_bot, happening_input("phone", "first"), "turn-1")
+            await wait_until(lambda: len(cognitive.inputs) == 1 and active_bot.state() == "/Bot/active/focused")
+            await arrive(active_bot, happening_input("phone", "busy"), "turn-2")
+        else:
+            # Only the start is unfocused (R-9): a first turn that arrived on no device keeps it so.
+            failure = cognition.StepFailedData(
+                message="Cognition's reasoning step failed, so the turn failed: provider unavailable",
+                stage="reasoning",
+                turn_id="failed-turn",
+                stimulus=mosfet.InputEvent.name,
+            )
+            await active_bot.dispatch(
+                active_bot.context(),
+                dataclasses.replace(
+                    cognition.InputEvent.with_data_and_id(
+                        cognition.InputData(
+                            stimulus=dataclasses.replace(
+                                cognition.StepFailedEvent.with_data(failure), source="cognition"
+                            )
+                        ),
+                        "handed-back",
+                    ),
+                    source="cognition",
+                ),
+            )
+        turns = 3 if occupied else 2
+        await wait_until(lambda: len(cognitive.inputs) == turns - 1)
         await arrive(active_bot, browser, "browser-first")
         await arrive(active_bot, phone, "phone-second")
         _ = release.set()
-        await wait_until(lambda: len(cognitive.inputs) == 3 and active_bot.state() == "/Bot/active/focused")
-        return cognitive.inputs
+        await wait_until(lambda: len(cognitive.inputs) == turns and active_bot.state() == "/Bot/active/focused")
+        return cognitive.inputs[-1]
 
-    unoccupied = asyncio.run(run(clear_output("let go")))
-    occupied = asyncio.run(run(no_output("stay")))
+    unoccupied = asyncio.run(run(occupied=False))
+    occupied = asyncio.run(run(occupied=True))
 
-    assert perceived_stimuli(unoccupied[2].stimulus) == [browser, phone]
-    assert unoccupied[2].focus == "browser"
-    assert unoccupied[2].focus_candidates == ("browser", "phone")
-    assert perceived_stimuli(occupied[2].stimulus) == [browser, phone]
-    assert occupied[2].focus == "phone"
-    assert occupied[2].focus_candidates == ("phone", "browser")
+    assert perceived_stimuli(unoccupied.stimulus) == [browser, phone]
+    assert unoccupied.focus == "browser"
+    assert unoccupied.focus_candidates == ("browser", "phone")
+    assert perceived_stimuli(occupied.stimulus) == [browser, phone]
+    assert occupied.focus == "phone"
+    assert occupied.focus_candidates == ("phone", "browser")
 
 
 def test_a_turn_records_how_many_percepts_it_took_and_how_long_each_waited(
@@ -6060,10 +6048,10 @@ def test_body_never_fans_environment_stimuli_out_to_output_abilities() -> None:
 def test_body_turn_focus_candidates_do_not_carry_into_the_next_turn() -> None:
     """Focus legality is recomputed every turn, never inherited.
 
-    Turn 1 focuses phone; turn 2 clears it; turn 3 hears browser. A turn-3 focus
-    selection for phone must be rejected and retried even though phone was a legal
-    candidate on turn 1 — the turn slot is set when the turn starts and retired with
-    it, so a stale allowlist never gates a later turn and never becomes an action.
+    Turn 1 focuses phone; turn 2 hears browser and turns to it; turn 3 hears browser. A
+    turn-3 focus selection for phone must be rejected and retried even though phone was a
+    legal candidate on turns 1 and 2 — the turn slot is set when the turn starts and retired
+    with it, so a stale allowlist never gates a later turn and never becomes an action.
     """
 
     async def run() -> tuple[
@@ -6075,7 +6063,7 @@ def test_body_turn_focus_candidates_do_not_carry_into_the_next_turn() -> None:
     ]:
         ability = SequenceAbility(
             no_output("stay on phone"),
-            clear_output("look away"),
+            focus_output("browser", "look at the browser"),
             focus_output("phone", "stale grab"),
             no_output("backs off"),
         )
@@ -6089,9 +6077,9 @@ def test_body_turn_focus_candidates_do_not_carry_into_the_next_turn() -> None:
         await wait_until(lambda: len(ability.calls) == 1 and active_bot.state() == "/Bot/active/focused")
         await active_bot.dispatch(
             active_bot.context(),
-            mosfet.InputEvent.with_data(mosfet.InputEventData(target_device="phone", priority=2)),
+            mosfet.InputEvent.with_data(mosfet.InputEventData(target_device="browser", priority=2)),
         )
-        await wait_until(lambda: len(ability.calls) == 2 and active_bot.state() == "/Bot/active/unfocused")
+        await wait_until(lambda: len(ability.calls) == 2 and active_bot.state() == "/Bot/active/focused")
         await active_bot.dispatch(
             active_bot.context(),
             mosfet.InputEvent.with_data(mosfet.InputEventData(target_device="browser", priority=1)),
@@ -6111,7 +6099,7 @@ def test_body_turn_focus_candidates_do_not_carry_into_the_next_turn() -> None:
 
     assert state == "/Bot/active/focused"
     assert inputs[0].focus_candidates == ("phone",)
-    assert inputs[1].focus_candidates == ("phone",)
+    assert inputs[1].focus_candidates == ("phone", "browser")
     assert inputs[2].focus == "browser"
     assert inputs[2].focus_candidates == ("browser",)
     # The stale grab was rejected and retried (4 processor calls for 3 turns) and never
@@ -6119,7 +6107,7 @@ def test_body_turn_focus_candidates_do_not_carry_into_the_next_turn() -> None:
     assert len(calls) == 4
     assert actions == [
         no_output("stay on phone"),
-        clear_output("look away"),
+        focus_output("browser", "look at the browser"),
         no_output("backs off"),
     ]
     assert failures == []

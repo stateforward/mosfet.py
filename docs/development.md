@@ -118,7 +118,9 @@ dropped. How many are held is the body's declared `held_percepts` attribute, a c
 snapshot. Every turn terminal (completed, failed, or a confirmed cancel) ends at the
 `active/turn_ended` choice: with something held the next turn starts at once, and a body
 focused on no device first turns to the device of what arrived first, by arrival and never by
-rank; with nothing held the body idles focused or unfocused.
+rank; with nothing held the body idles where its attention is. Focus stays on a device until the
+bot focuses another with `bot.focus_device`, and nothing the bot selects clears it, so the body is
+unfocused only from its start until something is first focused.
 
 A turn takes the longest arrival-order prefix of what is held, within 8
 percepts, 64 KiB of the stimuli's summed canonical JSON, and 32 participants (their

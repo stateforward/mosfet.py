@@ -360,7 +360,7 @@ def test_autonomy_reports_success_when_usage_persistence_degrades(
         turn=_turn(),
         output=(
             cognition.types.EventData(
-                event="bot.clear_focus",
+                event="bot.ability.cognition.ignore",
                 reason="delayed behavior",
             ),
         ),
@@ -424,7 +424,7 @@ output_event = hsm.event(
 triggers = ["environment.sound"]
 
 def emit(event):
-    hsm.dispatch(output_event, {"event": "bot.clear_focus", "reason": "delayed behavior"})
+    hsm.dispatch(output_event, {"event": "bot.ability.cognition.ignore", "reason": "delayed behavior"})
 
 behavior = hsm.define(
     "DelayedRing",
@@ -605,7 +605,7 @@ def test_autonomy_waits_for_asynchronous_behavior_terminal() -> None:
         turn=_turn(),
         output=(
             cognition.types.EventData(
-                event="bot.clear_focus",
+                event="bot.ability.cognition.ignore",
                 reason="delayed behavior",
             ),
         ),
@@ -1157,7 +1157,7 @@ output_event = hsm.event(
 triggers = ["environment.sound"]
 
 def echo(event):
-    hsm.dispatch(output_event, {"event": "bot.clear_focus", "reason": event["data"]["kind"]})
+    hsm.dispatch(output_event, {"event": "bot.ability.cognition.ignore", "reason": event["data"]["kind"]})
 
 behavior = hsm.define(
     "EchoKind",
@@ -1224,7 +1224,8 @@ def test_a_learned_behavior_that_handles_two_percepts_of_a_batch_is_counted_used
 
 
 _FAILING_RING_BEHAVIOR_SOURCE = _DELAYED_BEHAVIOR_SOURCE.replace(
-    'hsm.dispatch(output_event, {"event": "bot.clear_focus", "reason": "delayed behavior"})', 'fail("boom")'
+    'hsm.dispatch(output_event, {"event": "bot.ability.cognition.ignore", "reason": "delayed behavior"})',
+    'fail("boom")',
 )
 
 
