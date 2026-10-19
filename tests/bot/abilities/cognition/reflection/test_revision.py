@@ -3,6 +3,7 @@ import dataclasses
 import datetime
 import hashlib
 import json
+import typing
 
 import hsm
 import pytest
@@ -10,7 +11,7 @@ import pytest
 from mosfet.abilities.cognition import inventory
 
 from mosfet import behavior
-from mosfet.abilities import memory
+from mosfet.abilities import memory, processing
 from mosfet.abilities.cognition.reflection import revision
 from tests.bot.abilities.cognition.test_cognition import FixedProcessor
 from tests.bot.abilities.cognition.test_cognition import cognition_input
@@ -543,3 +544,55 @@ def test_revision_reports_a_typed_failure_when_memory_cannot_be_reached() -> Non
 
     with pytest.raises(RuntimeError, match="cannot be reached"):
         asyncio.run(run())
+
+
+class _SlowProcessor(processing.Processor):
+    """Authors as ``inner`` does, after ``delay``: a slow model's authoring call."""
+
+    inner: processing.Processor
+    delay: datetime.timedelta
+
+    def __init__(self, inner: processing.Processor, delay: datetime.timedelta) -> None:
+        self.inner = inner
+        self.delay = delay
+
+    @typing.override
+    async def process(
+        self, input: processing.InputData, *, drafts: processing.DraftSink | None = None
+    ) -> processing.Events:
+        await asyncio.sleep(self.delay.total_seconds())
+        return await self.inner.process(input, drafts=drafts)
+
+
+def test_revision_bounds_each_authoring_call_by_the_step_timeout_it_is_given() -> None:
+    """D-R-17 (live round 3, H4): a slow model's authoring call is bounded by the step timeout, not a fixed 30 s."""
+
+    async def run() -> revision.OutputData:
+        _, store = await _attached_memory()
+        actor = revision.Revision(
+            processor=_SlowProcessor(
+                FixedProcessor(
+                    write=behavior.ChangeData(name="AnswerIncomingRing", source=ANSWER_RING_BEHAVIOR_SOURCE)
+                ),
+                datetime.timedelta(milliseconds=400),
+            ),
+            memory=store,
+            child_operation_timeout=datetime.timedelta(seconds=5),
+        )
+        output = await dispatch_ability_for_test(
+            actor,
+            None,
+            _revision_input(behavior.CreateData(name="AnswerIncomingRing", triggers=("environment.sound",))),
+            timeout=_REVISION_TIMEOUT_SECONDS,
+        )
+        assert isinstance(output, revision.OutputData)
+        return output
+
+    assert isinstance(asyncio.run(run()).applied, behavior.CreateData)
+
+
+def test_revision_refuses_a_step_timeout_that_is_not_positive() -> None:
+    with pytest.raises(ValueError, match="child_operation_timeout must be positive"):
+        _ = revision.Revision(
+            processor=FixedProcessor(), memory=memory.Memory(), child_operation_timeout=datetime.timedelta()
+        )

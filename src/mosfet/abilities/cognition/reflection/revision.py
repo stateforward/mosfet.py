@@ -32,8 +32,6 @@ from .. import inventory
 from .. import input
 from .. import types
 
-_CHILD_OPERATION_TIMEOUT = datetime.timedelta(seconds=30)
-
 CHANGE_INSTRUCTIONS = (
     "You are in the changing phase: author or revise Starlark for the stored behavior. "
     "existing_behavior is the current inventory row (source may be empty for a new create stub; "
@@ -67,7 +65,6 @@ CHANGE_INSTRUCTIONS = (
 )
 
 _CHANGE_ID_SUFFIX = ":change"
-_CANCEL_TEARDOWN_TIMEOUT = datetime.timedelta(seconds=5)
 
 
 class ProcessorFactory(typing.Protocol):
@@ -496,6 +493,8 @@ class Revision(processing.Processing):
     # Authoring attempt index for child correlation (HSM-CORRELATION-001 / HSM-CONTEXT-001).
     # Set from write.attempt in _dispatch_change — never parsed from instance.state().
     _active_attempt: int | None
+    # The step timeout: the bound of one authoring call and of stopping it.
+    _step_timeout: datetime.timedelta
 
     @staticmethod
     def _operation(event: hsm.Event[typing.Any]) -> tuple[str, str] | None:
@@ -698,7 +697,7 @@ class Revision(processing.Processing):
                     instance._change_processing.output_event,
                     instance._change_processing.failed_event,
                 ),
-                timeout=_CHILD_OPERATION_TIMEOUT,
+                timeout=instance._step_timeout,
             )
             # Leave `starting` for `authoring` before handing the settled correlated child
             # terminal back to the same typed continuations. The terminal is queued after
@@ -1178,8 +1177,8 @@ class Revision(processing.Processing):
     def _cancel_timeout_delay(
         ctx: hsm.Context, instance: "Revision", event: hsm.Event[typing.Any]
     ) -> datetime.timedelta:
-        del ctx, instance, event
-        return _CANCEL_TEARDOWN_TIMEOUT
+        del ctx, event
+        return instance._step_timeout
 
     @staticmethod
     def _request_reboot(ctx: hsm.Context, instance: "Revision", event: hsm.Event[typing.Any]) -> None:
@@ -1414,8 +1413,18 @@ class Revision(processing.Processing):
         clock: hsm.Clock | None = None,
         processor: processing.Processor | ProcessorFactory,
         memory: memory.MemoryStore,
+        child_operation_timeout: datetime.timedelta | None = None,
     ) -> None:
+        """Build revision on ``processor`` over ``memory``, each authoring call bounded by ``child_operation_timeout``.
+
+        Raises:
+            ValueError: If ``child_operation_timeout`` is not positive.
+        """
+
         super(processing.Processing, self).__init__(id=id, clock=clock)
+        if child_operation_timeout is not None and child_operation_timeout <= datetime.timedelta():
+            raise ValueError("child_operation_timeout must be positive.")
+        self._step_timeout = types.STEP_TIMEOUT if child_operation_timeout is None else child_operation_timeout
         leaf = processor() if not isinstance(processor, processing.Processor) else processor
         self._change_processing = processing.Processing(processor=leaf, instructions=type(self).instructions)
         self._memory = memory

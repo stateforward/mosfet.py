@@ -95,14 +95,6 @@ INSTRUCTIONS = SELECT_INSTRUCTIONS
 
 _SELECT_ID_SUFFIX = ":reflection:select"
 _PERSONA_ID_SUFFIX = ":persona"
-_CHILD_OPERATION_TIMEOUT = datetime.timedelta(seconds=30)
-_CANCEL_TEARDOWN_TIMEOUT = datetime.timedelta(seconds=5)
-
-
-def _one_shot_timeout() -> datetime.timedelta:
-    return (
-        _CHILD_OPERATION_TIMEOUT if _CHILD_OPERATION_TIMEOUT > datetime.timedelta(0) else datetime.timedelta(seconds=30)
-    )
 
 
 class InputData(pydantic.BaseModel):
@@ -382,6 +374,11 @@ class Reflection(processing.Processing):
     A select step whose selection is rejected passes through ``routing_rejection``: the model is asked again
     with the diagnostic, at most ``types.MAX_SELECTION_REPAIRS`` times, and the same rejection twice running
     fails the reflection.
+
+    The select step, the revision child, and stopping either when it is cancelled or outlasts its bound are
+    each bounded by the step timeout, ``child_operation_timeout`` (``bot.timeouts(step=)``; cognition's
+    ``types.STEP_TIMEOUT`` by default), which the revision child is given too: a slow model's revision takes
+    as long as one of its steps may.
     """
 
     instructions: typing.ClassVar[str] = SELECT_INSTRUCTIONS
@@ -405,6 +402,8 @@ class Reflection(processing.Processing):
     # A peer reached by message (Cognition attaches it), never a child here.
     _persona: self_knowledge.Persona | None
     _events: tuple[processing.Event[typing.Any], ...]
+    # The step timeout: the bound of the select step, of the revision child, and of stopping either.
+    _step_timeout: datetime.timedelta
 
     @staticmethod
     def _child_id(instance: "Reflection", suffix: str) -> str:
@@ -533,10 +532,8 @@ class Reflection(processing.Processing):
         instance: "Reflection",
         event: hsm.Event[typing.Any],
     ) -> datetime.timedelta:
-        del ctx, instance, event
-        if _CHILD_OPERATION_TIMEOUT <= datetime.timedelta(0):
-            return datetime.timedelta(milliseconds=1)
-        return _CHILD_OPERATION_TIMEOUT
+        del ctx, event
+        return instance._step_timeout
 
     @staticmethod
     def _matches_cancelled(ctx: hsm.Context, instance: "Reflection", event: hsm.Event[typing.Any]) -> bool:
@@ -562,8 +559,8 @@ class Reflection(processing.Processing):
         instance: "Reflection",
         event: hsm.Event[typing.Any],
     ) -> datetime.timedelta:
-        del ctx, instance, event
-        return _CANCEL_TEARDOWN_TIMEOUT
+        del ctx, event
+        return instance._step_timeout
 
     @staticmethod
     def _emit_reflection_cancelled(ctx: hsm.Context, instance: "Reflection", event: hsm.Event[typing.Any]) -> None:
@@ -778,7 +775,7 @@ class Reflection(processing.Processing):
                     instance._select_processing.output_event,
                     instance._select_processing.failed_event,
                 ),
-                timeout=_one_shot_timeout(),
+                timeout=instance._step_timeout,
                 on_terminal=lambda _terminal: processing.finish_operation(ctx, instance, hop_id),
             )
         except TimeoutError:
@@ -1417,8 +1414,18 @@ class Reflection(processing.Processing):
         processor: processing.Processor | ProcessorFactory,
         memory: memory.MemoryStore,
         persona: self_knowledge.Persona | None = None,
+        child_operation_timeout: datetime.timedelta | None = None,
     ) -> None:
+        """Build reflection on ``processor`` over ``memory``, its steps bounded by ``child_operation_timeout``.
+
+        Raises:
+            ValueError: If ``child_operation_timeout`` is not positive.
+        """
+
         super(processing.Processing, self).__init__(id=id, clock=clock)
+        if child_operation_timeout is not None and child_operation_timeout <= datetime.timedelta():
+            raise ValueError("child_operation_timeout must be positive.")
+        self._step_timeout = types.STEP_TIMEOUT if child_operation_timeout is None else child_operation_timeout
         leaf = processor() if not isinstance(processor, processing.Processor) else processor
         # Shared transport; each phase stamps its own system policy on apply.
         self._select_processing = processing.Processing(
@@ -1428,6 +1435,7 @@ class Reflection(processing.Processing):
         self._revision = revision.Revision(
             processor=leaf,
             memory=memory,
+            child_operation_timeout=self._step_timeout,
         )
         self._memory = memory
         self._persona = persona

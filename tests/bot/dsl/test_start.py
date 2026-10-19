@@ -228,10 +228,15 @@ def test_the_body_takes_each_part_in_the_role_it_was_given(recording: type[Recor
 def test_the_step_timeout_bounds_each_step_of_the_bots_cognition(
     timeouts: tuple[bot.Element[hsm.Element], ...], step: datetime.timedelta | None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """D-R-3: ``bot.timeouts(step=)`` is cognition's step timeout; without it cognition keeps its own default."""
+    """D-R-3, D-R-17: ``bot.timeouts(step=)`` is the step timeout of cognition and of its reflection.
+
+    Without it each keeps cognition's default. Live (builder check round 3, H4): reflection's revision child
+    had a fixed 30 s bound, so a slow model's revision timed out and failed its turn 124 times.
+    """
 
     found: Built = []
     monkeypatch.setattr(cognition, "Cognition", _recorded(cognition.Cognition, found))
+    monkeypatch.setattr(cognition, "Reflection", _recorded(cognition.Reflection, found))
     model = bot.define("greeter", bot.cognition(support.Silent()), bot.attach(phone.Phone()), *timeouts)
 
     async def run() -> None:
@@ -240,8 +245,10 @@ def test_the_step_timeout_bounds_each_step_of_the_bots_cognition(
 
     asyncio.run(run())
 
-    ((_, given),) = found
-    assert given["child_operation_timeout"] == step
+    assert sorted((name, given["child_operation_timeout"]) for name, given in found) == [
+        ("Cognition", step),
+        ("Reflection", step),
+    ]
 
 
 def test_one_ability_given_as_input_and_acquired_is_given_to_the_body_in_both_roles(

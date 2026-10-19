@@ -4,6 +4,7 @@ from .. import memory
 from . import input as cognition_input
 
 import collections.abc
+import datetime
 import typing
 
 import hsm
@@ -215,6 +216,13 @@ class FailureData(ability.FailureData):
         ),
     )
 
+
+STEP_TIMEOUT: typing.Final = datetime.timedelta(seconds=120)
+"""How long one step of the bot's cognition may take when the composition gives no ``bot.timeouts(step=)``.
+
+Cognition's steps (autonomy, associating, intuition, reasoning) and reflection's (its select step, its revision
+child, and stopping either) are each bounded by the same step timeout. One step of a local model with thinking
+on takes 30 s and more, and intuition and reasoning together still fit the body's 5-minute turn bound."""
 
 MAX_SELECTION_REPAIRS: typing.Final[int] = 2
 """How many times a cognition stage (intuition, reasoning, reflection) asks its model again after a rejected

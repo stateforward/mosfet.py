@@ -428,8 +428,8 @@ def _mind(
     """Cognition, its faculties, its persona and the ``voice`` it is given at inception, all on ``store``.
 
     ``declared`` is ``bot.cognition`` as written, ``processor`` its processor, and ``nature`` the traits
-    of ``bot.traits``, which give the bot a persona. ``step`` is ``bot.timeouts(step=)``; ``None`` keeps
-    cognition's own step timeout.
+    of ``bot.traits``, which give the bot a persona. ``step`` is ``bot.timeouts(step=)``, the step timeout of
+    cognition and of its reflection; ``None`` keeps cognition's own step timeout for both.
     """
 
     now = typing.cast(schedule.WallClock | None, declared.routines)
@@ -437,7 +437,9 @@ def _mind(
     return cognition.Cognition(
         intuition=cognition.Intuition(processor=processor),
         reasoning=cognition.Reasoning(processor=processor),
-        reflection=cognition.Reflection(processor=processor, memory=store, persona=self_knowledge),
+        reflection=cognition.Reflection(
+            processor=processor, memory=store, persona=self_knowledge, child_operation_timeout=step
+        ),
         autonomy=cognition.Autonomy(
             memory=store, seeded_behaviors=tuple(typing.cast(collections.abc.Sequence[behavior.Seed], declared.seeds))
         )

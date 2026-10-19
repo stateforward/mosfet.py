@@ -46,10 +46,6 @@ _INTUITION_ID_SUFFIX = ":intuition"
 _REASONING_ID_SUFFIX = ":reasoning"
 _REFLECTION_ID_SUFFIX = ":reflection"
 _REMEMBER_ID_SUFFIX = ":remember"
-# How long one step of a turn (autonomy, associating, intuition, reasoning) may take: a capacity of
-# the composition (``bot.timeouts(step=)``). One step of a local model with thinking on takes 30 s
-# and more, and intuition and reasoning together still fit the body's 5-minute turn bound.
-_CHILD_OPERATION_TIMEOUT = datetime.timedelta(seconds=120)
 # How long cognition stays idle before it rests (and consolidation may run): a capacity of the
 # composition, like the processing timeout, not a choice the bot makes.
 _DEFAULT_REST_AFTER: typing.Final = datetime.timedelta(minutes=10)
@@ -639,7 +635,7 @@ class Cognition(ability.Ability[InputData, OutputData]):
         """Await one child hop through the settled one-shot. The step timeout is the hop bound."""
 
         child_timeout = instance._child_operation_timeout
-        timeout = child_timeout if child_timeout is not None else _CHILD_OPERATION_TIMEOUT
+        timeout = child_timeout if child_timeout is not None else types.STEP_TIMEOUT
         try:
             terminal = await ability.run_terminal_operation(
                 instance.context(),
@@ -1022,7 +1018,7 @@ class Cognition(ability.Ability[InputData, OutputData]):
                         metadata=_public_metadata(dict(event.metadata)),
                     ),
                     terminals=(memory.AssociatedEvent, ability.FailedEvent),
-                    timeout=child_timeout if child_timeout is not None else _CHILD_OPERATION_TIMEOUT,
+                    timeout=child_timeout if child_timeout is not None else types.STEP_TIMEOUT,
                 )
             except (TimeoutError, RuntimeError):
                 terminal = None

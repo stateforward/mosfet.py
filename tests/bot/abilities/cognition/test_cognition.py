@@ -1759,7 +1759,7 @@ def test_cancelled_turn_cannot_cancel_the_next_turn(monkeypatch: pytest.MonkeyPa
             return ()
 
     async def run() -> tuple[list[int], str]:
-        monkeypatch.setattr(cognition_module, "_CHILD_OPERATION_TIMEOUT", datetime.timedelta(milliseconds=30))
+        monkeypatch.setattr(cognition_module.types, "STEP_TIMEOUT", datetime.timedelta(milliseconds=30))
         processor = TwoTurnHangingProcessor()
         ability = make_cognition(intuition_processor=processor)
         ctx = shared_hsm_context()
@@ -1789,7 +1789,7 @@ def test_cancelled_turn_cannot_cancel_the_next_turn(monkeypatch: pytest.MonkeyPa
             ),
         )
         await wait_until(lambda: ability.state().endswith("/idle"))
-        monkeypatch.setattr(cognition_module, "_CHILD_OPERATION_TIMEOUT", datetime.timedelta(seconds=1))
+        monkeypatch.setattr(cognition_module.types, "STEP_TIMEOUT", datetime.timedelta(seconds=1))
 
         _ = await hsm.dispatch(
             ctx,

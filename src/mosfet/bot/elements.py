@@ -941,8 +941,8 @@ def timeouts(
     """The bot's timeout overrides (``bot.timeouts(processing=datetime.timedelta(seconds=30))``); each positive.
 
     ``processing``, ``deactivation`` and ``attachment`` are the body's own bounds. ``step`` bounds each step
-    of a turn in cognition (intuition, reasoning, ...; two minutes by default); a step that outlasts it
-    fails only its turn, which the bot then perceives.
+    of a turn in cognition (intuition, reasoning, ...; two minutes by default) and each step of its
+    reflection; a step that outlasts it fails only its turn, which the bot then perceives.
     """
 
     return RedefinableTimeouts(

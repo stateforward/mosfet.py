@@ -126,12 +126,18 @@ def reflection_ability() -> tuple[cognition.Reflection, memory.Memory, sqlite3.C
 
 def reflection_with_processor(
     processor: processing.Processor,
+    *,
+    child_operation_timeout: datetime.timedelta | None = None,
+    clock: hsm.Clock | None = None,
 ) -> tuple[cognition.Reflection, memory.Memory, sqlite3.Connection]:
     """Reflection over a memory peer reached only by message; ``attach_store`` attaches it."""
 
     connection = sqlite3.connect(":memory:", check_same_thread=False)
     store = memory.Memory(engine=memory.store.open_sqlite_engine(connection=connection))
-    return cognition.Reflection(processor=processor, memory=store), store, connection
+    reflection = cognition.Reflection(
+        processor=processor, memory=store, child_operation_timeout=child_operation_timeout, clock=clock
+    )
+    return reflection, store, connection
 
 
 async def attach_store(ctx: hsm.Context, store: memory.Memory) -> None:
@@ -370,12 +376,10 @@ def test_reflection_stubborn_child_cancel_timeout_requests_reboot(
         )
 
     async def run() -> tuple[list[hsm.Event[typing.Any]], str]:
-        monkeypatch.setattr(
-            reflection_impl,
-            "_CANCEL_TEARDOWN_TIMEOUT",
-            datetime.timedelta(0),
+        # The cancel teardown is bounded by the step timeout, as the select step is.
+        reflection, store, connection = reflection_with_processor(
+            EmptyProcessor(), child_operation_timeout=datetime.timedelta(milliseconds=200)
         )
-        reflection, store, connection = reflection_ability()
         stubborn = StubbornProcessing(processor=EmptyProcessor())
         setattr(reflection, "_select_processing", stubborn)
         setattr(
@@ -522,11 +526,12 @@ def test_reflection_revision_cancel_guard_requires_typed_parent_correlation(
         connection.close()
 
 
-def test_reflection_select_timeout_cancels_child_and_fails_turn(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_reflection_select_timeout_cancels_child_and_fails_turn() -> None:
     async def run() -> tuple[list[hsm.Event[typing.Any]], str, bool]:
-        monkeypatch.setattr(reflection_impl, "_CHILD_OPERATION_TIMEOUT", datetime.timedelta(milliseconds=100))
         processor = HangingProcessor()
-        reflection, store, connection = reflection_with_processor(processor)
+        reflection, store, connection = reflection_with_processor(
+            processor, child_operation_timeout=datetime.timedelta(milliseconds=100)
+        )
         ctx = hsm.Context()
         owner = AttachmentOwner()
         _ = await mosfet.started(ctx, owner, owner.model)
@@ -553,11 +558,8 @@ def test_reflection_select_timeout_cancels_child_and_fails_turn(monkeypatch: pyt
     assert state.endswith("/idle")
 
 
-def test_reflection_change_timeout_cancels_exact_attempt_and_fails_turn(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_reflection_change_timeout_cancels_exact_attempt_and_fails_turn() -> None:
     async def run() -> tuple[list[hsm.Event[typing.Any]], str, bool]:
-        # Long enough for Revision to read memory by message and start the (hanging) change
-        # processor, so the timeout cancels a running attempt rather than a preparing one.
-        monkeypatch.setattr(reflection_impl, "_CHILD_OPERATION_TIMEOUT", datetime.timedelta(milliseconds=250))
         processor = HangingProcessor(
             first_output=(
                 processing.SelectedEvent(
@@ -569,7 +571,11 @@ def test_reflection_change_timeout_cancels_exact_attempt_and_fails_turn(monkeypa
                 ),
             )
         )
-        reflection, store, connection = reflection_with_processor(processor)
+        # Long enough for Revision to read memory by message and start the (hanging) change
+        # processor, so the timeout cancels a running attempt rather than a preparing one.
+        reflection, store, connection = reflection_with_processor(
+            processor, child_operation_timeout=datetime.timedelta(milliseconds=250)
+        )
         ctx = hsm.Context()
         owner = AttachmentOwner()
         _ = await mosfet.started(ctx, owner, owner.model)
@@ -594,6 +600,96 @@ def test_reflection_change_timeout_cancels_exact_attempt_and_fails_turn(monkeypa
     assert len(lifecycle) == 1
     assert lifecycle[0].name == cognition.Reflection.failed_event.name
     assert state.endswith("/idle")
+
+
+class SlowProcessor(processing.Processor):
+    """Selects nothing, after ``delay``: a slow model's select step."""
+
+    delay: datetime.timedelta
+
+    def __init__(self, delay: datetime.timedelta) -> None:
+        self.delay = delay
+
+    @typing.override
+    async def process(
+        self, input: processing.InputData, *, drafts: processing.DraftSink | None = None
+    ) -> processing.Events:
+        del input, drafts
+        await asyncio.sleep(self.delay.total_seconds())
+        return ()
+
+
+@pytest.mark.parametrize(
+    ("step", "settled"), [(datetime.timedelta(seconds=2), "output"), (datetime.timedelta(milliseconds=100), "failed")]
+)
+def test_reflection_bounds_its_select_step_by_the_step_timeout_it_is_given(
+    step: datetime.timedelta, settled: str
+) -> None:
+    """D-R-17 (live round 3, H4): a slow model's step completes within the step timeout, not a fixed 30 s."""
+
+    async def run() -> list[str]:
+        reflection, store, connection = reflection_with_processor(
+            SlowProcessor(datetime.timedelta(milliseconds=400)), child_operation_timeout=step
+        )
+        ctx = hsm.Context()
+        owner = AttachmentOwner()
+        _ = await mosfet.started(ctx, owner, owner.model)
+        await attach_store(ctx, store)
+        await reflection.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)))
+        await wait_until(lambda: reflection.state().endswith("/idle"))
+        owner.lifecycle.clear()
+        _ = await hsm.dispatch(ctx, reflection, reflection.input_event.with_data_and_id(reflection_input(), "slow"))
+        terminals = (cognition.Reflection.output_event.name, cognition.Reflection.failed_event.name)
+        await wait_until(lambda: any(event.name in terminals for event in owner.lifecycle))
+        result = [
+            "output" if event.name == cognition.Reflection.output_event.name else "failed"
+            for event in owner.lifecycle
+            if event.name in terminals
+        ]
+        await reflection.stop(reflection.context())
+        connection.close()
+        return result
+
+    assert asyncio.run(run()) == [settled]
+
+
+def test_reflection_without_a_step_timeout_bounds_its_revision_by_cognitions_default() -> None:
+    """D-R-17: without ``child_operation_timeout`` the revision child gets cognition's step default, not 30 s."""
+
+    asked: list[datetime.timedelta] = []
+
+    def after(duration: datetime.timedelta) -> asyncio.Future[datetime.datetime]:
+        asked.append(duration)
+        return asyncio.get_running_loop().create_future()
+
+    async def run() -> None:
+        processor = HangingProcessor(
+            first_output=(
+                processing.SelectedEvent(
+                    event=behavior.CreateEvent.name,
+                    data=behavior.CreateData(name="SlowBehavior", triggers=(mosfet.InputEvent.name,)).model_dump(
+                        mode="json"
+                    ),
+                ),
+            )
+        )
+        reflection, store, connection = reflection_with_processor(processor, clock=hsm.Clock(after=after))
+        ctx = hsm.Context()
+        owner = AttachmentOwner()
+        _ = await mosfet.started(ctx, owner, owner.model)
+        await attach_store(ctx, store)
+        await reflection.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)))
+        await wait_until(lambda: reflection.state().endswith("/idle"))
+        _ = await hsm.dispatch(ctx, reflection, reflection.input_event.with_data_and_id(reflection_input(), "slow"))
+        await wait_until(lambda: processor.calls == 2)
+        await reflection.stop(reflection.context())
+        connection.close()
+
+    asyncio.run(run())
+
+    # Its other bounds (attaching, reading memory) are its own; the revision child's is the step timeout.
+    assert cognition.types.STEP_TIMEOUT in asked
+    assert cognition.types.STEP_TIMEOUT == datetime.timedelta(seconds=120)
 
 
 def test_reflection_rejects_valid_select_terminal_from_prior_turn(
