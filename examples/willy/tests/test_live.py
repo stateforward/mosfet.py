@@ -27,8 +27,9 @@ dispatches the event itself, standing in for a selection, or drives Speaking wit
 Willy speaks is never the test's question. A turn speech woke is one a conversation's speech woke, or speech heard
 while Willy was speaking (``listening.overlap``). Each step is bounded, and a failure says which step and its bound:
 
-* L1 preflight (10 s): the language model lists ``WILLY_MODEL``, and ``/healthz`` answers 200 on speech to text,
-  speech, voiceprints, tone, diarization and embeddings.
+* L1 preflight (10 s): the language model, asked with the ``openai_api_key`` its client sends, lists
+  ``WILLY_MODEL``, and ``/healthz`` answers 200 on speech to text, speech, voiceprints, tone, diarization and
+  embeddings.
 * L2 birth (300 s): Willy is born with a voice. Speaking constructs its encoder from the voice inception gave
   it, and memory keeps that voice.
 * L3 unknown voice (60 s): A's utterance, through the room's far side, reaches the model as a ``source`` that is
@@ -362,9 +363,14 @@ async def _step(name: str, bound: float) -> collections.abc.AsyncGenerator[None]
         raise AssertionError(f"{name}: not done within {bound:.0f} s (see the report above)") from None
 
 
-async def _answers(client: httpx.AsyncClient, variable: str, unit: str, url: str) -> httpx.Response:
+async def _answers(
+    client: httpx.AsyncClient, variable: str, unit: str, url: str, api_key: pydantic.SecretStr | None = None
+) -> httpx.Response:
+    """GET ``url``, with ``api_key`` as its bearer when given (a keyed server answers 401 without it), else none."""
+
+    headers = {} if api_key is None else {"Authorization": f"Bearer {api_key.get_secret_value()}"}
     try:
-        response = await client.get(url)
+        response = await client.get(url, headers=headers)
     except httpx.HTTPError as error:
         raise AssertionError(
             f"L1 preflight: {unit} ({variable}) does not answer at {url}: {type(error).__name__}; see lab-ct108.md"
@@ -375,9 +381,12 @@ async def _answers(client: httpx.AsyncClient, variable: str, unit: str, url: str
     return response
 
 
-async def _preflight(settings: willy_example.Settings) -> None:
+async def _preflight(settings: willy_example.Settings, api_key: pydantic.SecretStr) -> None:
     async with httpx.AsyncClient(timeout=_PREFLIGHT) as client:
-        listed = await _answers(client, "WILLY_LLM_URL", "mosfet-llm", f"{settings.llm_url.rstrip('/')}/models")
+        # The model server is asked with the key Willy's model client sends; the speech units take none.
+        listed = await _answers(
+            client, "WILLY_LLM_URL", "mosfet-llm", f"{settings.llm_url.rstrip('/')}/models", api_key
+        )
         models = {model.id for model in _Models.model_validate_json(listed.content).data}
         assert settings.model in models, f"L1 preflight: mosfet-llm does not serve WILLY_MODEL; it serves {models}"
         urls = {
@@ -474,7 +483,7 @@ async def _live(
     settings: willy_example.Settings, api_key: pydantic.SecretStr, data_dir: pathlib.Path, report: Report
 ) -> None:
     async with _step("L1 preflight", _PREFLIGHT):
-        await _preflight(settings)
+        await _preflight(settings, api_key)
 
     (place,) = settings.rooms[:1]
     port = _free_port()
