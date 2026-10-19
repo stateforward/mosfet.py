@@ -17,6 +17,7 @@ import collections.abc
 import asyncio
 import dataclasses
 import json
+import math
 import multiprocessing
 import re
 import threading
@@ -340,6 +341,13 @@ class _CallbackWorkerError(RuntimeError):
 
 
 def _apply_callback_worker_limits() -> None:
+    """Apply best-effort OS limits to a callback worker before it runs its one callback.
+
+    The CPU budget counts from here: ``RLIMIT_CPU`` counts the process's whole CPU time, and a
+    spawned worker has already spent seconds importing mosfet, so the limit is the CPU spent so
+    far, rounded up, plus the budget.
+    """
+
     try:
         import resource
     except ImportError:
@@ -353,7 +361,8 @@ def _apply_callback_worker_limits() -> None:
     try:
         cpu_limit = typing.cast(int | None, getattr(resource, "RLIMIT_CPU", None))
         if cpu_limit is not None:
-            limit = max(1, int(CALLBACK_EVALUATION_SECONDS) + 1)
+            usage = resource.getrusage(resource.RUSAGE_SELF)
+            limit = math.ceil(usage.ru_utime + usage.ru_stime) + max(1, int(CALLBACK_EVALUATION_SECONDS) + 1)
             resource.setrlimit(cpu_limit, (limit, limit))
     except (OSError, ValueError):
         pass

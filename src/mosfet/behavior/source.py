@@ -7,6 +7,7 @@ from .schedule import WEEKDAYS
 import io
 import abc
 import json
+import math
 import re
 import select
 import subprocess
@@ -692,7 +693,12 @@ def normalize_source(source: str) -> str:
 
 
 def _apply_worker_limits(*, cpu_seconds: int | None) -> None:
-    """Apply best-effort OS limits inside an already isolated evaluation process."""
+    """Apply best-effort OS limits inside an already isolated evaluation process.
+
+    ``cpu_seconds`` is the CPU budget from now on. ``RLIMIT_CPU`` counts the process's whole CPU
+    time, and a clean interpreter has already spent seconds importing mosfet, so the limit is the
+    CPU spent so far, rounded up, plus the budget.
+    """
 
     try:
         import resource
@@ -709,7 +715,9 @@ def _apply_worker_limits(*, cpu_seconds: int | None) -> None:
     try:
         cpu_limit = typing.cast(int | None, getattr(resource, "RLIMIT_CPU", None))
         if cpu_limit is not None:
-            resource.setrlimit(cpu_limit, (cpu_seconds, cpu_seconds))
+            usage = resource.getrusage(resource.RUSAGE_SELF)
+            limit = math.ceil(usage.ru_utime + usage.ru_stime) + cpu_seconds
+            resource.setrlimit(cpu_limit, (limit, limit))
     except (OSError, ValueError):
         pass
 

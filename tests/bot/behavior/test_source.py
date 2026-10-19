@@ -464,6 +464,38 @@ def test_source_worker_module_evaluates_in_a_clean_interpreter() -> None:
     assert payload["spec"]["name"] == "AnswerGreeting"
 
 
+_COSTLY_IMPORT_WORKER = """
+import resource
+import runpy
+import sys
+
+spent_before_ready = float(sys.argv[1])
+while sum(resource.getrusage(resource.RUSAGE_SELF)[:2]) < spent_before_ready:
+    pass
+runpy.run_module("mosfet.behavior.source", run_name="__main__")
+"""
+
+
+def test_a_behavior_source_parses_in_its_isolated_worker_after_a_costly_import() -> None:
+    # The worker's interpreter spends more CPU before readiness (importing mosfet) than the
+    # whole evaluation budget; the budget still counts from readiness, so the source parses.
+    spent_before_ready = behavior_source.SOURCE_EVALUATION_SECONDS + 2.0
+    completed = subprocess.run(
+        (sys.executable, "-c", _COSTLY_IMPORT_WORKER, str(spent_before_ready)),
+        input=greeting_behavior_source().encode("utf-8"),
+        capture_output=True,
+        check=False,
+        timeout=spent_before_ready * 4 + SOURCE_WORKER_TIMEOUT_SECONDS,
+    )
+
+    ready, separator, rest = completed.stdout.partition(b"\n")
+    assert completed.returncode == 0
+    assert ready + separator == behavior_source.SOURCE_WORKER_READY
+    payload = typing.cast(dict[str, typing.Any], json.loads(rest.decode("utf-8")))
+    assert payload["ok"] is True
+    assert payload["spec"]["name"] == "AnswerGreeting"
+
+
 def test_parse_source_isolated_workers_complete_under_parallel_spawn() -> None:
     source = greeting_behavior_source()
 
