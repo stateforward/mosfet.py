@@ -2698,15 +2698,20 @@ class Autonomy(ability.Ability[types.TurnData, types.CompletionData]):
                 hsm.effect(_consume_candidate_result),
                 hsm.target("/Autonomy/workflow/dispatching"),
             ),
+            # A candidate that answers nothing (or stays silent) is left before the next one
+            # starts: the next start then enters ``starting`` afresh through its initial, never
+            # from inside the ``starting`` the answering candidate is still in (D-R-46).
             hsm.transition(
                 hsm.on(_CandidateAdvanceEvent),
                 hsm.guard(_matches_candidate_result),
                 hsm.effect(_advance_candidate),
+                hsm.target("/Autonomy/workflow/running"),
             ),
             hsm.transition(
                 hsm.on(_CandidateSilentEvent),
                 hsm.guard(_matches_candidate_result),
                 hsm.effect(_advance_candidate),
+                hsm.target("/Autonomy/workflow/running"),
             ),
             hsm.transition(
                 hsm.on(_CandidateFailedEvent),

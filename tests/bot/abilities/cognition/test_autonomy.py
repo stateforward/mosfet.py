@@ -1264,3 +1264,68 @@ def test_a_batch_whose_last_percept_fails_after_an_earlier_one_was_handled_carri
     assert isinstance(admitted, conversation.TurnData)
     assert admitted.content == "answer the phone"
     assert selection.data == admitted
+
+
+_ANSWERING_NOTHING_BEHAVIOR_SOURCE = """
+input_event = hsm.event(
+    name = "bot.behavior.answering_nothing.input",
+    schema = {"type": "object", "additionalProperties": True},
+    description = "Input for a behavior that answers every sound it meets with no selection.",
+)
+output_event = hsm.event(
+    name = "bot.behavior.answering_nothing.output",
+    schema = {"type": "object", "additionalProperties": True},
+    description = "An answer that selects nothing.",
+)
+triggers = ["environment.sound"]
+
+def answer(event):
+    hsm.dispatch(output_event, {})
+
+behavior = hsm.define(
+    "AnsweringNothing",
+    hsm.initial(hsm.target("/AnsweringNothing/idle")),
+    hsm.state(
+        "idle",
+        hsm.transition(hsm.on(input_event), hsm.effect("answer")),
+    ),
+)
+""".strip()
+
+
+def test_a_candidate_that_answers_nothing_hands_the_turn_to_the_next_candidate() -> None:
+    """D-R-46: the next candidate starts afresh, not into the composite the last one is leaving."""
+
+    async def run() -> object:
+        # Inventory order is by name, so the behavior that answers nothing runs first.
+        nothing = behavior.start(
+            _ANSWERING_NOTHING_BEHAVIOR_SOURCE, name="AnsweringNothing", triggers=(SoundEvent.name,)
+        )
+        echo = behavior.start(_ECHO_KIND_BEHAVIOR_SOURCE, name="EchoKind", triggers=(SoundEvent.name,))
+        store = await _attached_memory(nothing, echo)
+        autonomy = cognition.Autonomy(memory=store)
+        ctx = shared_hsm_context()
+        await start_abilities_for_test(ctx, autonomy)
+        return await dispatch_ability_for_test(autonomy, ctx, _turn(), timeout=10.0)
+
+    output = asyncio.run(run())
+
+    assert isinstance(output, cognition.types.CompletionData)
+    assert output.output is not None
+    assert [selection.reason for selection in output.output] == ["phone.ringing"]
+
+
+def test_a_sole_candidate_that_answers_nothing_leaves_the_turn_unhandled() -> None:
+    async def run() -> object:
+        nothing = behavior.start(
+            _ANSWERING_NOTHING_BEHAVIOR_SOURCE, name="AnsweringNothing", triggers=(SoundEvent.name,)
+        )
+        store = await _attached_memory(nothing)
+        autonomy = cognition.Autonomy(memory=store)
+        ctx = shared_hsm_context()
+        await start_abilities_for_test(ctx, autonomy)
+        return await dispatch_ability_for_test(autonomy, ctx, _turn(), timeout=10.0)
+
+    output = asyncio.run(run())
+
+    assert output == cognition.types.CompletionData(turn=_turn(), output=None)
