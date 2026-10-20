@@ -2,13 +2,18 @@
 
     python -m willy_example.room --url ws://127.0.0.1:8765 --peer kitchen [--secret-file PATH] [--camera]
 
+``Room`` is the far side's machine and takes its devices injected, so another far side (the browser bridge,
+``willy_example.ui``) reuses it with devices of its own; this module's ``main`` runs it on the host's sound card.
+
 The room is a remote machine as the websocket transport's version 1 wire describes one. It connects to
 ``<url>/v1/<peer>``, sends its token (``websocket.HmacTokens(secret).issue(peer)``), and is the client role of
-one yamux session, on which it opens the ``microphone`` and ``speaker`` channels, and ``camera`` with
-``--camera``. Each channel's first message is a ``websocket.StreamOpenData``; after it, the microphone carries
-16 kHz mono s16le PCM in and the speaker whatever the computer plays out (24 kHz from Willy's voice), both as
-``audio.PcmCodec`` messages, and the camera one JPEG still at a time as ``computer.StillCodec`` reads them. The
-room defines no wire type of its own.
+one yamux session, on which it opens the ``microphone`` and ``speaker`` channels, ``camera`` with ``--camera``,
+and ``keyboard`` when it is given one. Each channel's first message is a ``websocket.StreamOpenData``; after it,
+the microphone carries 16 kHz mono s16le PCM in and the speaker whatever the computer plays out (24 kHz from
+Willy's voice), both as ``audio.PcmCodec`` messages, the camera one JPEG still at a time as
+``computer.StillCodec`` reads them, and the keyboard each line typed as ``hid.KeyEvent`` key presses, then Enter,
+as the computer's JSON keyboard codec reads them. With nothing focused on the computer's screen, the computer
+tells whoever holds it ``computer.text.entered`` with no field. The room defines no wire type of its own.
 
 It decides nothing: it captures and plays. Everything the microphone hears goes to the computer, which puts it
 into the house at the room's place; everything the computer plays comes out of the speaker. The sound card is
@@ -25,10 +30,10 @@ for a missing or unreadable secret. The room writes nothing to stdout; its diagn
 
 Telemetry (meter scope ``willy_example.room``), every attribute a closed set from code:
 ``bot.example.room.connect.count{outcome}`` (``connected``, ``timeout``, ``failed``),
-``bot.example.room.frames.count{channel}`` (``microphone`` and ``camera`` sent, ``speaker`` played),
+``bot.example.room.frames.count{channel}`` (``microphone``, ``camera`` and ``keyboard`` sent, ``speaker`` played),
 ``bot.example.room.dropped.count{channel}`` (captured while the link could not take it),
 ``bot.example.room.closed.count{reason}`` and one ``bot.example.room.session`` span per session. The peer, the
-url, the token and every sound and image never are attributes.
+url, the token, every line typed and every sound and image never are attributes.
 """
 
 import argparse
@@ -52,7 +57,7 @@ import pydantic
 import websockets.asyncio.client
 import websockets.exceptions
 from mosfet import media, runtime, telemetry
-from mosfet.devices import audio, computer
+from mosfet.devices import audio, computer, hid
 from mosfet.protocols import transform, transport, yamux
 from mosfet.providers import websocket
 from mosfet.telemetry import span
@@ -70,11 +75,23 @@ CAMERA_EVERY_SECONDS: typing.Final = 1.0
 CAMERA_LONG_EDGE: typing.Final = 1280
 """The longest edge of a still, in pixels, so every view Willy remembers stays small."""
 MAX_PENDING: typing.Final = 64
-"""Most captured messages held while the link cannot take them; past it, the newest is dropped and counted."""
+"""Most captures held while the link cannot take them; past it, the newest is dropped and counted.
+
+A typed line is one capture, however many keys it takes."""
+# The most one key event takes on the keyboard channel: a 4-byte length, then at most 124 bytes of JSON (a
+# control character, escaped as six bytes in both `key` and `text`). Enter takes as much.
+_KEY_BYTES = 128
+MAX_LINE: typing.Final = 2 * yamux.INITIAL_STREAM_WINDOW // _KEY_BYTES - 1
+"""The longest line the room types, in characters: 4095.
+
+A line is typed all at once, so its keys and its Enter must fit what one yamux stream holds before the computer
+takes any of them: the computer's receive window (at least ``yamux.INITIAL_STREAM_WINDOW``) and as much again
+waiting on this side. A longer line is not typed; it is dropped and counted.
+"""
 
 type Reason = typing.Literal["left", "normal", "refused", "abnormal", "timeout"]
 type ConnectOutcome = typing.Literal["connected", "timeout", "failed"]
-type Channel = typing.Literal["microphone", "speaker", "camera"]
+type Channel = typing.Literal["microphone", "speaker", "camera", "keyboard"]
 
 _LOG = logging.getLogger(__name__)
 _METER = metrics.get_meter(SCOPE)
@@ -158,6 +175,18 @@ class Speaker(typing.Protocol):
 
     def stop(self) -> None:
         """Stop playing and let go of what is queued."""
+        ...
+
+
+class Keyboard(typing.Protocol):
+    """The room's keyboard: it hands each line typed on it to ``typed``, without its line ending, from any thread."""
+
+    def start(self, typed: collections.abc.Callable[[str], None]) -> None:
+        """Start taking lines; each is handed to ``typed`` as it is entered."""
+        ...
+
+    def stop(self) -> None:
+        """Stop taking lines; nothing is handed on after it returns."""
         ...
 
 
@@ -308,6 +337,7 @@ _CODECS: dict[Channel, transform.Codec] = {
     "microphone": _OpeningCodec(audio.PcmCodec()),
     "speaker": _OpeningCodec(audio.PcmCodec()),
     "camera": _OpeningCodec(_StillSender()),
+    "keyboard": _OpeningCodec(transform.JsonCodec(hid.KeyEvent, max_message_bytes=computer.MAX_MESSAGE_BYTES)),
 }
 
 
@@ -372,7 +402,7 @@ class Room(Traced):
     speaker. ``closing`` stops the session and closes the socket, then the session is ``closed`` and
     ``on_closed`` is told how, once. ``LeaveEvent`` leaves at any point.
 
-    Captured sound and stills cross from the devices' threads into the room's loop through one bounded queue,
+    Captured sound, stills and typed lines cross from the devices' threads into the room's loop through one bounded queue,
     the only thing the room holds of what it carries; past ``MAX_PENDING`` the newest is dropped and counted.
     """
 
@@ -381,6 +411,7 @@ class Room(Traced):
     _microphone: Microphone
     _speaker: Speaker
     _camera: Camera | None
+    _keyboard: Keyboard | None
     _channels: tuple[Channel, ...]
     _on_closed: collections.abc.Callable[[ClosedData], None]
     _connect: Connect
@@ -389,8 +420,9 @@ class Room(Traced):
     _session: yamux.Client
     # Frames for the socket, in order; written by _enqueue and drained by _run_write.
     _outbox: asyncio.Queue[bytes]
-    # What the devices captured, for the link; written from their threads and drained by _run_capture.
-    _captured: asyncio.Queue[tuple[Channel, hsm.Event[typing.Any]]]
+    # What the devices captured, for the link, one capture per item (a typed line is all its keys); written from
+    # their threads and drained by _run_capture.
+    _captured: asyncio.Queue[tuple[Channel, tuple[hsm.Event[typing.Any], ...]]]
     # The open socket; written only by the transition into `linked`.
     _socket: Socket | None
     # Each opened channel's stream: an address, dispatched to and never read. Written only by _own.
@@ -409,6 +441,7 @@ class Room(Traced):
         speaker: Speaker,
         on_closed: collections.abc.Callable[[ClosedData], None],
         camera: Camera | None = None,
+        keyboard: Keyboard | None = None,
         connect: Connect = connect_websocket,
         connect_timeout: datetime.timedelta = _DEFAULT_TIMEOUT,
         open_timeout: datetime.timedelta = _DEFAULT_TIMEOUT,
@@ -428,7 +461,13 @@ class Room(Traced):
         self._microphone = microphone
         self._speaker = speaker
         self._camera = camera
-        self._channels = ("microphone", "speaker") if camera is None else ("microphone", "speaker", "camera")
+        self._keyboard = keyboard
+        self._channels = (
+            "microphone",
+            "speaker",
+            *(("camera",) if camera is not None else ()),
+            *(("keyboard",) if keyboard is not None else ()),
+        )
         self._on_closed = on_closed
         self._connect = connect
         self._connect_timeout = connect_timeout
@@ -636,15 +675,15 @@ class Room(Traced):
         loop = asyncio.get_running_loop()
         captured = instance._captured
 
-        def hand_on(channel: Channel, item: hsm.Event[typing.Any]) -> None:
+        def hand_on(channel: Channel, items: tuple[hsm.Event[typing.Any], ...]) -> None:
             if captured.full():
                 _DROPPED.add(1, {"channel": channel})
                 return
-            captured.put_nowait((channel, item))
+            captured.put_nowait((channel, items))
 
-        def post(channel: Channel, item: hsm.Event[typing.Any]) -> None:
+        def post(channel: Channel, *items: hsm.Event[typing.Any]) -> None:
             try:
-                _ = loop.call_soon_threadsafe(hand_on, channel, item)
+                _ = loop.call_soon_threadsafe(hand_on, channel, items)
             except RuntimeError:
                 # The loop is closed: nobody is sending any more.
                 return
@@ -656,26 +695,39 @@ class Room(Traced):
         def seen(image: media.Image) -> None:
             post("camera", computer.StillEvent.with_data(computer.StillData(image=image)))
 
-        camera = instance._camera
+        def typed(line: str) -> None:
+            if len(line) > MAX_LINE:
+                _DROPPED.add(1, {"channel": "keyboard"})
+                return
+            keys = [hid.KeyData(action="down", key=character, code="", text=character) for character in line]
+            keys.append(hid.KeyData(action="down", key="Enter", code="Enter", text=None))
+            post("keyboard", *(hid.KeyEvent.with_data(key) for key in keys))
+
+        devices: list[Microphone | Camera | Keyboard] = [instance._microphone]
         try:
             instance._microphone.start(heard)
-            if camera is not None:
-                camera.start(seen)
+            if instance._camera is not None:
+                devices.append(instance._camera)
+                instance._camera.start(seen)
+            if instance._keyboard is not None:
+                devices.append(instance._keyboard)
+                instance._keyboard.start(typed)
         except Exception as error:
-            # The device boundary: a sound card or camera that cannot open ends the session, named by kind only.
+            # The device boundary: a device that cannot open ends the session, named by kind only.
             _LOG.warning("willy room device failed kind=%s", type(error).__name__)
-            instance._microphone.stop()
+            for device in devices:
+                device.stop()
             _ = hsm.dispatch(ctx, instance, _BrokenEvent.with_data(_SignalData()))
             return
         try:
             while True:
-                channel, item = await captured.get()
-                _ = hsm.dispatch(ctx, instance._streams[channel], item)
-                _FRAMES.add(1, {"channel": channel})
+                channel, items = await captured.get()
+                for item in items:
+                    _ = hsm.dispatch(ctx, instance._streams[channel], item)
+                _FRAMES.add(len(items), {"channel": channel})
         finally:
-            instance._microphone.stop()
-            if camera is not None:
-                camera.stop()
+            for device in devices:
+                device.stop()
 
     @staticmethod
     def _play(ctx: hsm.Context, instance: "Room", event: hsm.Event[typing.Any]) -> None:
@@ -1076,6 +1128,7 @@ def main(argv: collections.abc.Sequence[str] | None = None) -> int:
 __all__ = [
     "CAMERA_EVERY_SECONDS",
     "CAMERA_LONG_EDGE",
+    "MAX_LINE",
     "MAX_PENDING",
     "MICROPHONE_BLOCK_SECONDS",
     "MICROPHONE_RATE_HZ",
@@ -1085,6 +1138,7 @@ __all__ = [
     "ClosedData",
     "Connect",
     "ConnectOutcome",
+    "Keyboard",
     "LeaveData",
     "LeaveEvent",
     "Microphone",

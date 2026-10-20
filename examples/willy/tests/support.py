@@ -73,6 +73,17 @@ class Recorder(hsm.Instance):
     def sights(self) -> list[environment.VisualData]:
         return [event.data for event in self.seen if isinstance(event.data, environment.VisualData)]
 
+    def entered(self) -> list[computer.TextEnteredData]:
+        """Every line the computer told its holder was typed on it."""
+
+        return [
+            event.data.observation.data
+            for event in self.seen
+            if isinstance(event.data, mosfet.InputEventData)
+            and event.data.observation is not None
+            and isinstance(event.data.observation.data, computer.TextEnteredData)
+        ]
+
     def linked(self) -> bool:
         return any(
             isinstance(event.data, mosfet.InputEventData)
@@ -159,6 +170,27 @@ class Camera:
         showing.join()
 
 
+class Keyboard:
+    """The room's keyboard: the test types lines on it, from a thread of its own."""
+
+    def __init__(self) -> None:
+        self.typed: collections.abc.Callable[[str], None] | None = None
+        self.stopped: int = 0
+
+    def start(self, typed: collections.abc.Callable[[str], None]) -> None:
+        self.typed = typed
+
+    def stop(self) -> None:
+        self.stopped += 1
+
+    def type(self, line: str) -> None:
+        typed = self.typed
+        assert typed is not None
+        typing_ = threading.Thread(target=typed, args=(line,))
+        typing_.start()
+        typing_.join()
+
+
 @dataclasses.dataclass
 class Kitchen:
     """Willy's side: a websocket server, the kitchen's computer on the counter, its holder, and an ear in the house."""
@@ -215,6 +247,7 @@ async def enter(
     speaker: Speaker,
     *,
     camera: Camera | None = None,
+    keyboard: Keyboard | None = None,
     token: pydantic.SecretStr | None = None,
 ) -> Session:
     closed: asyncio.Future[room.ClosedData] = asyncio.get_running_loop().create_future()
@@ -225,6 +258,7 @@ async def enter(
         microphone=microphone,
         speaker=speaker,
         camera=camera,
+        keyboard=keyboard,
         on_closed=closed.set_result,
         connect_timeout=BOUND,
         open_timeout=BOUND,

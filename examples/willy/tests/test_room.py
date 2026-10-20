@@ -96,6 +96,32 @@ def test_with_a_camera_the_room_shows_the_house_what_it_sees() -> None:
     assert camera.stopped == 1
 
 
+def test_a_line_typed_on_the_rooms_keyboard_reaches_whoever_holds_the_computer_with_no_field() -> None:
+    async def run() -> tuple[list[computer.TextEnteredData], support.Keyboard]:
+        house = await support.kitchen()
+        microphone, keyboard = support.Microphone(), support.Keyboard()
+        try:
+            session = await support.enter(house.port, microphone, support.Speaker(), keyboard=keyboard)
+            await support.wait_until(lambda: house.holder.linked() and keyboard.typed is not None)
+            keyboard.type("Hello, Willy")
+            keyboard.type("x" * (room.MAX_LINE + 1))
+            keyboard.type("Are you there?")
+            await support.wait_until(lambda: len(house.holder.entered()) == 2)
+            _ = await session.leave()
+            return house.holder.entered(), keyboard
+        finally:
+            await house.close()
+
+    entered, keyboard = asyncio.run(run())
+
+    # Typed with nothing focused: the line reaches the holder with no field. A line too long to type is not typed.
+    assert [(line.field_id, line.text, line.device_id) for line in entered] == [
+        (None, "Hello, Willy", support.PEER),
+        (None, "Are you there?", support.PEER),
+    ]
+    assert keyboard.stopped == 1
+
+
 def test_a_room_whose_token_is_refused_ends_1_and_hears_nothing() -> None:
     async def run() -> tuple[room.ClosedData, support.Microphone]:
         house = await support.kitchen()
