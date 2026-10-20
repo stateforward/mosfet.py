@@ -32,6 +32,8 @@ from sqlalchemy.pool import StaticPool
 from .engine import ProviderError
 
 _IDENTITIES = memory.schema.identity_table
+_RESEMBLE_K: typing.Final = 16
+"""Nearest prints a policy with a resemblance floor compares a new print with: linked ones among them it may resemble."""
 
 
 def table_name(model: str, dimensions: int) -> str:
@@ -174,24 +176,33 @@ class IdentityStore(identification.Store):
             recognitions: list[identification.Recognition | None] = []
             for print, minting in zip(prints, mint, strict=True):
                 table = _space(connection, print)
-                # ``decide`` reads only the best neighbor and the runner-up.
+                # ``decide`` reads only the best neighbor and the runner-up to match; a policy with a
+                # resemblance floor looks further, for the linked ids a new print may resemble past
+                # strangers' nearer prints.
                 nearest = connection.exec_driver_sql(
-                    f"SELECT seq, distance FROM {table} WHERE embedding MATCH ? AND k = 2 AND kind = ? "
+                    f"SELECT seq, distance FROM {table} WHERE embedding MATCH ? AND k = ? AND kind = ? "
                     "ORDER BY distance",
-                    (memory.index.pack(print.vector), kind),
+                    (memory.index.pack(print.vector), 2 if policy.resemble_floor is None else _RESEMBLE_K, kind),
                 ).all()
                 distances = {int(seq): float(distance) for seq, distance in nearest}
                 rows = connection.execute(
                     sqlalchemy.select(
-                        _IDENTITIES.c.seq, _IDENTITIES.c.id, _IDENTITIES.c.own, _IDENTITIES.c.seen_count
+                        _IDENTITIES.c.seq,
+                        _IDENTITIES.c.id,
+                        _IDENTITIES.c.own,
+                        _IDENTITIES.c.linked,
+                        _IDENTITIES.c.seen_count,
                     ).where(_IDENTITIES.c.seq.in_(list(distances)), _IDENTITIES.c.model == print.model)
                 ).all()
-                by_id = {str(id): (int(seq), int(seen_count)) for seq, id, _, seen_count in rows}
+                by_id = {str(id): (int(seq), int(seen_count)) for seq, id, _, _, seen_count in rows}
                 neighbors = [
                     identification.Neighbor(
-                        id=str(id), similarity=max(-1.0, min(1.0, 1.0 - distances[int(seq)])), own=bool(own)
+                        id=str(id),
+                        similarity=max(-1.0, min(1.0, 1.0 - distances[int(seq)])),
+                        own=bool(own),
+                        linked=bool(linked),
                     )
-                    for seq, id, own, _ in rows
+                    for seq, id, own, linked, _ in rows
                 ]
                 decision = identification.decide(neighbors, policy)
                 if isinstance(decision, identification.Mint) and not minting:
@@ -218,7 +229,11 @@ class IdentityStore(identification.Store):
                     )
                     recognitions.append(
                         identification.Recognition(
-                            id=minted, recognized=False, similarity=decision.similarity, own=False
+                            id=minted,
+                            recognized=False,
+                            similarity=decision.similarity,
+                            own=False,
+                            resembles=decision.resembles,
                         )
                     )
                     continue

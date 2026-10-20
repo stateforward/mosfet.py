@@ -38,7 +38,9 @@ with one `bot.define` that constructs every part inline, and runs it with `bot.r
 - **People.** Knowing who someone is, is remembering it: its memory offers Willy `memory.know` (a voice is the
   same person as someone, is called something, or is not the same person as someone) and `memory.forget` (a
   person, and their prints with them). The cognition is given the voice (and face) registries, so a person's prints
-  are kept once Willy has named them. Nobody is listed for Willy: it learns who everyone is itself.
+  are kept once Willy has named them. A new voice (or face) that is like someone Willy has named reaches it as
+  `known=false` with whom it `resembles` and how closely; what that means is Willy's to work out. Nobody is
+  listed for Willy: it learns who everyone is itself.
 - **Eye** (`WILLY_CAMERA=1`). `seeing.Seeing` over the rooms' cameras, with the OpenCV Zoo's YuNet and SFace
   into a face registry whose prints follow what Willy remembers, the same way.
 

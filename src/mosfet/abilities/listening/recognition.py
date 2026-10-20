@@ -70,19 +70,25 @@ def merge(*groups: tuple[mosfet.Participant, ...]) -> tuple[mosfet.Participant, 
 def stamps(voices: tuple[voice.HeardVoice, ...]) -> tuple[frozenset[str], tuple[mosfet.Participant, ...]]:
     """What a product stamps for the voices heard in it, earliest first.
 
-    Every voice is a ``voice:<id>`` participant, the bot's own included and stamped ``own``, so hearing
+    Every voice is one ``voice:<id>`` participant, the bot's own included and stamped ``own``, so hearing
     itself resolves to itself; only the others are ``source_ids``, at most ``MAX_IDENTITY_SET_SIZE`` of
-    them.
+    them. A voice minted in this product carries the known voices the registry said it resembles
+    (``Recognition.resembles``), from whichever of its spans was minted.
     """
 
     ordered = sorted(voices, key=lambda heard: heard.start_seconds)
     others = dict.fromkeys(
         identification.ref("voice", heard.recognition.id) for heard in ordered if not heard.recognition.own
     )
-    participants = tuple(
-        identification.participant("voice", heard.recognition.id, own=heard.recognition.own) for heard in ordered
-    )
-    return frozenset(tuple(others)[: value.MAX_IDENTITY_SET_SIZE]), participants
+    stamped: dict[str, mosfet.Participant] = {}
+    for heard in ordered:
+        recognition = heard.recognition
+        stamp = identification.participant(
+            "voice", recognition.id, own=recognition.own, resembles=recognition.resembles
+        )
+        if stamp.ref not in stamped or (stamp.resembles and not stamped[stamp.ref].resembles):
+            stamped[stamp.ref] = stamp
+    return frozenset(tuple(others)[: value.MAX_IDENTITY_SET_SIZE]), tuple(stamped.values())
 
 
 def unidentified(count: int, failure: identification.FailureKind) -> None:

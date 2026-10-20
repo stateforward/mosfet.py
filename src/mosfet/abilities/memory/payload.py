@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import datetime
 import enum
+import operator
 import re
 import typing
 
@@ -673,6 +674,27 @@ MAX_PRESENT_PERSONS: typing.Final = 17
 """Most persons one turn shows: everyone its participants belong to (at most 16) and the bot itself."""
 
 
+class Resemblance(pydantic.BaseModel):
+    """A person the bot named whose voice or face a new one is like, and how closely."""
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
+        frozen=True,
+        extra="forbid",
+        json_schema_extra={
+            "description": (
+                "Someone you know whose voice (or face) this new one is like: the person and how similar the two "
+                "are, -1..1. Nothing is linked: whether it is them is yours to infer, ask, or remember."
+            ),
+            "examples": [{"person": "3f2a9c0d4b5e6f708192a3b4c5d6e7f8", "similarity": 0.42}],
+        },
+    )
+
+    person: PersonId
+    similarity: float = pydantic.Field(
+        ge=-1.0, le=1.0, description="How similar the two are, -1..1; higher is more alike.", examples=[0.42]
+    )
+
+
 class Present(pydantic.BaseModel):
     """One participant of the turn, resolved to the person memory knows it as."""
 
@@ -702,6 +724,16 @@ class Present(pydantic.BaseModel):
             "True for the bot itself and for anyone named."
         ),
         examples=[False],
+    )
+    resembles: tuple[Resemblance, ...] = pydantic.Field(
+        default=(),
+        # Left out when empty, so a participant that resembles nobody reads as it always has.
+        exclude_if=operator.not_,
+        max_length=mosfet.events.MAX_RESEMBLANCES,
+        description=(
+            "Only when known is false: people you know whose voice (or face) this one is like, best first. "
+            "Perception, never a link."
+        ),
     )
 
 
@@ -1476,6 +1508,7 @@ __all__ = [
     "ReleaseData",
     "ReleasedData",
     "RememberedData",
+    "Resemblance",
     "RestData",
     "SameAsFact",
     "SearchData",

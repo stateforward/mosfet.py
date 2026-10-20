@@ -335,3 +335,11 @@ def test_python_m_names_a_bad_setting_and_exits_1_without_a_secret(
         assert secret.encode() not in finished.stderr
     # Nothing started: not even the database was opened.
     assert not (tmp_path / "data" / "memory.sqlite3").exists()
+
+
+def test_a_new_voice_or_face_tells_willy_whom_it_resembles() -> None:
+    """R-13: below the match threshold but above a floor, a new print says which known people it is like."""
+
+    for policy in (willy_example.VOICE_POLICY, willy_example.FACE_POLICY):
+        assert policy.resemble_floor is not None
+        assert 0.0 < policy.resemble_floor < policy.threshold

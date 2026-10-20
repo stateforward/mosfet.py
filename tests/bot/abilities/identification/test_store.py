@@ -391,6 +391,27 @@ def test_a_linked_id_is_kept_through_retention_until_it_is_unlinked() -> None:
     assert after.id != known.id
 
 
+def test_a_new_print_says_which_linked_ids_it_resembles_and_a_stranger_resembles_nobody() -> None:
+    """R-13: perception tells whose known prints a new one resembles; it links nothing itself."""
+
+    fixture = _fixture(
+        policy=identification.MatchPolicy(threshold=0.50, margin=0.05, refine_threshold=0.65, resemble_floor=0.30)
+    )
+    (known,) = _identify(fixture, _angle(0))
+    (stranger,) = _identify(fixture, _angle(130))
+    _link(fixture, known.id, True)
+
+    # cos(65 degrees) is about 0.42: below the match threshold, above the floor.
+    (new,) = _identify(fixture, _angle(65))
+    (far,) = _identify(fixture, _angle(-100))
+
+    assert new.recognized is False and new.id not in (known.id, stranger.id)
+    assert [(resemblance.id, round(resemblance.similarity, 6)) for resemblance in new.resembles] == [
+        (known.id, round(math.cos(math.radians(65)), 6))
+    ]
+    assert far.resembles == ()
+
+
 def test_an_own_id_refuses_a_link_mark_as_a_conflict_and_an_unknown_id_is_not_found() -> None:
     fixture = _fixture()
     own = _enroll(fixture, None, _angle(0), own=True)

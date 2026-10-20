@@ -409,6 +409,28 @@ def test_contract_a_linked_id_is_kept_through_retention_and_the_cap_until_unlink
     assert after.id != known.id
 
 
+def test_contract_a_new_print_says_which_linked_ids_it_resembles_past_nearer_strangers(
+    store_factory: StoreFactory,
+) -> None:
+    """R-13: a linked id resembled by a new print is found even when strangers' prints are nearer."""
+
+    fixture = _fixture(
+        store_factory,
+        policy=identification.MatchPolicy(threshold=0.50, margin=0.05, refine_threshold=0.65, resemble_floor=0.30),
+    )
+    (known,) = fixture.identify(_print(1.0, 0.0, 0.0))
+    fixture.link(known.id, True)
+    # Two strangers, each nearer the new print (0.49) than the known one is (cos 61 degrees, 0.485).
+    strangers = fixture.identify(_print(0.0, 0.56, 0.828), _print(0.0, 0.56, -0.828))
+
+    (new,) = fixture.identify(_print(math.cos(math.radians(61)), math.sin(math.radians(61)), 0.0))
+
+    assert new.recognized is False and new.id not in {known.id, *(stranger.id for stranger in strangers)}
+    assert [(resemblance.id, round(resemblance.similarity, 4)) for resemblance in new.resembles] == [
+        (known.id, round(math.cos(math.radians(61)), 4))
+    ]
+
+
 def test_contract_a_link_mark_on_an_own_id_is_a_conflict_and_on_an_unknown_id_not_found(
     store_factory: StoreFactory,
 ) -> None:

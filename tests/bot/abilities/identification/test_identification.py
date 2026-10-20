@@ -59,6 +59,75 @@ def test_decide_does_not_depend_on_the_weight_cap() -> None:
     assert identification.decide([_neighbor("a", 0.9)], capped) == identification.decide([_neighbor("a", 0.9)], _POLICY)
 
 
+_RESEMBLING = identification.MatchPolicy(threshold=0.50, margin=0.05, refine_threshold=0.65, resemble_floor=0.30)
+
+
+def _linked(id: str, similarity: float) -> identification.Neighbor:
+    return identification.Neighbor(id=id, similarity=similarity, own=False, linked=True)
+
+
+def test_a_mint_carries_the_linked_ids_it_resembles_best_first_at_most_three_above_the_floor() -> None:
+    """R-13, D-R-40: a new print that resembles known people's prints says so, as perception data."""
+
+    neighbors = [
+        _linked("a", 0.45),
+        _linked("b", 0.31),
+        _linked("c", 0.40),
+        _linked("d", 0.35),
+        _linked("e", 0.29),
+        _neighbor("stranger", 0.48),
+        identification.Neighbor(id="mine", similarity=0.47, own=True, linked=False),
+    ]
+
+    decision = identification.decide(neighbors, _RESEMBLING)
+
+    assert isinstance(decision, identification.Mint)
+    assert decision.resembles == (
+        identification.Resemblance(id="a", similarity=0.45),
+        identification.Resemblance(id="c", similarity=0.40),
+        identification.Resemblance(id="d", similarity=0.35),
+    )
+    # No floor, no resemblance; a match or a refine resembles nothing.
+    assert identification.decide(neighbors, _POLICY) == identification.Mint(similarity=0.48)
+    matched = identification.decide([_linked("a", 0.9), _linked("b", 0.4)], _RESEMBLING)
+    assert matched == identification.Refine(id="a", similarity=0.9, own=False)
+
+
+def test_the_floor_is_a_similarity_below_the_threshold() -> None:
+    assert identification.MatchPolicy(threshold=0.5, margin=0.05, refine_threshold=0.65).resemble_floor is None
+    for floor in (0.5, 0.6, -1.5):
+        with pytest.raises(pydantic.ValidationError):
+            _ = _POLICIES.validate_python(
+                {"threshold": 0.5, "margin": 0.05, "refine_threshold": 0.65, "resemble_floor": floor}
+            )
+
+
+def test_a_recognition_shows_the_model_neither_its_similarity_nor_whom_it_resembles() -> None:
+    recognition = identification.Recognition(
+        id="3f2a9c",
+        recognized=False,
+        similarity=0.4,
+        own=False,
+        resembles=(identification.Resemblance(id="7b1e04", similarity=0.4),),
+    )
+
+    assert recognition.resembles[0].id == "7b1e04"
+    assert {"similarity", "resembles"} <= identification.Recognition.__model_facing_excluded_fields__
+    assert identification.Recognition(id="3f2a9c", recognized=True, similarity=0.9, own=False).resembles == ()
+
+
+def test_a_participant_carries_the_refs_its_new_id_resembles() -> None:
+    stamped = identification.participant(
+        "voice", "3f2a9c", resembles=(identification.Resemblance(id="7b1e04", similarity=0.42),)
+    )
+
+    assert stamped == mosfet.Participant(
+        ref="voice:3f2a9c",
+        role=mosfet.ParticipantRole.SOURCE,
+        resembles=(mosfet.Resemblance(ref="voice:7b1e04", similarity=0.42),),
+    )
+
+
 @pytest.mark.parametrize(
     "fields",
     [

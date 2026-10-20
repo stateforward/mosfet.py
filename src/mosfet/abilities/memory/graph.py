@@ -776,25 +776,52 @@ def _who(
     persons: dict[str, int],
     stamp: str,
 ) -> tuple[tuple[payload.Present, ...], tuple[payload.Person, ...], payload.Person]:
-    """Who is here: each participant resolved, the persons they are (and ``self``), and ``self``."""
+    """Who is here: each participant resolved, the persons they are (and ``self``), and ``self``.
+
+    A participant nobody has named shows the persons the bot named whose refs its producer said it
+    resembles (R-13), best first and each once; those persons are shown too. Nothing is linked.
+    """
 
     self_seq, _ = _self_seq(connection, stamp)
     rows: dict[int, _PersonRow] = {}
     for seq in dict.fromkeys(persons.values()):
         rows[seq] = _person_by_seq(connection, seq)
-    people = tuple(
-        payload.Present(
-            ref=participant.ref,
-            part=participant.role,
-            person=rows[persons[participant.ref]].id,
-            known=not _provisional(rows[persons[participant.ref]]),
+    likes = _linked_persons(connection, {like.ref for participant in participants for like in participant.resembles})
+    for seq in dict.fromkeys(likes.values()):
+        rows.setdefault(seq, _person_by_seq(connection, seq))
+    resembled: list[int] = []
+    people: list[payload.Present] = []
+    for participant in participants:
+        row = rows[persons[participant.ref]]
+        known = not _provisional(row)
+        best: dict[int, float] = {}
+        if not known:
+            for like in participant.resembles:
+                seq = likes.get(like.ref)
+                if seq is None or seq == self_seq or _provisional(rows[seq]) or seq == row.seq:
+                    continue
+                best[seq] = max(best.get(seq, like.similarity), like.similarity)
+        ranked = sorted(best.items(), key=lambda item: (-item[1], rows[item[0]].id))
+        resembled.extend(seq for seq, _ in ranked)
+        people.append(
+            payload.Present(
+                ref=participant.ref,
+                part=participant.role,
+                person=row.id,
+                known=known,
+                resembles=tuple(
+                    payload.Resemblance(person=rows[seq].id, similarity=similarity) for seq, similarity in ranked
+                ),
+            )
         )
-        for participant in participants
-    )
-    shown = [seq for seq in dict.fromkeys(persons[participant.ref] for participant in participants) if seq != self_seq]
+    shown = [
+        seq
+        for seq in dict.fromkeys((*(persons[participant.ref] for participant in participants), *resembled))
+        if seq != self_seq
+    ]
     you = _person(connection, _person_by_seq(connection, self_seq))
     others = tuple(_person(connection, rows[seq]) for seq in shown[: payload.MAX_PRESENT_PERSONS - 1])
-    return people, (*others, you), you
+    return tuple(people), (*others, you), you
 
 
 def search(

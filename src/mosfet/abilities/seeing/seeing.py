@@ -172,6 +172,8 @@ _RESTARTS = _METER.create_counter(
 class Face(pydantic.BaseModel):
     """One face in a view: where it is and, when a face registry is composed, who it is."""
 
+    __model_facing_excluded_fields__: typing.ClassVar[frozenset[str]] = frozenset({"resembles"})
+
     model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
         frozen=True,
         extra="forbid",
@@ -230,6 +232,14 @@ class Face(pydantic.BaseModel):
         le=1.0,
         description="How close the face was to the matched (or nearest) known face, -1..1; null when none was compared.",
         examples=[0.82, None],
+    )
+    resembles: tuple[identification.Resemblance, ...] = pydantic.Field(
+        default=(),
+        max_length=mosfet.events.MAX_RESEMBLANCES,
+        description=(
+            "For a face nobody knew: the known faces it resembles, best first. Not shown to the model, which is "
+            "told whom as persons, by memory."
+        ),
     )
 
 
@@ -553,17 +563,22 @@ def _merged_participants(
 ) -> tuple[mosfet.Participant, ...]:
     """The views' stamped participants, then ``face:<id>`` for every identified face, ``own`` for the bot's.
 
-    First occurrence wins, bounded like the field.
+    First occurrence wins, bounded like the field; a face id is one participant, carrying whom it
+    resembles from the view it was minted in.
     """
 
     stamped = (participant for view in views for participant in view.participants)
-    identified = (
-        identification.participant("face", face.face_id, own=face.face_id in own_faces)
-        for view in views
-        for face in view.faces or ()
-        if face.face_id is not None
-    )
-    return tuple(dict.fromkeys((*stamped, *identified)))[:_MAX_PARTICIPANTS]
+    identified: dict[str, mosfet.Participant] = {}
+    for view in views:
+        for face in view.faces or ():
+            if face.face_id is None:
+                continue
+            stamp = identification.participant(
+                "face", face.face_id, own=face.face_id in own_faces, resembles=face.resembles
+            )
+            if stamp.ref not in identified or (stamp.resembles and not identified[stamp.ref].resembles):
+                identified[stamp.ref] = stamp
+    return tuple(dict.fromkeys((*stamped, *identified.values())))[:_MAX_PARTICIPANTS]
 
 
 class Seeing(ability.Ability[VisualData, cognition.InputData]):
@@ -1141,6 +1156,7 @@ class Seeing(ability.Ability[VisualData, cognition.InputData]):
                         face_id=None if recognition is None else recognition.id,
                         recognized=None if recognition is None else recognition.recognized,
                         similarity=None if recognition is None else recognition.similarity,
+                        resembles=() if recognition is None else recognition.resembles,
                     )
                 )
             faces = tuple(seen)

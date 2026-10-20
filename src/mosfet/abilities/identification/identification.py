@@ -113,14 +113,25 @@ def ref(kind: Kind, id: Id) -> Ref:
     return _REF.validate_python(f"{kind}:{id}")
 
 
-def participant(kind: Kind, id: Id, *, own: bool = False) -> mosfet.Participant:
+def participant(
+    kind: Kind, id: Id, *, own: bool = False, resembles: tuple["Resemblance", ...] = ()
+) -> mosfet.Participant:
     """The source participant a producer stamps for an identity it recognized or declared.
 
     ``own`` is the producer's own knowledge that the identity is the bot's (``Recognition.own``, or
-    the voice the bot speaks with); nobody else infers it.
+    the voice the bot speaks with); nobody else infers it. ``resembles`` is what the registry
+    perceived of an id it minted now (``Recognition.resembles``), stamped as the known refs it is like.
     """
 
-    return mosfet.Participant(ref=ref(kind, id), role=mosfet.ParticipantRole.SOURCE, own=own)
+    return mosfet.Participant(
+        ref=ref(kind, id),
+        role=mosfet.ParticipantRole.SOURCE,
+        own=own,
+        resembles=tuple(
+            mosfet.Resemblance(ref=ref(kind, resemblance.id), similarity=resemblance.similarity)
+            for resemblance in resembles
+        ),
+    )
 
 
 class Print(capture.Biometric):
@@ -162,13 +173,22 @@ class Print(capture.Biometric):
 
 
 @pydantic.dataclasses.dataclass(frozen=True, kw_only=True)
+class Resemblance:
+    """A linked id (a person the bot named) that a print minted now is like, and how closely."""
+
+    id: Id
+    similarity: float = pydantic.Field(ge=-1.0, le=1.0)
+
+
+@pydantic.dataclasses.dataclass(frozen=True, kw_only=True)
 class Recognition:
     """Who a print is: an existing id it matched, or the id minted for it now.
 
-    Shown to a model, a recognition is its id, ``recognized`` and ``own``; the similarity score is not.
+    Shown to a model, a recognition is its id, ``recognized`` and ``own``; the similarity score and
+    whom a new id resembles are not (memory tells the bot whom, as persons).
     """
 
-    __model_facing_excluded_fields__: typing.ClassVar[frozenset[str]] = frozenset({"similarity"})
+    __model_facing_excluded_fields__: typing.ClassVar[frozenset[str]] = frozenset({"similarity", "resembles"})
 
     id: Id
     recognized: bool
@@ -177,6 +197,8 @@ class Recognition:
     """Cosine similarity to the matched id (or the best candidate when minted); None when nothing was compared."""
     own: bool
     """True for an id its producer declared as the bot's own (for example the bot's own voice)."""
+    resembles: tuple[Resemblance, ...] = pydantic.Field(default=(), max_length=mosfet.events.MAX_RESEMBLANCES)
+    """For an id minted now: the linked ids it resembles, best first (``MatchPolicy.resemble_floor``)."""
 
 
 @pydantic.dataclasses.dataclass(frozen=True, kw_only=True)
@@ -185,28 +207,34 @@ class MatchPolicy:
 
     The best candidate must reach ``threshold`` and beat the runner-up by ``margin``; a match at
     or above ``refine_threshold`` also refines the id's running mean, weighted by at most
-    ``refine_weight_cap`` earlier prints.
+    ``refine_weight_cap`` earlier prints. A print minted below the threshold resembles each linked
+    id (a person the bot named) at or above ``resemble_floor``, at most three, best first; with no
+    floor it resembles nobody (R-13).
     """
 
     threshold: float = pydantic.Field(ge=-1.0, le=1.0)
     margin: float = pydantic.Field(ge=0.0, le=2.0)
     refine_threshold: float = pydantic.Field(ge=-1.0, le=1.0)
     refine_weight_cap: int = pydantic.Field(default=50, ge=1)
+    resemble_floor: float | None = pydantic.Field(default=None, ge=-1.0, le=1.0)
 
     @pydantic.model_validator(mode="after")
     def _ordered(self) -> typing.Self:
         if self.refine_threshold < self.threshold:
             raise ValueError("refine_threshold cannot be below threshold")
+        if self.resemble_floor is not None and self.resemble_floor >= self.threshold:
+            raise ValueError("resemble_floor must be below threshold")
         return self
 
 
 @pydantic.dataclasses.dataclass(frozen=True, kw_only=True)
 class Neighbor:
-    """One stored id a store compared a print with."""
+    """One stored id a store compared a print with; ``linked`` when it is a person's the bot named."""
 
     id: Id
     similarity: float = pydantic.Field(ge=-1.0, le=1.0)
     own: bool
+    linked: bool = False
 
 
 @pydantic.dataclasses.dataclass(frozen=True, kw_only=True)
@@ -229,9 +257,13 @@ class Refine:
 
 @pydantic.dataclasses.dataclass(frozen=True, kw_only=True)
 class Mint:
-    """The print is nobody known: the store mints a new id; ``similarity`` is the best candidate's, if any."""
+    """The print is nobody known: the store mints a new id; ``similarity`` is the best candidate's, if any.
+
+    ``resembles`` are the linked ids it is like, best first: what the registry tells the bot.
+    """
 
     similarity: float | None = pydantic.Field(ge=-1.0, le=1.0)
+    resembles: tuple[Resemblance, ...] = ()
 
 
 Decision: typing.TypeAlias = Match | Refine | Mint
@@ -241,17 +273,29 @@ def decide(neighbors: collections.abc.Sequence[Neighbor], policy: MatchPolicy) -
     """The one matching algorithm every store runs inside its own transaction; pure.
 
     The best neighbor must reach ``policy.threshold`` and beat the runner-up by ``policy.margin``;
-    one at or above ``policy.refine_threshold`` is a ``Refine``. Anything else is a ``Mint``.
+    one at or above ``policy.refine_threshold`` is a ``Refine``. Anything else is a ``Mint``, which
+    resembles the linked, non-own neighbors at or above ``policy.resemble_floor`` (at most three,
+    best first). Nothing is linked by it: who the new id is stays the bot's to decide.
     """
 
     if not neighbors:
         return Mint(similarity=None)
     ranked = sorted(neighbors, key=lambda neighbor: neighbor.similarity, reverse=True)
     best = ranked[0]
+    floor = policy.resemble_floor
+    resembles = (
+        ()
+        if floor is None
+        else tuple(
+            Resemblance(id=neighbor.id, similarity=neighbor.similarity)
+            for neighbor in ranked
+            if neighbor.linked and not neighbor.own and neighbor.similarity >= floor
+        )[: mosfet.events.MAX_RESEMBLANCES]
+    )
     if best.similarity < policy.threshold:
-        return Mint(similarity=best.similarity)
+        return Mint(similarity=best.similarity, resembles=resembles)
     if len(ranked) > 1 and best.similarity - ranked[1].similarity < policy.margin:
-        return Mint(similarity=best.similarity)
+        return Mint(similarity=best.similarity, resembles=resembles)
     if best.similarity >= policy.refine_threshold:
         return Refine(id=best.id, similarity=best.similarity, own=best.own)
     return Match(id=best.id, similarity=best.similarity, own=best.own)

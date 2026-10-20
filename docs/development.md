@@ -178,7 +178,10 @@ person `self` (created when Memory opens), and `PersonEvent` knows a typed fact 
 `not_found` or `invalid_input` with nothing changed. Nobody declares a household: who everyone is is
 what the bot learns, through `Associative`'s model-callable `memory.know` and `memory.forget`, whose
 outcome (`KnownEvent`, or a typed refusal) the bot perceives; a print is kept once its person is
-named and erased with them, through the registries the cognition is given (`registries=`). `SearchEvent` runs the nearest, recent, present, and
+named and erased with them, through the registries the cognition is given (`registries=`). A
+participant whose producer minted it now carries the known refs it resembles (`Participant.resembles`,
+R-13), and a search shows a person nobody named with the named persons those refs are
+(`Present.resembles`), never linking them. `SearchEvent` runs the nearest, recent, present, and
 one-link lanes at once and says who is here (each participant resolved to its person, `known`
 false for someone nobody has named, those persons, and the bot itself as `you`),
 which `Associative` hands the turn as `AssociationsData.people`/`persons`/`you`; `FetchEvent` reads nodes in full (image bytes on request) and can

@@ -15,6 +15,7 @@ from ...identity import value
 from . import turn_detector
 
 import asyncio
+import collections.abc
 import dataclasses
 import datetime
 import json
@@ -814,28 +815,39 @@ def _cognition_ready(message: Message) -> bool:
     )
 
 
+def _distinct(participants: collections.abc.Iterable[mosfet.Participant]) -> tuple[mosfet.Participant, ...]:
+    """One participant per ref and role, the first stamp of each, in order."""
+
+    distinct: dict[tuple[str, mosfet.ParticipantRole], mosfet.Participant] = {}
+    for participant in participants:
+        _ = distinct.setdefault((participant.ref, participant.role), participant)
+    return tuple(distinct.values())
+
+
 def turn_participants(turn: TurnData) -> tuple[mosfet.Participant, ...]:
     """Participants a cognition handoff stamps for the inbound turn that caused it.
 
     Identities become participants: ``source_ids`` as sources, ``target_ids`` as targets, followed by
     whatever the turn's Listening speech parent already carries. A speech turn's ``source_ids`` are the
-    ``voice:`` refs Listening stamped, so both name one participant. A string longer than a participant ref
-    allows is counted and never stamped. Deduplicated (first occurrence wins) and bounded at 32.
+    ``voice:`` refs Listening stamped, so both name one participant: the producer's stamp, with whatever
+    only the producer knows (``own``, ``resembles``), stands for the identity. A string longer than a
+    participant ref allows is counted and never stamped. One participant per ref and role, bounded at 32.
     """
 
     identities = (
         *((identity, mosfet.ParticipantRole.SOURCE) for identity in value.sorted_identities(turn.source_ids)),
         *((identity, mosfet.ParticipantRole.TARGET) for identity in value.sorted_identities(turn.target_ids)),
     )
+    carried = _distinct(turn.parent.data.participants if turn.parent is not None else ())
+    producers = {(participant.ref, participant.role): participant for participant in carried}
     stamped = tuple(
-        mosfet.Participant(ref=identity, role=role)
+        producers.get((identity, role), mosfet.Participant(ref=identity, role=role))
         for identity, role in identities
         if len(identity) <= _MAX_PARTICIPANT_REF_LENGTH
     )
     if unstamped := len(identities) - len(stamped):
         _PARTICIPANT_UNSTAMPED.add(unstamped)
-    carried = turn.parent.data.participants if turn.parent is not None else ()
-    return tuple(dict.fromkeys((*stamped, *carried)))[:_MAX_PARTICIPANTS]
+    return _distinct((*stamped, *carried))[:_MAX_PARTICIPANTS]
 
 
 def _terminal_output(
@@ -864,7 +876,7 @@ def _terminal_output(
         # Text or image-attachment contributions hand body cognition a typed history stimulus.
         # Audio and structured products remain bare Conversation output terminals, preserving the
         # audio trust boundary.
-        participants = tuple(dict.fromkeys((*turn_participants(turn), *outbound)))[:_MAX_PARTICIPANTS]
+        participants = _distinct((*turn_participants(turn), *outbound))[:_MAX_PARTICIPANTS]
         handoff = dataclasses.replace(
             _with_operation(
                 cognition.InputEvent.with_data(cognition.InputData(stimulus=history_event, participants=participants)),
@@ -1124,8 +1136,8 @@ class Conversation(ability.Ability[TurnData, Messages]):
             committed = message.model_copy(update={"sequence": len(instance._history), "provenance": provenance})
             instance._history.append(committed)
             # Producer-stamped (the bot's own voice on what it said): carried into the next handoff, bounded.
-            carried = dict.fromkeys((*instance._outbound_participants, *committed.participants))
-            instance._outbound_participants = list(carried)[:_MAX_OUTBOUND_PARTICIPANTS]
+            carried = _distinct((*instance._outbound_participants, *committed.participants))
+            instance._outbound_participants = list(carried[:_MAX_OUTBOUND_PARTICIPANTS])
         output = Messages(parent=instance._history_parent, messages=tuple(instance._history))
         terminal = dataclasses.replace(
             instance.output_event.with_data(output),

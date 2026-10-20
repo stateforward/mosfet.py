@@ -54,6 +54,18 @@ def test_event_json_value_omits_raw_media_after_python_model_dump() -> None:
     }
 
 
+class _Quiet(pydantic.BaseModel):
+    kept: int = 1
+    empty: tuple[int, ...] = pydantic.Field(default=(), exclude_if=lambda value: not value)
+
+
+def test_event_json_value_leaves_out_a_field_its_model_excludes_for_its_value() -> None:
+    """The canonical event JSON agrees with the model's own dump: an ``exclude_if`` field is left out."""
+
+    assert event_json_value(_Quiet()) == _Quiet().model_dump(mode="json") == {"kept": 1}
+    assert event_json_value(_Quiet(empty=(2,))) == {"kept": 1, "empty": [2]}
+
+
 def test_event_json_value_rejects_cycles_without_recursion_failure() -> None:
     value: dict[str, object] = {}
     value["self"] = value

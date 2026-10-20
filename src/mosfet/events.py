@@ -1,4 +1,5 @@
 import enum
+import operator
 import typing
 
 import pydantic
@@ -72,13 +73,44 @@ class ParticipantRole(enum.StrEnum):
     """Who the stimulus was addressed to."""
 
 
+MAX_RESEMBLANCES: typing.Final = 3
+"""Most known identities one participant's producer says a new one resembles."""
+
+
+class Resemblance(pydantic.BaseModel):
+    """A known identity a newly made one is like, as the producer that compared them perceived it."""
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
+        frozen=True,
+        extra="forbid",
+        json_schema_extra={
+            "description": (
+                "A known identity this new one resembles: its ref and how similar the two are (-1..1). Perception "
+                "data only: it links nothing, and it is never a print."
+            ),
+            "examples": [{"ref": "voice:7b1e04", "similarity": 0.42}],
+        },
+    )
+
+    ref: str = pydantic.Field(
+        min_length=1,
+        max_length=200,
+        description="The ref of the known identity, as its producer stamps it.",
+        examples=["voice:7b1e04"],
+    )
+    similarity: float = pydantic.Field(
+        ge=-1.0, le=1.0, description="How similar the two are, -1..1; higher is more alike.", examples=[0.42]
+    )
+
+
 class Participant(pydantic.BaseModel):
     """Someone who took part in a stimulus, stamped by the producer that knows them.
 
     Producers stamp participants from identities they already hold; products built from a
     stimulus copy them forward unchanged. Nobody infers a participant by walking actors. Only the
     producer knows a participant is the bot itself (its own voice, heard or spoken), so only the
-    producer stamps ``own``; transformers copy it with the rest.
+    producer stamps ``own``; transformers copy it with the rest. Likewise only the producer that
+    made a new identity knows which known ones it resembles (``resembles``).
     """
 
     model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
@@ -117,6 +149,17 @@ class Participant(pydantic.BaseModel):
             "heard back or the voice it spoke with. Stamped only by that producer; never inferred."
         ),
         examples=[False, True],
+    )
+    resembles: tuple[Resemblance, ...] = pydantic.Field(
+        default=(),
+        # Left out when empty, so a participant that resembles nobody reads as it always has.
+        exclude_if=operator.not_,
+        max_length=MAX_RESEMBLANCES,
+        description=(
+            "For an identity its producer made just now (nobody it knew): the known identities it resembles, "
+            f"best first, at most {MAX_RESEMBLANCES}. Stamped only by that producer; never a link."
+        ),
+        examples=[[{"ref": "voice:7b1e04", "similarity": 0.42}]],
     )
 
 

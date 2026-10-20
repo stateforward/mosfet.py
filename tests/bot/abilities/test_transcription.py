@@ -1034,3 +1034,26 @@ def test_a_tone_not_classified_in_time_leaves_the_turn_without_one(
     assert speech.content == "lovely"
     assert speech.affect is None
     assert after - before == 1
+
+
+def test_a_new_voice_stamps_whose_known_voices_it_resembles_once_per_voice() -> None:
+    """R-13: the ear copies what the registry perceived onto the voice's one participant; it links nothing."""
+
+    like = identification.Resemblance(id="sam", similarity=0.42)
+    minted = identification.Recognition(id="new", recognized=False, similarity=0.42, own=False, resembles=(like,))
+    again = identification.Recognition(id="new", recognized=True, similarity=0.9, own=False)
+    heard = (
+        voice.HeardVoice(recognition=minted, start_seconds=0.0, end_seconds=1.0),
+        voice.HeardVoice(recognition=again, start_seconds=1.0, end_seconds=2.0),
+    )
+
+    sources, participants = listening.recognition.stamps(heard)
+
+    assert sources == frozenset({"voice:new"})
+    assert participants == (
+        mosfet.Participant(
+            ref="voice:new",
+            role=mosfet.ParticipantRole.SOURCE,
+            resembles=(mosfet.Resemblance(ref="voice:sam", similarity=0.42),),
+        ),
+    )

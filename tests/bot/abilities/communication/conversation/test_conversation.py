@@ -175,7 +175,7 @@ def test_message_content_recursive_alias_preserves_schema_and_validation() -> No
 
     schema = conversation.Message.model_json_schema()
     schema_hash = hashlib.sha256(json.dumps(schema, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-    assert schema_hash == "9bfdab04c754b72fa460a2bce95bc2ed35512b4dfbebd8a1f4521d88047c834a"
+    assert schema_hash == "0d1a54a6b3d0dbeafcf216c82743db5e333606f6340edc9287802fccc6f139a2"
 
     payload = {
         "sequence": 0,
@@ -1713,11 +1713,13 @@ def test_cognition_handoff_stamps_string_identities_as_source_and_target_partici
     )
 
 
-def _speech_turn(*voices: str, own: str | None = None) -> tuple[conversation.TurnData, tuple[mosfet.Participant, ...]]:
+def _speech_turn(
+    *voices: str, own: str | None = None, resembles: tuple[identification.Resemblance, ...] = ()
+) -> tuple[conversation.TurnData, tuple[mosfet.Participant, ...]]:
     """A speech turn as SpeechHeard builds it from what Listening stamped: voice refs, own voice never a source."""
 
     stamped = (
-        *(identification.participant("voice", voice_id) for voice_id in voices),
+        *(identification.participant("voice", voice_id, resembles=resembles) for voice_id in voices),
         *((identification.participant("voice", own, own=True),) if own else ()),
     )
     ada = mosfet.Participant(ref="ada", role=mosfet.ParticipantRole.SOURCE)
@@ -1748,6 +1750,18 @@ def test_cognition_handoff_copies_its_speech_parents_participants_deduplicated()
     terminal = run_terminal(target, context, turn)
 
     assert _handoff(terminal).participants == (heard, _BOT, ada)
+
+
+def test_a_new_voice_that_resembles_someone_is_one_participant_carrying_what_its_producer_stamped() -> None:
+    """The ear's stamp of a voice is the participant its ref names, never a second bare one beside it (R-13)."""
+
+    turn, (ada, heard) = _speech_turn("3f2a9c", resembles=(identification.Resemblance(id="7d01be", similarity=0.42),))
+    target, context = started_conversation()
+
+    participants = _handoff(run_terminal(target, context, turn)).participants
+
+    assert participants == (heard, _BOT, ada)
+    assert heard.resembles == (mosfet.Resemblance(ref="voice:7d01be", similarity=0.42),)
 
 
 def test_a_speech_turns_participants_are_the_voice_refs_listening_stamped_and_no_bare_voice_id() -> None:

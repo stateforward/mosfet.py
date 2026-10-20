@@ -61,10 +61,16 @@ EMBEDDING_SPACE: typing.Final = embedding.Space(model="google/embeddinggemma-2",
 EMBEDDING_MAX_ITEMS: typing.Final = 16
 """Most texts memory sends the lab's embedder in one request."""
 
-VOICE_POLICY: typing.Final = identification.MatchPolicy(threshold=0.50, margin=0.05, refine_threshold=0.65)
-"""When two voiceprints are one voice: WeSpeaker's operating point on the lab's voiceprint server."""
-FACE_POLICY: typing.Final = identification.MatchPolicy(threshold=0.363, margin=0.05, refine_threshold=0.5)
-"""When two face prints are one face: SFace's published cosine threshold."""
+VOICE_POLICY: typing.Final = identification.MatchPolicy(
+    threshold=0.50, margin=0.05, refine_threshold=0.65, resemble_floor=0.35
+)
+"""When two voiceprints are one voice: WeSpeaker's operating point on the lab's voiceprint server. A new voice at
+or above 0.35 to a known person's tells Willy whom it resembles (R-13); whether it is them is Willy's to infer."""
+FACE_POLICY: typing.Final = identification.MatchPolicy(
+    threshold=0.363, margin=0.05, refine_threshold=0.5, resemble_floor=0.25
+)
+"""When two face prints are one face: SFace's published cosine threshold; a new face at or above 0.25 to a known
+person's tells Willy whom it resembles."""
 MAX_VOICE_IDS: typing.Final = 1_000
 """Most voice (and face) ids Willy remembers."""
 VOICE_RETENTION: typing.Final = datetime.timedelta(days=30)

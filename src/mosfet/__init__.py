@@ -55,6 +55,7 @@ from .events import (
     RebootEvent,
     RebootEventData,
     RebootReason,
+    Resemblance,
     StimulusData,
 )
 
@@ -145,6 +146,7 @@ __all__ = [
     "RebootEvent",
     "RebootEventData",
     "RebootReason",
+    "Resemblance",
     "StimulusData",
     "abilities",
     "behavior",

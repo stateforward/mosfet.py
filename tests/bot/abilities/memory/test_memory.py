@@ -1649,6 +1649,55 @@ def test_forget_deletes_the_person_its_refs_and_its_involves_links_and_keeps_the
     assert all(text != "Sam waved" for text, _ in involved)
 
 
+def test_a_new_voice_that_resembles_people_the_bot_named_shows_who_next_to_known_false() -> None:
+    """R-13, D-R-40: perception says whose known prints a new one is like; memory names the persons, links nothing."""
+
+    def like(ref: str, similarity: float) -> mosfet.Resemblance:
+        return mosfet.Resemblance(ref=ref, similarity=similarity)
+
+    async def scenario() -> tuple[memory.FoundData, str, list[tuple[typing.Any, ...]]]:
+        harness = await _harness()
+        await harness.attached()
+        await _seen(harness, "voice:sam", "voice:ada", "voice:x")
+        await _seen(harness, "voice:mouth", own=True)
+        sam = await _person(harness, _know("voice:sam", _named("Sam")))
+        _ = await _person(harness, _know("voice:ada", _named("Ada")))
+        assert sam.person is not None
+        new = mosfet.Participant(
+            ref="voice:new",
+            role=mosfet.ParticipantRole.SOURCE,
+            resembles=(like("voice:ada", 0.38), like("voice:x", 0.45), like("voice:sam", 0.42)),
+        )
+        # Someone the bot already knows needs no resemblance shown.
+        known = mosfet.Participant(
+            ref="voice:sam", role=mosfet.ParticipantRole.SOURCE, resembles=(like("voice:ada", 0.4),)
+        )
+        selfish = mosfet.Participant(
+            ref="voice:other", role=mosfet.ParticipantRole.SOURCE, resembles=(like("voice:mouth", 0.44),)
+        )
+        reply = await harness.ask(
+            memory.SearchEvent,
+            memory.SearchData(cue=(), participants=(new, known, selfish), nearest=0, recent=0, present=0, linked=0),
+        )
+        assert isinstance(reply.data, memory.FoundData), reply.data
+        return reply.data, sam.person.id, _links(harness)
+
+    found, sam, links = _run(scenario)
+    new, known, selfish = found.people
+    ada = next(person.id for person in found.persons if person.name == "Ada")
+    assert new.known is False
+    # Best first, only persons the bot named: a voice nobody named and the bot itself are nobody to infer.
+    assert new.resembles == (
+        memory.Resemblance(person=sam, similarity=0.42),
+        memory.Resemblance(person=ada, similarity=0.38),
+    )
+    assert known.resembles == () and selfish.resembles == ()
+    assert "resembles" not in known.model_dump(mode="json")
+    assert {sam, ada} <= {person.id for person in found.persons}
+    # Nothing was linked: voice:new is still nobody's the bot knows.
+    assert _by_ref(links)["voice:new"][1] == "stamped"
+
+
 def test_person_statements_to_a_memory_that_is_not_attached_are_unavailable() -> None:
     async def scenario() -> hsm.Event[typing.Any]:
         harness = await _harness()

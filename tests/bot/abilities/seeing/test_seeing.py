@@ -1262,6 +1262,36 @@ def test_identified_faces_are_stamped_as_face_participants() -> None:
     assert data.participants == sight.participants
 
 
+def test_a_new_face_stamps_whose_known_faces_it_resembles_and_the_model_sees_neither() -> None:
+    """R-13: the eye copies what the registry perceived onto the face's participant; it links nothing."""
+
+    like = identification.Resemblance(id="ada", similarity=0.31)
+    identifier = FakeIdentifier(
+        identification.Recognition(id="b", recognized=False, similarity=0.31, own=False, resembles=(like,))
+    )
+    faces = FakeFaces(_detected_face(0.4, _print(1.0, 0.0)))
+
+    async def run() -> list[tuple[float, hsm.Event[typing.Any], seeing.SightData]]:
+        harness = await _harness(face_detector=faces, faces=_registry(identifier))
+        await harness.frame("camera-1", _jpeg("a"))
+        await harness.owner.until(lambda: len(harness.sights()) == 1)
+        return harness.sights()
+
+    ((_, _, sight),) = asyncio.run(run())
+
+    assert sight.participants == (
+        mosfet.Participant(
+            ref="face:b",
+            role=mosfet.ParticipantRole.SOURCE,
+            resembles=(mosfet.Resemblance(ref="face:ada", similarity=0.31),),
+        ),
+    )
+    (view,) = sight.views
+    assert view.faces is not None
+    assert view.faces[0].resembles == (like,)
+    assert "resembles" in seeing.Face.__model_facing_excluded_fields__
+
+
 def test_a_face_recognized_as_own_is_stamped_as_the_bot_itself() -> None:
     identifier = FakeIdentifier(
         identification.Recognition(id="self-face", recognized=True, similarity=0.9, own=True),

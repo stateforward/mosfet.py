@@ -177,7 +177,10 @@ class InProcessStore(Store):
                     )
                 neighbors = [
                     identification.Neighbor(
-                        id=id, similarity=Store._similarity(entry.vector, print.vector), own=entry.own
+                        id=id,
+                        similarity=Store._similarity(entry.vector, print.vector),
+                        own=entry.own,
+                        linked=entry.linked,
                     )
                     for id, entry in ids.items()
                     if entry.model == print.model
@@ -209,7 +212,11 @@ class InProcessStore(Store):
                     )
                     recognitions.append(
                         identification.Recognition(
-                            id=minted, recognized=False, similarity=decision.similarity, own=False
+                            id=minted,
+                            recognized=False,
+                            similarity=decision.similarity,
+                            own=False,
+                            resembles=decision.resembles,
                         )
                     )
                     continue

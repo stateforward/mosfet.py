@@ -202,7 +202,13 @@ def _event_json_value(
                     budget=budget,
                 )
             model_type = type(value)
-            field_names = tuple(name for name, field in model_type.model_fields.items() if field.exclude is not True)
+            # As the model's own dump does: an excluded field, and one its ``exclude_if`` leaves out for this value.
+            field_names = tuple(
+                name
+                for name, field in model_type.model_fields.items()
+                if field.exclude is not True
+                and (field.exclude_if is None or not field.exclude_if(getattr(value, name)))
+            )
             computed_names = tuple(model_type.model_computed_fields)
             extra = value.model_extra or {}
             count = len(field_names) + len(extra) + len(computed_names)

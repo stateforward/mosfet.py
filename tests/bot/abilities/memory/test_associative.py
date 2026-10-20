@@ -649,6 +649,42 @@ def test_a_turn_says_who_is_speaking_who_is_present_and_who_the_bot_is() -> None
         assert hidden not in rendered
 
 
+def test_a_new_voice_that_resembles_a_named_person_renders_whom_and_how_closely_and_nothing_more() -> None:
+    """R-13: the bot is told whom a new voice is like and how closely; it decides what that means."""
+
+    sam = mosfet.Participant(ref="voice:sam", role=mosfet.ParticipantRole.SOURCE)
+    new = mosfet.Participant(
+        ref="voice:new",
+        role=mosfet.ParticipantRole.SOURCE,
+        resembles=(mosfet.Resemblance(ref="voice:sam", similarity=0.42),),
+    )
+
+    async def scenario() -> hsm.Event[typing.Any]:
+        harness = await _harness()
+        await harness.attach_memory()
+        await harness.remember(_episode("Hi, I'm Sam.", "sam", participants=(sam,)))
+        await harness.person(memory.PersonKnowData(about=sam.ref, fact=memory.NameFact(name="Sam")))
+        await harness.attach()
+        await harness.send(memory.CueData(cue=(text.TextPart(text="hello?"),), participants=(new,)), "a-1")
+        return await harness.reply("a-1")
+
+    surfaced = asyncio.run(scenario()).data
+    assert isinstance(surfaced, memory.AssociationsData)
+    (present,) = surfaced.people
+    (resembled,) = present.resembles
+    assert (present.known, resembled.similarity) == (False, 0.42)
+    assert next(person for person in surfaced.persons if person.id == resembled.person).name == "Sam"
+    rendered = "".join(
+        part.text
+        for part in projection.model_facing_content(surfaced, capacity=media.ImageCapacity())
+        if isinstance(part, text.TextPart)
+    )
+    for shown in ("resembles", "similarity", resembled.person):
+        assert shown in rendered
+    for hidden in ("print", "embedding", "vector"):
+        assert hidden not in rendered
+
+
 def test_the_bots_own_voice_on_the_turn_is_the_bot() -> None:
     mouth = mosfet.Participant(ref="voice:tts-warm", role=mosfet.ParticipantRole.SOURCE, own=True)
 

@@ -255,6 +255,12 @@ and erased when it forgets them:
 `registries=` takes `identification.Registry`s, one of each kind ([`B0006`](bot_diagnostics.md#b0006)
 otherwise).
 
+A person can have many voices. When a voice (or face) is new to its registry but is like the prints of
+people the bot has named, at or above the registry policy's `resemble_floor`, the turn shows it as
+`known=false` with `resembles`: up to three of those people, best first, each with how similar they are.
+Nothing is linked: the bot may infer, ask, or remember "this voice is the same as Sam" itself. Only
+persons and similarities are shown, never a print.
+
 Whether to ask who an unknown voice is, which voice is whose, what someone is called and whom to
 forget are the bot's choices; nothing asks, links or names for it. Who lives in the house, and whether
 someone is a child, are things the bot learns and remembers, never configuration: no fact carries a
