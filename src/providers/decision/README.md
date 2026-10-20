@@ -25,7 +25,7 @@ bot.cognition(processor, intuition=decision.Processor(base_url="http://127.0.0.1
 
 ## Servers and keys
 
-`Processor(base_url=..., api_key=None, model=None, timeout=None)` and
+`Processor(base_url=..., api_key=None, model=None, timeout=None, max_context_tokens=None)` and
 `Client(base_url=..., api_key=None, timeout=None)`:
 
 - `base_url` is required: the server to ask, for example `http://127.0.0.1:8102`. There is no
@@ -34,6 +34,18 @@ bot.cognition(processor, intuition=decision.Processor(base_url="http://127.0.0.1
   header is sent at all.
 - `model` names the model a server that serves several should answer with.
 - `timeout` bounds each request in seconds; `None` keeps httpx's default.
+- `max_context_tokens` is the decision model's context (2048 for anygame's decide). See below.
+
+## Fitting the model's context
+
+With `max_context_tokens`, each request is fitted to the decision model's context before it is
+sent. Its size is estimated as a token per 3 UTF-8 bytes of its JSON body. A request over the
+limit has the selection question's instructions cut: those are the turn's world, self and acted
+blocks, which are context assembly. They keep as many leading whole lines as fit (the world block
+comes first), and when not even one fits, the question's own default instructions are sent
+instead. The state (the turn's stimuli) and the menu are never cut, ranked or dropped. A request
+that still does not fit is sent as it is, and the server's refusal is intuition's failure, which
+cognition hands to reasoning in the same turn. `None` sends every request whole.
 
 ## Wire format
 
@@ -63,3 +75,7 @@ choice questions.
 Requests and answers are logged through `mosfet.telemetry` with `provider="decision"` and the
 model that answered (`model`), the answer as JSON when payload capture is on. The server's address
 never reaches telemetry.
+
+`bot.provider.decision.fit.count{outcome}` counts the requests that were over
+`max_context_tokens`: `cut` when cutting the instructions made them fit, `overflow` when they were
+still over and were sent anyway.

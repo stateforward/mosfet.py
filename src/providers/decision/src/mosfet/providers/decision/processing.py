@@ -21,16 +21,24 @@ The mapping is structural, not behavioral:
 - **Only the chosen option is returned** (D-R-28): one single-choice question chooses one event,
   returned with the chosen probability as its confidence and its grounded payload. The other options'
   probabilities are not selections. Intuition's confidence gate still applies to the one returned.
+- **The request fits the model's context** (D-R-36): with ``max_context_tokens``, a request whose
+  estimated size (a token per 3 UTF-8 bytes of its JSON body) is over it has the selection's
+  instructions (the turn's world, self and acted blocks: context assembly) cut to their leading whole
+  lines, down to the question's own default instructions. The state (the stimuli) and the menu are
+  never cut, ranked or dropped; a request that still does not fit is sent, and the server's refusal is
+  intuition's failure.
 """
 
 from __future__ import annotations
 
 import collections.abc
+import math
 import time
 import typing
 
 import httpx
 import pydantic
+from opentelemetry import metrics
 
 import mosfet.telemetry
 from mosfet.abilities import processing
@@ -51,6 +59,18 @@ _SELECTION_INSTRUCTIONS: typing.Final = (
 _PAYLOAD_KEY_INSTRUCTIONS: typing.Final = (
     "Fill one payload field for the selected event: the criteria are the exact values the "
     "evidence offers. Pick the value the turn supports."
+)
+_BYTES_PER_TOKEN: typing.Final = 3
+
+type _Fit = typing.Literal["cut", "overflow"]
+
+_FITS = metrics.get_meter("bot.providers.decision").create_counter(
+    "bot.provider.decision.fit.count",
+    unit="{request}",
+    description=(
+        "Decision requests over max_context_tokens, by outcome: cut (the turn instructions were cut to fit) "
+        "or overflow (still over at the default instructions, sent anyway)."
+    ),
 )
 
 
@@ -132,17 +152,55 @@ def _payload_key_wording(event_name: str, key: str) -> str:
     return f"Which value fills {key!r} for {event_name}?"
 
 
+def _fitted(request: client.Request, *, max_context_tokens: int) -> tuple[client.Request, _Fit | None]:
+    """``request`` within ``max_context_tokens``, cutting only the selection's instructions (D-R-36).
+
+    The estimate is a token per :data:`_BYTES_PER_TOKEN` UTF-8 bytes of the JSON body :class:`client.Client`
+    sends. Over it, the instructions keep as many leading whole lines as fit (the world block comes first),
+    then the question's default instructions; when even those do not fit, the request goes with them and
+    the outcome is ``overflow``. The state and every criterion are left as they are.
+    """
+
+    def tokens(candidate: client.Request) -> int:
+        body = candidate.model_dump_json(exclude={"model"} if candidate.model is None else None)
+        return math.ceil(len(body.encode("utf-8")) / _BYTES_PER_TOKEN)
+
+    def instructed(instructions: str) -> client.Request:
+        selection = request.questions[_SELECTION].model_copy(update={"instructions": instructions})
+        return request.model_copy(update={"questions": {**request.questions, _SELECTION: selection}})
+
+    if tokens(request) <= max_context_tokens:
+        return request, None
+    lines = (request.questions[_SELECTION].instructions or "").splitlines()
+    best: client.Request | None = None
+    low, high = 1, len(lines) - 1
+    while low <= high:
+        count = (low + high) // 2
+        candidate = instructed("\n".join(lines[:count]))
+        if tokens(candidate) <= max_context_tokens:
+            best, low = candidate, count + 1
+        else:
+            high = count - 1
+    if best is not None:
+        return best, "cut"
+    default = instructed(_SELECTION_INSTRUCTIONS)
+    return default, "cut" if tokens(default) <= max_context_tokens else "overflow"
+
+
 class Processor(processing.DecisionProcessor):
     """A decision processor on the decision server at ``base_url``: one choice over the offered event menu.
 
     ``api_key`` is sent as a bearer only when given. ``model`` names the model a server that serves
     several should answer with. ``timeout`` (seconds) bounds each request; the cognition step
-    timeout bounds the turn regardless. ``pass_wording`` describes the pass criterion. ``transport``
-    replaces the network (tests). Construction opens nothing: each turn is one request.
+    timeout bounds the turn regardless. ``max_context_tokens`` is the decision model's context, which
+    each request is fitted to by cutting the turn's instructions (D-R-36); None sends every request
+    whole. ``pass_wording`` describes the pass criterion. ``transport`` replaces the network (tests).
+    Construction opens nothing: each turn is one request.
     """
 
     _client: client.Client
     _model: str | None
+    _max_context_tokens: int | None
     _pass_wording: str
 
     def __init__(
@@ -152,13 +210,18 @@ class Processor(processing.DecisionProcessor):
         api_key: str | None = None,
         model: str | None = None,
         timeout: float | None = None,
+        max_context_tokens: int | None = None,
         pass_wording: str = _DEFAULT_PASS_WORDING,
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
-        """Raises ``ValueError`` as :class:`client.Client` does for its arguments."""
+        """Raises ``ValueError`` as :class:`client.Client` does for its arguments, and for a
+        ``max_context_tokens`` that is not positive."""
 
+        if max_context_tokens is not None and max_context_tokens <= 0:
+            raise ValueError("max_context_tokens must be positive; pass None to send every request whole.")
         self._client = client.Client(base_url=base_url, api_key=api_key, timeout=timeout, transport=transport)
         self._model = model
+        self._max_context_tokens = max_context_tokens
         self._pass_wording = pass_wording
 
     @typing.override
@@ -200,6 +263,10 @@ class Processor(processing.DecisionProcessor):
                 criteria=dict.fromkeys(values, wording),
             )
         request = client.Request(state={"turn": stimulus_document}, questions=questions, model=self._model)
+        if self._max_context_tokens is not None:
+            request, fit = _fitted(request, max_context_tokens=self._max_context_tokens)
+            if fit is not None:
+                _FITS.add(1, {"outcome": fit})
 
         started = time.monotonic()
         # D-R-31: the request is logged under the model that answered it, once the server named it; a failed

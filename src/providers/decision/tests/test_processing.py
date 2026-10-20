@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import pathlib
 import typing
 
@@ -19,8 +20,14 @@ from mosfet.abilities.cognition import intuition
 from mosfet.devices import phone as phone_device
 from mosfet.providers import decision
 from mosfet.telemetry.configure import logger_provider
+from tests import metric_reader
 
 _PASS = "__unhandled__"
+_DEFAULT_INSTRUCTIONS = (
+    "Choose the single criterion that answers this turn from the bot's own peripheral "
+    "transducers: the criterion text names the situation. Choose the pass criterion when "
+    "none offered fits."
+)
 
 
 class _RequiredPayload(pydantic.BaseModel):
@@ -64,8 +71,14 @@ class _Decide:
         return httpx.Response(200, json=body)
 
 
-def _processor(server: _Decide | typing.Callable[[httpx.Request], httpx.Response]) -> decision.Processor:
-    return decision.Processor(base_url="http://decide.test:8102", transport=httpx.MockTransport(server))
+def _processor(
+    server: _Decide | typing.Callable[[httpx.Request], httpx.Response], *, max_context_tokens: int | None = None
+) -> decision.Processor:
+    return decision.Processor(
+        base_url="http://decide.test:8102",
+        max_context_tokens=max_context_tokens,
+        transport=httpx.MockTransport(server),
+    )
 
 
 def _run(
@@ -73,6 +86,7 @@ def _run(
     *,
     input_payload: object,
     schemas: tuple[hsm.Event[typing.Any], ...],
+    instructions: str | None = "Choose from the menu.",
 ) -> processing.Events:
     return asyncio.run(
         processor.process(
@@ -81,7 +95,7 @@ def _run(
                 schemas=schemas,
                 actors={},
                 authority=None,
-                instructions="Choose from the menu.",
+                instructions=instructions,
             )
         )
     )
@@ -296,3 +310,129 @@ def test_the_request_and_response_logs_carry_the_answering_model_and_the_answer_
             }
         },
     }
+
+
+def _tokens(sent: dict[str, typing.Any]) -> int:
+    """The estimate D-R-36 fits to: a token per 3 UTF-8 bytes of the JSON body, as sent."""
+
+    return math.ceil(len(json.dumps(sent, ensure_ascii=False, separators=(",", ":")).encode("utf-8")) / 3)
+
+
+def _turn_instructions(lines: int, *, width: int = 60) -> str:
+    """Turn instructions as cognition writes them: the world block, then the self block, then what was acted."""
+
+    return "\n".join(f"<line {index:03d}>{'w' * width}</line>" for index in range(lines))
+
+
+def _without_selection_instructions(sent: dict[str, typing.Any]) -> dict[str, typing.Any]:
+    asked = typing.cast(dict[str, dict[str, object]], sent["questions"])
+    questions = {name: dict(question) for name, question in asked.items()}
+    del questions["selection"]["instructions"]
+    return {**sent, "questions": questions}
+
+
+def _fit_points(reader: metric_reader.Reader) -> dict[str, float]:
+    return {str(point.attributes["outcome"]): point.value for point in reader.points("bot.provider.decision.fit.count")}
+
+
+def test_a_request_over_max_context_tokens_cuts_its_turn_instructions_to_their_leading_lines(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D-R-36 (live run 7, D-2): the world, self and acted blocks overran decide's 2048-token context, and the
+    422 failed the turn. Only that context assembly is cut, by whole lines from the end; the state (the stimuli)
+    and every criterion are sent byte-identical, never ranked or dropped."""
+
+    instructions = _turn_instructions(80)
+    stimulus = {"kind": "phone.ringing", "call_id": "probe-call-42"}
+    schemas = (*_answer_call_offered(), *_probe_event())
+    answers = {"selection": (_PASS, {_PASS: 1.0})}
+    whole = _Decide(answers)
+    _ = _run(_processor(whole), input_payload=stimulus, schemas=schemas, instructions=instructions)
+    (unbounded,) = whole.requests
+    budget = _tokens(unbounded) - 400
+    fitted = _Decide(answers)
+
+    with metric_reader.recording(tmp_path, monkeypatch) as reader:
+        before = _fit_points(reader)
+        _ = _run(
+            _processor(fitted, max_context_tokens=budget),
+            input_payload=stimulus,
+            schemas=schemas,
+            instructions=instructions,
+        )
+        after = _fit_points(reader)
+
+    (sent,) = fitted.requests
+    assert _tokens(sent) <= budget
+    kept = typing.cast(str, sent["questions"]["selection"]["instructions"])
+    lines = instructions.splitlines()
+    (count,) = [count for count in range(1, len(lines)) if "\n".join(lines[:count]) == kept]
+    one_more = {**sent["questions"]["selection"], "instructions": "\n".join(lines[: count + 1])}
+    assert _tokens({**sent, "questions": {**sent["questions"], "selection": one_more}}) > budget
+    assert _without_selection_instructions(sent) == _without_selection_instructions(unbounded)
+    assert json.dumps(sent["state"]) == json.dumps(unbounded["state"])
+    assert after.get("cut", 0.0) - before.get("cut", 0.0) == 1.0
+
+
+def test_a_request_with_no_room_for_a_turn_line_sends_the_default_selection_instructions() -> None:
+    """D-R-36: when not even the world block's first line fits, the question keeps its own instructions."""
+
+    plain = _Decide({"selection": (_PASS, {_PASS: 1.0})})
+    _ = _run(_processor(plain), input_payload="ring turn", schemas=_answer_call_offered(), instructions=None)
+    (default,) = plain.requests
+    fitted = _Decide({"selection": (_PASS, {_PASS: 1.0})})
+
+    _ = _run(
+        _processor(fitted, max_context_tokens=_tokens(default)),
+        input_payload="ring turn",
+        schemas=_answer_call_offered(),
+        instructions=_turn_instructions(3, width=3000),
+    )
+
+    (sent,) = fitted.requests
+    assert sent["questions"]["selection"]["instructions"] == _DEFAULT_INSTRUCTIONS
+    assert sent == default
+
+
+def test_a_request_that_cannot_fit_is_still_sent_and_its_refusal_is_the_processing_error(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D-R-36: nothing is dropped to make a request fit. One that still overflows is sent as small as it can be,
+    and the server's refusal is intuition's failure, which cognition cascades to reasoning in the same turn."""
+
+    sent: list[dict[str, typing.Any]] = []
+
+    def refuse(request: httpx.Request) -> httpx.Response:
+        sent.append(typing.cast(dict[str, typing.Any], json.loads(request.content)))
+        return httpx.Response(422, json={"detail": "ValueError: prompt too long"})
+
+    with metric_reader.recording(tmp_path, monkeypatch) as reader:
+        before = _fit_points(reader)
+        with pytest.raises(decision.ProcessingError, match="HTTP 422"):
+            _ = _run(
+                _processor(refuse, max_context_tokens=1),
+                input_payload="ring turn",
+                schemas=_answer_call_offered(),
+                instructions=_turn_instructions(5),
+            )
+        after = _fit_points(reader)
+
+    (overflowing,) = sent
+    assert overflowing["questions"]["selection"]["instructions"] == _DEFAULT_INSTRUCTIONS
+    assert overflowing["state"] == {"turn": {"data": "ring turn"}}
+    assert after.get("overflow", 0.0) - before.get("overflow", 0.0) == 1.0
+
+
+def test_without_max_context_tokens_nothing_is_cut() -> None:
+    instructions = _turn_instructions(400)
+    server = _Decide({"selection": (_PASS, {_PASS: 1.0})})
+
+    _ = _run(_processor(server), input_payload="ring turn", schemas=_answer_call_offered(), instructions=instructions)
+
+    (sent,) = server.requests
+    assert sent["questions"]["selection"]["instructions"] == instructions
+
+
+def test_max_context_tokens_must_be_positive() -> None:
+    with pytest.raises(ValueError, match="max_context_tokens"):
+        _ = decision.Processor(base_url="http://decide.test", max_context_tokens=0)
