@@ -262,8 +262,22 @@ def test_a_criterion_is_the_first_line_of_its_event_schemas_description_or_its_n
     assert sent["questions"]["selection"]["criteria"] == {
         "phone.answer_call": described.strip().splitlines()[0],
         "probe.undescribed": "probe.undescribed",
-        _PASS: "None of these: leave the turn unhandled.",
+        _PASS: "None of these fits: think the turn through first, with reasoning.",
     }
+
+
+def test_the_default_pass_criterion_says_the_turn_goes_on_to_reasoning() -> None:
+    """D-R-42 (Willy live check): worded "leave the turn unhandled", passing read like ignoring, so the decision
+    model ignored a stranger's greeting rather than hand it on. Passing is how a turn reaches deliberation."""
+
+    server = _Decide({"selection": (_PASS, {_PASS: 1.0})})
+
+    _ = _run(_processor(server), input_payload="ring turn", schemas=(phone_device.AnswerCallEvent,))
+
+    (sent,) = server.requests
+    wording = sent["questions"]["selection"]["criteria"][_PASS]
+    assert "reason" in wording
+    assert "unhandled" not in wording
 
 
 def test_the_request_and_response_logs_carry_the_answering_model_and_the_answer_as_json(

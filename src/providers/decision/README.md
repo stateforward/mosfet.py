@@ -55,7 +55,7 @@ cognition hands to reasoning in the same turn. `None` sends every request whole.
 {"state": {"turn": {"envelope": {"name": "environment.sound"}, "data": {"kind": "phone.ringing"}}},
  "questions": {"selection": {"type": "choice", "instructions": "...",
                              "criteria": {"phone.answer_call": "Answer the ringing call.",
-                                          "__unhandled__": "None of these: leave the turn unhandled."}}}}
+                                          "__unhandled__": "None of these fits: think the turn through first, with reasoning."}}}}
 ```
 
 answered by

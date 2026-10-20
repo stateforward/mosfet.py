@@ -50,7 +50,7 @@ from . import client
 _PROVIDER: typing.Final = "decision"
 _SELECTION: typing.Final = "selection"
 _RESERVED_PASS_CRITERION: typing.Final = "__unhandled__"
-_DEFAULT_PASS_WORDING: typing.Final = "None of these: leave the turn unhandled."
+_DEFAULT_PASS_WORDING: typing.Final = "None of these fits: think the turn through first, with reasoning."
 _SELECTION_INSTRUCTIONS: typing.Final = (
     "Choose the single criterion that answers this turn from the bot's own peripheral "
     "transducers: the criterion text names the situation. Choose the pass criterion when "
