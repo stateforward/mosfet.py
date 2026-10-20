@@ -88,6 +88,7 @@ from mosfet.abilities import (
     vocal,
 )
 from mosfet.abilities.communication import conversation
+from mosfet.abilities.listening import recognition
 from mosfet.bot import testing
 from mosfet.devices import audio, computer
 from mosfet.providers import decision
@@ -111,6 +112,10 @@ _HEARD_BOUND = 60.0
 _OWN_VOICE = 90.0
 # How long the room's speaker is quiet before what it played counts as all of the reply.
 _QUIET_SECONDS = 1.5
+# The pause the household leaves after Willy's speaker goes quiet, past the echo window, before speaking.
+_PAUSE_SECONDS = 4.0
+# How long the household waits for Willy to finish a thought before speaking anyway.
+_SETTLE_SECONDS = 120.0
 # How long the room is silent after an utterance, so the speech server hears the turn end.
 _TRAILING_SILENCE_SECONDS = 1.5
 # How long the test waits, after the echo, for a turn before A speaks again to give Willy one.
@@ -175,14 +180,21 @@ class Report:
 
 
 class Recorded(processing.Processor):
-    """Willy's model, the lab's, with every call it is given and everything it chose recorded; it never steers it."""
+    """Willy's model, the lab's, with every call it is given and everything it chose recorded; it never steers it.
+
+    Intuition's decision model is recorded into the same ``calls`` (``Intuited``): a heard turn reaches whichever
+    mind takes it, so what Willy perceived is read from the first call of the turn, on either.
+    """
 
     image_capacity: media.ImageCapacity
     calls: list[processing.InputData]
+    thinking: list[int]
 
-    def __init__(self, model: processing.Processor, report: Report) -> None:
+    def __init__(self, model: processing.Processor, report: Report, shared: typing.Self | None = None) -> None:
         self.image_capacity = model.image_capacity
-        self.calls = []
+        # Shared with the other mind's recorder: one list of calls, and one count of calls still in flight.
+        self.calls = [] if shared is None else shared.calls
+        self.thinking = [0] if shared is None else shared.thinking
         self._model: processing.Processor = model
         self._report: Report = report
 
@@ -191,11 +203,18 @@ class Recorded(processing.Processor):
         self, input: processing.InputData, *, drafts: processing.DraftSink | None = None
     ) -> processing.Events:
         self.calls.append(input)
-        chosen = await self._model.process(input, drafts=drafts)
         stimulus = _stimulus(input)
+        # A turn something woke counts as thinking (it may end in speech); reflection, which nothing woke, does not.
+        woken = stimulus is not None
+        self.thinking[0] += int(woken)
+        try:
+            chosen = await self._model.process(input, drafts=drafts)
+        finally:
+            self.thinking[0] -= int(woken)
         self._report.write(
             "chose",
             woke=None if stimulus is None else stimulus.name,
+            # A decision model that passes answers intuition's own envelope, not events: it is reported by kind.
             events=[
                 {
                     "event": selected.event,
@@ -203,21 +222,27 @@ class Recorded(processing.Processor):
                     "data": typing.cast(dict[str, object], selected.data) if isinstance(selected.data, dict) else None,
                 }
                 for selected in chosen
-            ],
+            ]
+            if isinstance(chosen, tuple)
+            else type(typing.cast(object, chosen)).__name__,
         )
         return chosen
 
     def turns(self, after: int) -> collections.abc.Iterator[processing.InputData]:
-        """The first call of each turn heard speech woke, from call ``after`` on: what Willy perceived of it."""
+        """Every call of the turns heard speech woke, from call ``after`` on: what Willy perceived of each.
 
-        seen: set[str] = set()
+        A heard turn may reach intuition first and then, if intuition hands it on, reasoning: both calls are
+        the turn's, and only reasoning's frame offers what takes deliberation (``memory.know``).
+        """
+
         for index, call in enumerate(self.calls):
             stimulus = _stimulus(call)
-            if stimulus is None or stimulus.id in seen:
-                continue
-            seen.add(stimulus.id)
-            if index >= after and stimulus.name in _HEARD:
+            if stimulus is not None and index >= after and _heard(stimulus):
                 yield call
+
+
+class Intuited(Recorded, processing.DecisionProcessor):
+    """Willy's intuition, on the decision server, recorded into the model's ``calls`` the same way."""
 
 
 class Microphone:
@@ -270,13 +295,20 @@ class Played:
 
 
 class Speaker:
-    """The room's speaker, scripted: it keeps everything it played, and when."""
+    """The room's speaker, scripted: it keeps everything it played, and when.
+
+    Speech reaches it faster than it is spoken, so ``quiet_at`` is when a real speaker would have finished: each
+    chunk plays after the one before it, for as long as it lasts.
+    """
 
     def __init__(self) -> None:
         self.played: list[Played] = []
+        self.quiet_at: float = 0.0
 
     def play(self, pcm: bytes, *, sample_rate_hz: int, channels: int) -> None:
-        self.played.append(Played(at=time.monotonic(), pcm=pcm, sample_rate_hz=sample_rate_hz, channels=channels))
+        now = time.monotonic()
+        self.played.append(Played(at=now, pcm=pcm, sample_rate_hz=sample_rate_hz, channels=channels))
+        self.quiet_at = max(now, self.quiet_at) + len(pcm) / (2 * channels * sample_rate_hz)
 
     def stop(self) -> None:
         return None
@@ -287,6 +319,25 @@ def _stimulus(call: processing.InputData) -> hsm.Event[typing.Any] | None:
     if isinstance(given, cognition.reasoning.ProcessorInput):
         given = given.host_input.input
     return typing.cast(hsm.Event[typing.Any], given) if isinstance(given, hsm.Event) else None
+
+
+def _percepts(stimulus: hsm.Event[typing.Any]) -> list[hsm.Event[typing.Any]]:
+    """What the turn perceived: its stimulus, or each percept of a batch that queued behind a busy turn."""
+
+    batch = stimulus.data
+    if isinstance(batch, mosfet.PerceivedData):
+        return [
+            typing.cast(hsm.Event[typing.Any], percept.stimulus)
+            for percept in batch.percepts
+            if isinstance(percept.stimulus, hsm.Event)
+        ]
+    return [stimulus]
+
+
+def _heard(stimulus: hsm.Event[typing.Any]) -> bool:
+    """Whether heard speech woke the turn, alone or with what else queued."""
+
+    return any(percept.name in _HEARD for percept in _percepts(stimulus))
 
 
 def _recalled(call: processing.InputData) -> memory.AssociationsData:
@@ -437,6 +488,21 @@ class House:
     speaker: Speaker
     report: Report
 
+    async def settled(self) -> None:
+        """Wait, as a person in the room would, for Willy to finish its thought (``_SETTLE_SECONDS`` at most) and be quiet.
+
+        Quiet means a pause of ``_PAUSE_SECONDS`` past the echo window (D-R-37), in which a voice nobody knows is
+        heard match-only because it may be Willy's own coming back.
+        """
+
+        quiet = recognition.ECHO_SECONDS + _PAUSE_SECONDS
+        # A person waits a moment for Willy to finish a thought, not for every thought it goes on to have.
+        patience = time.monotonic() + _SETTLE_SECONDS
+        while (self.model.thinking[0] and time.monotonic() < patience) or (
+            time.monotonic() - self.speaker.quiet_at < quiet
+        ):
+            await asyncio.sleep(_POLL_SECONDS)
+
     def mark(self) -> int:
         """Where the model's calls are now: the turns after it are what comes next."""
 
@@ -472,9 +538,10 @@ class House:
         while True:
             for call in self.model.calls:
                 stimulus = _stimulus(call)
-                if stimulus is not None and stimulus.id == request_id:
-                    self.report.write("selected", event=request.name, outcome=stimulus.name)
-                    return typing.cast(object, stimulus.data)
+                for percept in () if stimulus is None else _percepts(stimulus):
+                    if percept.id == request_id:
+                        self.report.write("selected", event=request.name, outcome=percept.name)
+                        return typing.cast(object, percept.data)
             await asyncio.sleep(_POLL_SECONDS)
 
 
@@ -599,10 +666,14 @@ async def _live(
             ),
             bot.cognition(
                 model,
-                intuition=decision.Processor(
-                    base_url=settings.decision_base_url,
-                    api_key=None if decision_key is None else decision_key.get_secret_value() or None,
-                    max_context_tokens=settings.decision_max_context_tokens,
+                intuition=Intuited(
+                    decision.Processor(
+                        base_url=settings.decision_base_url,
+                        api_key=None if decision_key is None else decision_key.get_secret_value() or None,
+                        max_context_tokens=settings.decision_max_context_tokens,
+                    ),
+                    report,
+                    model,
                 ),
                 memory=store,
                 registries=(voices,),
@@ -694,7 +765,11 @@ async def _knows_people(house: House, settings: willy_example.Settings, speech_u
         _ = await house.microphone.streaming.wait()
         after = house.mark()
         await house.microphone.say(await _spoken(a, _A_ARRIVES))
-        turn = await house.turn(after, "L3", lambda call: bool(_others(call)))
+        # Knowing who someone is takes deliberation (effort M): the turn's reasoning call offers it, when
+        # intuition hands the turn on. Whether it does is Willy's; the step waits for that call within its bound.
+        turn = await house.turn(
+            after, "L3", lambda call: bool(_others(call)) and memory.KnowEvent.name in _offered(call)
+        )
     (stranger,) = _others(turn)
     # The typed unknown fact: a voice nobody is known by. What to do about it is Willy's.
     assert stranger.known is False, "L3: a voice Willy has never heard was shown as someone it knows"
@@ -708,6 +783,8 @@ async def _knows_people(house: House, settings: willy_example.Settings, speech_u
                 about=a_ref, fact=memory.NameFact(name="Sam"), note="the live check stands in for a selection"
             ),
         )
+    await house.settled()
+    async with _step("L4 knowing is a capacity", _HEARD_BOUND):
         after = house.mark()
         await house.microphone.say(await _spoken(a, _A_AGAIN))
         turn = await house.turn(after, "L4", lambda call: bool(_others(call)))
@@ -718,6 +795,7 @@ async def _knows_people(house: House, settings: willy_example.Settings, speech_u
     assert _person(turn, again.person).name == "Sam", "L4: the person A's voice is was not called Sam"
     a_person = again.person
 
+    await house.settled()
     async with _step("L5 two voices, one utterance", _HEARD_BOUND):
         after = house.mark()
         await house.microphone.say(await _spoken(a, _A_ASKS) + await _spoken(b, _B_ANSWERS))
@@ -760,6 +838,8 @@ async def _knows_people(house: House, settings: willy_example.Settings, speech_u
             memory.ForgetEvent, memory.ForgetData(person=a_person, note="the live check stands in for a selection")
         )
         assert isinstance(forgot, memory.KnownData), f"L7: forgetting A's person failed: {forgot}"
+    await house.settled()
+    async with _step("L7 forget", _HEARD_BOUND):
         after = house.mark()
         await house.microphone.say(await _spoken(a, _A_LEAVES))
         turn = await house.turn(after, "L7", lambda call: bool(_others(call)))
