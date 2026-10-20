@@ -2483,6 +2483,80 @@ def test_an_overlapping_voice_nobody_knows_is_not_named_and_makes_no_new_voice()
     assert _unlinked_voices(store) == len({heard.recognition.id for voices in speech_voices for heard in voices})
 
 
+@pytest.mark.parametrize("diarized", [False, True])
+@pytest.mark.parametrize(
+    ("while_producing", "after_tenths", "made"),
+    [
+        (True, 0, False),  # the utterance itself was heard while the bot spoke
+        (False, 0, False),  # it began right as the bot stopped
+        (False, 5, False),  # half a second after: still the echo window
+        (False, 11, True),  # past recognition.ECHO_SECONDS: anybody's voice again
+    ],
+)
+def test_a_voice_nobody_knows_heard_while_the_bot_speaks_or_just_after_makes_no_new_voice(
+    while_producing: bool, after_tenths: int, made: bool, diarized: bool
+) -> None:
+    """D-R-37 (Willy run 7, D-4) on the local ear: an utterance heard while the bot speaks, or that begins within
+    ``recognition.ECHO_SECONDS`` of heard audio after it last did, is identified match-only, whether its voice is
+    identified from its opening span or after it ends (diarized). Time is the audio the ear heard."""
+
+    store = identification.InProcessStore(max_ids=16)
+    voiced = voice.detection.ApplyData(
+        segments=(voice.detection.VoiceDetectionSegment(start_seconds=0.0, end_seconds=1.2, confidence=0.91),)
+    )
+
+    async def run() -> list[cognition.InputData]:
+        applies = (
+            [voiced]
+            if while_producing
+            else [_SILENCE_APPLY, *([_SILENCE_APPLY] if after_tenths else []), voiced]  # the bot, the quiet, a voice
+        )
+        detector = SequenceVoiceActivityClassifier(*applies, _SILENCE_APPLY)
+        listening_ability = RecordingListening(
+            voice_activity_classifier=detector,
+            voice_diarizer=FixedVoiceDiarizer(
+                segment=voice.diarization.VoiceDiarizationSegment(
+                    audio=_TENTH * 12,
+                    media_type="audio/pcm",
+                    sample_rate_hz=16_000,
+                    channels=1,
+                    start_seconds=0.0,
+                    end_seconds=1.2,
+                )
+            )
+            if diarized
+            else None,
+            voice_classifier=FixedVoiceClassifier(voice.identification.VoiceEmbedding(embedding=(0.6, 0.8), model="m")),
+            registry=voice_registry(identification.Matcher(store=store, policy=_POLICY)),
+        )
+        await start_ability_tree(hsm.Context(), listening_ability)
+        await start_producing(listening_ability, duration=60.0)
+        if while_producing:
+            await arrives_from(listening_ability, somebody_speaking(12), source="somebody-elses-mouth")
+        else:
+            await arrives_from(listening_ability, somebody_speaking(1), source="somebody-elses-mouth")
+            await start_producing(listening_ability, duration=0.0)
+            if after_tenths:
+                await arrives_from(listening_ability, somebody_speaking(after_tenths), source="somebody-elses-mouth")
+            await arrives_from(listening_ability, somebody_speaking(12), source="somebody-elses-mouth")
+        await start_producing(listening_ability, duration=0.0)
+        await arrives_from(listening_ability, somebody_speaking(1), source="somebody-elses-mouth")
+        await wait_until(lambda: detector.index == len(applies) + 1)
+        await asyncio.sleep(0.1)
+        assert listening_ability.failures == []
+        return listening_ability.handoffs
+
+    handoffs = asyncio.run(run())
+
+    speech_voices = [
+        typing.cast(listening.SpeechData, _stimulus(handoff).data).voices
+        for handoff in handoffs
+        if _stimulus(handoff).name == listening.SpeechEvent.name
+    ]
+    assert any(voices for voices in speech_voices) == made
+    assert _unlinked_voices(store) == int(made)
+
+
 def test_a_recognized_own_voice_makes_no_overlap_fact() -> None:
     """An echo the bot recognizes as its own voice is perception of who spoke, not another voice."""
 

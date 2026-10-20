@@ -31,7 +31,10 @@ Another voice heard while the bot's own mouth is producing is a fact of its own
 ``overlap_min_voiced``, after it was recognized when voice identification is composed, and never for
 a voice recognized as the bot's own. Its recognition is match-only: the overlap's audio carries the bot's
 own voice too, so it names a voice already known and never makes a new one. It is perception, not a
-decision: nothing here stops anything.
+decision: nothing here stops anything. An utterance is identified match-only the same way when any of it arrived
+while the bot was producing, or within ``recognition.ECHO_SECONDS`` of heard audio after this ear last heard it
+producing (D-R-37): that may be the bot's own voice coming back. Time here is the audio this ear heard, never a wall
+clock.
 
 How a voice sounded is perceived too: with an affect classifier composed, decoded speech carries the
 tone of its longest voice (``SpeechData.affect``, see :mod:`~mosfet.abilities.listening.tone`), heard
@@ -1021,6 +1024,12 @@ class Interpretation(ability.Ability[sensitivity.OutputData, cognition.InputData
     _open_speech_sensed: sensitivity.OutputData | None
     _open_speech_format_error: str | None
     _open_speech_wav: bool
+    # Whether the open utterance arrived, in any part, while the bot was producing or within
+    # recognition.ECHO_SECONDS after: its voices are identified match-only (D-R-37).
+    _open_speech_echo: bool
+    # The audio this ear has heard, in seconds (its own clock), and the second it last heard the bot producing at.
+    _heard_seconds: float
+    _produced_at: float | None
     # Who was heard opening the open utterance (direct identification); every product of the window carries it.
     _active_voices: tuple[voice.HeardVoice, ...]
     # Union of participants stamped on the sound admitted into the open utterance (machine-owned, reset with it).
@@ -1127,6 +1136,9 @@ class Interpretation(ability.Ability[sensitivity.OutputData, cognition.InputData
         self._open_speech_sensed = None
         self._open_speech_format_error = None
         self._open_speech_wav = False
+        self._open_speech_echo = False
+        self._heard_seconds = 0.0
+        self._produced_at = None
         self._active_voices = ()
         self._active_participants = ()
         self._active_operation_id = None
@@ -1198,12 +1210,29 @@ class Interpretation(ability.Ability[sensitivity.OutputData, cognition.InputData
 
     @staticmethod
     def _begin_operation(ctx: hsm.Context, instance: "Interpretation", event: hsm.Event[typing.Any]) -> None:
-        """Stamp one operation id at the interpretation ingress, including id-less ingress."""
+        """Stamp one operation id at the interpretation ingress, including id-less ingress.
+
+        A scored sound also advances this ear's clock by its length, and says whether it arrived in the echo window:
+        while the bot was producing, or within ``recognition.ECHO_SECONDS`` of heard audio after it last was.
+        """
 
         del ctx
         instance._active_operation_id = event.id or uuid.uuid4().hex
-        if not instance._open_speech_audio and isinstance(event.data, sensitivity.OutputData):
-            instance._open_speech_wav = _is_wav_sound(event.data.sound)
+        sensed = event.data
+        if not isinstance(sensed, sensitivity.OutputData):
+            return
+        if not instance._open_speech_audio:
+            instance._open_speech_wav = _is_wav_sound(sensed.sound)
+        sound = _sensed_with_pcm_sound(sensed).sound
+        arrived_at = instance._heard_seconds
+        if sound.sample_rate_hz and sound.channels:
+            instance._heard_seconds += len(sound.audio) // (2 * sound.channels) / sound.sample_rate_hz
+        produced_at = instance._produced_at
+        echo = sensed.producing or (produced_at is not None and arrived_at < produced_at + recognition.ECHO_SECONDS)
+        if sensed.producing:
+            instance._produced_at = instance._heard_seconds
+        # The first sound of an utterance says it alone; each one after can only add to it.
+        instance._open_speech_echo = echo or (bool(instance._open_speech_audio) and instance._open_speech_echo)
 
     @staticmethod
     def _clear_operation(ctx: hsm.Context, instance: "Interpretation", event: hsm.Event[typing.Any]) -> None:
@@ -1361,6 +1390,7 @@ class Interpretation(ability.Ability[sensitivity.OutputData, cognition.InputData
         instance._open_speech_sensed = None
         instance._open_speech_format_error = None
         instance._open_speech_wav = False
+        instance._open_speech_echo = False
         instance._active_voices = ()
         instance._active_participants = ()
         instance._overlap_stated = False
@@ -1510,9 +1540,9 @@ class Interpretation(ability.Ability[sensitivity.OutputData, cognition.InputData
 
         completion = event.data
         assert isinstance(completion, _VoiceDetectionCompletedEventData)
-        source_was_wav = instance._open_speech_wav
+        source_was_wav, echo = instance._open_speech_wav, instance._open_speech_echo
         Interpretation._clear_open_speech(ctx, instance, event)
-        instance._open_speech_wav = source_was_wav
+        instance._open_speech_wav, instance._open_speech_echo = source_was_wav, echo
         Interpretation._remember_open_speech_sensed(instance, completion.sensed)
         Interpretation._append_open_speech(instance, completion.sensed, completion.voice_detection)
         Interpretation._emit_speech_product(ctx, instance, event, completion)
@@ -1584,9 +1614,9 @@ class Interpretation(ability.Ability[sensitivity.OutputData, cognition.InputData
                 message="Voice identification produced no result for the opening voice.",
             )
             return
-        source_was_wav = instance._open_speech_wav
+        source_was_wav, echo = instance._open_speech_wav, instance._open_speech_echo
         Interpretation._clear_open_speech(ctx, instance, event)
-        instance._open_speech_wav = source_was_wav
+        instance._open_speech_wav, instance._open_speech_echo = source_was_wav, echo
         instance._active_voices = tuple(heard for heard in completion.voices[:1] if heard is not None)
         detection = _VoiceDetectionCompletedEventData(
             sensed=completion.sensed,
@@ -2144,7 +2174,10 @@ class Interpretation(ability.Ability[sensitivity.OutputData, cognition.InputData
             active.set_attribute(
                 "bot.voice.embedding.count", sum(embedding is not None for embedding in output.embeddings)
             )
-            voices = await Interpretation._recognize(instance, event, segments, output.embeddings, match_only=False)
+            # Heard while the bot produced sound, or just after: it may be its own voice coming back (D-R-37).
+            voices = await Interpretation._recognize(
+                instance, event, segments, output.embeddings, match_only=instance._open_speech_echo
+            )
             active.set_attribute("bot.voice.identified.count", sum(heard is not None for heard in voices))
             if own := sum(heard is not None and heard.recognition.own for heard in voices):
                 _OWN_VOICE.add(own)
