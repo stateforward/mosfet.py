@@ -317,18 +317,36 @@ def _validate_event_payload(
         ) from error
 
 
+def _spelled_scalar(value: str, schema_types: collections.abc.Collection[str]) -> int | float | bool | None:
+    """The number, integer or boolean ``value`` spells, when ``schema_types`` takes it; otherwise None."""
+
+    try:
+        spelled = typing.cast(object, json.loads(value))
+    except json.JSONDecodeError:
+        return None
+    if isinstance(spelled, bool):
+        return spelled if "boolean" in schema_types else None
+    if isinstance(spelled, int) and ("integer" in schema_types or "number" in schema_types):
+        return spelled
+    if isinstance(spelled, float) and "number" in schema_types:
+        return spelled
+    return None
+
+
 def _decoded_json_strings(
     value: object,
     schema: collections.abc.Mapping[str, object],
     *,
     root_schema: collections.abc.Mapping[str, object],
 ) -> object:
-    """Parse, once, each JSON string the model sent where ``schema`` takes only an array or object.
+    """Parse, once, each JSON string the model sent where ``schema`` takes only an array or object, or a scalar.
 
     Local models often encode a nested array or object as a JSON string. Each such string is decoded once: one that
     decodes to anything but the array or object expected is rejected, and a value whose schema also takes a string
-    is kept as sent. Of ``anyOf`` branches, the first the decoded value satisfies wins; with none, the value is kept
-    for validation to reject.
+    is kept as sent. A string where the schema takes only a number, an integer or a boolean (Gemma 4's tool calls
+    quote them: ``"intensity": "0.6"``) is read as the scalar it spells, when it spells one the schema takes, and
+    is otherwise kept for validation to reject. Of ``anyOf`` branches, the first the decoded value satisfies wins;
+    with none, the value is kept for validation to reject.
     """
 
     ref_schema = _resolve_schema_ref(schema.get("$ref"), root_schema)
@@ -347,6 +365,10 @@ def _decoded_json_strings(
             return decoded
         return value
     schema_types = _schema_types(schema.get("type"))
+    if isinstance(value, str) and "string" not in schema_types:
+        scalar = _spelled_scalar(value, schema_types)
+        if scalar is not None:
+            return scalar
     containers = tuple(kind for kind in ("array", "object") if kind in schema_types)
     if isinstance(value, str) and containers and "string" not in schema_types:
         try:

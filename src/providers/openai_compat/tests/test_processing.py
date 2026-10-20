@@ -633,6 +633,37 @@ def test_processor_decodes_nested_arrays_and_objects_sent_as_json_strings_and_ke
     ]
 
 
+class _ToneData(pydantic.BaseModel):
+    """Say something, and how."""
+
+    words: str
+    intensity: float | None = None
+    repeats: int = 1
+    whisper: bool = False
+
+
+_ToneEvent = hsm.Event[_ToneData](name="tests.openai_compat.tone", kind=processing.EventKind, schema=_ToneData)
+
+
+def test_processor_decodes_numbers_and_flags_sent_as_strings_and_keeps_strings() -> None:
+    # Live (Willy voice evaluation, Gemma 4 tool calls): the model sent "intensity": "0.6", so every reply was
+    # rejected and never said. A string its schema cannot be is read as the scalar it spells, once.
+    data = {"words": "0.5", "intensity": "0.6", "repeats": "2", "whisper": "true"}
+
+    output = _dispatched({"events": [{"event": _ToneEvent.name, "data": data}]}, _ToneEvent)
+
+    assert [(item.event, item.data) for item in output] == [
+        (_ToneEvent.name, {"words": "0.5", "intensity": 0.6, "repeats": 2, "whisper": True})
+    ]
+
+
+def test_processor_still_rejects_a_string_that_spells_no_scalar_its_schema_allows() -> None:
+    data = {"words": "hi", "intensity": "loud"}
+
+    with pytest.raises(processing.SelectionRejectionError, match="invalid event data"):
+        _ = _dispatched({"events": [{"event": _ToneEvent.name, "data": data}]}, _ToneEvent)
+
+
 def test_processor_rejects_a_dispatched_event_the_turn_does_not_offer_as_a_selection() -> None:
     # Live (builder check round 1, D2): intuition selected bot.ability.sandbox.write, which only reasoning
     # holds; a malformed-answer failure ended the turn instead of letting the model choose again.
