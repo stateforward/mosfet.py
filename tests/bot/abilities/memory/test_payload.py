@@ -1,6 +1,7 @@
 """Bounds, validators, and schemas of the episodic memory payloads."""
 
 import datetime
+import typing
 
 import mosfet
 import pydantic
@@ -107,7 +108,6 @@ def test_failure_data_carries_a_closed_kind() -> None:
         "stale_lease",
         "timeout",
         "conflict",
-        "declared",
         "not_found",
     }
 
@@ -256,11 +256,13 @@ def test_rest_and_wake_carry_nothing_and_a_unit_outcome_is_a_closed_label() -> N
 # --- persons (W8-5, W8-6) ---------------------------------------------------------------------
 
 
-def test_a_person_id_is_self_an_owner_slug_or_a_minted_hex() -> None:
+def test_a_person_id_is_self_or_a_minted_hex() -> None:
+    """R-11: nobody declares a person, so every id is the bot itself or one memory minted."""
+
     adapter = pydantic.TypeAdapter(memory.PersonId)
-    for valid in ("self", "ada", "gabe-w", "a_1", "3f2a9c0d4b5e6f708192a3b4c5d6e7f8"):
+    for valid in ("self", "3f2a9c0d4b5e6f708192a3b4c5d6e7f8"):
         assert adapter.validate_python(valid) == valid
-    for invalid in ("", "Ada", "-ada", "1ada", "a" * 33, "voice:3f2a"):
+    for invalid in ("", "ada", "gabe-w", "Ada", "a" * 33, "voice:3f2a", "3F2A9C0D4B5E6F708192A3B4C5D6E7F8"):
         with pytest.raises(pydantic.ValidationError):
             _ = adapter.validate_python(invalid)
     assert memory.SELF == "self"
@@ -278,26 +280,16 @@ def test_a_name_is_bounded_and_has_no_example() -> None:
     assert "examples" not in memory.Person.model_json_schema()["properties"]["name"]
 
 
-def test_a_member_is_an_owner_fact_and_never_the_bot_itself() -> None:
-    member = memory.Member(id="ada", name="Ada", role=memory.Role.CHILD, born=2018, refs=("voice:3f2a",))
-    assert (member.role, member.born, member.refs) == (memory.Role.CHILD, 2018, ("voice:3f2a",))
-    assert memory.Member(id="gabe", name="Gabe").role is None
-    assert {role.value for role in memory.Role} == {"adult", "child"}
-    with pytest.raises(pydantic.ValidationError, match="self"):
-        _ = memory.Member(id="self", name="Me")
-    with pytest.raises(pydantic.ValidationError):
-        _ = memory.Member(id="ada", name="Ada", born=1800)
-    with pytest.raises(pydantic.ValidationError):
-        _ = memory.Member(id="ada", name="Ada", refs=tuple(f"voice:{index}" for index in range(17)))
-    with pytest.raises(pydantic.ValidationError):
-        _ = memory.Member.model_validate({"id": "ada", "name": "Ada", "role": "guest"})
+_SAM: typing.Final = "3f2a9c0d4b5e6f708192a3b4c5d6e7f8"
 
 
 def test_a_person_is_frozen_and_shows_at_most_sixteen_refs() -> None:
-    person = memory.Person(id="ada", name="Ada", role=memory.Role.CHILD, born=2018, declared=True, refs=("voice:a",))
+    person = memory.Person(id=_SAM, name="Sam", refs=("voice:a",))
     assert memory.Person(id=memory.SELF).refs == ()
+    # R-11: who someone is (a child, a birth year) is something the bot learns as facts, never a field.
+    assert set(memory.Person.model_fields) == {"id", "name", "refs"}
     with pytest.raises(pydantic.ValidationError):
-        _ = memory.Person.model_validate({"id": "ada", "refs": [f"voice:{index}" for index in range(17)]})
+        _ = memory.Person.model_validate({"id": _SAM, "refs": [f"voice:{index}" for index in range(17)]})
     with pytest.raises(pydantic.ValidationError):
         person.__setattr__("name", "Bea")
 
@@ -306,33 +298,19 @@ def test_a_person_statement_is_one_typed_op() -> None:
     adapter = pydantic.TypeAdapter(memory.PersonData)
     assert isinstance(adapter.validate_python({"op": "link", "ref": "voice:3f2a"}), memory.PersonLinkData)
     assert isinstance(adapter.validate_python({"op": "unlink", "ref": "voice:3f2a"}), memory.PersonUnlinkData)
-    assert isinstance(adapter.validate_python({"op": "name", "person": "ada", "name": "Ada"}), memory.PersonNameData)
-    assert isinstance(adapter.validate_python({"op": "forget", "person": "ada"}), memory.PersonForgetData)
+    assert isinstance(adapter.validate_python({"op": "name", "person": _SAM, "name": "Sam"}), memory.PersonNameData)
+    assert isinstance(adapter.validate_python({"op": "forget", "person": _SAM}), memory.PersonForgetData)
     assert isinstance(adapter.validate_python({"op": "list"}), memory.PersonListData)
-    declared = adapter.validate_python({"op": "declare", "members": [{"id": "ada", "name": "Ada"}]})
-    assert isinstance(declared, memory.PersonDeclareData)
-    with pytest.raises(pydantic.ValidationError):
-        _ = adapter.validate_python({"op": "rename", "person": "ada"})
-
-
-def test_a_declaration_names_each_member_and_each_ref_once() -> None:
-    ada = memory.Member(id="ada", name="Ada", refs=("voice:a",))
-    with pytest.raises(pydantic.ValidationError, match="once"):
-        _ = memory.PersonDeclareData(members=(ada, memory.Member(id="ada", name="Ada again")))
-    with pytest.raises(pydantic.ValidationError, match="once"):
-        _ = memory.PersonDeclareData(members=(ada, memory.Member(id="bea", name="Bea", refs=("voice:a",))))
-    assert memory.PersonDeclareData(members=()).members == ()
+    invalids: tuple[dict[str, object], ...] = ({"op": "rename", "person": _SAM}, {"op": "declare", "members": []})
+    for invalid in invalids:
+        with pytest.raises(pydantic.ValidationError):
+            _ = adapter.validate_python(invalid)
 
 
 def test_a_person_statement_reply_carries_the_person_and_its_refs() -> None:
-    done = memory.PersonDoneData(op="forget", person=memory.Person(id="ada"), refs=("voice:a", "face:b"))
-    assert (done.op, done.refs, done.persons, done.refused, done.dropped) == (
-        "forget",
-        ("voice:a", "face:b"),
-        (),
-        (),
-        (),
-    )
+    done = memory.PersonDoneData(op="forget", person=memory.Person(id=_SAM), refs=("voice:a", "face:b"))
+    assert (done.op, done.refs, done.persons) == ("forget", ("voice:a", "face:b"), ())
+    assert set(memory.PersonDoneData.model_fields) == {"op", "person", "refs", "persons"}
     with pytest.raises(pydantic.ValidationError):
         _ = memory.PersonDoneData.model_validate({"op": "rename"})
 

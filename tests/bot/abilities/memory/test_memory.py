@@ -1349,8 +1349,8 @@ def _is_minted(person: str) -> bool:
     return len(person) == 32 and all(digit in "0123456789abcdef" for digit in person)
 
 
-_ADA_MEMBER = memory.Member(id="ada", name="Ada", role=memory.Role.CHILD, born=2018, refs=("voice:ada",))
-_GABE_MEMBER = memory.Member(id="gabe", name="Gabe", role=memory.Role.ADULT)
+_NOBODY: typing.Final = "0123456789abcdef0123456789abcdef"
+"""A well-formed person id memory never minted."""
 
 
 def test_self_is_a_person_from_the_moment_memory_opens() -> None:
@@ -1429,19 +1429,20 @@ def test_link_merges_a_provisional_person_and_re_points_its_involves_edges() -> 
         harness = await _harness()
         await harness.attached()
         _ = await harness.ask(memory.RememberEvent, _episode("hello", participants=(_voice("a"),)))
-        _ = await _person(harness, memory.PersonDeclareData(members=(_GABE_MEMBER,)))
-        linked = await _person(harness, memory.PersonLinkData(ref="voice:a", person="gabe"))
+        gabe = await _person(harness, memory.PersonLinkData(ref="+15550001", name="Gabe"))
+        assert gabe.person is not None
+        linked = await _person(harness, memory.PersonLinkData(ref="voice:a", person=gabe.person.id))
         persons = harness.rows("SELECT key FROM bot_memory_node WHERE kind = 'person' ORDER BY seq")
-        assert _links(harness) == [("voice:a", "gabe", "model")]
+        assert _by_ref(_links(harness))["voice:a"] == (gabe.person.id, "model")
         return linked, _involved(harness), persons
 
     linked, involved, persons = _run(scenario)
     assert linked.op == "link"
-    assert linked.person == memory.Person(
-        id="gabe", name="Gabe", role=memory.Role.ADULT, declared=True, refs=("voice:a",)
-    )
-    assert involved == [("hello", "gabe")]
-    assert persons == [("self",), ("gabe",)]
+    assert linked.person is not None
+    gabe = linked.person.id
+    assert (linked.person.name, set(linked.person.refs)) == ("Gabe", {"voice:a", "+15550001"})
+    assert involved == [("hello", gabe)]
+    assert persons == [("self",), (gabe,)]
 
 
 def test_one_person_has_many_refs_and_each_ref_is_one_persons() -> None:
@@ -1451,15 +1452,16 @@ def test_one_person_has_many_refs_and_each_ref_is_one_persons() -> None:
         sam = await _person(harness, memory.PersonLinkData(ref="voice:a", name="Sam"))
         assert sam.person is not None and _is_minted(sam.person.id) and sam.person.name == "Sam"
         both = await _person(harness, memory.PersonLinkData(ref="face:b", person=sam.person.id))
-        _ = await _person(harness, memory.PersonDeclareData(members=(_GABE_MEMBER,)))
-        taken = await _refused(harness, memory.PersonLinkData(ref="voice:a", person="gabe"))
+        gabe = await _person(harness, memory.PersonLinkData(ref="+15550001", name="Gabe"))
+        assert gabe.person is not None
+        taken = await _refused(harness, memory.PersonLinkData(ref="voice:a", person=gabe.person.id))
         return both, taken, _links(harness)
 
     both, taken, links = _run(scenario)
     assert both.person is not None and set(both.person.refs) == {"voice:a", "face:b"}
     assert taken is memory.FailureKind.CONFLICT
-    assert [(ref, origin) for ref, _, origin in links] == [("face:b", "model"), ("voice:a", "model")]
-    assert links[0][1] == links[1][1] == both.person.id
+    by_ref = _by_ref(links)
+    assert by_ref["face:b"] == by_ref["voice:a"] == (both.person.id, "model")
 
 
 def test_linking_to_the_bot_itself_or_an_unknown_person_is_refused() -> None:
@@ -1467,26 +1469,25 @@ def test_linking_to_the_bot_itself_or_an_unknown_person_is_refused() -> None:
         harness = await _harness()
         await harness.attached()
         itself = await _refused(harness, memory.PersonLinkData(ref="voice:a", person=memory.SELF))
-        unknown = await _refused(harness, memory.PersonLinkData(ref="voice:a", person="nobody"))
+        unknown = await _refused(harness, memory.PersonLinkData(ref="voice:a", person=_NOBODY))
         return itself, unknown, _links(harness)
 
     itself, unknown, links = _run(scenario)
-    assert (itself, unknown) == (memory.FailureKind.DECLARED, memory.FailureKind.NOT_FOUND)
+    # Only the producers that know the bot's own voice make a ref its own: anyone else's is a conflict.
+    assert (itself, unknown) == (memory.FailureKind.CONFLICT, memory.FailureKind.NOT_FOUND)
     assert links == []
 
 
-def test_the_bot_names_an_undeclared_person_never_a_declared_one_or_itself() -> None:
+def test_the_bot_names_a_person_it_learned_never_itself() -> None:
     async def scenario() -> tuple[memory.PersonDoneData, list[memory.FailureKind], list[tuple[typing.Any, ...]]]:
         harness = await _harness()
         await harness.attached()
-        _ = await _person(harness, memory.PersonDeclareData(members=(_ADA_MEMBER,)))
         stranger = await _person(harness, memory.PersonLinkData(ref="voice:s"))
         assert stranger.person is not None and stranger.person.name is None
         named = await _person(harness, memory.PersonNameData(person=stranger.person.id, name="Sam"))
         refused = [
-            await _refused(harness, memory.PersonNameData(person="ada", name="Bea")),
             await _refused(harness, memory.PersonNameData(person=memory.SELF, name="Willy")),
-            await _refused(harness, memory.PersonNameData(person="nobody", name="Sam")),
+            await _refused(harness, memory.PersonNameData(person=_NOBODY, name="Sam")),
         ]
         return named, refused, harness.rows("SELECT key, text FROM bot_memory_node WHERE kind = 'person' ORDER BY seq")
 
@@ -1494,15 +1495,14 @@ def test_the_bot_names_an_undeclared_person_never_a_declared_one_or_itself() -> 
     assert named.person is not None and (named.person.name, named.person.refs) == ("Sam", ("voice:s",))
     # Every ref of the named person, so People keeps each of their prints (D-W8-18).
     assert named.refs == ("voice:s",)
-    assert refused == [memory.FailureKind.DECLARED, memory.FailureKind.DECLARED, memory.FailureKind.NOT_FOUND]
-    assert [text for _, text in persons] == ["", "Ada", "Sam"]
+    assert refused == [memory.FailureKind.CONFLICT, memory.FailureKind.NOT_FOUND]
+    assert [text for _, text in persons] == ["", "Sam"]
 
 
 def test_unlink_gives_the_ref_a_fresh_provisional_person_and_keeps_past_attributions() -> None:
     async def scenario() -> tuple[str, list[tuple[typing.Any, ...]], list[tuple[typing.Any, ...]], list[str]]:
         harness = await _harness()
         await harness.attached()
-        _ = await _person(harness, memory.PersonDeclareData(members=(_ADA_MEMBER,)))
         sam = await _person(harness, memory.PersonLinkData(ref="voice:a", name="Sam"))
         assert sam.person is not None
         _ = await harness.ask(memory.RememberEvent, _episode("before", participants=(_voice("a"),)))
@@ -1510,10 +1510,7 @@ def test_unlink_gives_the_ref_a_fresh_provisional_person_and_keeps_past_attribut
         assert unlinked.op == "unlink" and unlinked.person is not None
         assert unlinked.person.id != sam.person.id and unlinked.person.refs == ("voice:a",)
         _ = await harness.ask(memory.RememberEvent, _episode("after", turn_id="2", participants=(_voice("a"),)))
-        refused = [
-            (await _refused(harness, memory.PersonUnlinkData(ref="voice:ada"))).value,
-            (await _refused(harness, memory.PersonUnlinkData(ref="voice:nobody"))).value,
-        ]
+        refused = [(await _refused(harness, memory.PersonUnlinkData(ref="voice:nobody"))).value]
         return sam.person.id, _links(harness), _involved(harness), refused
 
     sam, links, involved, refused = _run(scenario)
@@ -1521,7 +1518,7 @@ def test_unlink_gives_the_ref_a_fresh_provisional_person_and_keeps_past_attribut
     assert fresh != sam and _is_minted(fresh)
     assert ("voice:a", fresh, "model") not in links
     assert involved == [("before", sam), ("after", fresh)]
-    assert refused == ["declared", "not_found"]
+    assert refused == ["not_found"]
 
 
 def test_an_own_ref_cannot_be_unlinked_from_self() -> None:
@@ -1532,7 +1529,7 @@ def test_an_own_ref_cannot_be_unlinked_from_self() -> None:
         return await _refused(harness, memory.PersonUnlinkData(ref="voice:mouth")), _links(harness)
 
     refused, links = _run(scenario)
-    assert refused is memory.FailureKind.DECLARED
+    assert refused is memory.FailureKind.CONFLICT
     assert links == [("voice:mouth", "self", "own")]
 
 
@@ -1542,7 +1539,6 @@ def test_forget_deletes_the_person_its_refs_and_its_involves_links_and_keeps_the
     ]:
         harness = await _harness()
         await harness.attached()
-        _ = await _person(harness, memory.PersonDeclareData(members=(_ADA_MEMBER,)))
         sam = await _person(harness, memory.PersonLinkData(ref="voice:a", name="Sam"))
         assert sam.person is not None
         _ = await _person(harness, memory.PersonLinkData(ref="face:b", person=sam.person.id))
@@ -1553,7 +1549,6 @@ def test_forget_deletes_the_person_its_refs_and_its_involves_links_and_keeps_the
         forgotten = await _person(harness, memory.PersonForgetData(person=sam.person.id))
         refused = [
             await _refused(harness, memory.PersonForgetData(person=memory.SELF)),
-            await _refused(harness, memory.PersonForgetData(person="ada")),
             await _refused(harness, memory.PersonForgetData(person=sam.person.id)),
         ]
         episodes = harness.rows("SELECT text FROM bot_memory_node WHERE kind = 'episode'")
@@ -1562,111 +1557,9 @@ def test_forget_deletes_the_person_its_refs_and_its_involves_links_and_keeps_the
     forgotten, refused, episodes, involved = _run(scenario)
     assert forgotten.op == "forget"
     assert set(forgotten.refs) == {"voice:a", "face:b"}
-    assert refused == [memory.FailureKind.DECLARED, memory.FailureKind.DECLARED, memory.FailureKind.NOT_FOUND]
+    assert refused == [memory.FailureKind.CONFLICT, memory.FailureKind.NOT_FOUND]
     assert episodes == [("Sam waved",)]
     assert involved == []
-
-
-def test_declare_is_idempotent_and_undeclares_missing_members() -> None:
-    async def scenario() -> tuple[
-        memory.PersonDoneData, list[tuple[typing.Any, ...]], memory.PersonDoneData, list[tuple[typing.Any, ...]]
-    ]:
-        harness = await _harness()
-        await harness.attached()
-        household = memory.PersonDeclareData(members=(_ADA_MEMBER, _GABE_MEMBER))
-        _ = await _person(harness, household)
-        declared = await _person(harness, household)
-        first = _links(harness)
-        undeclared = await _person(harness, memory.PersonDeclareData(members=(_GABE_MEMBER,)))
-        return declared, first, undeclared, _links(harness)
-
-    declared, first, undeclared, links = _run(scenario)
-    assert declared.op == "declare"
-    assert declared.persons == (
-        memory.Person(id="ada", name="Ada", role=memory.Role.CHILD, born=2018, declared=True, refs=("voice:ada",)),
-        memory.Person(id="gabe", name="Gabe", role=memory.Role.ADULT, declared=True),
-    )
-    assert first == [("voice:ada", "ada", "owner")]
-    assert undeclared.persons == (memory.Person(id="gabe", name="Gabe", role=memory.Role.ADULT, declared=True),)
-    assert links == first
-
-
-def test_an_undeclared_member_keeps_their_name_and_links_and_may_then_be_forgotten() -> None:
-    async def scenario() -> tuple[memory.PersonDoneData, memory.PersonDoneData]:
-        harness = await _harness()
-        await harness.attached()
-        _ = await _person(harness, memory.PersonDeclareData(members=(_ADA_MEMBER,)))
-        _ = await _person(harness, memory.PersonDeclareData(members=()))
-        listed = await _person(harness, memory.PersonListData())
-        return listed, await _person(harness, memory.PersonForgetData(person="ada"))
-
-    listed, forgotten = _run(scenario)
-    assert memory.Person(id="ada", name="Ada", refs=("voice:ada",)) in listed.persons
-    assert forgotten.refs == ("voice:ada",)
-
-
-def test_an_owner_ref_is_taken_from_whoever_holds_it_but_the_bot_itself() -> None:
-    """Owner refs win on declare (D-W8-19): from a person the bot named, from a provisional person with
-    other refs, never from ``self``, which keeps its own ref; only that ref is refused, not the declaration."""
-
-    async def scenario() -> tuple[memory.PersonDoneData, list[tuple[typing.Any, ...]], list[tuple[typing.Any, ...]]]:
-        harness = await _harness()
-        await harness.attached()
-        sam = await _person(harness, memory.PersonLinkData(ref="voice:ada", name="Sam"))
-        stranger = await _person(harness, memory.PersonLinkData(ref="voice:x"))
-        assert sam.person is not None and stranger.person is not None
-        _ = await _person(harness, memory.PersonLinkData(ref="voice:y", person=stranger.person.id))
-        _ = await harness.ask(memory.RememberEvent, _episode("spoken", participants=(_voice("mouth", own=True),)))
-        gabe = _GABE_MEMBER.model_copy(update={"refs": ("voice:x", "voice:mouth", "+15550001")})
-        declared = await _person(harness, memory.PersonDeclareData(members=(_ADA_MEMBER, gabe)))
-        persons = harness.rows("SELECT key, text FROM bot_memory_node WHERE kind = 'person' ORDER BY seq")
-        return declared, _links(harness), persons
-
-    declared, links, persons = _run(scenario)
-    assert declared.refused == ("voice:mouth",)
-    assert [(person.id, set(person.refs)) for person in declared.persons] == [
-        ("ada", {"voice:ada"}),
-        ("gabe", {"voice:x", "+15550001"}),
-    ]
-    by_ref = _by_ref(links)
-    assert by_ref["voice:ada"] == ("ada", "owner")
-    assert by_ref["voice:x"] == ("gabe", "owner")
-    assert by_ref["+15550001"] == ("gabe", "owner")
-    assert by_ref["voice:mouth"] == ("self", "own")
-    # The provisional person keeps the ref the owner did not take, and the person the bot named stays.
-    assert _is_minted(by_ref["voice:y"][0]) and by_ref["voice:y"][1] == "model"
-    assert "Sam" in {typing.cast(str, row[1]) for row in persons}
-
-
-def test_an_owner_ref_a_member_no_longer_lists_is_unlinked_and_another_member_may_declare_it() -> None:
-    """The owner moves a ref from one member to another, or drops it (D-W8-19): no declaration is refused."""
-
-    async def scenario() -> tuple[memory.PersonDoneData, memory.PersonDoneData, list[tuple[typing.Any, ...]]]:
-        harness = await _harness()
-        await harness.attached()
-        gabe = _GABE_MEMBER.model_copy(update={"refs": ("+15550001",)})
-        ada = memory.Member(id="ada", name="Ada")
-        _ = await _person(harness, memory.PersonDeclareData(members=(gabe, ada)))
-        _ = await _person(harness, memory.PersonLinkData(ref="voice:g", person="gabe"))
-        moved = await _person(
-            harness,
-            memory.PersonDeclareData(members=(_GABE_MEMBER, ada.model_copy(update={"refs": ("+15550001",)}))),
-        )
-        dropped = await _person(harness, memory.PersonDeclareData(members=(_GABE_MEMBER, ada)))
-        return moved, dropped, _links(harness)
-
-    moved, dropped, links = _run(scenario)
-    assert [(person.id, person.refs) for person in moved.persons] == [
-        ("gabe", ("voice:g",)),
-        ("ada", ("+15550001",)),
-    ]
-    assert [(person.id, person.refs) for person in dropped.persons] == [("gabe", ("voice:g",)), ("ada", ())]
-    # Only a ref no member lists any more is answered dropped, so its print can stop being kept (D-W8-18).
-    assert (moved.dropped, dropped.dropped) == ((), ("+15550001",))
-    by_ref = _by_ref(links)
-    # A ref the bot linked stays; a dropped owner ref is nobody's the bot knows, with a fresh provisional person.
-    assert by_ref["voice:g"] == ("gabe", "model")
-    assert _is_minted(by_ref["+15550001"][0]) and by_ref["+15550001"][1] == "stamped"
 
 
 def test_person_statements_to_a_memory_that_is_not_attached_are_unavailable() -> None:

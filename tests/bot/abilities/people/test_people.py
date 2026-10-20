@@ -364,11 +364,17 @@ def test_the_bots_own_voice_is_never_linked_to_anyone(tmp_path: pathlib.Path) ->
 def test_a_link_memory_refuses_changes_no_mark(tmp_path: pathlib.Path) -> None:
     async def scenario(harness: Harness) -> tuple[str, people.FailureData, int, str, people.FailureData, int, bool]:
         ref = await harness.heard(_A)
-        refused = _failed(await harness.select(people.LinkEvent, people.LinkData(ref=ref, person="nobody")))
+        refused = _failed(
+            await harness.select(people.LinkEvent, people.LinkData(ref=ref, person="0123456789abcdef0123456789abcdef"))
+        )
         pruned = harness.prune_unlinked()
         heard_again = await harness.heard(_A)
         _ = _changed(await harness.select(people.LinkEvent, people.LinkData(ref=heard_again, name="Sam")))
-        moved = _failed(await harness.select(people.LinkEvent, people.LinkData(ref=heard_again, person="nobody")))
+        moved = _failed(
+            await harness.select(
+                people.LinkEvent, people.LinkData(ref=heard_again, person="0123456789abcdef0123456789abcdef")
+            )
+        )
         return (
             ref,
             refused,

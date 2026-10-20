@@ -79,7 +79,7 @@ def test_a_ref_belongs_to_exactly_one_person() -> None:
 
 
 def test_a_search_resolves_who_is_present_in_its_own_transaction() -> None:
-    """A ref never seen before is somebody already: a provisional person, unknown until named or declared."""
+    """A ref never seen before is somebody already: a provisional person, unknown until named."""
 
     import datetime
 

@@ -14,16 +14,14 @@ holds a canonical vector per node in its embedder's space. Requests:
 * ``LeaseEvent`` (``LeaseData``) → ``LeasedEvent``
 * ``ConsolidateEvent`` (``ConsolidateData``, model-callable) → ``ConsolidatedEvent``
 * ``ReleaseEvent`` (``ReleaseData``) → ``ReleasedEvent``
-* ``PersonEvent`` (``PersonData``: declare, name, link, unlink, forget, list) → ``PersonDoneEvent``
+* ``PersonEvent`` (``PersonData``: name, link, unlink, forget, list) → ``PersonDoneEvent``
 
 Memory is the authority on who is who: every participant ref belongs to exactly one person
 (``bot_person_ref``), resolved inside the transaction that keeps an episode. A ref first seen gets a
 provisional person, and a ref stamped own is the bot's own person, ``self``, which Memory creates
 when it opens. A person statement is one transaction; it refuses ``conflict`` (the ref is another
-person's), ``declared`` (an owner fact or the bot itself) or ``not_found``, and changes nothing then.
-The owner's declaration is never refused for a ref: an owner ref is taken from whoever holds it, except
-the bot itself, which keeps its own ref (the reply lists it as ``refused``), and an owner ref a member
-no longer lists is unlinked (the reply lists it as ``dropped`` unless another member now lists it).
+person's, or the statement would change the bot itself or its own refs) or ``not_found``, and changes
+nothing then. Nobody declares who anyone is: every person is one the bot perceived and learned.
 
 Every addressed request gets exactly one reply, sent to its ``source`` with its ``id``: the
 operation's own reply, or ``FailedEvent`` with a ``FailureKind``. SQL runs one step at a time, in
@@ -47,7 +45,7 @@ most once per pass, and never retries a node that cannot be embedded in that spa
 Telemetry (cardinality, METRICS > SPANS > Logs; every attribute value comes from code):
 
 * ``bot.memory.operation.count`` — operation (10) × outcome {ok, failed} × ``bot.failure.kind``
-  (FailureKind or ``none``; ok is always ``none``): at most 10 × (1 + 8) = 90 series.
+  (FailureKind or ``none``; ok is always ``none``): at most 10 × (1 + 7) = 80 series.
 * ``bot.memory.operation.duration`` — operation × outcome, from accepting a request to answering
   it (its embed wait included): 20 series.
 * ``bot.memory.embed.waiting`` — requests waiting on an embed reply, no attributes: 1 series.
@@ -61,7 +59,7 @@ Telemetry (cardinality, METRICS > SPANS > Logs; every attribute value comes from
 
 Spans ``bot.memory.<operation>`` (component ``memory``), one per SQL step, carry only bounded
 counts, whether the step resumes after an embed, and a person statement's ``bot.memory.person.op``
-(6 values); node ids, unit ids, person ids, participant refs, names, relation labels, text, images,
+(5 values); node ids, unit ids, person ids, participant refs, names, relation labels, text, images,
 vectors, and space names are never attributes.
 """
 
@@ -174,7 +172,7 @@ ConsolidatedEvent = hsm.Event[payload.ConsolidatedData](
 ReleaseEvent = hsm.Event[payload.ReleaseData](name="bot.ability.memory.release", schema=payload.ReleaseData)
 ReleasedEvent = hsm.Event[payload.ReleasedData](name="bot.ability.memory.released", schema=payload.ReleasedData)
 PersonEvent = hsm.Event[payload.PersonData](name="bot.ability.memory.person", schema=payload.PersonData)
-"""One person statement (declare, name, link, unlink, forget, list); not model-callable."""
+"""One person statement (name, link, unlink, forget, list); not model-callable."""
 PersonDoneEvent = hsm.Event[payload.PersonDoneData](
     name="bot.ability.memory.person.done", schema=payload.PersonDoneData
 )

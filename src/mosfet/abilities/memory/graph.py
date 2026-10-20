@@ -13,7 +13,7 @@ order they were written.
 Persons: a person node is keyed by its person id, and ``bot_person_ref`` says whose each
 participant ref is (the ref is its primary key, so it is exactly one person's). Memory resolves a
 ref to its person inside its own transaction, from that table: a ref first seen gets a provisional
-person (no name, not declared), and a ref stamped ``own`` is ``self``'s. A provisional person that
+person (no name), and a ref stamped ``own`` is ``self``'s. A provisional person that
 holds only the ref being linked is merged into the person it is linked to: its involves links are
 re-pointed and its node deleted. Any other person keeps its refs until they are unlinked.
 """
@@ -54,8 +54,8 @@ DERIVED_FROM: typing.Final = "derived_from"
 """Relation from a merged concept to each node it was merged from."""
 _INVOLVES: typing.Final = (INVOLVES_SOURCE, INVOLVES_TARGET)
 
-RefOrigin: typing.TypeAlias = typing.Literal["stamped", "own", "model", "owner"]
-"""How a ref came to be a person's: first seen, stamped as the bot's own, linked by the bot, or declared."""
+RefOrigin: typing.TypeAlias = typing.Literal["stamped", "own", "model"]
+"""How a ref came to be a person's: first seen, stamped as the bot's own, or linked by the bot."""
 
 PERMANENT_FAILURES: typing.Final = frozenset(
     {
@@ -99,24 +99,14 @@ def node_insert_clause(
     )
 
 
-def _person_content(
-    *, name: str | None, role: payload.Role | None, born: int | None, declared: bool
-) -> dict[str, object]:
-    return {"name": name, "role": None if role is None else role.value, "born": born, "declared": declared}
+def _person_content(*, name: str | None) -> dict[str, object]:
+    return {"name": name}
 
 
-def person_insert_clause(
-    *,
-    person_id: str,
-    at: str,
-    name: str | None = None,
-    role: payload.Role | None = None,
-    born: int | None = None,
-    declared: bool = False,
-) -> Insert:
+def person_insert_clause(*, person_id: str, at: str, name: str | None = None) -> Insert:
     """Create the person node ``person_id`` unless it exists; its text is its name (empty while unnamed)."""
 
-    content = _person_content(name=name, role=role, born=born, declared=declared)
+    content = _person_content(name=name)
     return (
         sqlite.insert(_NODES)
         .values(
@@ -447,9 +437,6 @@ class _PersonRow:
     seq: int
     id: str
     name: str | None
-    role: payload.Role | None
-    born: int | None
-    declared: bool
 
 
 def _person_rows(connection: Connection, criterion: sqlalchemy.ColumnElement[bool]) -> list[_PersonRow]:
@@ -461,17 +448,7 @@ def _person_rows(connection: Connection, criterion: sqlalchemy.ColumnElement[boo
     found: list[_PersonRow] = []
     for seq, key, content_json in rows:
         content = typing.cast(dict[str, typing.Any], json.loads(content_json))
-        role = content.get("role")
-        found.append(
-            _PersonRow(
-                seq=int(seq),
-                id=str(key),
-                name=content.get("name"),
-                role=None if role is None else payload.Role(role),
-                born=content.get("born"),
-                declared=bool(content.get("declared", False)),
-            )
-        )
+        found.append(_PersonRow(seq=int(seq), id=str(key), name=content.get("name")))
     return found
 
 
@@ -485,9 +462,9 @@ def _person_by_seq(connection: Connection, seq: int) -> _PersonRow:
 
 
 def _provisional(row: _PersonRow) -> bool:
-    """Never named, never declared, and not the bot itself: a person memory made for a ref it saw."""
+    """Never named, and not the bot itself: a person memory made for a ref it saw."""
 
-    return row.id != payload.SELF and row.name is None and not row.declared
+    return row.id != payload.SELF and row.name is None
 
 
 def _ref_count(connection: Connection, seq: int) -> int:
@@ -507,9 +484,7 @@ def _person(connection: Connection, row: _PersonRow) -> payload.Person:
         .order_by(_PERSON_REFS.c.linked_at.desc(), _PERSON_REFS.c.ref)
         .limit(payload.MAX_PERSON_REFS)
     ).scalars()
-    return payload.Person(
-        id=row.id, name=row.name, role=row.role, born=row.born, declared=row.declared, refs=tuple(refs)
-    )
+    return payload.Person(id=row.id, name=row.name, refs=tuple(refs))
 
 
 def _self_seq(connection: Connection, stamp: str) -> tuple[int, int]:
@@ -1145,15 +1120,15 @@ class _Refusal(Exception):
         self.kind = kind
 
 
-def _rename(connection: Connection, idx: index.Index, row: _PersonRow, content: dict[str, object], stamp: str) -> None:
-    """Rewrite a person's facts; a changed name drops its vectors, so backfill embeds the new one."""
+def _rename(connection: Connection, idx: index.Index, row: _PersonRow, name: str, stamp: str) -> None:
+    """Name a person; a changed name drops its vectors, so backfill embeds the new one."""
 
-    name = typing.cast(str | None, content["name"])
+    content = _person_content(name=name)
     _ = connection.execute(
         update(_NODES)
         .where(_NODES.c.seq == row.seq)
         .values(
-            text=name or "",
+            text=name,
             content_json=json.dumps(content, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
             updated_at=stamp,
         )
@@ -1164,84 +1139,24 @@ def _rename(connection: Connection, idx: index.Index, row: _PersonRow, content: 
         idx.remove(connection, [row.seq])
 
 
-def _take(connection: Connection, ref: str, person: int, origin: RefOrigin, stamp: str) -> int:
-    """Make ``ref`` ``person``'s, merging a provisional person that held only it; the person-count change.
+def _take(connection: Connection, ref: str, person: int, stamp: str) -> int:
+    """Make ``ref`` the bot's link to ``person``, merging a provisional person that held only it; the person-count change.
 
-    A ref that is already ``person``'s keeps how it was linked, unless the owner declares it now. The
-    bot's link raises ``_Refusal`` (conflict) when the ref belongs to anyone else: they keep it until it
-    is unlinked. The owner's ref is taken from whoever holds it (the caller never takes ``self``'s), and
-    what was believed before stays with whom it was attributed to then.
+    A ref that is already ``person``'s keeps how it was linked. The link raises ``_Refusal`` (conflict)
+    when the ref belongs to anyone else: they keep it until it is unlinked.
     """
 
     current = _linked_persons(connection, [ref]).get(ref)
-    if current == person and origin != "owner":
+    if current == person:
         return 0
     change = 0
-    if current is not None and current != person:
-        if _provisional(_person_by_seq(connection, current)) and _ref_count(connection, current) == 1:
-            _merge(connection, current, person)
-            change = -1
-        elif origin != "owner":
+    if current is not None:
+        if not (_provisional(_person_by_seq(connection, current)) and _ref_count(connection, current) == 1):
             raise _Refusal(payload.FailureKind.CONFLICT, f"{ref} belongs to another person; unlink it from them first.")
-    _ = connection.execute(person_ref_upsert_clause(ref=ref, person=person, origin=origin, at=stamp))
+        _merge(connection, current, person)
+        change = -1
+    _ = connection.execute(person_ref_upsert_clause(ref=ref, person=person, origin="model", at=stamp))
     return change
-
-
-def _declare(
-    connection: Connection, idx: index.Index, data: payload.PersonDeclareData, self_seq: int, stamp: str
-) -> tuple[payload.PersonDoneData, int]:
-    """The owner's household: owner refs win, except over the bot itself, whose own refs are only refused.
-
-    Each member's owner refs it no longer lists are unlinked first (each gets a fresh provisional
-    person), then each listed ref is taken from whoever holds it. A ref that is ``self``'s stays its
-    own and is answered in ``refused``; nothing else of the declaration is refused. An unlinked ref
-    that no member lists is answered in ``dropped``; one another member lists is that member's again.
-    """
-
-    change = 0
-    declared: list[_PersonRow] = []
-    refused: list[str] = []
-    unlinked: list[str] = []
-    for member in data.members:
-        content = _person_content(name=member.name, role=member.role, born=member.born, declared=True)
-        row = _person_by_id(connection, member.id)
-        if row is None:
-            _ = connection.execute(
-                person_insert_clause(
-                    person_id=member.id, at=stamp, name=member.name, role=member.role, born=member.born, declared=True
-                )
-            )
-            change += 1
-        else:
-            _rename(connection, idx, row, content, stamp)
-        row = _person_by_id(connection, member.id)
-        assert row is not None
-        dropped = connection.execute(
-            select(_PERSON_REFS.c.ref).where(
-                _PERSON_REFS.c.person_seq == row.seq,
-                _PERSON_REFS.c.origin == "owner",
-                _PERSON_REFS.c.ref.not_in(list(member.refs)),
-            )
-        ).scalars()
-        for ref in list(dropped):
-            unlinked.append(typing.cast(str, ref))
-            fresh = _mint(connection, stamp)
-            _ = connection.execute(person_ref_upsert_clause(ref=ref, person=fresh, origin="stamped", at=stamp))
-            change += 1
-        for ref in member.refs:
-            if _linked_persons(connection, [ref]).get(ref) == self_seq:
-                refused.append(ref)
-                continue
-            change += _take(connection, ref, row.seq, "owner", stamp)
-        declared.append(row)
-    members = {member.id for member in data.members}
-    for row in _person_rows(connection, _NODES.c.key.not_in(list(members))):
-        if row.declared:
-            _rename(connection, idx, row, _person_content(name=row.name, role=None, born=None, declared=False), stamp)
-    persons = tuple(_person(connection, _person_by_seq(connection, row.seq)) for row in declared)
-    listed = {ref for member in data.members for ref in member.refs}
-    dropped_refs = tuple(ref for ref in unlinked if ref not in listed)
-    return payload.PersonDoneData(op="declare", persons=persons, refused=tuple(refused), dropped=dropped_refs), change
 
 
 def _statement(
@@ -1250,9 +1165,6 @@ def _statement(
     """Apply one person statement; raises ``_Refusal`` for what memory refuses."""
 
     self_seq, change = _self_seq(connection, stamp)
-    if isinstance(data, payload.PersonDeclareData):
-        done, declared = _declare(connection, idx, data, self_seq, stamp)
-        return done, change + declared
     if isinstance(data, payload.PersonListData):
         rows = _person_rows(connection, or_(_NODES.c.key == payload.SELF, _NODES.c.text != ""))
         rows.sort(key=lambda row: (row.id != payload.SELF, row.seq))
@@ -1261,7 +1173,7 @@ def _statement(
     if isinstance(data, payload.PersonLinkData):
         if data.person == payload.SELF:
             raise _Refusal(
-                payload.FailureKind.DECLARED, "Only the producers that know the bot's own voice make a ref its own."
+                payload.FailureKind.CONFLICT, "Only the producers that know the bot's own voice make a ref its own."
             )
         if data.person is None:
             person = _mint(connection, stamp, name=data.name)
@@ -1271,7 +1183,7 @@ def _statement(
             if row is None:
                 raise _Refusal(payload.FailureKind.NOT_FOUND, "Memory holds no such person.")
             person = row.seq
-        change += _take(connection, data.ref, person, "model", stamp)
+        change += _take(connection, data.ref, person, stamp)
         done = payload.PersonDoneData(op="link", person=_person(connection, _person_by_seq(connection, person)))
         return done, change
     if isinstance(data, payload.PersonUnlinkData):
@@ -1281,8 +1193,8 @@ def _statement(
         if found is None:
             raise _Refusal(payload.FailureKind.NOT_FOUND, "Memory holds no such ref.")
         holder, origin = _person_by_seq(connection, int(found[0])), str(found[1])
-        if origin == "own" or holder.id == payload.SELF or (origin == "owner" and holder.declared):
-            raise _Refusal(payload.FailureKind.DECLARED, "That ref is the bot's own or the owner's to change.")
+        if origin == "own" or holder.id == payload.SELF:
+            raise _Refusal(payload.FailureKind.CONFLICT, "That ref is the bot's own.")
         fresh = _mint(connection, stamp)
         _ = connection.execute(person_ref_upsert_clause(ref=data.ref, person=fresh, origin="stamped", at=stamp))
         done = payload.PersonDoneData(op="unlink", person=_person(connection, _person_by_seq(connection, fresh)))
@@ -1290,8 +1202,8 @@ def _statement(
     row = _person_by_id(connection, data.person)
     if row is None:
         raise _Refusal(payload.FailureKind.NOT_FOUND, "Memory holds no such person.")
-    if row.seq == self_seq or row.declared:
-        raise _Refusal(payload.FailureKind.DECLARED, "The bot itself and declared persons are the owner's.")
+    if row.seq == self_seq:
+        raise _Refusal(payload.FailureKind.CONFLICT, "The bot itself is not a person the bot names or forgets.")
     # Name and forget both answer with every ref the person has: its prints are kept, or erased.
     refs = tuple(
         connection.execute(
@@ -1301,13 +1213,7 @@ def _statement(
         ).scalars()
     )
     if isinstance(data, payload.PersonNameData):
-        _rename(
-            connection,
-            idx,
-            row,
-            _person_content(name=data.name, role=row.role, born=row.born, declared=row.declared),
-            stamp,
-        )
+        _rename(connection, idx, row, data.name, stamp)
         return payload.PersonDoneData(
             op="name", person=_person(connection, _person_by_seq(connection, row.seq)), refs=refs
         ), change
@@ -1324,8 +1230,7 @@ def person_statement(
 ) -> tuple[payload.PersonDoneData | Refused, int]:
     """Apply one person statement in one transaction: its reply, or what was refused; and the person-count change.
 
-    A refusal rolls the whole transaction back. The owner's declaration is never refused for a ref (an
-    own ref it names is answered in ``refused``, D-W8-19), so it is refused only by a failing store.
+    A refusal rolls the whole transaction back.
     """
 
     try:

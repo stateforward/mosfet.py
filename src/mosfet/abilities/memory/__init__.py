@@ -5,7 +5,7 @@ relational statement transactions (behavior inventory and identity build SQLAlch
 against ``memory_table`` and friends, compile them with ``compile_statement(s)``, and send them
 with ``transact``), and it keeps every cognition turn as an episode node of a graph, linked to the
 persons it involves (each participant ref is exactly one person's; the bot itself is ``SELF``,
-and ``PersonEvent`` declares, names, links, unlinks, forgets and lists persons), with a canonical
+and ``PersonEvent`` names, links, unlinks, forgets and lists persons), with a canonical
 vector per node in its embedder's space (``Index`` /
 ``ExactIndex`` search it). ``Associative`` surfaces what memory associates with a turn, scored and
 fit to a token budget, and brings a memory to mind in full when the bot deliberately recalls it
@@ -48,7 +48,6 @@ from .payload import (
     MAX_ASSOCIATIONS,
     MAX_EPISODE_PARTS,
     MAX_EPISODE_TEXT_BYTES,
-    MAX_MEMBERS,
     MAX_PERSON_REFS,
     MAX_PERSONS,
     MAX_PRESENT_PERSONS,
@@ -74,7 +73,6 @@ from .payload import (
     LeaseData,
     LeasedData,
     LinkData,
-    Member,
     MergeData,
     Name,
     Node,
@@ -82,7 +80,6 @@ from .payload import (
     Outcome,
     Person,
     PersonData,
-    PersonDeclareData,
     PersonDoneData,
     PersonForgetData,
     PersonId,
@@ -98,7 +95,6 @@ from .payload import (
     ReleasedData,
     RememberedData,
     RestData,
-    Role,
     SearchData,
     UnitData,
     UnitNode,
@@ -130,7 +126,6 @@ __all__ = [
     "MAX_ASSOCIATIONS",
     "MAX_EPISODE_PARTS",
     "MAX_EPISODE_TEXT_BYTES",
-    "MAX_MEMBERS",
     "MAX_PERSONS",
     "MAX_PERSON_REFS",
     "MAX_PRESENT_PERSONS",
@@ -178,7 +173,6 @@ __all__ = [
     "LeasedData",
     "LeasedEvent",
     "LinkData",
-    "Member",
     "Memory",
     "MemoryStore",
     "MergeData",
@@ -192,7 +186,6 @@ __all__ = [
     "ParameterValue",
     "Person",
     "PersonData",
-    "PersonDeclareData",
     "PersonDoneData",
     "PersonDoneEvent",
     "PersonEvent",
@@ -221,7 +214,6 @@ __all__ = [
     "RequestError",
     "RestData",
     "RestEvent",
-    "Role",
     "Row",
     "SearchData",
     "SearchEvent",

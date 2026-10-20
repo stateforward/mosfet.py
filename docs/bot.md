@@ -247,7 +247,7 @@ Whether to ask who an unknown voice is, which voice is whose, what someone is ca
 forget are the bot's choices; nothing asks, links or names for it. Who lives in the house, and whether
 someone is a child, are things the bot learns and remembers, never configuration: no tool carries a
 role or a birth year, and memory refuses to rename, unlink the own refs of, or forget the bot itself
-(`declared`). Each ref is one person's: linking a voice
+(`conflict`). Each ref is one person's: linking a voice
 that is someone else's is a `conflict`, and so is linking the bot's own. Forgetting a person erases
 their voice and face prints too. Nothing here decides what the bot says to anyone, or treats anyone
 differently; a child's turn reaches the bot as a fact about who is speaking, never as a rule.

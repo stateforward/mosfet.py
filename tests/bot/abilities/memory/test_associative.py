@@ -593,8 +593,8 @@ def test_a_turn_says_who_is_speaking_who_is_present_and_who_the_bot_is() -> None
     async def scenario() -> hsm.Event[typing.Any]:
         harness = await _harness()
         await harness.attach_memory()
-        ada = memory.Member(id="ada", name="Ada", role=memory.Role.CHILD, born=2018, refs=(child.ref,))
-        await harness.person(memory.PersonDeclareData(members=(ada,)))
+        # Nobody declares Ada (R-11): the bot learned her voice and her name.
+        await harness.person(memory.PersonLinkData(ref=child.ref, name="Ada"))
         await harness.remember(_episode("Hello, I am here.", "spoke", participants=(mouth,)))
         await harness.attach()
         cue = memory.CueData(cue=(text.TextPart(text="who is that?"),), participants=(child, stranger, seen))
@@ -611,13 +611,11 @@ def test_a_turn_says_who_is_speaking_who_is_present_and_who_the_bot_is() -> None
         (stranger.ref, mosfet.ParticipantRole.SOURCE, False),
         (seen.ref, mosfet.ParticipantRole.SOURCE, False),
     ]
-    assert surfaced.people[0].person == "ada"
+    ada = surfaced.people[0].person
     unknown = surfaced.people[1].person
-    assert unknown not in ("ada", memory.SELF) and unknown != surfaced.people[2].person
+    assert unknown not in (ada, memory.SELF) and unknown != surfaced.people[2].person
     persons = {person.id: person for person in surfaced.persons}
-    assert persons["ada"] == memory.Person(
-        id="ada", name="Ada", role=memory.Role.CHILD, born=2018, declared=True, refs=(child.ref,)
-    )
+    assert persons[ada] == memory.Person(id=ada, name="Ada", refs=(child.ref,))
     assert persons[unknown] == memory.Person(id=unknown, refs=(stranger.ref,))
     assert surfaced.you == memory.Person(id=memory.SELF, refs=(mouth.ref,))
     assert persons[memory.SELF] == surfaced.you
@@ -627,7 +625,7 @@ def test_a_turn_says_who_is_speaking_who_is_present_and_who_the_bot_is() -> None
         for part in projection.model_facing_content(surfaced, capacity=media.ImageCapacity())
         if isinstance(part, text.TextPart)
     )
-    for shown in ("voice:3f2a9c", "child", "voice:tts-warm", "known"):
+    for shown in ("voice:3f2a9c", "Ada", "voice:tts-warm", "known"):
         assert shown in rendered
     for hidden in ("similarity", "print", "embedding", "vector"):
         assert hidden not in rendered

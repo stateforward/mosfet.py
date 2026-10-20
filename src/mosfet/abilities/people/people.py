@@ -14,7 +14,7 @@ on its turn (``known`` false), never a reason this ability acts.
 Who someone is, a child included, is something the bot learns and remembers, never configuration.
 People never decides what the bot says to anyone, and treats no one differently: it only refuses a
 capacity memory or a registry refuses. Memory refuses every statement that would change the bot
-itself (``declared``).
+itself (``conflict``).
 
 Memory and the registries are peers reached by message only (``memory.PersonEvent`` and
 ``identification.LinkEvent`` / ``identification.ForgetEvent``, each through a one-shot reply actor
@@ -46,7 +46,7 @@ carrying the selection's id. A detached People answers a selection at its source
 Telemetry (scope ``bot.abilities.people``; every attribute is a closed set from code):
 
 * ``bot.people.count`` — ``bot.people.op`` {link, unlink, name, forget, none} × ``bot.outcome``
-  {done, failed} × ``bot.failure.kind`` (``FailureKind`` or ``none``): at most 5 × (1 + 7) = 40 series
+  {done, failed} × ``bot.failure.kind`` (``FailureKind`` or ``none``): at most 5 × (1 + 6) = 35 series
   (``none`` is a selection whose payload was not a People statement).
 * Spans ``bot.people.<op>`` (component ``people``) record a failure with the same kind.
 
@@ -93,9 +93,8 @@ class FailureKind(enum.StrEnum):
     """Why a People statement failed; values match ``telemetry/FAILURE_KINDS.md``."""
 
     CONFLICT = "conflict"
-    """The ref is already someone else's (unlink it from them first), or it is the bot's own voice or face."""
-    DECLARED = "declared"
-    """The statement would change the bot itself (``self``) or its own refs."""
+    """The ref is already someone else's (unlink it from them first), or the statement would change the bot
+    itself (``self``) or its own voice or face."""
     NOT_FOUND = "not_found"
     """The statement names a person, ref or print nobody holds."""
     INVALID_INPUT = "invalid_input"
@@ -245,7 +244,7 @@ class ChangedData(pydantic.BaseModel):
             "examples": [
                 {
                     "op": "link",
-                    "person": {"id": "3f2a9c0d4b5e6f708192a3b4c5d6e7f8", "declared": False, "refs": ["voice:3f2a9c"]},
+                    "person": {"id": "3f2a9c0d4b5e6f708192a3b4c5d6e7f8", "refs": ["voice:3f2a9c"]},
                 }
             ],
         },
@@ -269,7 +268,7 @@ class FailureData(ability.FailureData):
         json_schema_extra={
             "description": (
                 "Observation: a statement you made about people was not done. kind says why: conflict (the ref "
-                "is someone else's, or your own), declared (you yourself), not_found, "
+                "is someone else's, or you yourself or your own), not_found, "
                 "invalid_input, store_failed, timeout or unavailable."
             ),
             "examples": [{"message": "That ref belongs to another person.", "kind": "conflict", "op": "link"}],

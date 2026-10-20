@@ -7,7 +7,7 @@ present) and gets one reply: ``AssociatedEvent`` (``AssociationsData``, best fir
 scores each with the injected ``Weights``, and admits them best first while their text fits
 ``budget_tokens``. It never embeds and never reads Memory's state; Memory is only an address.
 The association also says who is here, as Memory resolved it in the search: each participant of
-the cue and the person it is (``known`` false for someone nobody has named or declared), those
+the cue and the person it is (``known`` false for someone nobody has named), those
 persons, and the bot itself (``you``, with its own refs). Those facts are what the bot is offered;
 whether to ask who someone is, or to do anything at all, stays the bot's choice.
 

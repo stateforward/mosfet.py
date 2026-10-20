@@ -116,13 +116,13 @@ node_table = Table(
     Column("seq", Integer, primary_key=True, autoincrement=True),
     Column("node_id", Text, nullable=False),
     Column("kind", Text, nullable=False),
-    # The person id of a person node ("self", an owner-declared slug, or a minted uuid hex); NULL
+    # The person id of a person node ("self", or a minted uuid hex); NULL
     # for every other kind. A person's refs are in ``person_ref_table``.
     Column("key", Text, nullable=True),
     # A person node's text is its name, or empty while it has none.
     Column("text", Text, nullable=False, server_default=""),
     # Kind-specific typed JSON (an episode's stimulus, acts, outcome, turn id, focus, participants;
-    # a person's name, role, birth year and whether the owner declared it).
+    # a person's name).
     Column("content_json", Text, nullable=False, server_default="{}"),
     Column("created_at", Text, nullable=False),
     Column("updated_at", Text, nullable=False),
@@ -139,7 +139,7 @@ node_table = Table(
 # Which person each participant ref belongs to. The ref is the primary key: two persons never
 # share a ref. ``origin`` is how the link was made: ``stamped`` (a ref first seen, given its own
 # provisional person), ``own`` (a ref its producer stamped as the bot's own, linked to ``self``),
-# ``model`` (the bot linked it) or ``owner`` (the owner declared it).
+# or ``model`` (the bot linked it).
 person_ref_table = Table(
     PERSON_REF_TABLE,
     metadata,
