@@ -110,6 +110,29 @@ def test_server_segments_become_ordered_clips_of_the_original_audio_without_spea
     assert "speaker" not in output.model_dump_json()
 
 
+def test_a_speakers_spans_with_nobody_between_are_one_clip_across_the_pause() -> None:
+    """Willy live check: one speaker who paused mid-sentence came back as two spans, each identified on its own,
+    so one stranger became two new voices. Spans of one speaker with nobody else between are one segment."""
+
+    data = _input(seconds=4.0)
+    body = {
+        "segments": [
+            {"start": 0.0, "end": 1.0, "speaker": 0},
+            {"start": 1.25, "end": 2.0, "speaker": 0},
+            {"start": 2.0, "end": 3.0, "speaker": 1},
+            {"start": 3.0, "end": 3.5, "speaker": 0},
+        ]
+    }
+
+    first, second, third = _classify(_answer([], body), data).segments
+
+    frame = 2
+    assert (first.start_seconds, first.end_seconds) == (0.0, 2.0)
+    assert first.audio == data.audio[0 : 32_000 * frame]
+    assert (second.start_seconds, second.end_seconds) == (2.0, 3.0)
+    assert (third.start_seconds, third.end_seconds) == (3.0, 3.5)
+
+
 def test_a_segment_past_the_audio_is_clipped_to_its_end() -> None:
     body = {"segments": [{"start": 1.5, "end": 2.4, "speaker": 0}, {"start": 2.1, "end": 2.5, "speaker": 1}]}
 

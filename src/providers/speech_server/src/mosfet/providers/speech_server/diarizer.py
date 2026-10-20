@@ -1,9 +1,10 @@
 """``Diarizer``: core voice diarization served by a speech server's ``POST /v1/diarize`` (Sortformer).
 
 The input is resampled to 16 kHz mono (:mod:`resample`) and posted raw with ``sample_rate=16000``. Each server
-segment ``{start, end, speaker}`` becomes a ``voice.VoiceDiarizationSegment`` that clips the *original* audio at its
-own rate and channels, snapped to whole frames and clipped to the audio's end; the server's local speaker index is
-dropped, as the pyannote diarizer drops its labels. Segments are ordered by start time. An answer with no usable
+segment ``{start, end, speaker}`` clips the *original* audio at its own rate and channels, snapped to whole frames
+and clipped to the audio's end; consecutive segments of one speaker, with nobody else between, are one
+``voice.VoiceDiarizationSegment`` across the pause. The server's local speaker index is then dropped, as the
+pyannote diarizer drops its labels. Segments are ordered by start time. An answer with no usable
 segment is ``invalid_response``, because the core result needs at least one.
 """
 
@@ -94,22 +95,29 @@ class Diarizer(voice.VoiceDiarizer):
         rate = input.sample_rate_hz
         frame = 2 * input.channels
         frames = len(input.audio) // frame
-        segments: list[voice.VoiceDiarizationSegment] = []
+        # A speaker's spans with nobody else between are one segment across the pause: a speaker who pauses is
+        # still one voice, and each clip alone may be too short to be told apart from someone new.
+        spans: list[tuple[int, int, int]] = []
         for served_segment in sorted(served.segments, key=lambda segment: segment.start):
             start = min(math.floor(served_segment.start * rate + 0.5), frames)
             end = min(math.floor(served_segment.end * rate + 0.5), frames)
             if end <= start:
                 continue
-            segments.append(
-                voice.VoiceDiarizationSegment(
-                    audio=input.audio[start * frame : end * frame],
-                    media_type=input.media_type,
-                    sample_rate_hz=rate,
-                    channels=input.channels,
-                    start_seconds=start / rate,
-                    end_seconds=end / rate,
-                )
+            if spans and spans[-1][2] == served_segment.speaker:
+                spans[-1] = (spans[-1][0], max(end, spans[-1][1]), served_segment.speaker)
+            else:
+                spans.append((start, end, served_segment.speaker))
+        segments = [
+            voice.VoiceDiarizationSegment(
+                audio=input.audio[start * frame : end * frame],
+                media_type=input.media_type,
+                sample_rate_hz=rate,
+                channels=input.channels,
+                start_seconds=start / rate,
+                end_seconds=end / rate,
             )
+            for start, end, _ in spans
+        ]
         if not segments:
             raise request.RequestError("invalid_response", "speech-server diarization found no speaker segment.")
         return voice.diarization.OutputData(segments=tuple(segments))
