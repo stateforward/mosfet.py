@@ -125,6 +125,68 @@ bad flags, `78` missing secret); the page's address goes to stderr and nothing t
 scope `willy_example.ui`) counts pages by outcome, messages by kind and drops by kind and why, never the room's
 name, what was typed or any sound or image.
 
+## Evaluate Willy by voice
+
+`willy_example.evaluate` is a voice agent that evaluates a running Willy: it joins one of Willy's rooms as that
+room's far side (a `room.Room` whose microphone it speaks into and whose speaker it listens to), holds short
+spoken conversations with Willy, and grades them. Give Willy a room the evaluator can have to itself, then run it
+in a second terminal:
+
+```sh
+cd examples/willy
+set -a; . ./.env.example; set +a
+# Terminal 1: Willy, on loopback, with a room for the evaluator.
+WILLY_HOST=127.0.0.1 WILLY_ROOMS=living-room:shelf,eval-room:table \
+  .venv/bin/python -m willy_example --secrets-dir secrets --ready-file /tmp/willy-ready
+# Terminal 2: the evaluator, in that room.
+.venv/bin/python -m willy_example.evaluate --url ws://127.0.0.1:8765 --peer eval-room \
+  --secret-file secrets/computer_token_secret --out /tmp/willy-eval [--scenario stranger-arrives ...]
+```
+
+Everything it uses is local, on Willy's own lab stack (`.env.example`): the people speak through the speech
+engine (`WILLY_TTS_URL`) in its catalog voices, never a designed voice (Willy's own is one); Willy's replies are
+heard by batch speech to text (`WILLY_TRANSCRIBE_URL`); and an evaluator model on `WILLY_LLM_URL`/`WILLY_MODEL`
+plays two parts. As the **persona** it plays each scenario's people: given the scenario's goal and what has been
+said so far, it writes the next thing one of them says, or decides the conversation is done. Only the people's
+lines are generated; nothing Willy should say is written anywhere. As the **judge** it grades each conversation
+on a JSON schema: relevance, helpfulness, warmth (Willy's traits, `WILLY_TRAITS`), honesty (no invented facts),
+memory where a person comes back, what suits a child where a child speaks, and overall, 1 to 5, each with a short
+rationale. An answer that fails its schema is shown back once; failing twice, the persona ends the scenario and the
+judge's conversation is recorded ungraded. The judge is Willy's own model by default, so it may favour answers like
+its own; the report says so. `--judge-url` and `--judge-model` name a bigger one.
+
+The person takes turns as people in a room do: they speak only once Willy's voice has died away (what the room's
+speaker played, modelled as playing for as long as it lasts) and the echo window after it has passed
+(`recognition.ECHO_SECONDS`), then wait for Willy's reply until it has been quiet for `--pause` seconds (1.5); no
+sound within `--reply-timeout` (30) is no reply. Each exchange measures the response latency (from the end of the
+person's line to Willy's first sound after it), how long Willy's reply played, no reply, talk-over (Willy's voice
+playing while the person speaks) and, where the person cuts in, how long Willy kept talking. The microphone is
+perfectly echo-cancelled: the evaluator never hears Willy through it. Willy's mouth plays in every room, so the
+evaluator also hears what Willy says to anyone else in the house: run it when the other rooms are quiet.
+
+The scenarios are data (`willy_example/evaluate/scenarios.json`), each a goal for the persona, the people (each
+with a catalog voice), at most 3 to 6 of their turns, the breaks and cut-ins, and the criteria graded:
+
+| Id | What happens |
+|---|---|
+| `stranger-arrives` | someone Willy has never met arrives and chats |
+| `introduces-and-returns` | Maya introduces herself, chats, leaves for 20 s, then checks Willy remembers her (graded on memory: recognising her voice is Willy's; the judge grades whether Willy acted on knowing her) |
+| `two-people` | Alex and Rose, in two voices, ask and answer each other with Willy in the room |
+| `curious-child` | Lily, about seven, in a lighter voice, asks curious questions (graded on what suits a child) |
+| `interrupts` | Sam asks for a long answer and cuts in while Willy is still giving it |
+
+Everything goes in `--out` (created `0700`), each file readable by its owner alone (`0600`), since it is
+household-style data: `transcript.jsonl` (every utterance: who, what, when, and a note on no reply, talk-over or a
+cut-in), `audio/<scenario>-<turn>.wav` (each exchange as the room heard it, 16 kHz mono), `scores.json` (per
+scenario and overall) and `report.html` (one page with nothing fetched: scores, latency median and p90, talk-overs,
+no replies and the transcripts, with each exchange's audio). The last line on stdout is a one-line summary;
+diagnostics go to stderr. Exit codes are the room's: `0` the evaluation finished, whatever it found, `1` it could
+not (the room's session ended or was refused, a service failed, or `--out` cannot be made), `64` bad flags (an
+unknown `--scenario` included), `78` a missing setting (`WILLY_LLM_URL`, `WILLY_MODEL`, `WILLY_TTS_URL`,
+`WILLY_TRANSCRIBE_URL`) or secret. Its telemetry (meter scope `willy_example.evaluate`) counts exchanges by
+outcome and scenarios by whether they were graded, and records each latency; nothing said, no scenario and no
+person is an attribute.
+
 ## Settings
 
 | Variable | Default | What it is |
@@ -209,6 +271,21 @@ and memory with its registries, and fakes at the provider seams only: the speech
 they are is offered; a voice Willy names is known by that name next turn; two voices in one turn are two sources; its own voice is
 `you`; forgetting a person erases their print; a line typed in a room wakes a turn with answering offered), never
 what it chooses.
+
+`tests/evaluate/` covers the evaluator, one file per module: the scenarios load and each is refused when its data
+does not hold together, and a persona voice must be a catalog voice and never a designed one; the speaker's
+playback model and the measures (latency, reply length, no reply, talk-over, a cut-in) on a manual clock, and the
+turn-taking machine on the real clock with its windows scaled down (it speaks only after Willy's voice and the echo
+window, waits out a break, hears a reply to its pause, marks talk-over, cuts in only while Willy is playing); the
+audio resampled, mixed and written as WAV; the persona's and the judge's prompts and JSON against a scripted chat
+model behind `httpx.MockTransport` (the persona ending a scenario, a child played as one, two people, a cut-in, one
+repair, and a judge answer that fails the schema twice recorded ungraded); the report rendered from fixtures; a
+whole evaluation against a real `websocket.Server` and `computer.Computer` with a scripted Willy that answers each
+line in the house, with the speech engine, speech to text and model scripted (the transcript, the WAVs, the
+scores and the page, each `0600`); and the command line's exit codes. `tests/evaluate/test_live.py` runs one short
+scenario with a running Willy and the lab, under the same two gates as the live check below: `WILLY_LIVE=1`, a
+Willy whose `WILLY_ROOMS` lists `WILLY_EVALUATE_PEER` (default `eval-room`) at `WILLY_EVALUATE_URL` (default
+`ws://127.0.0.1:8765`), and the `computer_token_secret` it was started with.
 
 ## Live check
 
