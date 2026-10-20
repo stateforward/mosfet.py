@@ -150,6 +150,44 @@ def test_on_an_interrupting_turn_the_persona_also_writes_what_it_cuts_in_with() 
     assert "cut_in" in model.prompt()
 
 
+type _Branch = dict[str, object]
+
+
+def _persona_branches(request: dict[str, typing.Any]) -> list[_Branch]:
+    """The persona schema's two answers as sent: a line, then done."""
+
+    return typing.cast(list[_Branch], request["response_format"]["json_schema"]["schema"]["anyOf"])
+
+
+def test_the_persona_schema_names_who_may_speak_and_bounds_what_they_say() -> None:
+    model = _Model(json.dumps({"done": False, "speaker": "rose", "say": "Dinner?", "cut_in": None}))
+    _ = _run(minds.Persona(model.client()).next(_scenario("two-people"), [], turn=0))
+
+    branches = _persona_branches(model.requests[0])
+    line, done = (typing.cast(dict[str, dict[str, object]], branch["properties"]) for branch in branches)
+    # The server's grammar holds the answer to the scenario's people, so a name in place of an id cannot be written.
+    assert line["done"] == {"const": False, "description": line["done"]["description"]}
+    assert sorted(typing.cast(list[str], line["speaker"]["enum"])) == ["alex", "rose"]
+    assert (line["say"]["type"], line["say"]["minLength"], line["say"]["maxLength"]) == ("string", 1, 300)
+    # Not an interrupting turn: there is nothing to cut in with.
+    assert line["cut_in"]["type"] == "null"
+    # Done is only done: no speaker, no line.
+    assert done["done"]["const"] is True
+    assert [done[name]["type"] for name in ("speaker", "say", "cut_in")] == ["null", "null", "null"]
+    for branch in branches:
+        assert sorted(typing.cast(list[str], branch["required"])) == ["cut_in", "done", "say", "speaker"]
+        assert branch["additionalProperties"] is False
+
+
+def test_on_an_interrupting_turn_the_persona_schema_requires_the_words_cut_in() -> None:
+    model = _Model(json.dumps({"done": False, "speaker": "sam", "say": "Pancakes?", "cut_in": "Waffles!"}))
+    _ = _run(minds.Persona(model.client()).next(_scenario("interrupts"), [], turn=0, cut_in=True))
+
+    line = typing.cast(dict[str, dict[str, object]], _persona_branches(model.requests[0])[0]["properties"])
+    assert line["speaker"]["enum"] == ["sam"]
+    assert (line["cut_in"]["type"], line["cut_in"]["minLength"], line["cut_in"]["maxLength"]) == ("string", 1, 300)
+
+
 def test_a_persona_that_answers_wrongly_twice_is_unanswered() -> None:
     model = _Model("not json at all", json.dumps({"done": False, "speaker": "visitor", "say": "", "cut_in": None}))
 
@@ -191,6 +229,11 @@ def test_the_judge_grades_each_of_the_scenarios_criteria_against_willys_traits()
     assert schema["name"] == "verdict"
     # The schema offers exactly this scenario's criteria.
     assert set(schema["schema"]["$defs"]["Grade"]["properties"]["criterion"]["enum"]) == set(scenario.criteria)
+    # One grade per criterion, scored 1 to 5, as the schema the server holds the answer to.
+    grades = typing.cast(dict[str, object], schema["schema"]["properties"]["grades"])
+    assert grades["minItems"] == grades["maxItems"] == len(scenario.criteria)
+    score = typing.cast(dict[str, object], schema["schema"]["$defs"]["Grade"]["properties"]["score"])
+    assert (score["minimum"], score["maximum"]) == (1, 5)
 
 
 def test_a_judge_answer_that_fails_the_schema_is_repaired_once_then_recorded_as_ungraded() -> None:

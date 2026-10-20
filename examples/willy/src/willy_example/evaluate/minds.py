@@ -74,6 +74,46 @@ class _PersonaTurn(pydantic.BaseModel):
     )
 
 
+def _persona_schema(people: collections.abc.Sequence[str], *, cut_in: bool) -> dict[str, typing.Any]:
+    """The persona's answer as the server's grammar holds it: a line by one of ``people`` (with the words cut in on
+    an interrupting turn, and none otherwise), or done with nothing said.
+
+    It carries the constraints the persona's reader checks, so a speaker who is not in the room, an empty or overlong
+    line, or a missing cut-in cannot be written; the reader still checks them.
+    """
+
+    turn = _PersonaTurn.model_json_schema()
+    described: dict[str, dict[str, typing.Any]] = {
+        name: {"description": field.description} for name, field in _PersonaTurn.model_fields.items()
+    }
+    spoken = {"type": "string", "minLength": 1, "maxLength": _MAX_LINE}
+    line = {
+        "done": {**described["done"], "const": False},
+        "speaker": {**described["speaker"], "enum": list(people)},
+        "say": {**described["say"], **spoken},
+        "cut_in": {**described["cut_in"], **(spoken if cut_in else {"type": "null"})},
+    }
+    done = {
+        "done": {**described["done"], "const": True},
+        **{name: {**described[name], "type": "null"} for name in ("speaker", "say", "cut_in")},
+    }
+    return {
+        "title": turn["title"],
+        "description": turn["description"],
+        "examples": [
+            {
+                **turn["examples"][0],
+                "speaker": people[0],
+                "cut_in": "Actually, never mind." if cut_in else None,
+            }
+        ],
+        "anyOf": [
+            {"type": "object", "properties": branch, "required": list(branch), "additionalProperties": False}
+            for branch in (line, done)
+        ],
+    }
+
+
 def _json_format(name: str, schema: dict[str, typing.Any]) -> dict[str, object]:
     return {"type": "json_schema", "json_schema": {"name": name, "strict": True, "schema": schema}}
 
@@ -225,7 +265,7 @@ class Persona:
         return await _ask(
             self._chat,
             [{"role": "system", "content": system}, {"role": "user", "content": "\n".join(instructions)}],
-            response_format=_json_format("persona_turn", _PersonaTurn.model_json_schema()),
+            response_format=_json_format("persona_turn", _persona_schema(list(people), cut_in=cut_in)),
             temperature=self._temperature,
             read=read,
         )
@@ -284,6 +324,7 @@ class Judge:
         )
         schema = record.Verdict.model_json_schema()
         schema["$defs"]["Grade"]["properties"]["criterion"] = {"type": "string", "enum": list(criteria)}
+        schema["properties"]["grades"] |= {"minItems": len(criteria), "maxItems": len(criteria)}
 
         def read(text: str) -> record.Verdict:
             try:

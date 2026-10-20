@@ -151,9 +151,12 @@ said so far, it writes the next thing one of them says, or decides the conversat
 lines are generated; nothing Willy should say is written anywhere. As the **judge** it grades each conversation
 on a JSON schema: relevance, helpfulness, warmth (Willy's traits, `WILLY_TRAITS`), honesty (no invented facts),
 memory where a person comes back, what suits a child where a child speaks, and overall, 1 to 5, each with a short
-rationale. An answer that fails its schema is shown back once; failing twice, the persona ends the scenario and the
-judge's conversation is recorded ungraded. The judge is Willy's own model by default, so it may favour answers like
-its own; the report says so. `--judge-url` and `--judge-model` name a bigger one.
+rationale. Each schema is built for the scenario, so the server's structured output holds the answer to it: the
+persona's names who may speak (the people's ids), bounds each line, and requires the words cut in on an interrupting
+turn and none otherwise; the judge's offers the scenario's criteria, one grade each. An answer that still fails its
+check is shown back once; failing twice, the persona ends the scenario and the judge's conversation is recorded
+ungraded. The judge is Willy's own model by default, so it may favour answers like its own; the report says so.
+`--judge-url` and `--judge-model` name a bigger one.
 
 The person takes turns as people in a room do: they speak only once Willy's voice has died away (what the room's
 speaker played, modelled as playing for as long as it lasts) and the echo window after it has passed
@@ -278,8 +281,9 @@ playback model and the measures (latency, reply length, no reply, talk-over, a c
 turn-taking machine on the real clock with its windows scaled down (it speaks only after Willy's voice and the echo
 window, waits out a break, hears a reply to its pause, marks talk-over, cuts in only while Willy is playing); the
 audio resampled, mixed and written as WAV; the persona's and the judge's prompts and JSON against a scripted chat
-model behind `httpx.MockTransport` (the persona ending a scenario, a child played as one, two people, a cut-in, one
-repair, and a judge answer that fails the schema twice recorded ungraded); the report rendered from fixtures; a
+model behind `httpx.MockTransport` (the schemas each sends for its scenario, the persona ending a scenario, a child
+played as one, two people, a cut-in, one repair, and a judge answer that fails the schema twice recorded ungraded);
+the report rendered from fixtures; a
 whole evaluation against a real `websocket.Server` and `computer.Computer` with a scripted Willy that answers each
 line in the house, with the speech engine, speech to text and model scripted (the transcript, the WAVs, the
 scores and the page, each `0600`); and the command line's exit codes. `tests/evaluate/test_live.py` runs one short
