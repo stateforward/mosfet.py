@@ -127,7 +127,7 @@ class Settings(pydantic.BaseModel):
         examples=["http://192.168.2.2:8100/v1"],
     )
     model: str = pydantic.Field(
-        alias="WILLY_MODEL", min_length=1, description="The model that endpoint serves.", examples=["qwen3.8-27b"]
+        alias="WILLY_MODEL", min_length=1, description="The model that endpoint serves.", examples=["gemma-4-26b-a4b"]
     )
     decision_base_url: str = pydantic.Field(
         alias="DECISION_BASE_URL",

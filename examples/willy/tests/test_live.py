@@ -39,15 +39,16 @@ and its bound:
 * L4 knowing is a capacity (60 s): the test has Willy remember that A's ref is called Sam. A's next utterance is
   the same ref (a real voiceprint match through the persistent store), ``known`` true, and Sam; or, when that
   sentence's print falls below the match threshold, a new voice shown as resembling Sam's person (R-13).
-* L5 two voices, one utterance (180 s): A then B in one utterance are two distinct ``source`` voice refs on one
-  turn (diarization and voiceprints). Talked over by Willy, they say it again once it has finished.
+* L5 two voices, one utterance (180 s): A then B in one utterance are two distinct ``source`` voice refs across
+  the turns Willy takes on it, one turn when the speech server hears it as one (diarization and voiceprints).
+  Talked over by Willy, they say it again once it has finished.
 * L6 own voice (90 s): Speaking says a fixed reply; its echo, played by the room's speaker into the room's
   microphone, resolves to ``you``, and ``you.refs`` lists that ``voice:`` ref. When no turn shows it within
   20 s, A speaks in the room again, which gives Willy one.
 * L7 forget (60 s): forgetting A's person erases A's print, so A's next utterance is a new ref and not that
   person: unknown, unless Willy itself has come to know the new voice again.
 
-The run takes about fifteen minutes, most of it Willy's birth on the 27B model, which thinks by default. The
+The run takes a few minutes, most of it Willy's birth, while its model conceives a voice. The
 owner's ``WILLY_HOST``, ``WILLY_PORT`` and ``WILLY_CAMERA`` are not used: the room is served on loopback, and
 Willy does not see.
 """
@@ -563,12 +564,13 @@ class House:
                 await asyncio.sleep(_POLL_SECONDS)
 
     async def heard_saying(
-        self, pcm: bytes, step: str, wanted: collections.abc.Callable[[processing.InputData], bool]
-    ) -> processing.InputData:
-        """Say ``pcm`` once Willy has finished answering, and say it again whenever Willy talks over it.
+        self, pcm: bytes, step: str, enough: collections.abc.Callable[[list[processing.InputData]], bool]
+    ) -> list[processing.InputData]:
+        """Say ``pcm`` once Willy's voice has died away, and the turns Willy took on it once they are ``enough``.
 
-        Heard over Willy's voice, a voice nobody knows is never a new voice (D-R-37), so an utterance Willy
-        talked over is said again, as people do; one Willy let be is the step's turn, wanted or not.
+        The speech server may hear one utterance as one turn or several; what was heard is every turn on it.
+        Heard over Willy's voice, a voice nobody knows is never a new voice (D-R-37), so an utterance Willy talked
+        over is said again, as people do, once a turn on it shows it was not enough.
         """
 
         while True:
@@ -576,10 +578,20 @@ class House:
             after = self.mark()
             await self.microphone.say(pcm)
             talked_over = self.speaker.quiet_at > after.at
-            turn = await self.turn(after, step, lambda call: bool(_others(call)))
-            if wanted(turn) or not talked_over:
-                return turn
+            heard = await self.heard_since(after, step, lambda calls: enough(calls) or (talked_over and bool(calls)))
+            if enough(heard):
+                return heard
             self.report.write("talked_over", step=step)
+
+    async def heard_since(
+        self, after: Mark, step: str, done: collections.abc.Callable[[list[processing.InputData]], bool]
+    ) -> list[processing.InputData]:
+        """Every turn with someone speaking, on speech that reached Willy after ``after``, once they are ``done``."""
+
+        seen: list[processing.InputData] = []
+        while not done(seen):
+            seen.append(await self.turn(after, step, lambda call: bool(_others(call)) and call not in seen))
+        return seen
 
     def mark(self) -> Mark:
         """Where the model's calls are now, and when: the turns after it on speech heard after it come next."""
@@ -892,10 +904,11 @@ async def _knows_people(house: House, settings: willy_example.Settings, speech_u
 
     together = await _spoken(a, _A_ASKS) + await _spoken(b, _B_ANSWERS)
     async with _step("L5 two voices, one utterance", _TALKED_OVER_BOUND):
-        turn = await house.heard_saying(
-            together, "L5", lambda call: len({present.ref for present in _others(call)}) == 2
+        heard = await house.heard_saying(
+            together, "L5", lambda calls: len({present.ref for call in calls for present in _others(call)}) >= 2
         )
-    assert len({present.ref for present in _others(turn)}) == 2, "L5: one utterance of two voices was not two voices"
+    voices = {present.ref for call in heard for present in _others(call)}
+    assert len(voices) >= 2, "L5: one utterance of two voices was not two voices"
 
     await house.settled()
     async with _step("L6 own voice", _OWN_VOICE):
@@ -936,7 +949,7 @@ async def _knows_people(house: House, settings: willy_example.Settings, speech_u
         assert isinstance(forgot, memory.KnownData), f"L7: forgetting A's person failed: {forgot}"
     leaves = await _spoken(a, _A_LEAVES)
     async with _step("L7 forget", _TALKED_OVER_BOUND):
-        turn = await house.heard_saying(leaves, "L7", lambda call: all(not present.known for present in _others(call)))
+        (turn, *_) = await house.heard_saying(leaves, "L7", bool)
     (forgotten,) = _others(turn)
     # The print went with the person: A's voice is a new voice to Willy now, and not the person it forgot.
     assert forgotten.ref != a_ref, "L7: A's print outlived the person it was linked to"

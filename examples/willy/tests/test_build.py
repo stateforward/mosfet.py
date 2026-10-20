@@ -171,7 +171,7 @@ def test_the_env_example_is_the_lab_and_every_setting_in_it_is_valid() -> None:
     # nothing in it is a secret but the lab's keyless placeholder, and the local decision server takes no key.
     assert set(_REQUIRED) <= set(given)
     assert all("192.168.2.2:" in given[name] for name in _REQUIRED if name.endswith("_URL"))
-    assert (settings.model, settings.embed_model) == ("qwen3.8-27b", "embeddinggemma-2")
+    assert (settings.model, settings.embed_model) == ("gemma-4-26b-a4b", "embeddinggemma-2")
     assert [room.id for room in settings.rooms] == ["living-room"]
     assert given["OPENAI_API_KEY"] == "local"
     # D-R-36: decide's context is 2048 tokens, and each decision request is fitted to it.
