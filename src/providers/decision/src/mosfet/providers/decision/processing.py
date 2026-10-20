@@ -5,8 +5,10 @@ events with a calibrated probability for each, so it is a processor intuition ru
 
 The mapping is structural, not behavioral:
 
-- **state** is the turn as the model may see it: the stimulus envelope (name, data) as a
-  structured JSON document, so the live event data rides as JSON instead of a text template.
+- **state** is the turn as the model may see it (D-R-50): core's model-facing projection of the
+  stimulus (``cognition.event.model_facing_content``), the same text reasoning reads. Typed causal
+  parents are left out and media renders as a placeholder, never as bytes or base64; what someone
+  said or typed is kept whole (D-R-47). The state is JSON, so no image is attached to it.
 - The **event menu** is one choice question per turn (``selection``): its criteria are the offered
   event names, each described by the first line of its event schema's description, together with a
   reserved pass criterion ("none of these") that maps to the typed explicit decline (an unhandled
@@ -41,8 +43,11 @@ import pydantic
 from opentelemetry import metrics
 
 import mosfet.telemetry
+from mosfet import media
 from mosfet.abilities import processing
+from mosfet.abilities.cognition import event as cognition_event
 from mosfet.abilities.cognition import intuition as cognition_intuition
+from mosfet.abilities.language import text
 
 from . import _json
 from . import client
@@ -106,15 +111,6 @@ def _single_enabler(
     if enablers is not None and len(enablers) == 1:
         return next(iter(enablers))
     return None
-
-
-def _stimulus_document(stimulus: object) -> dict[str, typing.Any]:
-    """The stimulus envelope as structured state: name plus live event data."""
-
-    if isinstance(stimulus, processing.Event):
-        event = typing.cast(processing.Event[typing.Any], stimulus)
-        return {"envelope": {"name": event.name}, "data": _json.jsonable(event.data)}
-    return {"data": _json.jsonable(stimulus)}
 
 
 def _payload_required_keys(event: processing.Event[typing.Any]) -> tuple[str, ...]:
@@ -247,8 +243,13 @@ class Processor(processing.DecisionProcessor):
         """
 
         del drafts
-        stimulus_document = _stimulus_document(input.input)
-        stimulus_data = stimulus_document.get("data")
+        stimulus = input.input
+        # Grounding reads the live stimulus data, media left out (D-R-50); the state is what the model may see.
+        stimulus_data = _json.jsonable(
+            typing.cast(processing.Event[typing.Any], stimulus).data
+            if isinstance(stimulus, processing.Event)
+            else stimulus
+        )
         groundable: dict[str, processing.Event[typing.Any]] = {}
         candidates: dict[tuple[str, str], dict[str, typing.Any]] = {}
         for event in input.schemas:
@@ -273,7 +274,13 @@ class Processor(processing.DecisionProcessor):
                 instructions=f"{wording} {_PAYLOAD_KEY_INSTRUCTIONS}",
                 criteria=dict.fromkeys(values, wording),
             )
-        request = client.Request(state={"turn": stimulus_document}, questions=questions, model=self._model)
+        try:
+            # Text-only capacity: the state is JSON, so an image is its placeholder and never an attached part.
+            parts = cognition_event.model_facing_content(stimulus, capacity=media.ImageCapacity())
+        except (TypeError, ValueError) as error:
+            raise ProcessingError(f"The turn cannot be shown to the decision model: {error}") from error
+        turn = "".join(part.text for part in parts if isinstance(part, text.TextPart))
+        request = client.Request(state={"turn": turn}, questions=questions, model=self._model)
         if self._max_context_tokens is not None:
             request, fit = _fitted(
                 request, max_context_tokens=self._max_context_tokens, bytes_per_token=self._bytes_per_token

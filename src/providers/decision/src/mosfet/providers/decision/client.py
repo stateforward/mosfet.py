@@ -55,7 +55,7 @@ class Request(pydantic.BaseModel):
 
     state: pydantic.JsonValue = pydantic.Field(
         description="The state the questions are judged against: a string, an object or an array.",
-        examples=[{"turn": {"envelope": {"name": "environment.sound"}, "data": {"kind": "phone.ringing"}}}],
+        examples=[{"turn": '<environment:sound kind="phone.ringing" stimulus:event="environment.sound" />'}],
     )
     questions: dict[str, Choice] = pydantic.Field(
         min_length=1,

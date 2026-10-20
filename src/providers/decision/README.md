@@ -11,10 +11,13 @@ bot.cognition(processor, intuition=decision.Processor(base_url="http://127.0.0.1
 ```
 
 - `Processor` is a decision processor (`processing.DecisionProcessor`), the kind intuition runs
-  on. It maps a cognition turn to one request: a choice question over the offered event menu
+  on. It maps a cognition turn to one request. Its state is the turn as the model may see it: core's
+  model-facing projection of the stimulus, the same text reasoning reads, with typed causal parents
+  left out and media as a placeholder, never as bytes or base64; what someone said or typed is kept
+  whole. It asks a choice question over the offered event menu
   (each event described by the first line of its schema's description) plus a reserved pass
   criterion ("none of these"), and one choice question per required payload key whose criteria
-  are values taken mechanically from the turn's own evidence (the stimulus data, then the
+  are values taken mechanically from the turn's own evidence (the stimulus data, media left out, then the
   schema's enum options). The answer label *is* the value, so a payload can never leave the menu,
   and an event with a required key that has no grounded value is left unoffered, before any
   request. Only the option the question chose is returned, with its probability as the
@@ -53,7 +56,7 @@ cognition hands to reasoning in the same turn. `None` sends every request whole.
 `POST {base_url}/v1/systemone` with
 
 ```json
-{"state": {"turn": {"envelope": {"name": "environment.sound"}, "data": {"kind": "phone.ringing"}}},
+{"state": {"turn": "<environment:sound kind=\"phone.ringing\" stimulus:event=\"environment.sound\" />"},
  "questions": {"selection": {"type": "choice", "instructions": "...",
                              "criteria": {"phone.answer_call": "Answer the ringing call.",
                                           "__unhandled__": "None of these fits: think the turn through first, with reasoning."}}}}

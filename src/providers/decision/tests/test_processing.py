@@ -8,14 +8,20 @@ import math
 import pathlib
 import typing
 
+import dataclasses
+
 import hsm
 import httpx
 import pydantic
 import pytest
 from opentelemetry import _logs
 
+import mosfet
 import mosfet.telemetry
-from mosfet.abilities import processing
+from mosfet import environment
+from mosfet.abilities import listening, processing
+from mosfet.abilities.communication import communication, conversation
+from mosfet.abilities.hearing import voice
 from mosfet.abilities.cognition import intuition
 from mosfet.devices import phone as phone_device
 from mosfet.providers import decision
@@ -231,7 +237,9 @@ def test_a_refused_request_is_a_processing_error_naming_the_status() -> None:
     assert "prompt too long" not in str(raised.value)
 
 
-def test_the_state_document_carries_the_envelope_and_groundable_data() -> None:
+def test_the_state_carries_the_envelope_and_groundable_data_and_leaves_the_audio_out() -> None:
+    """The state is the stimulus as the model may see it: its event name and data, never its audio bytes."""
+
     stimulus = hsm.Event[phone_device.SoundData](
         name="environment.sound",
         schema=phone_device.SoundData,
@@ -249,8 +257,9 @@ def test_the_state_document_carries_the_envelope_and_groundable_data() -> None:
 
     (sent,) = server.requests
     turn = sent["state"]["turn"]
-    assert turn["envelope"] == {"name": "environment.sound"}
-    assert turn["data"]["kind"] == "phone.ringing"
+    assert 'stimulus:event="environment.sound"' in turn
+    assert 'kind="phone.ringing"' in turn
+    assert "audio=" not in turn
     assert sent["questions"]["selection"]["instructions"] == "Choose from the menu."
 
 
@@ -406,7 +415,78 @@ def test_what_someone_said_or_typed_reaches_the_decision_whole() -> None:
     _ = _run(_processor(server), input_payload={"text": line}, schemas=_answer_call_offered())
 
     (sent,) = server.requests
-    assert sent["state"]["turn"]["data"]["text"] == line
+    assert f'value="{line}"' in sent["state"]["turn"]
+
+
+class _SaidPayload(pydantic.BaseModel):
+    """Probe event payload: echoes what was said, grounded from the turn's own content."""
+
+    content: str
+
+
+def test_the_state_is_the_turn_as_the_model_may_see_it_without_causal_parents_or_audio() -> None:
+    """D-R-50 (Willy evaluator): the state dumped the stimulus data whole, so a heard turn carried its typed causal
+    parents down to environment.sound and that sound's audio as base64. Requests were 10-27 KB against a 2048-token
+    decide context and 98 of ~120 were refused (422). The state is the turn as the model may see it: the words whole,
+    no causal parents, no audio; grounding still reads the live stimulus data."""
+
+    said = "Hi Willy, this is Gabe. Can you set a timer for ten minutes?"
+    sound = environment.SoundData(audio=b"\x01\x02" * 4_096, media_type="audio/pcm", sample_rate_hz=16_000, channels=1)
+    speech = listening.SpeechData(
+        content=said,
+        content_type="text/plain",
+        voice_detection=voice.detection.ApplyData(segments=()),
+        sample_rate_hz=16_000,
+        channels=1,
+        media_type="audio/pcm",
+        source_ids=frozenset({"voice:gabe"}),
+        parent=mosfet.StimulusData.from_event(environment.SoundEvent.with_data_and_id(sound, "sound-1")),
+    )
+    speech_event = dataclasses.replace(listening.SpeechEvent.with_data_and_id(speech, "speech-1"), source="listening-1")
+    turn = conversation.TurnData(
+        source_ids=frozenset({"voice:gabe"}),
+        target_ids=frozenset(),
+        content=said,
+        content_type="text/plain",
+        parent=mosfet.StimulusData.from_event(speech_event),
+    )
+    stimulus = communication.InputEvent.with_data_and_id(turn, "communication-1")
+    probe = hsm.Event[_SaidPayload](name="probe.say_back", schema=_SaidPayload)
+    server = _Decide({"selection": (_PASS, {_PASS: 1.0})})
+
+    _ = _run(_processor(server), input_payload=stimulus, schemas=(probe,))
+
+    (sent,) = server.requests
+    state = json.dumps(sent["state"], ensure_ascii=False)
+    assert said in state
+    assert "environment.sound" not in state
+    assert speech_event.name not in state
+    assert "AQIBAg" not in state  # the audio as base64
+    assert len(state.encode("utf-8")) < 2_048
+    assert sent["questions"]["probe.say_back::content"]["criteria"] == {
+        said: "Which value fills 'content' for probe.say_back?"
+    }
+
+
+class _HeardPayload(pydantic.BaseModel):
+    """Probe event payload: a required key a sound's audio bytes would fill if they reached the menu."""
+
+    audio: str
+
+
+def test_audio_bytes_never_become_a_payload_candidate() -> None:
+    """D-R-50: media never belongs in a decision request, so audio bytes in the stimulus data are no evidence for a
+    payload key. Dumped as JSON they became a base64 candidate; read as the model may see them they are left out,
+    and an event whose required key only audio could ground is left unoffered."""
+
+    stimulus = environment.SoundEvent.with_data_and_id(
+        environment.SoundData(audio=b"\x01\x02" * 64, media_type="audio/pcm", kind="ambient"), "sound-1"
+    )
+    probe = hsm.Event[_HeardPayload](name="probe.repeat_sound", schema=_HeardPayload)
+    server = _Decide({"selection": (_PASS, {_PASS: 1.0})})
+
+    assert _run(_processor(server), input_payload=stimulus, schemas=(probe,)) == ()
+    assert server.requests == []
 
 
 def test_the_token_estimate_learns_from_what_the_server_counted() -> None:
@@ -479,7 +559,7 @@ def test_a_request_that_cannot_fit_is_still_sent_and_its_refusal_is_the_processi
 
     (overflowing,) = sent
     assert overflowing["questions"]["selection"]["instructions"] == _DEFAULT_INSTRUCTIONS
-    assert overflowing["state"] == {"turn": {"data": "ring turn"}}
+    assert overflowing["state"] == {"turn": "<str>ring turn</str>"}
     assert after.get("overflow", 0.0) - before.get("overflow", 0.0) == 1.0
 
 
