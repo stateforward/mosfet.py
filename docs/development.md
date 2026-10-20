@@ -144,7 +144,9 @@ prompt renders the batch with each percept as a child element in order. Images a
 share the model's `media.ImageCapacity`, which admits newest in document order first, as within
 any one stimulus. The turn is remembered as one episode of `bot.perceived`, every percept kept,
 under the participants' union. A failed or timed-out step of a batch names `bot.perceived` as its
-stimulus and is handed back once, unless every percept was itself a failed step.
+stimulus and is handed back once, unless every percept was itself a failed step. A turn that
+perceives a handed-back intuition failure, as its stimulus or as any percept of its batch, passes
+intuition, so reasoning, a stage that can perceive that failure, decides it.
 
 Leaving `active` (deactivation, reboot, the cancel bound that degrades the body, or stopping)
 releases whatever is still held: never replayed, counted in

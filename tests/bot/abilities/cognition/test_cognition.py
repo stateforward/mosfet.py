@@ -5273,14 +5273,19 @@ def _typed_percept(line: str, *, person: mosfet.Participant) -> mosfet.PerceptDa
     )
 
 
-def _failed_percept(turn_id: str, *, timed_out: bool = False) -> mosfet.PerceptData:
+def _failed_percept(
+    turn_id: str,
+    *,
+    timed_out: bool = False,
+    stage: typing.Literal["autonomy", "intuition", "reasoning"] = "intuition",
+) -> mosfet.PerceptData:
     """A failed step cognition handed back, as the body holds it."""
 
     observed = (
         cognition.StepTimedOutEvent.with_data(
             cognition.StepTimedOutData(
-                message="Cognition's intuition step took longer than 0.5 seconds, so the turn failed.",
-                stage="intuition",
+                message=f"Cognition's {stage} step took longer than 0.5 seconds, so the turn failed.",
+                stage=stage,
                 timeout_seconds=0.5,
                 turn_id=turn_id,
                 stimulus=mosfet.InputEvent.name,
@@ -5289,8 +5294,8 @@ def _failed_percept(turn_id: str, *, timed_out: bool = False) -> mosfet.PerceptD
         if timed_out
         else cognition.StepFailedEvent.with_data(
             cognition.StepFailedData(
-                message="Cognition's intuition step failed, so the turn failed: the step failed",
-                stage="intuition",
+                message=f"Cognition's {stage} step failed, so the turn failed: the step failed",
+                stage=stage,
                 turn_id=turn_id,
                 stimulus=mosfet.InputEvent.name,
             )
@@ -5359,17 +5364,20 @@ def test_a_failed_batch_turn_is_handed_back_once_unless_it_perceived_only_failed
 ) -> None:
     """D-W12-6 (Q6): a batch whose turn fails is handed back once, so the next turn perceives that failure
     with whatever else queued; a batch that perceived nothing but failed steps is not handed back, so a
-    failing step cannot wake the bot more often than new stimuli arrive."""
+    failing step cannot wake the bot more often than new stimuli arrive. A batch holding an intuition
+    failure is decided by reasoning (D-R-30), so here it is reasoning's step that fails."""
 
     def outcomes(reader: metric_reader.Reader) -> dict[str, float]:
         return {
             str(point.attributes["outcome"]): point.value
             for point in reader.points("bot.cognition.step.failure.count")
-            if point.attributes.get("stage") == "intuition" and point.attributes.get("kind") == "failed"
+            if point.attributes.get("stage") == "reasoning" and point.attributes.get("kind") == "failed"
         }
 
     async def run() -> list[hsm.Event[typing.Any]]:
-        intuition, reasoning = cognition_abilities(intuition_processor=_FailingStepProcessor())
+        intuition, reasoning = cognition_abilities(
+            intuition_processor=_FailingStepProcessor(), reasoning_processor=_FailingStepProcessor()
+        )
         store = memory.Memory()
         ability = cognition.Cognition(
             intuition=intuition,
@@ -5406,7 +5414,11 @@ def test_a_failed_batch_turn_is_handed_back_once_unless_it_perceived_only_failed
         failure = perceived.data.stimulus
         assert isinstance(failure, hsm.Event)
         assert isinstance(failure.data, cognition.StepFailedData)
-        assert (failure.data.turn_id, failure.data.stimulus) == ("batch-turn", "bot.perceived")
+        assert (failure.data.stage, failure.data.turn_id, failure.data.stimulus) == (
+            "reasoning",
+            "batch-turn",
+            "bot.perceived",
+        )
 
 
 def test_a_batch_turn_whose_step_outlasts_its_timeout_names_bot_perceived_as_its_stimulus() -> None:
@@ -5442,6 +5454,63 @@ def test_a_batch_turn_whose_step_outlasts_its_timeout_names_bot_perceived_as_its
     (perceived,) = [event for event in told if event.name == cognition.InputEvent.name]
     assert isinstance(perceived.data, cognition.InputData)
     assert perceived.data.participants == (_ADA, _BOB)
+
+
+@pytest.mark.parametrize(
+    ("perceived", "decider"),
+    [
+        ("intuition-failed", "reasoning"),
+        ("intuition-timed-out", "reasoning"),
+        ("batch-holding-an-intuition-failure", "reasoning"),
+        ("reasoning-failed", "intuition"),
+    ],
+)
+def test_a_turn_perceiving_a_handed_back_intuition_failure_is_decided_by_reasoning(
+    perceived: str, decider: str
+) -> None:
+    """D-R-30 (live round 5, F-4): a handed-back intuition failure went back to intuition, which failed on it
+    again, and the bound stopped it, so reasoning never saw it. A turn that perceives one (as its stimulus or
+    as any percept of its batch) starts at reasoning; one that perceives another stage's failure does not."""
+
+    async def run() -> tuple[
+        cognition.types.OutputData, cognition.InputData, list[processing.InputData], list[processing.InputData]
+    ]:
+        intuition_processor = RecordingIntuitionProcessor(cognition.intuition.OutputData(result=no_output("fast")))
+        reasoning_processor = RecordingReasoningProcessor(no_output("reasoned"))
+        ability = RecordingCognition(intuition_processor=intuition_processor, reasoning_processor=reasoning_processor)
+        ctx = await start_cognition_ability_for_test(ability)
+        await wait_until(lambda: ability.state().endswith("/idle"))
+        base = await started_cognition_input(ctx)
+        turn = (
+            _batch_turn(base, _typed_percept("are you there?", person=_ADA), _failed_percept("failed-1"))
+            if perceived == "batch-holding-an-intuition-failure"
+            else base.model_copy(
+                update={
+                    "stimulus": _failed_percept(
+                        "failed-1",
+                        timed_out=perceived == "intuition-timed-out",
+                        stage="reasoning" if perceived == "reasoning-failed" else "intuition",
+                    ).stimulus
+                }
+            )
+        )
+        result = await dispatch_ability_for_test(ability, ctx, turn)
+        await wait_until(lambda: ability.state().endswith("/idle"))
+        return result, turn, intuition_processor.calls, reasoning_processor.calls
+
+    result, turn, intuition_calls, reasoning_calls = asyncio.run(run())
+
+    if decider == "reasoning":
+        assert result == no_output("reasoned")
+        assert intuition_calls == []
+        (frame,) = reasoning_calls
+        assert isinstance(frame.input, cognition.reasoning.ProcessorInput)
+        assert frame.input.host_input.input == turn.stimulus
+    else:
+        assert result == no_output("fast")
+        assert reasoning_calls == []
+        (frame,) = intuition_calls
+        assert frame.input == turn.stimulus
 
 
 def _record_admitted(ctx: hsm.Context, instance: "_Communication", event: hsm.Event[typing.Any]) -> None:

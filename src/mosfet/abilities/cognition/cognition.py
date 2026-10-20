@@ -265,6 +265,12 @@ _AssociatedEvent = hsm.Event[_AssociatedData](
     kind=hsm.CompletionEventKind,
     schema=_AssociatedData,
 )
+# Private completion: intuition passed the turn without deciding it (``output`` is None), so reasoning takes it.
+_IntuitionPassedEvent = hsm.Event[types.CompletionData](
+    name="bot.ability.cognition.intuition.passed",
+    kind=hsm.CompletionEventKind,
+    schema=types.CompletionData,
+)
 
 
 class _TurnOpenedData(pydantic.BaseModel):
@@ -380,7 +386,8 @@ class Cognition(ability.Ability[InputData, OutputData]):
     cannot be built for one) is handed back the same way, as a ``cognition.InputEvent`` observing
     ``StepFailedEvent``. Both are bounded: a step that fails or outlasts its timeout on a turn
     taken up for a failed step is not handed back again (``bot.cognition.step.failure.count``
-    counts each, by stage, kind and outcome).
+    counts each, by stage, kind and outcome). A turn taken up for a handed-back intuition failure
+    passes intuition, so reasoning, a stage that can perceive that failure, decides it.
 
     With ``memory`` composed, Cognition attaches it and remembers every turn it settles —
     completed, failed, or cancelled — as one ``memory.RememberEvent`` it does not wait on: what it
@@ -749,10 +756,42 @@ class Cognition(ability.Ability[InputData, OutputData]):
         acted: types.ActedData | None,
     ) -> None:
         """Build intuition's frame (with what memory surfaced as ``recalled``, and what behaviors
-        already did as ``acted``) and hop to it."""
+        already did as ``acted``) and hop to it.
+
+        A turn that perceives a handed-back intuition failure (its stimulus, or any percept of its
+        ``bot.perceived`` batch) passes intuition unhandled, so reasoning, a stage that can perceive
+        that failure, takes it (D-R-30).
+        """
 
         public_metadata = _public_metadata(dict(event.metadata))
         base = operation_id or uuid.uuid4().hex
+        perceived = cognition_input.stimulus
+        stimuli = (
+            tuple(percept.stimulus for percept in perceived.data.percepts)
+            if isinstance(perceived, hsm.Event) and isinstance(perceived.data, mosfet.PerceivedData)
+            else (perceived,)
+        )
+        if any(
+            isinstance(stimulus, hsm.Event)
+            and isinstance(stimulus.data, StepFailedData | StepTimedOutData)
+            and stimulus.data.stage == "intuition"
+            for stimulus in stimuli
+        ):
+            if processing.active_operation(instance, base) is None:
+                _ = await processing.start_operation(instance, base)
+            turn = Cognition._turn(instance, cognition_input, base, associations=associations, acted=acted)
+            _ = hsm.dispatch(
+                ctx,
+                instance,
+                dataclasses.replace(
+                    _IntuitionPassedEvent.with_data(types.CompletionData(turn=turn)),
+                    id=base,
+                    source=hsm.id(instance),
+                    target=hsm.id(instance),
+                    metadata=public_metadata,
+                ),
+            )
+            return
         try:
             input = Cognition._build_processing_input(
                 instance,
@@ -1084,6 +1123,26 @@ class Cognition(ability.Ability[InputData, OutputData]):
         if not isinstance(data, _AssociatedData):
             return False
         operation = processing.active_operation(instance, data.turn.operation_id)
+        return (
+            event.source == hsm.id(instance)
+            and event.target == hsm.id(instance)
+            and event.id == data.turn.operation_id
+            and operation is not None
+            and data.turn.generation == hsm.id(operation)
+        )
+
+    @staticmethod
+    def _is_intuition_passed(
+        ctx: hsm.Context,
+        instance: "Cognition",
+        event: hsm.Event[typing.Any],
+    ) -> bool:
+        del ctx
+        data = event.data
+        if not isinstance(data, types.CompletionData):
+            return False
+        operation = processing.active_operation(instance, data.turn.operation_id)
+        # The intuition state selected the pass; envelope and generation correlate the turn.
         return (
             event.source == hsm.id(instance)
             and event.target == hsm.id(instance)
@@ -2368,6 +2427,11 @@ class Cognition(ability.Ability[InputData, OutputData]):
                 hsm.transition(
                     hsm.on(intuition.OutputEvent),
                     hsm.guard(_intuition_is_unhandled),
+                    hsm.target("/Cognition/processing/reasoning"),
+                ),
+                hsm.transition(
+                    hsm.on(_IntuitionPassedEvent),
+                    hsm.guard(_is_intuition_passed),
                     hsm.target("/Cognition/processing/reasoning"),
                 ),
                 hsm.transition(

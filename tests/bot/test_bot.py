@@ -3299,18 +3299,18 @@ def test_bot_receives_one_redacted_terminal_for_bounded_alternating_selection_re
             active_bot.context(),
             mosfet.InputEvent.with_data(mosfet.InputEventData(target_device="phone", priority=3)),
         )
-        # The bot perceives the failed turn as one more turn (D-R-13), whose selections are rejected the same
-        # way; that failure is not handed back again.
-        await wait_until(lambda: len(active_bot.failures) == 2 and active_bot.state() == "/Bot/active/focused")
+        # The bot perceives the failed turn as one more turn (D-R-13). It perceives an intuition failure, so
+        # reasoning decides it (D-R-30), and here reasoning selects nothing.
+        await wait_until(lambda: len(active_bot.actions) == 1 and active_bot.state() == "/Bot/active/focused")
 
         return len(processor.calls), active_bot.failures, active_bot.actions
 
     calls, failures, actions = asyncio.run(run())
 
-    assert calls == 6
-    assert len(failures) == 2
+    assert calls == 3
+    assert len(failures) == 1
     assert all("input_value" not in failure.message for failure in failures)
-    assert actions == []
+    assert [tuple(action) for action in actions] == [()]
 
 
 def test_bot_receives_one_redacted_terminal_for_same_selection_rejection() -> None:
@@ -3329,16 +3329,16 @@ def test_bot_receives_one_redacted_terminal_for_same_selection_rejection() -> No
             active_bot.context(),
             mosfet.InputEvent.with_data(mosfet.InputEventData(target_device="phone", priority=3)),
         )
-        # The bot perceives the failed turn as one more turn (D-R-13), whose selections are rejected the same
-        # way; that failure is not handed back again.
-        await wait_until(lambda: len(active_bot.failures) == 2 and active_bot.state() == "/Bot/active/focused")
+        # The bot perceives the failed turn as one more turn (D-R-13). It perceives an intuition failure, so
+        # reasoning decides it (D-R-30), and here reasoning selects nothing.
+        await wait_until(lambda: len(active_bot.actions) == 1 and active_bot.state() == "/Bot/active/focused")
 
         return len(processor.calls), active_bot.failures
 
     calls, failures = asyncio.run(run())
 
-    assert calls == 4
-    assert len(failures) == 2
+    assert calls == 2
+    assert len(failures) == 1
     assert all("input_value" not in failure.message for failure in failures)
 
 
@@ -3596,7 +3596,6 @@ def test_focused_agent_rejects_focus_device_outside_processing_candidates() -> N
             no_output("stay on phone"),
             focus_output("screen", "bad target"),
             focus_output("screen", "bad target"),
-            no_output("perceive the failed turn"),
             no_output("observe retained focus"),
         )
         cognitive = InputRecordingCognition(ability)
@@ -3613,13 +3612,14 @@ def test_focused_agent_rejects_focus_device_outside_processing_candidates() -> N
             mosfet.InputEvent.with_data(mosfet.InputEventData(target_device="browser", priority=1)),
         )
         await wait_until(lambda: bool(active_bot.failures) and active_bot.state() == "/Bot/active/focused")
-        # The bot perceives its failed turn as one more turn (D-R-13).
-        await wait_until(lambda: len(ability.calls) == 4 and active_bot.state() == "/Bot/active/focused")
+        # The bot perceives its failed turn as one more turn (D-R-13). It perceives an intuition failure, so
+        # reasoning decides it (D-R-30), and here reasoning selects nothing.
+        await wait_until(lambda: len(active_bot.actions) == 2 and active_bot.state() == "/Bot/active/focused")
         await active_bot.dispatch(
             active_bot.context(),
             mosfet.InputEvent.with_data(mosfet.InputEventData(target_device="browser", priority=2)),
         )
-        await wait_until(lambda: len(ability.calls) == 5 and active_bot.state() == "/Bot/active/focused")
+        await wait_until(lambda: len(ability.calls) == 4 and active_bot.state() == "/Bot/active/focused")
 
         return active_bot.state(), cognitive.inputs, active_bot.actions, active_bot.failures
 
@@ -3629,9 +3629,9 @@ def test_focused_agent_rejects_focus_device_outside_processing_candidates() -> N
     perceived = inputs[2].stimulus
     assert isinstance(perceived, hsm.Event) and perceived.name == cognition.StepFailedEvent.name
     assert inputs[3].focus == "phone"
-    assert actions == [
+    assert [tuple(action) for action in actions] == [
         no_output("stay on phone"),
-        no_output("perceive the failed turn"),
+        (),
         no_output("observe retained focus"),
     ]
     assert len(failures) == 1
@@ -3895,8 +3895,8 @@ def test_a_line_typed_while_the_bot_is_busy_is_perceived_on_the_next_turn() -> N
 
         for index in range(3):
             failure = cognition.StepFailedData(
-                message="Cognition's intuition step failed, so the turn failed: provider unavailable",
-                stage="intuition",
+                message="Cognition's reasoning step failed, so the turn failed: provider unavailable",
+                stage="reasoning",
                 turn_id=f"failed-turn-{index}",
                 stimulus=mosfet.InputEvent.name,
             )
@@ -4442,17 +4442,21 @@ def test_bot_processing_state_routes_ability_failure_to_failed_event() -> None:
             active_bot.context(),
             mosfet.InputEvent.with_data(mosfet.InputEventData(target_device="phone", priority=3)),
         )
-        # The bot perceives the failed step as one more turn (D-R-13); that turn fails the same way and is
-        # not handed back again.
-        await wait_until(lambda: len(active_bot.failures) == 2 and active_bot.state() == "/Bot/active/focused")
+        # The bot perceives the failed step as one more turn (D-R-13). That turn perceives an intuition
+        # failure, so reasoning decides it (D-R-30), and here reasoning selects nothing.
+        await wait_until(
+            lambda: len(active_bot.failures) == 1
+            and len(active_bot.actions) == 1
+            and active_bot.state() == "/Bot/active/focused"
+        )
 
         return active_bot.state(), active_bot.failures, active_bot.actions
 
     state, failures, actions = asyncio.run(run())
 
     assert state == "/Bot/active/focused"
-    assert [failure.message for failure in failures] == ["ability unavailable", "ability unavailable"]
-    assert actions == []
+    assert [failure.message for failure in failures] == ["ability unavailable"]
+    assert [tuple(action) for action in actions] == [()]
 
 
 @pytest.mark.parametrize("fails", [False, True])
