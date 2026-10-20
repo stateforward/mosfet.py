@@ -7,7 +7,9 @@ Each test writes its own ``bot.define`` of Willy's shape: the speech seed and as
 seams only: a scripted speech server behind ``speech_server.Transcription``'s ``connect`` (it hears each second
 of audio as one turn), and the voiceprint and diarization servers behind ``httpx.MockTransport``, where a voice
 is the sample value its audio is made of. Sound reaches the bot the way a room's computer puts it in the house: as
-``environment.sound`` from that room.
+``environment.sound`` from that room. A line typed in a room reaches it the way the bot file's rooms carry it: a
+real ``computer.Computer`` attached to Willy, served by a real ``websocket.Server`` on loopback, with
+``willy_example.room`` as its far side on ``support``'s fake devices.
 
 These tests pin perception and capacity: who Willy is shown is speaking, who is present and who it is itself,
 and what it is offered to do about them. They never pin a choice. Every fact is scripted, or dispatched by the
@@ -32,9 +34,12 @@ from mosfet import bot, environment
 from mosfet.abilities import communication, identification, listening, memory, processing, speaking, vocal
 from mosfet.abilities.communication import conversation
 from mosfet.bot import testing
-from mosfet.devices import audio
+from mosfet.devices import audio, computer
 from mosfet.providers import speech_server
+from mosfet.providers import websocket
 from mosfet.providers.speech_server import transcription
+
+from tests import support
 
 _RATE_HZ = 16_000
 # Two voices in one utterance get a second each: what a voice nobody knows needs to be made a new voice from.
@@ -249,12 +254,15 @@ async def willy(
     *choices: testing.Choice,
     heard_before: tuple[tuple[str, int], ...] = (),
     intuition: testing.Decider | None = None,
+    rooms: tuple[computer.Computer, ...] = (),
+    actors: tuple[hsm.Instance, ...] = (),
 ) -> collections.abc.AsyncGenerator[House]:
     """Run a Willy-shaped bot for the block, on wire fakes, with the model's ``choices`` scripted.
 
     ``heard_before`` gives voices Willy's registry already holds unnamed, as (id, voice) pairs, as a voice heard on an earlier
     day would be: so a test can write a choice about that voice's ref before the bot runs. ``intuition`` is the
-    decision model, a ``testing.Decider`` that chooses nothing when not given.
+    decision model, a ``testing.Decider`` that chooses nothing when not given. ``rooms`` are computers attached to
+    Willy, as the bot file attaches one per room, and ``actors`` the shared actors they need (their server).
     """
 
     model = testing.Scripted(*choices)
@@ -301,8 +309,9 @@ async def willy(
             bot.input(hearing),
             bot.output(voice),
             bot.attach(communication.Communication(conversations=(talk,), speaking=voice)),
+            *(bot.attach(room) for room in rooms),
         )
-        async with testing.running(defined) as run:
+        async with testing.running(defined, actors=actors) as run:
             yield House(run=run, model=model, intuition=decider, mouth=mouth, prints=prints)
 
 
@@ -490,3 +499,77 @@ def test_forgetting_a_person_erases_their_voiceprint() -> None:
     assert after.ref.startswith("voice:")
     assert after.known is False
     assert after.person != before.person
+
+
+def _typed(call: processing.InputData) -> computer.TextEnteredData:
+    """What was typed, on a turn a line typed on a room's computer woke."""
+
+    given = call.input
+    if isinstance(given, mosfet.abilities.cognition.reasoning.ProcessorInput):
+        given = given.host_input.input
+    assert isinstance(given, mosfet.InputEventData) and given.observation is not None
+    entered = given.observation.data
+    assert isinstance(entered, computer.TextEnteredData)
+    return entered
+
+
+def test_a_line_typed_in_a_room_reaches_willy_as_what_woke_its_turn() -> None:
+    """Typing is perceived: the room's far side types a line on its computer, and a turn of Willy's is woken by it."""
+
+    async def run() -> processing.InputData:
+        port = support.free_port()
+        server = websocket.Server(host="127.0.0.1", port=port, verifier=support.TOKENS)
+        kitchen = computer.Computer(
+            id=support.PEER, transport=server, peer_id=support.PEER, placement=support.COUNTER.surface()
+        )
+        async with willy(rooms=(kitchen,), actors=(server,)) as house:
+            keyboard = support.Keyboard()
+            session = await support.enter(port, support.Microphone(), support.Speaker(), keyboard=keyboard)
+            try:
+                await support.wait_until(lambda: keyboard.typed is not None)
+                keyboard.type("Hello, Willy")
+                (turn,) = await house.turns(1, computer.TextEnteredEvent.name)
+                return turn
+            finally:
+                _ = await session.leave()
+
+    turn = asyncio.run(run())
+
+    typed = _typed(turn)
+    assert (typed.device_id, typed.field_id, typed.text) == (support.PEER, None, "Hello, Willy")
+    # A room's computer is shared: it stamps nobody on what was typed on it.
+    assert typed.participants == ()
+    # Answering is offered: what, if anything, to say back is Willy's.
+    assert communication.RespondEvent.name in _offered(turn)
+
+
+def test_willy_can_answer_a_typed_line_aloud_and_the_room_plays_it() -> None:
+    """The capacity, not the choice: the answer is scripted only to prove a reply reaches the room's speaker."""
+
+    answer = testing.Choice(
+        stimulus=computer.TextEnteredEvent.name,
+        event=communication.RespondEvent.name,
+        data={"parts": [{"words": "Hello, I'm here."}]},
+    )
+
+    async def run() -> tuple[list[str], list[support.Played]]:
+        port = support.free_port()
+        server = websocket.Server(host="127.0.0.1", port=port, verifier=support.TOKENS)
+        kitchen = computer.Computer(
+            id=support.PEER, transport=server, peer_id=support.PEER, placement=support.COUNTER.surface()
+        )
+        async with willy(answer, rooms=(kitchen,), actors=(server,)) as house:
+            keyboard, speaker = support.Keyboard(), support.Speaker()
+            session = await support.enter(port, support.Microphone(), speaker, keyboard=keyboard)
+            try:
+                await support.wait_until(lambda: keyboard.typed is not None)
+                keyboard.type("Hello, Willy")
+                await support.wait_until(lambda: bool(house.mouth.said) and bool(speaker.played), timeout=_WAIT)
+                return house.mouth.said, speaker.played
+            finally:
+                _ = await session.leave()
+
+    said, played = asyncio.run(run())
+
+    assert said == ["Hello, I'm here."]
+    assert all(sound.sample_rate_hz == _RATE_HZ and sound.channels == 1 for sound in played)
