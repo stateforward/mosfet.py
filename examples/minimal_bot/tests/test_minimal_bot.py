@@ -20,7 +20,12 @@ from mosfet import bot
 from mosfet.abilities import memory
 from mosfet.bot import testing
 
-_ENDPOINT = {"OPENAI_BASE_URL": "http://127.0.0.1:9/v1", "OPENAI_MODEL": "any-model"}
+# The decision server intuition decides on is a closed local port too: nothing reaches the bot, so it never asks.
+_ENDPOINT = {
+    "OPENAI_BASE_URL": "http://127.0.0.1:9/v1",
+    "OPENAI_MODEL": "any-model",
+    "DECISION_BASE_URL": "http://127.0.0.1:9",
+}
 # Starting the child imports mosfet and the provider before it can be ready; that is not under test.
 _START_BOUND = 60.0
 # Stop grace (8 s default) plus the 1.5 s bounded process exit and scheduling slack.
@@ -53,7 +58,7 @@ def _child(tmp_path: pathlib.Path, environ: dict[str, str], *flags: str) -> subp
     given = {
         name: value
         for name, value in os.environ.items()
-        if not name.startswith(("OTEL_", "BOT_OTEL_", "OPENAI_", "TYPESAFE_", "MOSFET_"))
+        if not name.startswith(("OTEL_", "BOT_OTEL_", "OPENAI_", "DECISION_", "MOSFET_"))
     }
     _ = given.pop("PYTHONPATH", None)
     given.update(environ, BOT_OTEL_DISABLED="1")
@@ -66,12 +71,15 @@ def _child(tmp_path: pathlib.Path, environ: dict[str, str], *flags: str) -> subp
     )
 
 
-# Intuition decides on hosted TypeSafe with the typesafe_api_key secret, or on a local system_one server, which
-# takes no key, so the bot file reads no typesafe_api_key for it.
+# Intuition decides on the decision server DECISION_BASE_URL names. The decision_api_key secret is optional: a local
+# server takes none, and a hosted one with the same wire format is given its key. DECISION_MAX_CONTEXT_TOKENS is too.
 @pytest.mark.parametrize(
     ("decider", "keys"),
-    [({}, ("openai_api_key", "typesafe_api_key")), ({"TYPESAFE_BASE_URL": "http://127.0.0.1:9"}, ("openai_api_key",))],
-    ids=["hosted", "local"],
+    [
+        ({}, ("openai_api_key",)),
+        ({"DECISION_MAX_CONTEXT_TOKENS": "2048"}, ("openai_api_key", "decision_api_key")),
+    ],
+    ids=["keyless", "keyed"],
 )
 def test_python_m_serves_the_bot_until_sigterm(
     tmp_path: pathlib.Path, decider: dict[str, str], keys: tuple[str, ...]
@@ -105,11 +113,11 @@ def test_python_m_serves_the_bot_until_sigterm(
 
 
 def test_python_m_without_the_endpoint_or_the_secret_exits_1_naming_it(tmp_path: pathlib.Path) -> None:
-    keyed = {**_ENDPOINT, "OPENAI_API_KEY": "key"}
+    undecided = {name: value for name, value in _ENDPOINT.items() if name != "DECISION_BASE_URL"}
     for environ, named in (
         ({}, b"OPENAI_BASE_URL and OPENAI_MODEL"),
         (_ENDPOINT, b"openai_api_key"),
-        (keyed, b"typesafe_api_key"),
+        ({**undecided, "OPENAI_API_KEY": "key"}, b"DECISION_BASE_URL"),
     ):
         child = _child(tmp_path, environ, "--secrets-dir", str(tmp_path / "absent"))
         _, stderr = child.communicate(timeout=_START_BOUND)

@@ -285,7 +285,7 @@ EXPLANATIONS: tuple[Explanation, ...] = (
             "A body with no cognition can hold devices but can never choose anything to do with them. "
             "`bot.cognition(processor, intuition=decider)` thinks with a `processing.Processor` (`from "
             "mosfet.abilities import processing`), and its intuition decides with a `processing.DecisionProcessor`, "
-            "such as `typesafe.Processor(...)` (`from mosfet.providers import typesafe`). In a test, the offline "
+            "such as `decision.Processor(...)` (`from mosfet.providers import decision`). In a test, the offline "
             "ones are `testing.Scripted()` and `testing.Decider()` (`from mosfet.bot import testing`), which make "
             "only the choices the test writes down."
         ),
@@ -691,10 +691,11 @@ EXPLANATIONS: tuple[Explanation, ...] = (
         title="`bot.cognition` has no intuition",
         meaning=(
             "`bot.cognition` takes `intuition=`, the `processing.DecisionProcessor` its intuition decides on: "
-            "`typesafe.Processor(...)` (`from mosfet.providers import typesafe`), hosted TypeSafe by default or a "
-            "local system_one server given as its `base_url`. In a test, the offline one is `testing.Decider()` "
-            "(`from mosfet.bot import testing`). The suggestion writes `intuition=typesafe.Processor()`, which "
-            "may need its address and key."
+            "`decision.Processor(...)` (`from mosfet.providers import decision`), on the server given as its "
+            "`base_url` that speaks the decisions wire format, such as a local decide. In a test, the offline one "
+            "is `testing.Decider()` (`from mosfet.bot import testing`). The suggestion writes "
+            '`intuition=decision.Processor(base_url="http://127.0.0.1:8102")`, which may need your server\'s '
+            "address and key."
         ),
         why=(
             "Intuition is the bot's fast first decision on every turn: it chooses among the offered events, each "
@@ -710,7 +711,7 @@ EXPLANATIONS: tuple[Explanation, ...] = (
         title="`bot.cognition(intuition=)` is given a chat processor",
         meaning=(
             "`intuition=` takes a `processing.DecisionProcessor`, a decision model's processor, such as "
-            "`typesafe.Processor(...)` (`from mosfet.providers import typesafe`); in a test, `testing.Decider()`. "
+            "`decision.Processor(...)` (`from mosfet.providers import decision`); in a test, `testing.Decider()`. "
             "Any other `processing.Processor` is a chat model's: it is cognition's processor, given first."
         ),
         why=(

@@ -81,7 +81,7 @@ model = bot.define("greeter_bot", bot.cognition(processor, intuition=decider), b
 
 Every bot has exactly one `bot.cognition`, the mind that perceives and decides.
 
-Why: A body with no cognition can hold devices but can never choose anything to do with them. `bot.cognition(processor, intuition=decider)` thinks with a `processing.Processor` (`from mosfet.abilities import processing`), and its intuition decides with a `processing.DecisionProcessor`, such as `typesafe.Processor(...)` (`from mosfet.providers import typesafe`). In a test, the offline ones are `testing.Scripted()` and `testing.Decider()` (`from mosfet.bot import testing`), which make only the choices the test writes down.
+Why: A body with no cognition can hold devices but can never choose anything to do with them. `bot.cognition(processor, intuition=decider)` thinks with a `processing.Processor` (`from mosfet.abilities import processing`), and its intuition decides with a `processing.DecisionProcessor`, such as `decision.Processor(...)` (`from mosfet.providers import decision`). In a test, the offline ones are `testing.Scripted()` and `testing.Decider()` (`from mosfet.bot import testing`), which make only the choices the test writes down.
 
 Wrong:
 
@@ -664,7 +664,7 @@ model = bot.define(
 
 **error:** `bot.cognition` has no intuition
 
-`bot.cognition` takes `intuition=`, the `processing.DecisionProcessor` its intuition decides on: `typesafe.Processor(...)` (`from mosfet.providers import typesafe`), hosted TypeSafe by default or a local system_one server given as its `base_url`. In a test, the offline one is `testing.Decider()` (`from mosfet.bot import testing`). The suggestion writes `intuition=typesafe.Processor()`, which may need its address and key.
+`bot.cognition` takes `intuition=`, the `processing.DecisionProcessor` its intuition decides on: `decision.Processor(...)` (`from mosfet.providers import decision`), on the server given as its `base_url` that speaks the decisions wire format, such as a local decide. In a test, the offline one is `testing.Decider()` (`from mosfet.bot import testing`). The suggestion writes `intuition=decision.Processor(base_url="http://127.0.0.1:8102")`, which may need your server's address and key.
 
 Why: Intuition is the bot's fast first decision on every turn: it chooses among the offered events, each with its confidence, and hands what it cannot decide to reasoning. A decision model does that; a chat model does not, so intuition never runs on cognition's processor.
 
@@ -684,7 +684,7 @@ model = bot.define("greeter", bot.cognition(processor, intuition=decider), bot.a
 
 **error:** `bot.cognition(intuition=)` is given a chat processor
 
-`intuition=` takes a `processing.DecisionProcessor`, a decision model's processor, such as `typesafe.Processor(...)` (`from mosfet.providers import typesafe`); in a test, `testing.Decider()`. Any other `processing.Processor` is a chat model's: it is cognition's processor, given first.
+`intuition=` takes a `processing.DecisionProcessor`, a decision model's processor, such as `decision.Processor(...)` (`from mosfet.providers import decision`); in a test, `testing.Decider()`. Any other `processing.Processor` is a chat model's: it is cognition's processor, given first.
 
 Why: A chat model writes and calls tools; intuition chooses among the offered events with a confidence for each. Intuition on a chat model would be slow reasoning wearing a fast decision's name.
 

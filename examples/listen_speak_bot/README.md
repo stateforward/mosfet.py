@@ -80,9 +80,10 @@ uv run python -m listen_speak_bot_example --verbose
 - macOS with `say` and `afconvert`
 - `uv` + Python 3.13
 - `BOT_GEMINI_API_KEY` / `GEMINI_API_KEY` / `GOOGLE_API_KEY`
-- `TYPESAFE_API_KEY` for hosted TypeSafe, the decision model the bot's intuition decides on; or
-  `TYPESAFE_BASE_URL`, a local system_one server (for example `http://127.0.0.1:8102`), which takes no key
-  and is never sent `TYPESAFE_API_KEY`
+- `DECISION_BASE_URL`, the decision server the bot's intuition decides on, which speaks the decisions wire
+  format (anygame's decide, for example `http://127.0.0.1:8102`), with `DECISION_API_KEY` only for a server that
+  takes a key, and the optional `DECISION_MAX_CONTEXT_TOKENS`, the decision model's context, which each decision
+  request is fitted to (2048 for decide)
 
 Optional: `BOT_GEMINI_MODEL` (or `GEMINI_MODEL`, default `gemini-3.5-flash`) and `BOT_SILERO_VAD_MODEL`
 (default `mlx-community/silero-vad`; `BOT_VAD_MODEL` and `SILERO_VAD_MODEL` are also accepted).
@@ -139,7 +140,7 @@ it chooses.
 |---|---|
 | Heard audio | macOS `say` → WAV |
 | Input ability | `Listening` (MLX Audio Silero VAD + PyAnnote voice embeddings identified as `voice:<id>` refs) |
-| Cognition | One Gemini model (`gemini-3.5-flash`), intuition on TypeSafe (`typesafe.Processor`, a decision model), autonomy with the speech seed, associations, consolidation, routines |
+| Cognition | One Gemini model (`gemini-3.5-flash`), intuition on a decision server (`decision.Processor`, a decision model), autonomy with the speech seed, associations, consolidation, routines |
 | Conversation STT | MLX Audio Whisper, after identity-correlated admission |
 | Output route | `communication.respond` → Communication → Speaking |
 | Reply audio | `assets/reply.wav`, when the bot says something |

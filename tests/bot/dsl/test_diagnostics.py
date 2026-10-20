@@ -335,6 +335,16 @@ def test_the_explanation_of_a_missing_cognition_names_where_a_processor_comes_fr
     assert "`from mosfet.bot import testing`" in explained
 
 
+@pytest.mark.parametrize("code", ["B0002", "B0024", "B0025"])
+def test_the_explanations_of_intuition_name_the_decision_provider(code: str) -> None:
+    """D-R-33: intuition decides on ``decision.Processor``, on any server that speaks the decisions wire format."""
+
+    explained = " ".join(bot.explain(code).split())  # the prose is wrapped
+
+    assert "`decision.Processor(" in explained
+    assert "`from mosfet.providers import decision`" in explained
+
+
 def test_the_explanation_of_a_stray_names_the_firmware_elements_too() -> None:
     explained = " ".join(bot.explain("B0017").split())  # the prose is wrapped
 

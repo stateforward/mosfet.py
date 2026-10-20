@@ -1,7 +1,7 @@
 """The phone bot file: ``python -m phone_bot_example`` runs ``alice`` on this host, holding the line until stopped.
 
 Reads the owner's :class:`~phone_bot_example.Settings` from the environment (the OpenAI and Gemini keys, the
-decision model's local system_one server or hosted TypeSafe's key, the optional LiveKit line and the model
+decision server intuition decides on and its optional key, the optional LiveKit line and the model
 overrides). The process options (``MOSFET_*`` or flags) are ``bot.process``'s. A missing or malformed setting ends
 the process with exit ``1``, naming it, before anything starts.
 
@@ -30,12 +30,12 @@ from mosfet.abilities.communication.conversation import turn_detector
 from mosfet.abilities.hearing import sound
 from mosfet.devices import audio, phone
 from mosfet.environment import space
+from mosfet.providers import decision
 from mosfet.providers import gemini
 from mosfet.providers import livekit
 from mosfet.providers import mlx_audio
 from mosfet.providers import openai_compat
 from mosfet.providers import pyannote
-from mosfet.providers import typesafe
 from mosfet.providers.livekit import signaling
 from mosfet.providers.livekit.audio import PcmWavDecoder
 
@@ -116,9 +116,10 @@ if __name__ == "__main__":
                 ),
                 provider="openai_terra_reasoning",
             ),
-            intuition=typesafe.Processor(
-                base_url=settings.typesafe_base_url,
-                api_key=settings.typesafe_key(),
+            intuition=decision.Processor(
+                base_url=settings.decision_base_url,
+                api_key=settings.decision_key(),
+                max_context_tokens=settings.decision_max_context_tokens,
             ),
             associative=True,
             consolidation=True,

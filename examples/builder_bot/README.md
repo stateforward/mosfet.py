@@ -19,7 +19,11 @@ builder = bot.define(
             stream=settings.stream,
             tool_choice=settings.tool_choice,
         ),
-        intuition=typesafe.Processor(base_url=settings.typesafe_base_url, api_key=...),
+        intuition=decision.Processor(
+            base_url=settings.decision_base_url,
+            api_key=decision_key,
+            max_context_tokens=settings.decision_max_context_tokens,
+        ),
         memory=memory.Memory(database=str(process.data_dir / "memory.sqlite3")),
         associative=True,
         consolidation=True,
@@ -124,7 +128,7 @@ Run these from the repository root:
 uv sync --project examples/builder_bot
 cp examples/builder_bot/.env.example examples/builder_bot/.env   # then fill it in
 printf '%s' "$KEY" > examples/builder_bot/secrets/openai_api_key  # any placeholder for a keyless local server
-printf '%s' "$TYPESAFE_KEY" > examples/builder_bot/secrets/typesafe_api_key  # hosted TypeSafe only; skip with TYPESAFE_BASE_URL
+printf '%s' "$DECISION_KEY" > examples/builder_bot/secrets/decision_api_key  # only for a decision server that takes a key
 head -c 32 /dev/urandom | base64 > examples/builder_bot/secrets/computer_token_secret
 chmod 0600 examples/builder_bot/secrets/*
 ```
@@ -135,8 +139,9 @@ chmod 0600 examples/builder_bot/secrets/*
 | `OPENAI_STREAM` | env | `true` | `false` for an endpoint that cannot stream a tool call (a proxy that sends only keep-alives); then nothing the bot writes reaches the screen until the call ends |
 | `OPENAI_TOOL_CHOICE` | env | `required` | The tool choice each call sends: `auto` for an endpoint whose guided decoding of a required tool call degrades what the model writes (one that drops the line breaks in code); then the model may also answer in content, which is read as the same events array |
 | `openai_api_key` | secret, required | | The endpoint's key; a placeholder for a keyless server |
-| `TYPESAFE_BASE_URL` | env | unset | The local system_one server the bot's intuition decides on (for example `http://127.0.0.1:8102`); unset, it decides on hosted TypeSafe. Intuition is never a chat model: it runs on this decision model, while reasoning and reflection run on the endpoint above |
-| `typesafe_api_key` | secret, required for hosted TypeSafe | | Hosted TypeSafe's key, read only when `TYPESAFE_BASE_URL` is unset: a local system_one server takes no key and is never sent it |
+| `DECISION_BASE_URL` | env, required | | The decision server the bot's intuition decides on, which speaks the decisions wire format (anygame's decide, for example `http://127.0.0.1:8102`, or a hosted server with the same format). Intuition is never a chat model: it runs on this decision model, while reasoning and reflection run on the endpoint above |
+| `DECISION_MAX_CONTEXT_TOKENS` | env | unset | The decision model's context in tokens (2048 for decide); each decision request is fitted to it by cutting the turn's context, never its stimuli. Unset, requests are sent whole |
+| `decision_api_key` | secret | unset | The decision server's key, sent as a bearer only when given; a local decide takes none |
 | `BUILDER_SANDBOX_SOCKET` | env, required | | The rootless Docker or Podman API socket |
 | `BUILDER_SANDBOX_IMAGE` | env | `localhost/mosfet-bench:2` | The one image the bench may use |
 | `BUILDER_SANDBOX_EGRESS_NETWORK` | env | unset | The owner's egress bridge; unset, the bench has no network |

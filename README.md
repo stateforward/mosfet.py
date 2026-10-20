@@ -32,7 +32,7 @@ bot's behalf.
 ```python
 from mosfet import bot
 from mosfet.devices import computer
-from mosfet.providers import openai_compat, typesafe
+from mosfet.providers import decision, openai_compat
 
 # Reached at its desk; what it does about what is typed there is its own.
 greeter = bot.define(
@@ -40,8 +40,8 @@ greeter = bot.define(
     bot.traits("warm", "curious"),
     bot.cognition(
         openai_compat.Processor(client=openai_compat.ChatClient(model="qwen3-coder")),
-        # Intuition is never a chat model: it decides on TypeSafe, hosted or a local system_one server.
-        intuition=typesafe.Processor(base_url="http://127.0.0.1:8102"),
+        # Intuition is never a chat model: it decides on a server that speaks the decisions wire format.
+        intuition=decision.Processor(base_url="http://127.0.0.1:8102"),
     ),
     bot.attach(computer.Computer(id="desk")),
 )
@@ -89,7 +89,7 @@ if __name__ == "__main__":
         bot.traits(*settings.traits.traits),
         bot.cognition(
             openai_compat.Processor(client=openai_compat.ChatClient(model=settings.model, base_url=settings.base_url)),
-            intuition=typesafe.Processor(base_url=settings.typesafe_base_url, api_key=...),
+            intuition=decision.Processor(base_url=settings.decision_base_url, api_key=...),
             memory=memory.Memory(database=str(process.data_dir / "memory.sqlite3")),
             associative=True,
             consolidation=True,
@@ -148,7 +148,7 @@ device-free bot on any OpenAI-compatible endpoint:
 
 ```bash
 uv sync --project examples/minimal_bot
-OPENAI_BASE_URL=http://127.0.0.1:8080/v1 OPENAI_MODEL=... OPENAI_API_KEY=... TYPESAFE_API_KEY=... \
+OPENAI_BASE_URL=http://127.0.0.1:8080/v1 OPENAI_MODEL=... OPENAI_API_KEY=... DECISION_BASE_URL=http://127.0.0.1:8102 \
   examples/minimal_bot/.venv/bin/python -m minimal_bot_example --ready-file /tmp/ready
 ```
 

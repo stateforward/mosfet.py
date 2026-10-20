@@ -10,7 +10,7 @@ dependencies = [
   "mosfet-provider-openai-compat",
   "mosfet-provider-pyannote",
   "mosfet-provider-speech-server",
-  "mosfet-provider-typesafe",
+  "mosfet-provider-decision",
 ]
 
 [tool.uv.sources]
@@ -20,7 +20,7 @@ mosfet-provider-mlx-audio = { path = "../../src/providers/mlx_audio", editable =
 mosfet-provider-openai-compat = { path = "../../src/providers/openai_compat", editable = true }
 mosfet-provider-pyannote = { path = "../../src/providers/pyannote", editable = true }
 mosfet-provider-speech-server = { path = "../../src/providers/speech_server", editable = true }
-mosfet-provider-typesafe = { path = "../../src/providers/typesafe", editable = true }
+mosfet-provider-decision = { path = "../../src/providers/decision", editable = true }
 
 [dependency-groups]
 dev = [

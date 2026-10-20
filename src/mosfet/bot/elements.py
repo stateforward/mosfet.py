@@ -397,7 +397,7 @@ def misplaced(
     if isinstance(value, processing.DecisionProcessor):
         return found("a decision processor", "bot.cognition(processor, intuition=...)", None)
     if isinstance(value, processing.Processor):
-        intuition = ", intuition=typesafe.Processor()"
+        intuition = ', intuition=decision.Processor(base_url="http://127.0.0.1:8102")'
         return found("a processor", "bot.cognition", single(RedefinableCognition, "bot.cognition", intuition))
     if isinstance(value, memory.StmMemory):
         return found("a sensory register", "bot.register", single(RedefinableRegister, "bot.register"))

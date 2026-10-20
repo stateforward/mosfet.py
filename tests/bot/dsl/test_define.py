@@ -244,8 +244,8 @@ _PROCESSORS = (
 
 _DECISIONS = (
     "`processing.DecisionProcessor`",
-    "`typesafe.Processor(...)`",
-    "`from mosfet.providers import typesafe`",
+    "`decision.Processor(...)`",
+    "`from mosfet.providers import decision`",
     "`testing.Decider()`",
     "`from mosfet.bot import testing`",
 )
@@ -261,7 +261,10 @@ def test_a_bot_without_cognition_is_told_where_both_processors_and_the_offline_o
     for named in (*_PROCESSORS, *_DECISIONS):
         assert named in missing.help.message
     assert missing.help.suggestion is not None
-    assert missing.help.suggestion.replacement == ", bot.cognition(processor, intuition=typesafe.Processor())"
+    assert (
+        missing.help.suggestion.replacement
+        == ', bot.cognition(processor, intuition=decision.Processor(base_url="http://127.0.0.1:8102"))'
+    )
 
 
 def test_a_cognition_without_intuition_is_b0024_told_where_a_decision_processor_comes_from() -> None:
@@ -275,7 +278,7 @@ def test_a_cognition_without_intuition_is_b0024_told_where_a_decision_processor_
         assert named in missing.help.message
     assert missing.help.suggestion is not None
     assert (missing.help.suggestion.replacement, missing.help.suggestion.applicability) == (
-        ", intuition=typesafe.Processor()",
+        ', intuition=decision.Processor(base_url="http://127.0.0.1:8102")',
         "maybe-incorrect",
     )
 

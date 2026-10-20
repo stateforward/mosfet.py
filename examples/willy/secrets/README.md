@@ -8,8 +8,8 @@ Each secret is one file here, named for it, holding only its value. Nothing in t
   Make one with `python -c "import secrets; print(secrets.token_urlsafe(32))" > secrets/computer_token_secret`.
 - `openai_api_key` (optional): the key for the lab's OpenAI-compatible servers, which take none; without it,
   `OPENAI_API_KEY` in `.env` is the placeholder.
-- `typesafe_api_key` (hosted TypeSafe only): hosted TypeSafe's key, for the decision model Willy's intuition
-  decides on when `TYPESAFE_BASE_URL` is unset. With `TYPESAFE_BASE_URL` set (as in `.env.example`), the local
-  system_one server takes no key: Willy never reads this secret and never sends it there.
+- `decision_api_key` (optional): the key of the decision server Willy's intuition decides on, sent as a bearer
+  only when this file (or `DECISION_API_KEY`) is given. The local decide `DECISION_BASE_URL` names in
+  `.env.example` takes no key, so leave it out for the lab.
 
 Run Willy with `--secrets-dir examples/willy/secrets`, or point `COMPUTER_TOKEN_SECRET_FILE` at the file.

@@ -92,10 +92,10 @@ from mosfet.abilities import (
 from mosfet.abilities.communication import conversation
 from mosfet.bot import testing
 from mosfet.devices import audio, computer
+from mosfet.providers import decision
 from mosfet.providers import openai_compat
 from mosfet.providers import speech_server
 from mosfet.providers import sqlite_memory
-from mosfet.providers import typesafe
 from mosfet.providers import websocket
 from willy_example import room
 
@@ -493,13 +493,13 @@ def test_willy_is_born_hears_a_stranger_learns_them_and_forgets_them(
         api_key = runtime.Secrets(directory=_SECRETS_DIRECTORY, environ=os.environ).get("openai_api_key")
     except runtime.MissingSecretError:
         pytest.fail("WILLY_LIVE=1 needs the openai_api_key secret: OPENAI_API_KEY=local in .env.example does")
-    # The local system_one server takes no key and is never sent the hosted one; only hosted TypeSafe needs its key.
-    decision_key: pydantic.SecretStr | None = None
-    if settings.typesafe_base_url is None:
-        try:
-            decision_key = runtime.Secrets(directory=_SECRETS_DIRECTORY, environ=os.environ).get("typesafe_api_key")
-        except runtime.MissingSecretError:
-            pytest.fail("WILLY_LIVE=1 on hosted TypeSafe (TYPESAFE_BASE_URL unset) needs the typesafe_api_key secret")
+    # The local decision server takes no key; the decision_api_key secret is sent only when it is given.
+    try:
+        decision_key: pydantic.SecretStr | None = runtime.Secrets(directory=_SECRETS_DIRECTORY, environ=os.environ).get(
+            "decision_api_key"
+        )
+    except runtime.MissingSecretError:
+        decision_key = None
     # The OTEL JSONL files are written under the working directory: the test's data directory.
     monkeypatch.chdir(tmp_path)
     _ = telemetry.configure(service_name="willy-live")
@@ -601,9 +601,10 @@ async def _live(
             ),
             bot.cognition(
                 model,
-                intuition=typesafe.Processor(
-                    base_url=settings.typesafe_base_url,
-                    api_key=None if decision_key is None else decision_key.get_secret_value(),
+                intuition=decision.Processor(
+                    base_url=settings.decision_base_url,
+                    api_key=None if decision_key is None else decision_key.get_secret_value() or None,
+                    max_context_tokens=settings.decision_max_context_tokens,
                 ),
                 memory=store,
                 associative=True,

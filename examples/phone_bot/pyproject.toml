@@ -8,7 +8,7 @@ dependencies = [
   "mosfet-provider-openai-compat",
   "mosfet-provider-livekit",
   "mosfet-provider-sqlite-memory",
-  "mosfet-provider-typesafe",
+  "mosfet-provider-decision",
   "mosfet-provider-gemini",
   "mosfet-provider-mlx-audio",
   "mosfet-provider-pyannote",
@@ -18,7 +18,7 @@ dependencies = [
 mint-livekit-token = "phone_bot_example.token_cli:main"
 
 [tool.uv.sources]
-mosfet-provider-typesafe = { path = "../../src/providers/typesafe", editable = true }
+mosfet-provider-decision = { path = "../../src/providers/decision", editable = true }
 stateforward-mosfet = { path = "../..", editable = true }
 mosfet-provider-openai-compat = { path = "../../src/providers/openai_compat", editable = true }
 mosfet-provider-livekit = { path = "../../src/providers/livekit", editable = true }

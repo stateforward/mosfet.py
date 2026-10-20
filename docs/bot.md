@@ -125,11 +125,15 @@ Intuition is the bot's fast first decision on every turn: it chooses among the e
 its confidence, and hands what it does not decide to reasoning. It runs on a decision model, never a chat model, so
 `bot.cognition` takes it apart from its processor: `intuition=` is a `processing.DecisionProcessor`. Reasoning,
 reflection, consolidation and the voice inception stay on `processor`. The decision processor is
-`typesafe.Processor(...)` (`from mosfet.providers import typesafe`), on one of two servers:
+`decision.Processor(...)` (`from mosfet.providers import decision`), on any server that speaks the decisions wire
+format (`POST /v1/systemone`), given as `base_url=`:
 
-* hosted TypeSafe, its default, with the hosted key (`api_key=`, or `TYPESAFE_API_KEY` in the environment);
-* a local system_one server, given as `base_url=` (for example `http://127.0.0.1:8102`); the environment's hosted
-  key is never sent to it.
+* a local one, such as anygame's decide at `http://127.0.0.1:8102`, which takes no key and is sent none;
+* a hosted one with the same wire format, given its key as `api_key=`, which is sent as a bearer.
+
+`max_context_tokens=` is the decision model's context (2048 for decide): each request is fitted to it by cutting
+the turn's instructions to their leading lines, never its stimuli or the offered events. See
+[`src/providers/decision/README.md`](../src/providers/decision/README.md).
 
 In a test, the offline one is `testing.Decider()`, which makes only the choices the test writes down and otherwise
 hands the turn to reasoning. A cognition without `intuition=` is `B0024`; a chat processor given as `intuition=` is
@@ -481,12 +485,9 @@ if __name__ == "__main__":
         "greeter",
         bot.cognition(
             openai_compat.Processor(client=openai_compat.ChatClient(model=settings.model)),
-            intuition=typesafe.Processor(
-                base_url=settings.typesafe_base_url,
-                # A local system_one server takes no key and is never sent hosted TypeSafe's.
-                api_key=None
-                if settings.typesafe_base_url is not None
-                else process.secrets.get("typesafe_api_key").get_secret_value(),
+            intuition=decision.Processor(
+                base_url=settings.decision_base_url,
+                max_context_tokens=settings.decision_max_context_tokens,
             ),
         ),
         bot.attach(computer.Computer(id="desk", transport=server)),

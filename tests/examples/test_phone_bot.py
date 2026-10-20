@@ -55,11 +55,13 @@ else:
     )
     person = example.person
 
-_KEYS = {
+_REQUIRED = {
     "BOT_OPENAI_API_KEY": "openai-key-5d1a",
     "BOT_GEMINI_API_KEY": "gemini-key-8e3f",
-    "TYPESAFE_API_KEY": "typesafe-key-9b07",
+    # The decision server intuition decides on: a closed port, since nothing in these tests asks it.
+    "DECISION_BASE_URL": "http://127.0.0.1:9",
 }
+_DECISION_KEY = "decision-key-9b07"
 _WAIT = 10.0
 # Starting the child imports mosfet and the providers before the bot file runs; that is not under test.
 _RUN_BOUND = 90.0
@@ -95,11 +97,12 @@ def _sources() -> dict[str, str]:
 # --- The owner's settings ---------------------------------------------------------------------------------------
 
 
-def test_the_keys_alone_take_every_default() -> None:
-    settings = example.Settings.model_validate(_KEYS)
+def test_the_required_settings_alone_take_every_default() -> None:
+    settings = example.Settings.model_validate(_REQUIRED)
 
-    assert settings.openai_api_key.get_secret_value() == _KEYS["BOT_OPENAI_API_KEY"]
-    assert settings.gemini_api_key.get_secret_value() == _KEYS["BOT_GEMINI_API_KEY"]
+    assert settings.openai_api_key.get_secret_value() == _REQUIRED["BOT_OPENAI_API_KEY"]
+    assert settings.gemini_api_key.get_secret_value() == _REQUIRED["BOT_GEMINI_API_KEY"]
+    assert (settings.decision_base_url, settings.decision_max_context_tokens) == ("http://127.0.0.1:9", None)
     assert (settings.openai_base_url, settings.reasoning_model) == ("https://api.openai.com/v1", "gpt-5.6-terra")
     assert (settings.stt_model, settings.tts_model, settings.tts_voice) == (
         "gemini-3.5-flash",
@@ -149,7 +152,7 @@ def test_the_keys_alone_take_every_default() -> None:
 def test_every_setting_reads_each_of_its_variables(variable: str, field: str, value: object) -> None:
     # The other key is given; this field's own is given only by the variable under test.
     owner = {"openai_api_key": "BOT_OPENAI_API_KEY", "gemini_api_key": "BOT_GEMINI_API_KEY"}.get(field)
-    others = {name: given for name, given in _KEYS.items() if name != owner}
+    others = {name: given for name, given in _REQUIRED.items() if name != owner}
     settings = example.Settings.model_validate({**others, variable: str(value)})
 
     read = typing.cast(object, getattr(settings, field))
@@ -158,11 +161,11 @@ def test_every_setting_reads_each_of_its_variables(variable: str, field: str, va
 
 def test_a_line_joins_with_the_token_given_or_one_minted_for_its_number() -> None:
     given = example.Settings.model_validate(
-        {**_KEYS, "VA_LIVEKIT_URL": "wss://livekit.example.test", "VA_LIVEKIT_TOKEN": "line-token-0c2b"}
+        {**_REQUIRED, "VA_LIVEKIT_URL": "wss://livekit.example.test", "VA_LIVEKIT_TOKEN": "line-token-0c2b"}
     )
     minted = example.Settings.model_validate(
         {
-            **_KEYS,
+            **_REQUIRED,
             "BOT_LIVEKIT_URL": "ws://127.0.0.1:7880",
             "BOT_LIVEKIT_API_KEY": "devkey",
             "BOT_LIVEKIT_API_SECRET": "secret",
@@ -188,32 +191,36 @@ def test_a_line_joins_with_the_token_given_or_one_minted_for_its_number() -> Non
 )
 def test_a_line_and_its_token_come_together(given: dict[str, str]) -> None:
     with pytest.raises(pydantic.ValidationError) as refused:
-        _ = example.Settings.model_validate({**_KEYS, **given})
+        _ = example.Settings.model_validate({**_REQUIRED, **given})
 
     assert "BOT_LIVEKIT" in str(refused.value)
     assert "line-token-0c2b" not in str(refused.value)
 
 
 def test_the_dial_plan_is_optional_number_to_identity_aliases() -> None:
-    settings = example.Settings.model_validate({**_KEYS, "BOT_LIVEKIT_DIAL_PLAN": "5550142=alias-bob, 5550143=x"})
+    settings = example.Settings.model_validate({**_REQUIRED, "BOT_LIVEKIT_DIAL_PLAN": "5550142=alias-bob, 5550143=x"})
 
     assert settings.dial_plan == {"5550142": "alias-bob", "5550143": "x"}
     with pytest.raises(pydantic.ValidationError, match="number=identity"):
-        _ = example.Settings.model_validate({**_KEYS, "BOT_LIVEKIT_DIAL_PLAN": "5550142"})
+        _ = example.Settings.model_validate({**_REQUIRED, "BOT_LIVEKIT_DIAL_PLAN": "5550142"})
 
 
-def test_hosted_typesafe_needs_its_key_and_a_local_system_one_server_is_never_sent_it() -> None:
-    keyless = {name: given for name, given in _KEYS.items() if name != "TYPESAFE_API_KEY"}
+def test_intuition_needs_a_decision_server_and_its_key_is_sent_only_when_given() -> None:
+    undecided = {name: given for name, given in _REQUIRED.items() if name != "DECISION_BASE_URL"}
     with pytest.raises(pydantic.ValidationError) as missing:
-        _ = example.Settings.model_validate(keyless)
+        _ = example.Settings.model_validate(undecided)
 
-    assert "TYPESAFE_API_KEY" in str(missing.value)
-    assert not [secret for secret in keyless.values() if secret in str(missing.value)]
-    assert example.Settings.model_validate(_KEYS).typesafe_key() == _KEYS["TYPESAFE_API_KEY"]
-    # A local system_one server takes no key, and the keyless key in the environment never reaches it.
-    local = {"TYPESAFE_BASE_URL": "http://127.0.0.1:8102"}
-    assert example.Settings.model_validate({**keyless, **local}).typesafe_key() is None
-    assert example.Settings.model_validate({**_KEYS, **local}).typesafe_key() is None
+    assert "DECISION_BASE_URL" in str(missing.value)
+    assert not [secret for secret in undecided.values() if secret in str(missing.value)]
+    # A local decide takes no key, so none is sent; a hosted server with the same wire format is given its own.
+    assert example.Settings.model_validate(_REQUIRED).decision_key() is None
+    keyed = example.Settings.model_validate({**_REQUIRED, "DECISION_API_KEY": _DECISION_KEY})
+    assert keyed.decision_key() == _DECISION_KEY
+    # D-R-36: the decision model's context, which each decision request is fitted to.
+    fitted = example.Settings.model_validate({**_REQUIRED, "DECISION_MAX_CONTEXT_TOKENS": "2048"})
+    assert fitted.decision_max_context_tokens == 2048
+    with pytest.raises(pydantic.ValidationError, match="DECISION_MAX_CONTEXT_TOKENS"):
+        _ = example.Settings.model_validate({**_REQUIRED, "DECISION_MAX_CONTEXT_TOKENS": "0"})
 
 
 def test_a_missing_key_is_named_and_no_value_is_shown() -> None:
@@ -225,7 +232,7 @@ def test_a_missing_key_is_named_and_no_value_is_shown() -> None:
 
 
 def test_an_empty_variable_is_unset() -> None:
-    settings = example.Settings.model_validate({**_KEYS, "BOT_LIVEKIT_URL": "", "BOT_GEMINI_TTS_VOICE": ""})
+    settings = example.Settings.model_validate({**_REQUIRED, "BOT_LIVEKIT_URL": "", "BOT_GEMINI_TTS_VOICE": ""})
 
     assert (settings.livekit_url, settings.tts_voice) == (None, "Kore")
 
@@ -236,8 +243,13 @@ def test_the_env_example_is_the_local_line_and_every_setting_in_it_is_valid() ->
         name, equals, value = line.strip().partition("=")
         if equals and not name.startswith("#"):
             assignments[name] = value
-    settings = example.Settings.model_validate({**assignments, **_KEYS})
+    settings = example.Settings.model_validate({**assignments, **_REQUIRED})
 
+    # Intuition decides on the lab's decide, whose context is 2048 tokens.
+    assert (assignments["DECISION_BASE_URL"], assignments["DECISION_MAX_CONTEXT_TOKENS"]) == (
+        "http://127.0.0.1:8102",
+        "2048",
+    )
     assert settings.livekit_url == "ws://127.0.0.1:7880"
     assert settings.identity == "5550141"
     assert settings.line_token() is not None
@@ -284,7 +296,7 @@ def _environ(**given: str) -> dict[str, str]:
         name: value
         for name, value in os.environ.items()
         if not name.startswith(
-            ("OTEL_", "BOT_", "OPENAI_", "GEMINI_", "GOOGLE_", "LIVEKIT_", "TYPESAFE_", "VA_", "MOSFET_")
+            ("OTEL_", "BOT_", "OPENAI_", "GEMINI_", "GOOGLE_", "LIVEKIT_", "DECISION_", "VA_", "MOSFET_")
         )
     }
     _ = environ.pop("PYTHONPATH", None)
@@ -307,7 +319,7 @@ def test_python_m_holds_the_line_until_sigterm(tmp_path: pathlib.Path) -> None:
             str(ready),
         ],
         cwd=tmp_path,
-        env=_environ(**_KEYS),
+        env=_environ(**_REQUIRED),
         # Nobody is standing in front of it: an empty room.
         stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
@@ -333,13 +345,13 @@ def test_python_m_holds_the_line_until_sigterm(tmp_path: pathlib.Path) -> None:
     assert not ready.exists()
     # Its observer logged what it did, and never a key.
     assert b"phone_bot observe" in stderr
-    for secret in _KEYS.values():
+    for secret in _REQUIRED.values():
         assert secret.encode() not in stderr
 
 
-@pytest.mark.parametrize("missing", ["BOT_GEMINI_API_KEY", "TYPESAFE_API_KEY"])
+@pytest.mark.parametrize("missing", ["BOT_GEMINI_API_KEY", "DECISION_BASE_URL"])
 def test_python_m_names_a_missing_key_and_exits_1(tmp_path: pathlib.Path, missing: str) -> None:
-    given = {name: secret for name, secret in _KEYS.items() if name != missing}
+    given = {name: secret for name, secret in _REQUIRED.items() if name != missing}
     finished = subprocess.run(
         [sys.executable, "-m", "phone_bot_example", "--data-dir", str(tmp_path / "data")],
         cwd=tmp_path,
@@ -384,10 +396,11 @@ def test_the_bot_file_thinks_with_one_model_decides_on_another_and_shares_one_me
 
     # One processor (D-W8-8): the example keeps its reasoning model; cognition owns the one memory.
     assert main.count("openai_compat.Processor(") == 1
-    # Its intuition is never a chat model (R-6): it decides on TypeSafe, hosted or a local system_one server.
-    assert main.count("intuition=typesafe.Processor(") == 1
-    # Asked with hosted TypeSafe's key, or none at all for a local system_one server.
-    assert "api_key=settings.typesafe_key()" in main
+    # Its intuition is never a chat model (R-6): it decides on the decision server DECISION_BASE_URL names.
+    assert main.count("intuition=decision.Processor(") == 1
+    # Asked with the decision server's key only when one is given, and fitted to its model's context.
+    assert "api_key=settings.decision_key()" in main
+    assert "max_context_tokens=settings.decision_max_context_tokens" in main
     assert 'provider="openai_terra_reasoning"' in main
     assert "seeds=(communication.speech_heard_seed(),)" in main
     for faculty in ("associative=True", "consolidation=True", "autonomy=True"):
@@ -989,7 +1002,7 @@ def test_phone_bot_e2e_cognition_wires_speech_event_to_conversation() -> None:
     from mosfet.providers import gemini
     from mosfet.providers import mlx_audio
     from mosfet.providers import openai_compat
-    from mosfet.providers import typesafe
+    from mosfet.providers import decision
 
     settings = example.Settings.model_validate(os.environ)
     store = memory.Memory()
@@ -1025,9 +1038,10 @@ def test_phone_bot_e2e_cognition_wires_speech_event_to_conversation() -> None:
                 ),
                 provider="openai_terra_reasoning",
             ),
-            intuition=typesafe.Processor(
-                base_url=settings.typesafe_base_url,
-                api_key=settings.typesafe_key(),
+            intuition=decision.Processor(
+                base_url=settings.decision_base_url,
+                api_key=settings.decision_key(),
+                max_context_tokens=settings.decision_max_context_tokens,
             ),
             memory=store,
             associative=True,

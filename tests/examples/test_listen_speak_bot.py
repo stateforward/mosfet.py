@@ -67,7 +67,9 @@ else:
     )
 
 _KEY = "gemini-key-5d1a"
-_DECISION_KEY = "typesafe-key-9b07"
+_DECISION_KEY = "decision-key-9b07"
+# The decision server intuition decides on: a closed port, since nothing in these tests asks it.
+_DECIDER = "http://127.0.0.1:9"
 _WAIT = 10.0
 _RATE_HZ = 16_000
 # Starting the child imports mosfet and the providers before the bot file runs; that is not under test.
@@ -85,12 +87,16 @@ def _example_root() -> pathlib.Path:
 # --- The owner's settings ---------------------------------------------------------------------------------------
 
 
-def test_the_keys_alone_take_every_default() -> None:
-    settings = example.Settings.model_validate({"BOT_GEMINI_API_KEY": _KEY, "TYPESAFE_API_KEY": _DECISION_KEY})
+def test_the_required_settings_alone_take_every_default() -> None:
+    settings = example.Settings.model_validate({"BOT_GEMINI_API_KEY": _KEY, "DECISION_BASE_URL": _DECIDER})
 
     assert settings.gemini_api_key.get_secret_value() == _KEY
-    # Intuition decides on hosted TypeSafe, with its key.
-    assert (settings.typesafe_base_url, settings.typesafe_key()) == (None, _DECISION_KEY)
+    # Intuition decides on the decision server, sent no key unless one is given, with requests sent whole.
+    assert (settings.decision_base_url, settings.decision_key(), settings.decision_max_context_tokens) == (
+        _DECIDER,
+        None,
+        None,
+    )
     assert settings.gemini_model == example.DEFAULT_GEMINI_MODEL == "gemini-3.5-flash"
     assert settings.vad_model == example.DEFAULT_SILERO_VAD_MODEL == "mlx-community/silero-vad"
     assert settings.stt_model is None
@@ -124,7 +130,7 @@ def test_the_keys_alone_take_every_default() -> None:
 )
 def test_every_setting_reads_each_of_its_variables(variable: str, field: str, value: str) -> None:
     given = {"GEMINI_API_KEY": "another-key"} if field != "gemini_api_key" else {}
-    settings = example.Settings.model_validate({**given, "TYPESAFE_API_KEY": _DECISION_KEY, variable: value})
+    settings = example.Settings.model_validate({**given, "DECISION_BASE_URL": _DECIDER, variable: value})
 
     read = getattr(settings, field)
     assert (read.get_secret_value() if isinstance(read, pydantic.SecretStr) else read) == value
@@ -134,7 +140,7 @@ def test_the_lab_wiring_is_read_from_the_environment() -> None:
     settings = example.Settings.model_validate(
         {
             "BOT_GEMINI_API_KEY": _KEY,
-            "TYPESAFE_API_KEY": _DECISION_KEY,
+            "DECISION_BASE_URL": _DECIDER,
             "BOT_SPEECH_SERVER_STREAM_URL": "ws://lab.test:8001",
             "BOT_SPEECH_SERVER_URL": "http://lab.test:8003",
             "BOT_SPEECH_SERVER_TTS_URL": "http://lab.test:8002",
@@ -152,7 +158,7 @@ def test_an_empty_variable_is_unset() -> None:
     settings = example.Settings.model_validate(
         {
             "BOT_GEMINI_API_KEY": _KEY,
-            "TYPESAFE_API_KEY": _DECISION_KEY,
+            "DECISION_BASE_URL": _DECIDER,
             "BOT_GEMINI_MODEL": "",
             "BOT_SPEECH_SERVER_TTS_URL": "",
         }
@@ -161,16 +167,20 @@ def test_an_empty_variable_is_unset() -> None:
     assert (settings.gemini_model, settings.tts_url) == (example.DEFAULT_GEMINI_MODEL, None)
 
 
-def test_hosted_typesafe_needs_its_key_and_a_local_system_one_server_is_never_sent_it() -> None:
+def test_intuition_needs_a_decision_server_and_its_key_is_sent_only_when_given() -> None:
     with pytest.raises(pydantic.ValidationError) as missing:
         _ = example.Settings.model_validate({"BOT_GEMINI_API_KEY": _KEY})
 
-    assert "TYPESAFE_API_KEY" in str(missing.value)
+    assert "DECISION_BASE_URL" in str(missing.value)
     assert _KEY not in str(missing.value)
-    # A local system_one server takes no key, and the hosted key in the environment never reaches it.
-    local = {"BOT_GEMINI_API_KEY": _KEY, "TYPESAFE_BASE_URL": "http://127.0.0.1:8102"}
-    assert example.Settings.model_validate(local).typesafe_key() is None
-    assert example.Settings.model_validate({**local, "TYPESAFE_API_KEY": _DECISION_KEY}).typesafe_key() is None
+    given = {"BOT_GEMINI_API_KEY": _KEY, "DECISION_BASE_URL": _DECIDER}
+    keyed = example.Settings.model_validate({**given, "DECISION_API_KEY": _DECISION_KEY})
+    assert keyed.decision_key() == _DECISION_KEY
+    # D-R-36: the decision model's context, which each decision request is fitted to.
+    fitted = example.Settings.model_validate({**given, "DECISION_MAX_CONTEXT_TOKENS": "2048"})
+    assert fitted.decision_max_context_tokens == 2048
+    with pytest.raises(pydantic.ValidationError, match="DECISION_MAX_CONTEXT_TOKENS"):
+        _ = example.Settings.model_validate({**given, "DECISION_MAX_CONTEXT_TOKENS": "0"})
 
 
 def test_a_missing_key_is_named_and_no_value_is_shown() -> None:
@@ -198,7 +208,7 @@ def _environ() -> dict[str, str]:
     environ = {
         name: value
         for name, value in os.environ.items()
-        if not name.startswith(("OTEL_", "BOT_", "GEMINI_", "GOOGLE_", "TYPESAFE_", "VA_", "MOSFET_"))
+        if not name.startswith(("OTEL_", "BOT_", "GEMINI_", "GOOGLE_", "DECISION_", "VA_", "MOSFET_"))
     }
     _ = environ.pop("PYTHONPATH", None)
     environ["BOT_OTEL_DISABLED"] = "1"
@@ -207,7 +217,7 @@ def _environ() -> dict[str, str]:
 
 @pytest.mark.parametrize(
     ("given", "missing"),
-    [("TYPESAFE_API_KEY", "BOT_GEMINI_API_KEY"), ("BOT_GEMINI_API_KEY", "TYPESAFE_API_KEY")],
+    [("DECISION_BASE_URL", "BOT_GEMINI_API_KEY"), ("BOT_GEMINI_API_KEY", "DECISION_BASE_URL")],
 )
 def test_python_m_names_a_missing_key_and_exits_1(tmp_path: pathlib.Path, given: str, missing: str) -> None:
     env_file = tmp_path / ".env"

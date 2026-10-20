@@ -29,7 +29,7 @@ run_id="mosfet-smoke-$$"
 label="org.stateforward.mosfet.smoke=$run_id"
 secrets_volume="$run_id-secrets"
 # minimal_bot has no devices, so it reaches ready without calling this closed local port.
-endpoint=(--env OPENAI_BASE_URL=http://127.0.0.1:9/v1 --env OPENAI_MODEL=smoke)
+endpoint=(--env OPENAI_BASE_URL=http://127.0.0.1:9/v1 --env OPENAI_MODEL=smoke --env DECISION_BASE_URL=http://127.0.0.1:9)
 secrets_mount=(--mount "type=volume,source=$secrets_volume,target=/run/secrets,readonly")
 # The compose override and its placeholder secret, under the example's git- and docker-ignored secrets dir: a
 # compose secret is a bind mount, and a path under the checkout is one a VM-backed daemon (colima) can see.
@@ -102,8 +102,7 @@ if [[ "$mode" == "compose" ]]; then
   compose_dir="$(mktemp -d "$PWD/examples/minimal_bot/secrets/.smoke.XXXXXX")"
   chmod 0755 "$compose_dir"
   printf placeholder > "$compose_dir/openai_api_key"
-  printf placeholder > "$compose_dir/typesafe_api_key"
-  chmod 0444 "$compose_dir/openai_api_key" "$compose_dir/typesafe_api_key"
+  chmod 0444 "$compose_dir/openai_api_key"
   # The example's env_file is the operator's .env; the smoke replaces it with the closed local endpoint.
   printf '%s\n' \
     'services:' \
@@ -112,11 +111,10 @@ if [[ "$mode" == "compose" ]]; then
     '    environment:' \
     '      OPENAI_BASE_URL: http://127.0.0.1:9/v1' \
     '      OPENAI_MODEL: smoke' \
+    '      DECISION_BASE_URL: http://127.0.0.1:9' \
     'secrets:' \
     '  openai_api_key:' \
-    "    file: $compose_dir/openai_api_key" \
-    '  typesafe_api_key:' \
-    "    file: $compose_dir/typesafe_api_key" > "$compose_dir/override.yaml"
+    "    file: $compose_dir/openai_api_key" > "$compose_dir/override.yaml"
 
   echo "docker_smoke: compose up becomes healthy" >&2
   compose config --quiet
@@ -140,7 +138,7 @@ echo "docker_smoke: build $image" >&2
 docker build --build-arg PROJECT=examples/minimal_bot --file docker/Dockerfile --tag "$image" .
 
 docker volume create --label "$label" "$secrets_volume" >/dev/null
-secrets 'printf placeholder > /secrets/openai_api_key && printf placeholder > /secrets/typesafe_api_key && chmod 0444 /secrets/openai_api_key /secrets/typesafe_api_key'
+secrets 'printf placeholder > /secrets/openai_api_key && chmod 0444 /secrets/openai_api_key'
 
 echo "docker_smoke: hardened run becomes healthy" >&2
 bot="$(docker run --detach --label "$label" --init --read-only \

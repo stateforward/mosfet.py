@@ -357,7 +357,7 @@ catalog = support.Shelf()
             'bot.define("greeter", bot.attach(processor), bot.attach(phone.Phone()))',
             "B0006",
             "`bot.attach` does not take a processor",
-            "bot.cognition(processor, intuition=typesafe.Processor())",
+            'bot.cognition(processor, intuition=decision.Processor(base_url="http://127.0.0.1:8102"))',
         ),
         (
             'bot.define("greeter", bot.cognition(processor, intuition=decider), bot.attach(decider), '
@@ -394,7 +394,7 @@ catalog = support.Shelf()
             'bot.define("greeter", bot.cognition(processor, intuition=decider), bot.attach(phone.Phone()), processor)',
             "B0017",
             "`bot.define` does not take a processor",
-            "bot.cognition(processor, intuition=typesafe.Processor())",
+            'bot.cognition(processor, intuition=decision.Processor(base_url="http://127.0.0.1:8102"))',
         ),
         (
             'bot.define("greeter", bot.cognition(processor, intuition=decider), bot.attach(phone.Phone()), bot.traits)',

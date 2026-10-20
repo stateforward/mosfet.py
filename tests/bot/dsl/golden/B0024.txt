@@ -5,10 +5,10 @@ error[B0024]: `bot.cognition` has no intuition
   |                         ^^^^^^^^^^^^^ no intuition
   |
   = note: intuition is the bot's fast first decision on every turn, and it decides on a decision model, never a chat model
-help: give it `intuition=`, a `processing.DecisionProcessor`: `typesafe.Processor(...)` (`from mosfet.providers import typesafe`), hosted or on a local system_one server; in a test, the offline one is `testing.Decider()` (`from mosfet.bot import testing`)
+help: give it `intuition=`, a `processing.DecisionProcessor`: `decision.Processor(...)` (`from mosfet.providers import decision`), on any server that speaks the decisions wire format; in a test, the offline one is `testing.Decider()` (`from mosfet.bot import testing`)
   |
-8 | model = bot.define("…", bot.cognition(support.Silent(), intuition=typesafe.Processor()), bot.attach(phone.Phone()))
-  |                                                       ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+8 | model = bot.define("…", bot.cognition(support.Silent(), intuition=decision.Processor(base_url="http://127.0.0.1:8102")), bot.attach(phone.Phone()))
+  |                                                       ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
   = explain: bot.explain("B0024")
 
 error: could not define bot `greeter`: 1 error

@@ -65,11 +65,13 @@ _PROCESSOR: typing.Final = (
 )
 """What ``bot.cognition`` thinks with, and where it is imported from, for the help of B0002 and B0006."""
 _DECISION: typing.Final = (
-    "a `processing.DecisionProcessor`: `typesafe.Processor(...)` (`from mosfet.providers import typesafe`), "
-    + "hosted or on a local system_one server; in a test, the offline one is `testing.Decider()` "
+    "a `processing.DecisionProcessor`: `decision.Processor(...)` (`from mosfet.providers import decision`), "
+    + "on any server that speaks the decisions wire format; in a test, the offline one is `testing.Decider()` "
     + "(`from mosfet.bot import testing`)"
 )
 """What ``bot.cognition``'s intuition decides with, and where it is imported from, for B0002, B0006, B0024, B0025."""
+_INTUITION: typing.Final = 'intuition=decision.Processor(base_url="http://127.0.0.1:8102")'
+"""The intuition B0002 and B0024 write in: a local decision server, constructed without opening anything."""
 
 
 class Error(hsm.ErrorValidatingModel):
@@ -164,7 +166,7 @@ class Validator(hsm.ModelValidator):
                     help=diagnostics.Help(
                         message=f"give it a cognition that thinks with {_PROCESSOR}. Its intuition decides "
                         + f"with {_DECISION}",
-                        suggestion=diagnostics.append(call, "bot.cognition(processor, intuition=typesafe.Processor())"),
+                        suggestion=diagnostics.append(call, f"bot.cognition(processor, {_INTUITION})"),
                     ),
                 )
             )
@@ -333,7 +335,7 @@ class Validator(hsm.ModelValidator):
             ),
             help=diagnostics.Help(
                 message=f"give it `intuition=`, {_DECISION}",
-                suggestion=diagnostics.append(call, "intuition=typesafe.Processor()"),
+                suggestion=diagnostics.append(call, _INTUITION),
             ),
         )
 

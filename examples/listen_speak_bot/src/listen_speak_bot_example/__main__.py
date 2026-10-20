@@ -11,8 +11,8 @@ voice. The conversation, shared by communication and the mouth. The mouth, the o
 speaks through. And the MLX Audio workers the run closes when it ends: Whisper, and off the lab Silero.
 
 Then one ``bot.define`` constructs every other part inline: the bot's traits, on the lab the source of the voice it is
-born with, its cognition on Gemini with its intuition on a decision model (TypeSafe, hosted or a local system_one
-server) and the speech seed that takes heard speech into a conversation, its ear, its
+born with, its cognition on Gemini with its intuition on a decision model (on the decision server
+``DECISION_BASE_URL`` names) and the speech seed that takes heard speech into a conversation, its ear, its
 mouth and its conversations. :func:`~listen_speak_bot_example.hear` plays the recording and then half a second of
 silence to it, and the run's summary is printed: exit ``0`` when the bot said something, ``1`` otherwise.
 """
@@ -35,11 +35,11 @@ from mosfet.abilities import communication, decoding, identification, listening,
 from mosfet.abilities.communication import conversation
 from mosfet.abilities.communication.conversation import turn_detector
 from mosfet.environment import SoundData
+from mosfet.providers import decision
 from mosfet.providers import gemini
 from mosfet.providers import mlx_audio
 from mosfet.providers import pyannote
 from mosfet.providers import speech_server
-from mosfet.providers import typesafe
 
 import listen_speak_bot_example as example
 
@@ -189,9 +189,10 @@ if __name__ == "__main__":
                 ),
                 provider="gemini_reasoning",
             ),
-            intuition=typesafe.Processor(
-                base_url=settings.typesafe_base_url,
-                api_key=settings.typesafe_key(),
+            intuition=decision.Processor(
+                base_url=settings.decision_base_url,
+                api_key=settings.decision_key(),
+                max_context_tokens=settings.decision_max_context_tokens,
             ),
             # The bot's memory outlives the run: its persona, and on the lab its voice, are its own on every start.
             memory=memory.Memory(database=str(assets / "memory.sqlite3")),

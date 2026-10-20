@@ -32,11 +32,12 @@ _REQUIRED = {
     "OPENAI_BASE_URL": "http://127.0.0.1:9/v1",
     "OPENAI_MODEL": "local-model",
     "BUILDER_SANDBOX_SOCKET": "/nonexistent/podman.sock",
+    # The decision server intuition decides on: a closed port, since nothing reaches the bot in these tests.
+    "DECISION_BASE_URL": "http://127.0.0.1:9",
 }
-_SECRETS = {"OPENAI_API_KEY": "key-5d1a", "TYPESAFE_API_KEY": "key-9b07", "COMPUTER_TOKEN_SECRET": "secret-8e3f"}
-# A local system_one server for intuition to decide on: it takes no key, so the bot file needs none for it.
-_LOCAL_DECIDER = {"TYPESAFE_BASE_URL": "http://127.0.0.1:9"}
-_KEYLESS = {name: secret for name, secret in _SECRETS.items() if name != "TYPESAFE_API_KEY"}
+_SECRETS = {"OPENAI_API_KEY": "key-5d1a", "DECISION_API_KEY": "key-9b07", "COMPUTER_TOKEN_SECRET": "secret-8e3f"}
+# A local decision server takes no key, so the bot file needs no decision_api_key for it.
+_KEYLESS = {name: secret for name, secret in _SECRETS.items() if name != "DECISION_API_KEY"}
 # Starting the child imports mosfet and the providers before the bot file runs; that is not under test.
 _RUN_BOUND = 60.0
 # Stop grace (8 s default) plus the 1.5 s bounded process exit and scheduling slack.
@@ -178,6 +179,7 @@ def test_the_required_settings_alone_take_every_default() -> None:
     )
     assert settings.stream is True
     assert settings.tool_choice == text.ToolSelectionPolicy.REQUIRED
+    assert (settings.decision_base_url, settings.decision_max_context_tokens) == ("http://127.0.0.1:9", None)
     # Bench image 2 has mosfet installed, so the bot can write and test bots on it (W7-14).
     assert settings.image == builder_bot_example.DEFAULT_IMAGE == "localhost/mosfet-bench:2"
     assert (settings.egress_network, settings.runtime) == (None, "runc")
@@ -198,6 +200,7 @@ def test_every_owner_setting_has_a_working_value() -> None:
             **_REQUIRED,
             "OPENAI_STREAM": "false",
             "OPENAI_TOOL_CHOICE": "auto",
+            "DECISION_MAX_CONTEXT_TOKENS": "2048",
             "BUILDER_SANDBOX_IMAGE": "localhost/mosfet-bench:3",
             "BUILDER_SANDBOX_EGRESS_NETWORK": "builder-egress",
             "BUILDER_SANDBOX_RUNTIME": "runsc",
@@ -213,6 +216,8 @@ def test_every_owner_setting_has_a_working_value() -> None:
     assert settings.stream is False
     # Live (builder check round 3, H1): under "required" the Spark's model wrote code with no line breaks.
     assert settings.tool_choice == text.ToolSelectionPolicy.AUTO
+    # D-R-36: anygame's decide has a 2048-token context.
+    assert settings.decision_max_context_tokens == 2048
     assert settings.image == "localhost/mosfet-bench:3"
     assert (settings.egress_network, settings.runtime) == ("builder-egress", "runsc")
     assert (settings.host, settings.port, settings.peer, settings.person_id) == ("0.0.0.0", 9000, "desk-2", "person-1")
@@ -233,7 +238,7 @@ def _refused(environ: dict[str, str]) -> str:
     return str(raised.value)
 
 
-@pytest.mark.parametrize("unset", ["OPENAI_BASE_URL", "OPENAI_MODEL", "BUILDER_SANDBOX_SOCKET"])
+@pytest.mark.parametrize("unset", ["OPENAI_BASE_URL", "OPENAI_MODEL", "BUILDER_SANDBOX_SOCKET", "DECISION_BASE_URL"])
 def test_each_required_setting_is_named_when_it_is_missing(unset: str) -> None:
     for missing in ({}, {unset: ""}):
         environ = {**_REQUIRED, **missing}
@@ -249,6 +254,8 @@ def test_each_required_setting_is_named_when_it_is_missing(unset: str) -> None:
         ("OPENAI_STREAM", "sometimes"),
         ("OPENAI_TOOL_CHOICE", "none"),
         ("OPENAI_TOOL_CHOICE", "dispatch"),
+        ("DECISION_MAX_CONTEXT_TOKENS", "-2048"),
+        ("DECISION_MAX_CONTEXT_TOKENS", "many"),
         ("BUILDER_COMPUTER_PORT", "0"),
         ("BUILDER_COMPUTER_PORT", "65536"),
         ("BUILDER_COMPUTER_PORT", "eighty"),
@@ -271,7 +278,7 @@ def _environ(**given: str) -> dict[str, str]:
     environ = {
         name: value
         for name, value in os.environ.items()
-        if not name.startswith(("OTEL_", "BOT_OTEL_", "OPENAI_", "TYPESAFE_", "BUILDER_", "MOSFET_"))
+        if not name.startswith(("OTEL_", "BOT_OTEL_", "OPENAI_", "DECISION_", "BUILDER_", "MOSFET_"))
     }
     _ = environ.pop("PYTHONPATH", None)
     environ.update(given, BOT_OTEL_DISABLED="1")
@@ -284,7 +291,11 @@ def _free_port() -> int:
         return typing.cast(tuple[str, int], probe.getsockname())[1]
 
 
-@pytest.mark.parametrize(("decider", "secrets"), [({}, _SECRETS), (_LOCAL_DECIDER, _KEYLESS)], ids=["hosted", "local"])
+@pytest.mark.parametrize(
+    ("decider", "secrets"),
+    [({"DECISION_MAX_CONTEXT_TOKENS": "2048"}, _SECRETS), ({}, _KEYLESS)],
+    ids=["keyed", "keyless"],
+)
 def test_python_m_defines_the_builder_and_serves_it_until_sigterm(
     tmp_path: pathlib.Path, decider: dict[str, str], secrets: dict[str, str]
 ) -> None:

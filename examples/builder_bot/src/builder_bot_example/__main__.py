@@ -1,11 +1,11 @@
 """The builder bot file: ``python -m builder_bot_example`` runs the builder for one person on this host.
 
 Reads the owner's :class:`~builder_bot_example.Settings` from the environment (``OPENAI_BASE_URL``,
-``OPENAI_MODEL``, ``BUILDER_SANDBOX_SOCKET`` and the optional ``OPENAI_STREAM``, ``OPENAI_TOOL_CHOICE``,
-``TYPESAFE_BASE_URL`` and ``BUILDER_*`` variables) and its secrets: ``openai_api_key`` (a placeholder for a
-keyless local server), ``typesafe_api_key`` (hosted TypeSafe's key, for the decision model intuition decides on;
-read only when ``TYPESAFE_BASE_URL`` is unset, since a local system_one server takes none and is never sent it)
-and ``computer_token_secret``, the key the terminal's token is signed with. Each is the Docker secret, the file named by ``<NAME>_FILE``, or
+``OPENAI_MODEL``, ``BUILDER_SANDBOX_SOCKET``, ``DECISION_BASE_URL`` and the optional ``OPENAI_STREAM``,
+``OPENAI_TOOL_CHOICE``, ``DECISION_MAX_CONTEXT_TOKENS`` and ``BUILDER_*`` variables) and its secrets:
+``openai_api_key`` (a placeholder for a keyless local server), the optional ``decision_api_key`` (the key of the
+decision server intuition decides on; without it none is sent, as a local decide expects) and
+``computer_token_secret``, the key the terminal's token is signed with. Each is the Docker secret, the file named by ``<NAME>_FILE``, or
 ``<NAME>``. The process options (``MOSFET_*`` or flags) are ``bot.process``'s; memory is kept in
 ``<data dir>/memory.sqlite3``. A missing or malformed setting or secret ends the process with exit ``1``,
 naming it, before anything starts. So does a bench image that was not built for the mosfet commit this host
@@ -28,12 +28,12 @@ import functools
 import os
 
 import pydantic
-from mosfet import bot, environment
+from mosfet import bot, environment, runtime
 from mosfet.abilities import memory, sandbox
 from mosfet.devices import computer
+from mosfet.providers import decision
 from mosfet.providers import docker
 from mosfet.providers import openai_compat
-from mosfet.providers import typesafe
 from mosfet.providers import websocket
 
 from builder_bot_example import MAX_OUTPUT_CHARS, BenchError, Settings, check_bench, mosfet_commit
@@ -51,6 +51,11 @@ if __name__ == "__main__":
         holds = check_bench(socket=settings.socket, image=settings.image, commit=mosfet_commit())
     except BenchError as error:
         raise SystemExit(f"builder_bot_example: {error}") from None
+    try:
+        # A local decision server takes no key; one is sent only when the secret is given.
+        decision_key = process.secrets.get("decision_api_key").get_secret_value() or None
+    except runtime.MissingSecretError:
+        decision_key = None
     server = websocket.Server(
         host=settings.host,
         port=settings.port,
@@ -71,12 +76,10 @@ if __name__ == "__main__":
                 stream=settings.stream,
                 tool_choice=settings.tool_choice,
             ),
-            intuition=typesafe.Processor(
-                base_url=settings.typesafe_base_url,
-                # A local system_one server takes no key and is never sent hosted TypeSafe's.
-                api_key=None
-                if settings.typesafe_base_url is not None
-                else process.secrets.get("typesafe_api_key").get_secret_value(),
+            intuition=decision.Processor(
+                base_url=settings.decision_base_url,
+                api_key=decision_key,
+                max_context_tokens=settings.decision_max_context_tokens,
             ),
             memory=memory.Memory(database=str(process.data_dir / "memory.sqlite3")),
             associative=True,

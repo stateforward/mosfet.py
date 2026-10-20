@@ -185,14 +185,24 @@ class Settings(pydantic.BaseModel):
         ),
         examples=["required", "auto"],
     )
-    typesafe_base_url: str | None = pydantic.Field(
-        default=None,
-        alias="TYPESAFE_BASE_URL",
+    decision_base_url: str = pydantic.Field(
+        alias="DECISION_BASE_URL",
         min_length=1,
         description=(
-            "The local system_one server the bot's intuition decides on; unset, it decides on hosted TypeSafe."
+            "The decision server the bot's intuition decides on, which speaks the decisions wire format: anygame's"
+            + " decide, or a hosted server with the same format."
         ),
         examples=["http://127.0.0.1:8102"],
+    )
+    decision_max_context_tokens: int | None = pydantic.Field(
+        default=None,
+        alias="DECISION_MAX_CONTEXT_TOKENS",
+        gt=0,
+        description=(
+            "The decision model's context in tokens, which each decision request is fitted to; unset, requests"
+            + " are sent whole."
+        ),
+        examples=[2048],
     )
     socket: pathlib.Path = pydantic.Field(
         alias="BUILDER_SANDBOX_SOCKET",

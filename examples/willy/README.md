@@ -30,8 +30,8 @@ with one `bot.define` that constructs every part inline, and runs it with `bot.r
   keeps only a voice's id and its description, and speaks every line from that description, so nothing in it is
   marked as Willy's: Willy knows its voice by the id its memory keeps (the `self_voice` row in the data dir) and
   checks on every start that the engine still holds it.
-- **Mind.** `bot.cognition` on the lab's language model, its intuition on a decision model (`typesafe.Processor`
-  on the local system_one server `TYPESAFE_BASE_URL` names, never a chat model), with associations, consolidation, autonomy, routines
+- **Mind.** `bot.cognition` on the lab's language model, its intuition on a decision model (`decision.Processor`
+  on the decision server `DECISION_BASE_URL` names, never a chat model), with associations, consolidation, autonomy, routines
   and the speech seed that takes heard speech into a conversation. Its memory recalls by the lab's
   EmbeddingGemma 2 vectors.
 - **Name.** `identity.Identity`: Willy is born nameless and may take a name when someone gives it one.
@@ -107,7 +107,8 @@ reason; the room's name, the url, the token and every sound and image never are 
 | `WILLY_CAMERA`, `WILLY_FACE_MODELS` | `0`, unset | `1` to see; the directory holding `face_detection_yunet_2023mar.onnx` and `face_recognition_sface_2021dec.onnx` |
 | `WILLY_TRAITS` | `warm,patient,curious,honest` | the owner's traits for Willy, comma separated |
 | `WILLY_HOUSEHOLD_FILE` | unset | a JSON list of who lives in the house; unset, nobody is declared and Willy learns everyone |
-| `TYPESAFE_BASE_URL` | unset | the local system_one server Willy's intuition decides on (`http://127.0.0.1:8102` in `.env.example`), whose `/v1/systemone` answer must carry a `model` field, which typesafe-sdk 0.6.0 requires; unset, hosted TypeSafe |
+| `DECISION_BASE_URL` | required | the decision server Willy's intuition decides on, which speaks the decisions wire format (anygame's decide, `http://127.0.0.1:8102` in `.env.example`) |
+| `DECISION_MAX_CONTEXT_TOKENS` | unset | the decision model's context in tokens (`2048` for decide in `.env.example`); each decision request is fitted to it by cutting the turn's context, never its stimuli |
 
 Every address is required: where the owner's model server is has no safe default. A room's name is the id of its
 computer and the peer its far side connects as: 3 to 63 lower-case letters, digits or hyphens, starting with a
@@ -115,8 +116,8 @@ letter.
 
 Secrets are files under `secrets/` (see [`secrets/README.md`](secrets/README.md)): `computer_token_secret`,
 which every room's far side signs its token with, `openai_api_key`, a placeholder for the lab's keyless
-servers (`OPENAI_API_KEY=local` in `.env` does as well), and, for hosted TypeSafe only (`TYPESAFE_BASE_URL`
-unset), `typesafe_api_key`, its key. The local system_one server takes no key, and Willy never sends it one.
+servers (`OPENAI_API_KEY=local` in `.env` does as well), and, optionally, `decision_api_key`, the decision
+server's key. The local decide takes no key, and without the secret Willy sends it none.
 
 ## The household, and where safety sits
 

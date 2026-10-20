@@ -38,7 +38,7 @@ as documented; see [`minimal_bot/README.md`](minimal_bot/README.md):
 
 ```bash
 uv sync --project examples/minimal_bot
-OPENAI_BASE_URL=... OPENAI_MODEL=... OPENAI_API_KEY=... TYPESAFE_API_KEY=... \
+OPENAI_BASE_URL=... OPENAI_MODEL=... OPENAI_API_KEY=... DECISION_BASE_URL=http://127.0.0.1:8102 \
   examples/minimal_bot/.venv/bin/python -m minimal_bot_example
 ```
 

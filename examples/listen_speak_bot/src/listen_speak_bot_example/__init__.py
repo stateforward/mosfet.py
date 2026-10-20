@@ -90,8 +90,8 @@ class Settings(pydantic.BaseModel):
     """The owner's settings for the bot, read by ``__main__`` from the process environment and an env file.
 
     Each field is read from the first of its variables that is set; a variable set to the empty string is unset.
-    The Gemini key is required. The bot's intuition decides on hosted TypeSafe, whose key is then required too,
-    unless a local system_one server is named, which takes no key and is never sent the hosted one. Each lab address is optional, and each one moves one part onto the lab: the
+    The Gemini key is required, and so is the decision server the bot's intuition decides on, whose key is optional
+    (a local decide takes none). Each lab address is optional, and each one moves one part onto the lab: the
     streaming speech server hears instead of Silero, the voiceprint server knows voices apart instead of PyAnnote,
     and the lab's speech engine speaks, in the voice the bot is born with, instead of ``say``. A value is never shown
     in an error: the error names the variable.
@@ -133,20 +133,29 @@ class Settings(pydantic.BaseModel):
         description="The PyAnnote speaker-embedding model that knows voices apart, off the lab.",
         examples=[DEFAULT_PYANNOTE_VOICE_IDENTITY_MODEL],
     )
-    typesafe_base_url: str | None = pydantic.Field(
-        default=None,
+    decision_base_url: str = pydantic.Field(
         min_length=1,
-        validation_alias=pydantic.AliasChoices("TYPESAFE_BASE_URL"),
-        description="The local system_one server the bot's intuition decides on; unset, it decides on hosted TypeSafe.",
+        validation_alias=pydantic.AliasChoices("DECISION_BASE_URL"),
+        description=(
+            "The decision server the bot's intuition decides on, which speaks the decisions wire format: anygame's"
+            " decide, or a hosted server with the same format."
+        ),
         examples=["http://127.0.0.1:8102"],
     )
-    typesafe_api_key: pydantic.SecretStr | None = pydantic.Field(
+    decision_api_key: pydantic.SecretStr | None = pydantic.Field(
         default=None,
-        validation_alias=pydantic.AliasChoices("TYPESAFE_API_KEY"),
+        validation_alias=pydantic.AliasChoices("DECISION_API_KEY"),
+        description="The decision server's key, sent as a bearer only when given; a local decide takes none.",
+    )
+    decision_max_context_tokens: int | None = pydantic.Field(
+        default=None,
+        gt=0,
+        validation_alias=pydantic.AliasChoices("DECISION_MAX_CONTEXT_TOKENS"),
         description=(
-            "Hosted TypeSafe's key, required unless TYPESAFE_BASE_URL names a local system_one server, which takes"
-            " none and is never sent it."
+            "The decision model's context in tokens, which each decision request is fitted to; unset, requests are"
+            " sent whole."
         ),
+        examples=[2048],
     )
     stream_url: str | None = pydantic.Field(
         default=None,
@@ -178,24 +187,10 @@ class Settings(pydantic.BaseModel):
             return {name: value for name, value in given.items() if value != ""}
         return data
 
-    @pydantic.model_validator(mode="after")
-    def _hosted_typesafe_needs_its_key(self) -> typing.Self:
-        if self.typesafe_base_url is None and self.typesafe_api_key is None:
-            raise ValueError(
-                "TYPESAFE_API_KEY: hosted TypeSafe's key, or TYPESAFE_BASE_URL for a local system_one server"
-            )
-        return self
+    def decision_key(self) -> str | None:
+        """The key intuition's decision server is asked with: ``DECISION_API_KEY`` when given, else none at all."""
 
-    def typesafe_key(self) -> str | None:
-        """The key intuition's decision model is asked with: hosted TypeSafe's, and none for a local system_one server.
-
-        A local server is never sent the hosted key, even when ``TYPESAFE_API_KEY`` is set.
-        """
-
-        if self.typesafe_base_url is not None:
-            return None
-        assert self.typesafe_api_key is not None
-        return self.typesafe_api_key.get_secret_value()
+        return None if self.decision_api_key is None else self.decision_api_key.get_secret_value()
 
 
 def load_env(path: pathlib.Path) -> dict[str, str]:

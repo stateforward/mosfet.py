@@ -36,11 +36,11 @@ _REQUIRED = {
     "WILLY_VOICEPRINT_URL": f"http://{_CLOSED}",
     "WILLY_EMOTION_URL": f"http://{_CLOSED}",
     "WILLY_DIAR_URL": f"http://{_CLOSED}",
+    "DECISION_BASE_URL": f"http://{_CLOSED}",
 }
-_SECRETS = {"OPENAI_API_KEY": "key-5d1a", "TYPESAFE_API_KEY": "key-9b07", "COMPUTER_TOKEN_SECRET": "secret-8e3f"}
-# A local system_one server for intuition to decide on: it takes no key, so the bot file needs none for it.
-_LOCAL_DECIDER = {"TYPESAFE_BASE_URL": f"http://{_CLOSED}"}
-_KEYLESS = {name: secret for name, secret in _SECRETS.items() if name != "TYPESAFE_API_KEY"}
+_SECRETS = {"OPENAI_API_KEY": "key-5d1a", "DECISION_API_KEY": "key-9b07", "COMPUTER_TOKEN_SECRET": "secret-8e3f"}
+# A local decision server takes no key, so the bot file needs no decision_api_key for it.
+_KEYLESS = {name: secret for name, secret in _SECRETS.items() if name != "DECISION_API_KEY"}
 _HOUSEHOLD = [
     {"id": "gabe", "name": "Gabe", "role": "adult"},
     {"id": "ada", "name": "Ada", "role": "child", "born": 2018},
@@ -67,6 +67,7 @@ def test_the_required_settings_alone_take_every_default() -> None:
         "embeddinggemma-2",
     )
     assert (settings.host, settings.port, settings.camera, settings.face_models) == ("127.0.0.1", 8765, False, None)
+    assert (settings.decision_base_url, settings.decision_max_context_tokens) == (f"http://{_CLOSED}", None)
     # One room, its computer on a shelf; nobody is declared, so Willy learns everyone.
     assert settings.rooms == (
         willy_example.Room(id="living-room", on="shelf", placement=space.Placement(position=space.Position(0.0, 0.0))),
@@ -90,10 +91,12 @@ def test_every_owner_setting_has_a_working_value(tmp_path: pathlib.Path) -> None
             "WILLY_FACE_MODELS": str(tmp_path),
             "WILLY_TRAITS": "patient, exact",
             "WILLY_HOUSEHOLD_FILE": _household(tmp_path, json.dumps(_HOUSEHOLD)),
+            "DECISION_MAX_CONTEXT_TOKENS": "2048",
         }
     )
 
     assert (settings.host, settings.port, settings.camera, settings.face_models) == ("0.0.0.0", 9000, True, tmp_path)
+    assert settings.decision_max_context_tokens == 2048
     # Each room is placed ROOM_SPACING_M further along, in the order the owner lists them.
     assert [(room.id, room.on, room.placement.position.x) for room in settings.rooms] == [
         ("kitchen", "counter", 0.0),
@@ -145,6 +148,8 @@ def test_each_endpoint_is_required_and_named_when_it_is_missing(unset: str) -> N
         ("WILLY_ROOMS", "kitchen:Counter Top"),
         ("WILLY_CAMERA", "maybe"),
         ("WILLY_TRAITS", "warm,,honest"),
+        ("DECISION_MAX_CONTEXT_TOKENS", "-2048"),
+        ("DECISION_MAX_CONTEXT_TOKENS", "many"),
     ],
 )
 def test_a_bad_setting_is_refused_and_named_without_its_value(variable: str, value: str) -> None:
@@ -195,12 +200,17 @@ def test_the_env_example_is_the_lab_and_every_setting_in_it_is_valid() -> None:
     # secret but the lab's keyless placeholder, and the local decision server takes no key at all.
     assert set(_REQUIRED) <= set(given)
     assert given["WILLY_TTS_URL"] == "http://192.168.2.32:8002"
-    assert all("192.168.2.2:" in given[name] for name in _REQUIRED if name.endswith("_URL") and name != "WILLY_TTS_URL")
+    assert all(
+        "192.168.2.2:" in given[name]
+        for name in _REQUIRED
+        if name.endswith("_URL") and name not in {"WILLY_TTS_URL", "DECISION_BASE_URL"}
+    )
     assert (settings.model, settings.embed_model) == ("qwen3.8-27b", "embeddinggemma-2")
     assert [room.id for room in settings.rooms] == ["living-room"]
     assert given["OPENAI_API_KEY"] == "local"
-    assert settings.typesafe_base_url == "http://127.0.0.1:8102"
-    secrets = {"COMPUTER_TOKEN_SECRET", "OPENAI_API_KEY_FILE", "TYPESAFE_API_KEY", "TYPESAFE_API_KEY_FILE"}
+    # D-R-36: decide's context is 2048 tokens, and each decision request is fitted to it.
+    assert (settings.decision_base_url, settings.decision_max_context_tokens) == ("http://127.0.0.1:8102", 2048)
+    secrets = {"COMPUTER_TOKEN_SECRET", "OPENAI_API_KEY_FILE", "DECISION_API_KEY", "DECISION_API_KEY_FILE"}
     assert not secrets & set(given)
 
 
@@ -221,7 +231,7 @@ def _environ(**given: str) -> dict[str, str]:
     environ = {
         name: value
         for name, value in os.environ.items()
-        if not name.startswith(("OTEL_", "BOT_OTEL_", "OPENAI_", "TYPESAFE_", "WILLY_", "MOSFET_", "COMPUTER_"))
+        if not name.startswith(("OTEL_", "BOT_OTEL_", "OPENAI_", "DECISION_", "WILLY_", "MOSFET_", "COMPUTER_"))
     }
     _ = environ.pop("PYTHONPATH", None)
     environ.update(given, BOT_OTEL_DISABLED="1")
@@ -234,7 +244,11 @@ def _free_port() -> int:
         return typing.cast(tuple[str, int], probe.getsockname())[1]
 
 
-@pytest.mark.parametrize(("decider", "secrets"), [({}, _SECRETS), (_LOCAL_DECIDER, _KEYLESS)], ids=["hosted", "local"])
+@pytest.mark.parametrize(
+    ("decider", "secrets"),
+    [({"DECISION_MAX_CONTEXT_TOKENS": "2048"}, _SECRETS), ({}, _KEYLESS)],
+    ids=["keyed", "keyless"],
+)
 def test_python_m_defines_willy_and_serves_the_house_until_sigterm(
     tmp_path: pathlib.Path, decider: dict[str, str], secrets: dict[str, str]
 ) -> None:
