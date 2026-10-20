@@ -47,10 +47,17 @@ class _Decide:
     _answers: dict[str, tuple[str, dict[str, float]]]
     _model: str | None
 
-    def __init__(self, answers: dict[str, tuple[str, dict[str, float]]], *, model: str | None = "decider") -> None:
+    def __init__(
+        self,
+        answers: dict[str, tuple[str, dict[str, float]]],
+        *,
+        model: str | None = "decider",
+        count: typing.Callable[[bytes], int] = lambda body: 12,
+    ) -> None:
         self.requests = []
         self._answers = answers
         self._model = model
+        self.count: typing.Callable[[bytes], int] = count
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(typing.cast(dict[str, typing.Any], json.loads(request.content)))
@@ -64,7 +71,7 @@ class _Decide:
                 }
                 for name, (choice, probabilities) in self._answers.items()
             },
-            "usage": {"input_tokens": 12, "output_tokens": 0},
+            "usage": {"input_tokens": self.count(request.content), "output_tokens": 0},
         }
         if self._model is not None:
             body["model"] = self._model
@@ -323,6 +330,7 @@ def test_the_request_and_response_logs_carry_the_answering_model_and_the_answer_
                 "probabilities": {"phone.answer_call": 0.9, _PASS: 0.1},
             }
         },
+        "usage": {"input_tokens": 12},
     }
 
 
@@ -386,6 +394,31 @@ def test_a_request_over_max_context_tokens_cuts_its_turn_instructions_to_their_l
     assert _without_selection_instructions(sent) == _without_selection_instructions(unbounded)
     assert json.dumps(sent["state"]) == json.dumps(unbounded["state"])
     assert after.get("cut", 0.0) - before.get("cut", 0.0) == 1.0
+
+
+def test_the_token_estimate_learns_from_what_the_server_counted() -> None:
+    """D-R-45 (Willy live check): decide counts tokens with its own tokenizer and prompt template, so requests
+    fitted at a guessed 3 bytes a token still overran its context and were refused (422). The processor learns
+    bytes per token from the input tokens each answer reports, and fits later requests to what it learned."""
+
+    def counted(body: bytes) -> int:
+        return len(body) // 2 + 40  # a tokenizer denser than the guess, and a template around the request
+
+    server = _Decide({"selection": (_PASS, {_PASS: 1.0})}, count=counted)
+    plain = _Decide({"selection": (_PASS, {_PASS: 1.0})})
+    _ = _run(_processor(plain), input_payload="ring turn", schemas=_answer_call_offered(), instructions=None)
+    (default,) = plain.requests
+    budget = _tokens(default) * 3
+    processor = _processor(server, max_context_tokens=budget)
+
+    _ = _run(processor, input_payload="ring turn", schemas=_answer_call_offered(), instructions=None)
+    _ = _run(processor, input_payload="ring turn", schemas=_answer_call_offered(), instructions=_turn_instructions(80))
+
+    first, second = server.requests
+    assert server.count(json.dumps(first, ensure_ascii=False).encode("utf-8")) <= budget
+    sent = json.dumps(second, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    assert server.count(sent) <= budget
+    assert second["questions"]["selection"]["instructions"] != _turn_instructions(80)
 
 
 def test_a_request_with_no_room_for_a_turn_line_sends_the_default_selection_instructions() -> None:

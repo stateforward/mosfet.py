@@ -39,7 +39,8 @@ bot.cognition(processor, intuition=decision.Processor(base_url="http://127.0.0.1
 ## Fitting the model's context
 
 With `max_context_tokens`, each request is fitted to the decision model's context before it is
-sent. Its size is estimated as a token per 3 UTF-8 bytes of its JSON body. A request over the
+sent. Its size is estimated from its JSON body at the fewest bytes per token any answer's `usage.input_tokens`
+has shown (the server's own tokenizer and prompt template), and at 3 until a server has said. A request over the
 limit has the selection question's instructions cut: those are the turn's world, self and acted
 blocks, which are context assembly. They keep as many leading whole lines as fit (the world block
 comes first), and when not even one fits, the question's own default instructions are sent

@@ -60,7 +60,8 @@ _PAYLOAD_KEY_INSTRUCTIONS: typing.Final = (
     "Fill one payload field for the selected event: the criteria are the exact values the "
     "evidence offers. Pick the value the turn supports."
 )
-_BYTES_PER_TOKEN: typing.Final = 3
+# The guess a processor fits to until a server has answered and said how many tokens it read (D-R-45).
+_BYTES_PER_TOKEN: typing.Final = 3.0
 
 type _Fit = typing.Literal["cut", "overflow"]
 
@@ -152,18 +153,25 @@ def _payload_key_wording(event_name: str, key: str) -> str:
     return f"Which value fills {key!r} for {event_name}?"
 
 
-def _fitted(request: client.Request, *, max_context_tokens: int) -> tuple[client.Request, _Fit | None]:
+def _body_bytes(request: client.Request) -> int:
+    """The size of the JSON body :class:`client.Client` sends for ``request``."""
+
+    return len(request.model_dump_json(exclude={"model"} if request.model is None else None).encode("utf-8"))
+
+
+def _fitted(
+    request: client.Request, *, max_context_tokens: int, bytes_per_token: float
+) -> tuple[client.Request, _Fit | None]:
     """``request`` within ``max_context_tokens``, cutting only the selection's instructions (D-R-36).
 
-    The estimate is a token per :data:`_BYTES_PER_TOKEN` UTF-8 bytes of the JSON body :class:`client.Client`
+    The estimate is a token per ``bytes_per_token`` UTF-8 bytes of the JSON body :class:`client.Client`
     sends. Over it, the instructions keep as many leading whole lines as fit (the world block comes first),
     then the question's default instructions; when even those do not fit, the request goes with them and
     the outcome is ``overflow``. The state and every criterion are left as they are.
     """
 
     def tokens(candidate: client.Request) -> int:
-        body = candidate.model_dump_json(exclude={"model"} if candidate.model is None else None)
-        return math.ceil(len(body.encode("utf-8")) / _BYTES_PER_TOKEN)
+        return math.ceil(_body_bytes(candidate) / bytes_per_token)
 
     def instructed(instructions: str) -> client.Request:
         selection = request.questions[_SELECTION].model_copy(update={"instructions": instructions})
@@ -202,6 +210,8 @@ class Processor(processing.DecisionProcessor):
     _model: str | None
     _max_context_tokens: int | None
     _pass_wording: str
+    # Bytes of request body per token the server read: the guess, then the fewest any answer showed (D-R-45).
+    _bytes_per_token: float
 
     def __init__(
         self,
@@ -223,6 +233,7 @@ class Processor(processing.DecisionProcessor):
         self._model = model
         self._max_context_tokens = max_context_tokens
         self._pass_wording = pass_wording
+        self._bytes_per_token = _BYTES_PER_TOKEN
 
     @typing.override
     async def process(
@@ -264,7 +275,9 @@ class Processor(processing.DecisionProcessor):
             )
         request = client.Request(state={"turn": stimulus_document}, questions=questions, model=self._model)
         if self._max_context_tokens is not None:
-            request, fit = _fitted(request, max_context_tokens=self._max_context_tokens)
+            request, fit = _fitted(
+                request, max_context_tokens=self._max_context_tokens, bytes_per_token=self._bytes_per_token
+            )
             if fit is not None:
                 _FITS.add(1, {"outcome": fit})
 
@@ -275,6 +288,10 @@ class Processor(processing.DecisionProcessor):
         try:
             try:
                 answered = await self._client.decide(request)
+                read = None if answered.usage is None else answered.usage.input_tokens
+                if read:
+                    # What the server counted, its own tokenizer and prompt template included, is what fits.
+                    self._bytes_per_token = min(self._bytes_per_token, _body_bytes(request) / read)
                 if answered.model is not None:
                     model = answered.model
             finally:

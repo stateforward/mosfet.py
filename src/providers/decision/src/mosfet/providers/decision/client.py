@@ -95,8 +95,21 @@ class ChoiceAnswer(pydantic.BaseModel):
     )
 
 
+class Usage(pydantic.BaseModel):
+    """What answering cost the server, as far as a processor reads it."""
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(frozen=True, extra="ignore")
+
+    input_tokens: int | None = pydantic.Field(
+        default=None,
+        ge=0,
+        description="The tokens the server's model read for the request, prompt template included.",
+        examples=[775],
+    )
+
+
 class Response(pydantic.BaseModel):
-    """A decision server's answer. Usage and any other keys are ignored."""
+    """A decision server's answer. Keys other than these are ignored."""
 
     model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(frozen=True, extra="ignore")
 
@@ -107,6 +120,10 @@ class Response(pydantic.BaseModel):
     )
     answers: dict[str, ChoiceAnswer] = pydantic.Field(
         description="The answers by question name.",
+    )
+    usage: Usage | None = pydantic.Field(
+        default=None,
+        description="What answering cost, when the server says.",
     )
 
 
