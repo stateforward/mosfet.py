@@ -5,9 +5,9 @@ assistant. It learns who people are: a voice it has never heard is a fact it is 
 belongs to, what to call them, and whether to ask at all are its own choices. A person may have several voices
 (a cold, a phone, a whisper), and each voice is exactly one person's. Willy knows its own voice too.
 
-Everything runs locally. The lab model server (CT 108; see `.env.example`) serves the language model, its
-embeddings, streaming speech to text, voiceprints, diarization and tone of voice. Speech and voice design run on
-the Breeze engine anygame's family shares on CT 107, where Willy has one voice of its own (see Mouth below).
+Everything runs locally. Willy talks to model servers on your own network, whose addresses go in `.env`: a
+language model, its embeddings, streaming speech to text, voiceprints, diarization, tone of voice, a decision
+model, and a speech engine that can design voices, where Willy has one voice of its own (see Mouth below).
 
 ## The bot file
 
@@ -19,21 +19,21 @@ with one `bot.define` that constructs every part inline, and runs it with `bot.r
   served by one `websocket.Server`. A far side in each room, `willy_example.room`, carries the room's
   microphone and speaker (and, optionally, camera) to it. A room's computer is shared, so it stamps nobody on what it hears: who is speaking is
   what Willy's ear recognizes.
-- **Ear.** `listening.Listening` on the lab's streaming speech to text, with voiceprints into a voice
+- **Ear.** `listening.Listening` on the streaming speech to text server, with voiceprints into a voice
   `identification.Registry` on the same file database as memory, diarization (several voices in one turn) and
   tone of voice.
 - **Mouth.** One `speaking.Speaking`, in the one voice Willy is given when it is born (`bot.voice`: the first
-  time Willy starts, its model conceives a voice from its traits and the lab designs it). Every room's computer
-  hears it and plays it on that room's speaker, like an intercom. The lab's speech engine is the Breeze engine
-  anygame's family shares on CT 107. Willy is allowed none of its voices (`bot.voice` with no `allowed=`), so
-  it designs one of its own there and is never born as one of the family's or the sidekicks' voices. The engine
+  time Willy starts, its model conceives a voice from its traits and the speech engine designs it). Every room's
+  computer hears it and plays it on that room's speaker, like an intercom. The speech engine may be shared with
+  other bots. Willy is allowed none of its voices (`bot.voice` with no `allowed=`), so it designs one of its own
+  there and is never born as another bot's voice. The engine
   keeps only a voice's id and its description, and speaks every line from that description, so nothing in it is
   marked as Willy's: Willy knows its voice by the id its memory keeps (the `self_voice` row in the data dir) and
   checks on every start that the engine still holds it.
-- **Mind.** `bot.cognition` on the lab's language model, its intuition on a decision model (`decision.Processor`
+- **Mind.** `bot.cognition` on the language model, its intuition on a decision model (`decision.Processor`
   on the decision server `DECISION_BASE_URL` names, never a chat model), with associations, consolidation, autonomy, routines
-  and the speech seed that takes heard speech into a conversation. Its memory recalls by the lab's
-  EmbeddingGemma 2 vectors.
+  and the speech seed that takes heard speech into a conversation. Its memory recalls by the
+  embedding server's vectors.
 - **Name.** `identity.Identity`: Willy is born nameless and may take a name when someone gives it one.
 - **People.** Knowing who someone is, is remembering it: its memory offers Willy `memory.know` (a voice is the
   same person as someone, is called something, or is not the same person as someone) and `memory.forget` (a
@@ -51,7 +51,7 @@ whom to answer.
 
 ```sh
 uv sync --project examples/willy
-cp examples/willy/.env.example examples/willy/.env          # the lab's addresses; edit the rooms
+cp examples/willy/.env.example examples/willy/.env          # your servers' addresses; edit the rooms
 python -c "import secrets; print(secrets.token_urlsafe(32))" > examples/willy/secrets/computer_token_secret
 set -a; . examples/willy/.env; set +a
 examples/willy/.venv/bin/python -m willy_example --secrets-dir examples/willy/secrets --ready-file /tmp/willy-ready
@@ -99,27 +99,27 @@ reason; the room's name, the url, the token and every sound and image never are 
 
 | Variable | Default | What it is |
 |---|---|---|
-| `WILLY_LLM_URL`, `WILLY_MODEL` | required | Willy's language model (the lab's `:8100/v1`, `qwen3.8-27b`) |
-| `WILLY_EMBED_URL`, `WILLY_EMBED_MODEL` | required | memory's embeddings (`:8014/v1`, `embeddinggemma-2`, 768 dimensions) |
-| `WILLY_STT_URL` | required | streaming speech to text, a `ws://` root (`:8001`) |
-| `WILLY_TRANSCRIBE_URL` | required | batch transcription, which Willy hears its own name through (`:8001/v1`) |
-| `WILLY_TTS_URL` | required | speech, its voices and its voice designer: the Breeze engine anygame's family shares on CT 107 (`192.168.2.32:8002`) |
-| `WILLY_VOICEPRINT_URL`, `WILLY_DIAR_URL`, `WILLY_EMOTION_URL` | required | voiceprints (`:8003`), diarization (`:8005`), tone (`:8004`) |
+| `WILLY_LLM_URL`, `WILLY_MODEL` | required | Willy's language model, an OpenAI-compatible `/v1` root, and its name |
+| `WILLY_EMBED_URL`, `WILLY_EMBED_MODEL` | required | memory's embeddings, an OpenAI-compatible `/v1` root, and the model's name |
+| `WILLY_STT_URL` | required | streaming speech to text, a `ws://` root |
+| `WILLY_TRANSCRIBE_URL` | required | batch transcription, which Willy hears its own name through, a `/v1` root |
+| `WILLY_TTS_URL` | required | speech, its voices and its voice designer |
+| `WILLY_VOICEPRINT_URL`, `WILLY_DIAR_URL`, `WILLY_EMOTION_URL` | required | voiceprints, diarization (several voices in one utterance), tone of voice |
 | `WILLY_HOST`, `WILLY_PORT` | `127.0.0.1`, `8765` | where the rooms' computers are served |
 | `WILLY_ROOMS` | `living-room:shelf` | each room and what its computer sits on, `room:object,...`; rooms are placed 10 m apart in the order given |
 | `WILLY_CAMERA`, `WILLY_FACE_MODELS` | `0`, unset | `1` to see; the directory holding `face_detection_yunet_2023mar.onnx` and `face_recognition_sface_2021dec.onnx` |
 | `WILLY_TRAITS` | `warm,patient,curious,honest` | the owner's traits for Willy, comma separated |
-| `DECISION_BASE_URL` | required | the decision server Willy's intuition decides on, which speaks the decisions wire format (anygame's decide, `http://127.0.0.1:8102` in `.env.example`) |
-| `DECISION_MAX_CONTEXT_TOKENS` | unset | the decision model's context in tokens (`2048` for decide in `.env.example`); each decision request is fitted to it by cutting the turn's context, never its stimuli |
+| `DECISION_BASE_URL` | required | the decision server Willy's intuition decides on, which speaks the decisions wire format |
+| `DECISION_MAX_CONTEXT_TOKENS` | unset | the decision model's context in tokens; each decision request is fitted to it by cutting the turn's context, never its stimuli |
 
 Every address is required: where the owner's model server is has no safe default. A room's name is the id of its
 computer and the peer its far side connects as: 3 to 63 lower-case letters, digits or hyphens, starting with a
 letter.
 
 Secrets are files under `secrets/` (see [`secrets/README.md`](secrets/README.md)): `computer_token_secret`,
-which every room's far side signs its token with, `openai_api_key`, a placeholder for the lab's keyless
+which every room's far side signs its token with, `openai_api_key`, a placeholder for keyless local
 servers (`OPENAI_API_KEY=local` in `.env` does as well), and, optionally, `decision_api_key`, the decision
-server's key. The local decide takes no key, and without the secret Willy sends it none.
+server's key. Without the secret Willy sends the decision server no key.
 
 ## Who lives here, and where safety sits
 
@@ -177,29 +177,26 @@ they are is offered; a voice Willy names is known by that name next turn; two vo
 
 ## Live check
 
-`tests/test_live.py` runs Willy against the lab itself, at the addresses in `.env.example`: CT 108, and the Breeze
-speech engine on CT 107:
+`tests/test_live.py` runs Willy against real servers, at the addresses in your `.env`:
 
 ```sh
-cd examples/willy && set -a && . ./.env.example && set +a && WILLY_LIVE=1 uv run pytest -m live tests/test_live.py -q
+cd examples/willy && set -a && . ./.env && set +a && WILLY_LIVE=1 uv run pytest -m live tests/test_live.py -q
 ```
 
 It has two gates, and both must hold: it is marked `live`, so `-m "not live"` (CI, and the command above under
 Tests) deselects it, and it is skipped unless `WILLY_LIVE=1`. With `WILLY_LIVE=1` nothing is skipped: a missing
-`WILLY_*` setting fails naming it, and a lab service that does not answer fails naming its unit and where it runs,
-so a down server never passes. It assumes `mosfet-llm` and CT 108's speech and embedding units are up (the runbook,
-`lab-ct108.md`, says how to stop and start them), and that anygame's `sidekick-tts-engine-breeze` answers on
-CT 107. That engine is the family's: the check never restarts it.
+`WILLY_*` setting fails naming it, and a server that does not answer fails naming it, so a down server never
+passes. The check never restarts a server: a shared speech engine stays as it is.
 
-The test writes its own `bot.define` of Willy's shape on the real parts and the lab's models, with one room served
-on loopback and `willy_example.room` as its far side; the far side's sound card is a scripted microphone and
-speaker, and the strangers' speech is made by the lab's speech engine at test time, in two catalog voices that are
-not Willy's. Step by step, each bounded: the lab answers (L1, 10 s); Willy is born with a voice that memory keeps
+The test writes its own `bot.define` of Willy's shape on the real parts and models, with one room served on
+loopback and `willy_example.room` as its far side; the far side's sound card is a scripted microphone and
+speaker, and the strangers' speech is made by the speech engine at test time, in two catalog voices that are not
+Willy's. Step by step, each bounded: the servers answer (L1, 10 s); Willy is born with a voice that memory keeps
 (L2, 300 s); a stranger's voice reaches it unknown, with knowing who they are offered (L3); a fact the test has
-Willy remember, standing in for a selection, makes that voice known by the next utterance (L4); two voices in one utterance are two sources
-(L5); its own voice, echoed through the room's microphone, is `you` (L6, 90 s); and forgetting the person erases
-the print (L7); 60 s each unless given. It asserts perception and capacity only. Whatever Willy chose on each
-turn (whether it asked who the stranger was, what it said, the tools it called) is recorded, never asserted:
-printed as it happens, kept in `live-report.jsonl` beside the OTEL JSONL in the test's data directory, each
-readable by its owner alone (0600). It takes about
-fifteen minutes, most of it Willy's birth on the 27B model, which thinks by default.
+Willy remember, standing in for a selection, makes that voice known by the next utterance (L4); two voices in one
+utterance are two sources (L5); its own voice, echoed through the room's microphone, is `you` (L6, 90 s); and
+forgetting the person erases the print (L7); 60 s each unless given. It asserts perception and capacity only.
+Whatever Willy chose on each turn (whether it asked who the stranger was, what it said, the tools it called) is
+recorded, never asserted: printed as it happens, kept in `live-report.jsonl` beside the OTEL JSONL in the test's
+data directory, each readable by its owner alone (0600). Most of its time is Willy's birth, while its model
+conceives a voice.
