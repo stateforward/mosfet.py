@@ -45,6 +45,7 @@ import asyncio
 import collections.abc
 import dataclasses
 import datetime
+import math
 import logging
 import typing
 import uuid
@@ -113,6 +114,8 @@ DEFAULT_IDLE_CLOSE = datetime.timedelta(seconds=60)
 """How long a source may go unheard before its session is closed; its next sound opens a new one."""
 DEFAULT_MAX_TURN = datetime.timedelta(seconds=30)
 """The most audio of one turn a source keeps for identifying who spoke; older audio is let go."""
+# How much of a segment must fall in an echo span for it to be identified match-only: more than rounding.
+_ECHO_OVERLAP_SECONDS = 0.001
 DEFAULT_EMBED_TIMEOUT = datetime.timedelta(seconds=3)
 """How long a turn waits to embed (and diarize) its voices and to hear its tone, before the registry's answer."""
 
@@ -132,8 +135,9 @@ class _Turn:
     spans: tuple[voice.detection.VoiceDetectionSegment, ...]
     participants: tuple[mosfet.Participant, ...]
     parent: mosfet.StimulusData[SoundData] | None
-    # Heard while the bot was producing, or within recognition.ECHO_SECONDS after: identified match-only.
-    echo: bool
+    # When, in seconds of the turn's audio, it was heard while the bot was producing or within
+    # recognition.ECHO_SECONDS after: a voice in a segment overlapping one of these is identified match-only.
+    echo: tuple[tuple[float, float], ...]
 
 
 class _HeardData(pydantic.BaseModel):
@@ -275,10 +279,10 @@ class Source(Traced):
     # What the session was last told about the bot's mouth; what the latest scored sound says.
     _producing_told: bool
     _producing: bool
-    # The heard-audio second this source last heard the bot producing at, and whether the current turn was heard
-    # while it produced or within recognition.ECHO_SECONDS after (D-R-37).
+    # The heard-audio second this source last heard the bot producing at, and the spans of heard-audio seconds the
+    # current turn heard while it produced or within recognition.ECHO_SECONDS after (D-R-37, D-R-44).
     _produced_at: float | None
-    _echo: bool
+    _echo: list[tuple[float, float]]
     # The one turn being finished, and the overlap being recognized: each for one active operation.
     _turn: _Turn | None
     _overlap_voiced_seconds: float
@@ -324,7 +328,7 @@ class Source(Traced):
         self._producing_told = False
         self._producing = False
         self._produced_at = None
-        self._echo = False
+        self._echo = []
         self._turn = None
         self._overlap_voiced_seconds = 0.0
 
@@ -445,9 +449,13 @@ class Source(Traced):
         instance._received_seconds += len(sound.audio) // frame_bytes / sound.sample_rate_hz
         if sensed.producing:
             instance._produced_at = instance._received_seconds
-            instance._echo = True
-        elif instance._produced_at is not None and arrived_at < instance._produced_at + recognition.ECHO_SECONDS:
-            instance._echo = True
+        if sensed.producing or (
+            instance._produced_at is not None and arrived_at < instance._produced_at + recognition.ECHO_SECONDS
+        ):
+            if instance._echo and instance._echo[-1][1] >= arrived_at:
+                instance._echo[-1] = (instance._echo[-1][0], instance._received_seconds)
+            else:
+                instance._echo.append((arrived_at, instance._received_seconds))
         if instance._ring_rate_hz != sound.sample_rate_hz or instance._ring_channels != sound.channels:
             instance._ring = bytearray()
             instance._ring_rate_hz = sound.sample_rate_hz
@@ -508,7 +516,7 @@ class Source(Traced):
         instance._transcripts = []
         instance._partial = None
         instance._participants = ()
-        instance._echo = False
+        instance._echo = []
 
     @staticmethod
     def _count_failure(ctx: hsm.Context, instance: "Source", event: hsm.Event[typing.Any]) -> None:
@@ -533,6 +541,13 @@ class Source(Traced):
         confidences = [confidence for _, confidence in instance._transcripts if confidence is not None]
         text = data.text if data.text is not None and data.text.strip() else " ".join(texts)
         origin = instance._turn_started_at
+        # The turn's audio is the ring, which ends now and may have dropped its oldest audio past the turn bound.
+        rate = instance._ring_rate_hz
+        kept = 0.0 if rate is None else len(instance._ring) // (2 * instance._ring_channels) / rate
+        ring_start = instance._received_seconds - kept
+        echo = tuple(
+            (max(0.0, start - ring_start), end - ring_start) for start, end in instance._echo if end > ring_start
+        )
         spans: list[voice.detection.VoiceDetectionSegment] = []
         for start, end in instance._spans:
             begin, finish = max(0.0, start - origin), max(0.0, (data.at_seconds if end is None else end) - origin)
@@ -547,7 +562,7 @@ class Source(Traced):
             spans=tuple(spans),
             participants=instance._participants,
             parent=instance._parent,
-            echo=instance._echo,
+            echo=echo,
         )
         Source._restart_turn(instance)
 
@@ -573,11 +588,17 @@ class Source(Traced):
 
     @staticmethod
     async def _identify(
-        instance: "Source", event: hsm.Event[typing.Any], segments: tuple[voice.VoiceSegment, ...], *, match_only: bool
+        instance: "Source",
+        event: hsm.Event[typing.Any],
+        segments: tuple[voice.VoiceSegment, ...],
+        *,
+        match_only: tuple[bool, ...],
     ) -> tuple[voice.HeardVoice, ...]:
         """Who was heard in the segments, earliest first; nobody when identification is not composed or fails.
 
-        ``match_only`` names only voices already known and makes no new one (``recognition.identify``).
+        A segment whose ``match_only`` is true names only voices already known and makes no new one
+        (``recognition.identify``). Those segments are identified first, so a voice the others make new in this
+        turn is never what one of them is matched to.
         """
 
         embedder, registry = instance._embedder, instance._registry
@@ -598,16 +619,23 @@ class Source(Traced):
             return ()
         if embeddings is None:
             return ()
-        heard = await recognition.identify(
-            instance.context(),
-            registry,
-            segments,
-            embeddings,
-            match_only=match_only,
-            timeout=instance._recognize_timeout,
-            operation_id=operation_id,
-            metadata=event.metadata,
-        )
+        heard: list[voice.HeardVoice | None] = [None] * len(segments)
+        for only in (True, False):
+            indices = [index for index, flag in enumerate(match_only) if flag is only]
+            if not indices:
+                continue
+            answered = await recognition.identify(
+                instance.context(),
+                registry,
+                tuple(segments[index] for index in indices),
+                tuple(embeddings[index] for index in indices),
+                match_only=only,
+                timeout=instance._recognize_timeout,
+                operation_id=operation_id,
+                metadata=event.metadata,
+            )
+            for index, item in zip(indices, answered, strict=True):
+                heard[index] = item
         return tuple(item for item in heard if item is not None)[:_MAX_VOICES]
 
     @staticmethod
@@ -649,7 +677,8 @@ class Source(Traced):
     async def _run_turn(ctx: hsm.Context, instance: "Source", event: hsm.Event[typing.Any]) -> None:
         """Identify who spoke in the ended turn and hear its tone, then hand it on.
 
-        A turn heard while the bot produced sound, or just after, is identified match-only (``_Turn.echo``).
+        A segment heard while the bot produced sound, or just after, is identified match-only (``_Turn.echo``): a
+        voice heard later in the same turn, once the bot is quiet, is identified as any other (D-R-44).
         """
 
         turn = instance._turn
@@ -663,7 +692,18 @@ class Source(Traced):
         ) as active:
             segments = await Source._diarize(instance, event, turn)
             heard, affect = await asyncio.gather(
-                Source._identify(instance, event, segments, match_only=turn.echo),
+                Source._identify(
+                    instance,
+                    event,
+                    segments,
+                    match_only=tuple(
+                        any(
+                            min(segment.end_seconds, end) - max(segment.start_seconds, start) > _ECHO_OVERLAP_SECONDS
+                            for start, end in turn.echo
+                        )
+                        for segment in segments
+                    ),
+                ),
                 tone.classify(
                     instance.context(),
                     instance._affect,
@@ -799,12 +839,12 @@ class Source(Traced):
                 spans=(),
                 participants=(),
                 parent=None,
-                echo=True,
+                echo=((0.0, math.inf),),
             )
         )
         # Match only: the overlap's audio carries the bot's own voice too, so it names a voice already known
         # and never makes a new one.
-        heard = await Source._identify(instance, event, segments, match_only=True)
+        heard = await Source._identify(instance, event, segments, match_only=(True,) * len(segments))
         _ = hsm.dispatch(ctx, instance, _OverlapHeardEvent.with_data(_HeardData(voices=heard)))
 
     # -- timers -----------------------------------------------------------------------------------

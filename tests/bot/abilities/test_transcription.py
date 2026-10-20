@@ -882,6 +882,69 @@ def test_a_diarizing_ear_identifies_each_speaker_of_the_turn() -> None:
     assert [(item.start_seconds, item.end_seconds) for item in speech.voices] == [(0.0, 1.0), (1.0, 2.0)]
 
 
+class SplitAt(voice.diarization.VoiceDiarizer):
+    """Two speakers: the turn's audio before ``seconds`` and after; a shorter turn is one."""
+
+    def __init__(self, seconds: float) -> None:
+        self.seconds: float = seconds
+
+    @typing.override
+    async def classify(self, input: voice.diarization.InputData) -> voice.diarization.OutputData:
+        cut = int(self.seconds * input.sample_rate_hz) * 2 * input.channels
+        if len(input.audio) <= cut:
+            parts = ((input.audio, 0.0),)
+        else:
+            parts = ((input.audio[:cut], 0.0), (input.audio[cut:], self.seconds))
+        return voice.diarization.OutputData(
+            segments=tuple(
+                voice.diarization.VoiceDiarizationSegment(
+                    audio=audio,
+                    media_type="audio/pcm",
+                    sample_rate_hz=input.sample_rate_hz,
+                    channels=input.channels,
+                    start_seconds=start,
+                    end_seconds=start + len(audio) / (2 * input.channels * input.sample_rate_hz),
+                )
+                for audio, start in parts
+            )
+        )
+
+
+def test_a_voice_nobody_knows_after_the_echo_window_of_the_same_turn_is_a_new_voice() -> None:
+    """Willy live check (D-R-44): the echo guard held a whole turn match-only when the bot had spoken anywhere in it,
+    so a stranger who spoke well after Willy went quiet, in the same turn, was never heard as anyone. Only a
+    diarized segment that overlaps the bot producing, or ``recognition.ECHO_SECONDS`` after, is match-only."""
+
+    async def run() -> StreamingListening:
+        sessions = Sessions()
+        classifier = FixedVoiceClassifier(voice.identification.VoiceEmbedding(embedding=(0.6, 0.8), model="m"))
+        ear = await _ear(sessions, voice_classifier=classifier, registry=_registry(), voice_diarizer=SplitAt(2.0))
+        await arrives(ear, heard())  # the caller's source is open before the bot speaks
+        await _wait(lambda: len(sessions.made) == 1 and len(sessions.made[0].audio()) == 1)
+        session = sessions.made[0]
+
+        async def streamed(sound: SoundData) -> None:
+            count = len(session.audio())
+            await arrives(ear, sound)
+            await _wait(lambda: len(session.audio()) == count + 1)
+
+        await session.say(stream.TurnEndedEvent.with_data(stream.TurnEndedData(at_seconds=0.1, text="")))
+        await produce(ear)
+        await streamed(heard(10))  # the bot speaking
+        await produce(ear, duration=0.0)
+        await streamed(heard(10))  # its echo window, a second of heard audio
+        await streamed(heard(20))  # a stranger, after it
+        await session.say(stream.TurnEndedEvent.with_data(stream.TurnEndedData(at_seconds=4.0, text="hello there")))
+        await _wait(lambda: bool(_speech(ear)))
+        return ear
+
+    ear = asyncio.run(run())
+
+    (speech,) = _speech(ear)
+    (stranger,) = speech.voices
+    assert (stranger.start_seconds, stranger.recognition.recognized) == (2.0, False)
+
+
 _CHEERFUL = voice.Affect(label="happy", scores={"happy": 0.7, "neutral": 0.3}, valence=0.6, confidence=0.7)
 
 
