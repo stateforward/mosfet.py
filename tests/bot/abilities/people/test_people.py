@@ -1,4 +1,4 @@
-"""People: the bot's capacity to know who people are, under the owner's household.
+"""People: the bot's capacity to know who people are, which it learns itself.
 
 Every test pins a *capacity* and never a choice. A link, an unlink, a name or a forget happens only
 because the test dispatched it itself, standing in for cognition selecting the tool; nothing here
@@ -13,6 +13,7 @@ import asyncio
 import collections.abc
 import dataclasses
 import datetime
+import inspect
 import pathlib
 import typing
 import uuid
@@ -34,7 +35,6 @@ _POLICY = identification.MatchPolicy(threshold=0.50, margin=0.05, refine_thresho
 # Two orthogonal voiceprints: similarity 0, so they are never one voice.
 _A = identification.Print(vector=(0.6180339887, 0.7861513778), model="voice-model")
 _B = identification.Print(vector=(-0.7861513778, 0.6180339887), model="voice-model")
-_ADA = memory.Member(id="ada", name="Ada", role=memory.Role.CHILD, born=2018)
 _TOOLS = {people.LinkEvent.name, people.UnlinkEvent.name, people.NameEvent.name, people.ForgetEvent.name}
 _FAR_FUTURE = datetime.datetime(2100, 1, 1, tzinfo=datetime.UTC)
 
@@ -165,33 +165,6 @@ class Harness:
         (observed,) = [observed for observed in self.observations() if observed.id == request_id]
         return observed
 
-    async def redeclare(self, household: tuple[memory.Member, ...]) -> None:
-        """Attach People again under ``household``, as the owner's next start would, and wait for it to serve."""
-
-        await self.capacity.stop(self.ctx)
-        self.capacity = people.People(memory=self.store, registries=(self.voices,), household=household)
-        await self.attach(self.capacity)
-        await self.serving()
-
-    async def own_in_memory(self, ref: str) -> None:
-        """Memory learns ``ref`` is the bot's own, as it does from any turn its own voice takes part in."""
-
-        found = await self.ask(
-            self.store,
-            memory.SearchEvent,
-            memory.SearchData(
-                cue=(),
-                participants=(mosfet.Participant(ref=ref, role=mosfet.ParticipantRole.SOURCE, own=True),),
-                nearest=0,
-                recent=0,
-                present=0,
-                linked=0,
-            ),
-            memory.FoundEvent,
-            memory.FailedEvent,
-        )
-        assert isinstance(found, memory.FoundData), found
-
     def prune_unlinked(self) -> int:
         """Retention, run far in the future: every print no person holds is pruned."""
 
@@ -203,12 +176,7 @@ class Harness:
                 await part.stop(self.ctx)
 
 
-async def _harness(
-    tmp_path: pathlib.Path,
-    *,
-    household: tuple[memory.Member, ...] = (),
-    start_memory: bool = True,
-) -> Harness:
+async def _harness(tmp_path: pathlib.Path, *, timeout: datetime.timedelta | None = None) -> Harness:
     ctx = environment.Environment()
     owner = EventRecorder()
     _ = await mosfet.started(ctx, owner, EventRecorder.model)
@@ -226,10 +194,11 @@ async def _harness(
         store=store,
         prints=prints,
         voices=voices,
-        capacity=people.People(memory=store, registries=(voices,), household=household),
+        capacity=people.People(memory=store, registries=(voices,))
+        if timeout is None
+        else people.People(memory=store, registries=(voices,), timeout=timeout),
     )
-    if start_memory:
-        await harness.attach(store)
+    await harness.attach(store)
     await harness.attach(voices)
     await harness.attach(harness.capacity)
     return harness
@@ -238,11 +207,9 @@ async def _harness(
 def _run[T](
     tmp_path: pathlib.Path,
     scenario: collections.abc.Callable[[Harness], collections.abc.Awaitable[T]],
-    *,
-    household: tuple[memory.Member, ...] = (),
 ) -> T:
     async def run() -> T:
-        harness = await _harness(tmp_path, household=household)
+        harness = await _harness(tmp_path)
         try:
             await harness.serving()
             return await scenario(harness)
@@ -282,7 +249,7 @@ def test_constructing_people_starts_nothing_and_refuses_what_it_cannot_serve() -
         max_ids=4,
     )
 
-    built = people.People(memory=store, registries=(voices,), household=(_ADA,))
+    built = people.People(memory=store, registries=(voices,))
 
     assert built.identity() == "people"
     assert built.memory() is store
@@ -291,8 +258,6 @@ def test_constructing_people_starts_nothing_and_refuses_what_it_cannot_serve() -
     assert not lifecycle.is_started(voices)
     with pytest.raises(ValueError, match="voice"):
         _ = people.People(memory=store, registries=(voices, other))
-    with pytest.raises(ValueError, match="once"):
-        _ = people.People(memory=store, household=(_ADA, _ADA))
     with pytest.raises(ValueError, match="timeout"):
         _ = people.People(memory=store, timeout=datetime.timedelta(0))
 
@@ -300,7 +265,7 @@ def test_constructing_people_starts_nothing_and_refuses_what_it_cannot_serve() -
 # --- the schemas the bot is offered ---------------------------------------------------------------
 
 
-def test_the_tools_are_model_callable_and_never_offer_an_owner_fact() -> None:
+def test_the_tools_are_model_callable_and_never_offer_a_role_or_birth_year() -> None:
     requests = (people.LinkEvent, people.UnlinkEvent, people.NameEvent, people.ForgetEvent)
     observations = (people.ChangedEvent, people.FailedEvent)
 
@@ -318,27 +283,18 @@ def test_the_tools_are_model_callable_and_never_offer_an_owner_fact() -> None:
     assert all("examples" not in branch for branch in typing.cast(list[dict[str, object]], link["name"]["anyOf"]))
 
 
+def test_people_takes_no_household() -> None:
+    """R-11: nobody lists the household; who people are is what the bot learns."""
+
+    assert "household" not in inspect.signature(people.People.__init__).parameters
+
+
 def test_a_link_names_a_new_person_only() -> None:
     with pytest.raises(pydantic.ValidationError):
         _ = people.LinkData(ref="voice:3f2a9c", person="ada", name="Ada")
 
 
 # --- serving ----------------------------------------------------------------------------------------
-
-
-def test_the_household_is_declared_on_attach_and_its_facts_are_the_owners(tmp_path: pathlib.Path) -> None:
-    async def scenario(harness: Harness) -> tuple[tuple[memory.Person, ...], people.FailureData, people.FailureData]:
-        persons = await harness.persons()
-        renamed = await harness.select(people.NameEvent, people.NameData(person="ada", name="Addie"))
-        forgotten = await harness.select(people.ForgetEvent, people.ForgetData(person="ada"))
-        return persons, _failed(renamed), _failed(forgotten)
-
-    persons, renamed, forgotten = _run(tmp_path, scenario, household=(_ADA,))
-
-    (ada,) = [person for person in persons if person.id == "ada"]
-    assert (ada.name, ada.role, ada.born, ada.declared) == ("Ada", memory.Role.CHILD, 2018, True)
-    assert (renamed.op, renamed.kind) == ("name", people.FailureKind.DECLARED)
-    assert (forgotten.op, forgotten.kind) == ("forget", people.FailureKind.DECLARED)
 
 
 def test_linking_an_unknown_voice_to_a_new_named_person_makes_the_next_turn_know_them(
@@ -435,7 +391,7 @@ def test_a_link_memory_refuses_changes_no_mark(tmp_path: pathlib.Path) -> None:
 
 
 def test_a_voice_linked_to_a_person_nobody_has_named_is_not_kept(tmp_path: pathlib.Path) -> None:
-    """The mark follows known (D-W8-18): a link into a person nobody named or declared keeps no print."""
+    """The mark follows known (D-W8-18, D-R-39): a link into a person nobody named keeps no print."""
 
     async def scenario(harness: Harness) -> tuple[str, memory.Present, int, str]:
         ref = await harness.heard(_A)
@@ -466,210 +422,6 @@ def test_naming_a_person_keeps_every_one_of_their_prints(tmp_path: pathlib.Path)
     assert known.known is True
     assert pruned == 0
     assert after == before
-
-
-def test_a_voice_linked_to_a_declared_person_is_kept(tmp_path: pathlib.Path) -> None:
-    async def scenario(harness: Harness) -> tuple[str, int, str]:
-        ref = await harness.heard(_A)
-        _ = _changed(await harness.select(people.LinkEvent, people.LinkData(ref=ref, person="ada")))
-        return ref, harness.prune_unlinked(), await harness.heard(_A)
-
-    ref, pruned, heard_again = _run(tmp_path, scenario, household=(_ADA,))
-
-    assert pruned == 0
-    assert heard_again == ref
-
-
-def test_a_voice_the_owner_declares_is_kept(tmp_path: pathlib.Path) -> None:
-    async def scenario(harness: Harness) -> tuple[str, memory.Present, int, str]:
-        ref = await harness.heard(_A)
-        await harness.redeclare((_ADA.model_copy(update={"refs": (ref,)}),))
-        return ref, await harness.who(ref), harness.prune_unlinked(), await harness.heard(_A)
-
-    ref, present, pruned, heard_again = _run(tmp_path, scenario)
-
-    assert (present.person, present.known) == ("ada", True)
-    assert pruned == 0
-    assert heard_again == ref
-
-
-def test_a_voice_the_owner_no_longer_declares_is_a_strangers_again(tmp_path: pathlib.Path) -> None:
-    """D-W8-18: memory drops the owner ref, so its mark is cleared and retention prunes the print."""
-
-    async def scenario(harness: Harness) -> tuple[str, memory.Present, int, str]:
-        ref = await harness.heard(_A)
-        await harness.redeclare((_ADA.model_copy(update={"refs": (ref,)}),))
-        await harness.redeclare((_ADA,))
-        return ref, await harness.who(ref), harness.prune_unlinked(), await harness.heard(_A)
-
-    ref, present, pruned, heard_again = _run(tmp_path, scenario)
-
-    assert present.person != "ada"
-    assert present.known is False
-    assert pruned == 1
-    assert heard_again != ref
-
-
-def _declarations(reader: metric_reader.Reader) -> dict[str, float]:
-    counted: dict[str, float] = {}
-    for point in reader.points("bot.people.count"):
-        if point.attributes.get("bot.people.op") == "declare":
-            kind = str(point.attributes.get("bot.failure.kind"))
-            counted[kind] = counted.get(kind, 0.0) + point.value
-    return counted
-
-
-def test_a_dropped_voice_whose_mark_cannot_be_cleared_is_logged_by_kind_and_counted(
-    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-) -> None:
-    """The household is still declared once and People serves; the mark left behind only keeps a print longer."""
-
-    async def run(reader: metric_reader.Reader) -> tuple[str, dict[str, float], dict[str, float]]:
-        harness = await _harness(tmp_path)
-        try:
-            await harness.serving()
-            ref = await harness.heard(_A)
-            await harness.redeclare((_ADA.model_copy(update={"refs": (ref,)}),))
-            mark = harness.prints.link
-
-            def failing(kind: identification.Kind, id: identification.Id, linked: bool) -> None:
-                if not linked:
-                    raise identification.StoreError(identification.FailureKind.STORE_FAILED, "the store failed")
-                mark(kind, id, linked)
-
-            monkeypatch.setattr(harness.prints, "link", failing)
-            before = _declarations(reader)
-            await harness.redeclare((_ADA,))
-            return ref, before, _declarations(reader)
-        finally:
-            await harness.stop()
-
-    with metric_reader.recording(tmp_path, monkeypatch) as reader, caplog.at_level("WARNING"):
-        ref, before, after = asyncio.run(run(reader))
-
-    assert {kind: after[kind] - before.get(kind, 0.0) for kind in after if after[kind] != before.get(kind)} == (
-        {"none": 1.0, "store_failed": 1.0}
-    )
-    uncleared = [record for record in caplog.records if "declar" in record.getMessage()]
-    assert len(uncleared) == 1
-    assert "voice" in uncleared[0].getMessage()
-    assert ref not in caplog.text and ref.partition(":")[2] not in caplog.text
-
-
-async def _redeclare_while_marks_fail(
-    harness: Harness,
-    monkeypatch: pytest.MonkeyPatch,
-    reader: metric_reader.Reader,
-    fails: collections.abc.Callable[[int, bool], bool],
-) -> tuple[str, memory.Present, int, dict[str, float]]:
-    """Declare A as Ada's, then B instead, while the store fails each mark ``fails(call, linked)`` says."""
-
-    a = await harness.heard(_A)
-    b = await harness.heard(_B)
-    await harness.redeclare((_ADA.model_copy(update={"refs": (a,)}),))
-    mark = harness.prints.link
-    calls = [0]
-
-    def flaky(kind: identification.Kind, id: identification.Id, linked: bool) -> None:
-        calls[0] += 1
-        if fails(calls[0], linked):
-            raise identification.StoreError(identification.FailureKind.STORE_FAILED, "the store is busy")
-        mark(kind, id, linked)
-
-    monkeypatch.setattr(harness.prints, "link", flaky)
-    before = _declarations(reader)
-    await harness.redeclare((_ADA.model_copy(update={"refs": (b,)}),))
-    after = _declarations(reader)
-    counted = {kind: after[kind] - before.get(kind, 0.0) for kind in after if after[kind] != before.get(kind)}
-    return a, await harness.who(a), harness.prune_unlinked(), counted
-
-
-def test_a_dropped_voice_whose_mark_fails_with_the_declaration_is_cleared_when_it_is_made_again(
-    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-) -> None:
-    """D-W8-18: memory dropped A on the failed attempt, so the retry clears A's mark with B's being kept."""
-
-    async def run(reader: metric_reader.Reader) -> tuple[memory.Present, int, dict[str, float]]:
-        harness = await _harness(tmp_path)
-        try:
-            await harness.serving()
-            # Keeping B and clearing A both fail once: the declaration fails and is made again.
-            _, present, pruned, counted = await _redeclare_while_marks_fail(
-                harness, monkeypatch, reader, lambda call, linked: call <= 2
-            )
-            return present, pruned, counted
-        finally:
-            await harness.stop()
-
-    with metric_reader.recording(tmp_path, monkeypatch) as reader, caplog.at_level("WARNING"):
-        present, pruned, counted = asyncio.run(run(reader))
-
-    assert present.known is False
-    assert pruned == 1
-    assert counted == {"store_failed": 1.0, "none": 1.0}
-    assert not [record for record in caplog.records if "cleared" in record.getMessage()]
-
-
-def test_a_dropped_voice_whose_mark_still_cannot_be_cleared_when_made_again_is_logged_once_and_counted(
-    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-) -> None:
-    async def run(reader: metric_reader.Reader) -> tuple[str, memory.Present, dict[str, float]]:
-        harness = await _harness(tmp_path)
-        try:
-            await harness.serving()
-            # Keeping B fails once; clearing A always fails.
-            a, present, _, counted = await _redeclare_while_marks_fail(
-                harness, monkeypatch, reader, lambda call, linked: call == 1 or not linked
-            )
-            return a, present, counted
-        finally:
-            await harness.stop()
-
-    with metric_reader.recording(tmp_path, monkeypatch) as reader, caplog.at_level("WARNING"):
-        a, present, counted = asyncio.run(run(reader))
-
-    assert present.known is False
-    # The failed declaration, the mark left behind, and the declaration made.
-    assert counted == {"store_failed": 2.0, "none": 1.0}
-    uncleared = [record for record in caplog.records if "cleared" in record.getMessage()]
-    assert len(uncleared) == 1
-    assert "voice" in uncleared[0].getMessage()
-    assert a not in caplog.text and a.partition(":")[2] not in caplog.text
-
-
-def test_an_owner_ref_that_is_the_bots_own_is_refused_alone_and_people_serves(
-    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-) -> None:
-    """D-W8-19: the declaration is made without that ref, logged once by kind and counted; never retried."""
-
-    async def run(
-        reader: metric_reader.Reader,
-    ) -> tuple[str, memory.Present, tuple[memory.Person, ...], dict[str, float], dict[str, float]]:
-        harness = await _harness(tmp_path)
-        try:
-            await harness.serving()
-            own = await harness.own(_A)
-            await harness.own_in_memory(own)
-            before = _declarations(reader)
-            await harness.redeclare((_ADA.model_copy(update={"refs": (own, "+15550100")}),))
-            return own, await harness.who(own), await harness.persons(), before, _declarations(reader)
-        finally:
-            await harness.stop()
-
-    with metric_reader.recording(tmp_path, monkeypatch) as reader, caplog.at_level("WARNING"):
-        own, present, persons, before, after = asyncio.run(run(reader))
-
-    assert present.person == memory.SELF
-    (ada,) = [person for person in persons if person.id == "ada"]
-    assert (ada.declared, ada.refs) == (True, ("+15550100",))
-    # The declaration is made once and the refusal counted once: nothing is retried.
-    assert {kind: after[kind] - before.get(kind, 0.0) for kind in after if after[kind] != before.get(kind)} == (
-        {"none": 1.0, "conflict": 1.0}
-    )
-    refusals = [record for record in caplog.records if "declar" in record.getMessage()]
-    assert len(refusals) == 1
-    assert "voice" in refusals[0].getMessage()
-    assert own not in caplog.text and own.partition(":")[2] not in caplog.text
 
 
 def test_unlinking_a_voice_gives_it_back_to_nobody(tmp_path: pathlib.Path) -> None:
@@ -721,26 +473,27 @@ def test_forgetting_a_person_erases_their_prints(tmp_path: pathlib.Path) -> None
     assert all(person.id != forgotten.person.id for person in persons)
 
 
-def test_the_tools_are_offered_only_while_serving(tmp_path: pathlib.Path) -> None:
-    """Until memory answers the household's declaration nothing is offered, and a selection is refused."""
+def test_the_tools_are_offered_at_once_and_a_memory_that_cannot_answer_fails_the_statement(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Nothing is declared first (R-11): People serves as soon as it is attached."""
 
-    async def run() -> tuple[set[str], people.FailureData, set[str]]:
-        harness = await _harness(tmp_path, start_memory=False)
+    async def run() -> tuple[set[str], people.FailureData]:
+        harness = await _harness(tmp_path, timeout=datetime.timedelta(milliseconds=200))
         try:
-            await _until(lambda: "/unavailable/" in harness.capacity.state())
-            waiting = _offered(harness.capacity)
-            refused = _failed(await harness.select(people.LinkEvent, people.LinkData(ref="voice:3f2a9c", name="Sam")))
-            await harness.attach(harness.store)
             await harness.serving()
-            return waiting, refused, _offered(harness.capacity)
+            offered = _offered(harness.capacity)
+            await harness.store.stop(harness.ctx)
+            refused = _failed(await harness.select(people.LinkEvent, people.LinkData(ref="voice:3f2a9c", name="Sam")))
+            return offered, refused
         finally:
             await harness.stop()
 
-    waiting, refused, serving = asyncio.run(run())
+    offered, refused = asyncio.run(run())
 
-    assert waiting == set()
-    assert (refused.op, refused.kind) == ("link", people.FailureKind.UNAVAILABLE)
-    assert serving == _TOOLS
+    assert offered == _TOOLS
+    assert refused.op == "link"
+    assert refused.kind in {people.FailureKind.UNAVAILABLE, people.FailureKind.TIMEOUT}
 
 
 def test_a_detached_people_answers_a_selection_unavailable() -> None:
@@ -753,7 +506,7 @@ def test_a_detached_people_answers_a_selection_unavailable() -> None:
         assert model is not None
         _ = await mosfet.started(ctx, detached, model)
         request = dataclasses.replace(
-            people.ForgetEvent.with_data_and_id(people.ForgetData(person="ada"), "forget"),
+            people.ForgetEvent.with_data_and_id(people.ForgetData(person=memory.SELF), "forget"),
             source=hsm.id(owner),
             target=hsm.id(detached),
         )
@@ -774,7 +527,7 @@ def test_telemetry_counts_each_statement_with_closed_attributes(
 ) -> None:
     async def run(reader: metric_reader.Reader) -> dict[tuple[tuple[str, object], ...], float]:
         before = reader.points("bot.people.count")
-        harness = await _harness(tmp_path, household=(_ADA,))
+        harness = await _harness(tmp_path)
         try:
             await harness.serving()
             ref = await harness.heard(_A)
@@ -796,7 +549,6 @@ def test_telemetry_counts_each_statement_with_closed_attributes(
         return (("bot.failure.kind", kind), ("bot.outcome", outcome), ("bot.people.op", op))
 
     assert counted == {
-        key("declare", "done", "none"): 1.0,
         key("link", "done", "none"): 1.0,
         key("link", "failed", "conflict"): 1.0,
     }

@@ -216,10 +216,10 @@ Seeds without autonomy are [`B0021`](bot_diagnostics.md#b0021); a voice needs th
 
 ## Knowing people
 
-A bot for a household learns who people are. Its ears and eyes tell voices and faces apart (each
+A bot for a household learns who people are; nobody lists them for it. Its ears and eyes tell voices and faces apart (each
 `voice:` or `face:` ref is a print a registry recognized); its memory holds who each ref belongs to,
 and it is the bot itself, `self`, with its own voice ids; with `associative=True` every turn says who
-is speaking and who is present, and a ref nobody has named or declared is `known=false`.
+is speaking and who is present, and a ref nobody has named is `known=false`.
 `people.People` is the capacity to say who is who. Attached with the cognition's own memory and the
 registries the ears and eyes own, it offers the bot `people.link`, `people.unlink`, `people.name` and
 `people.forget`, and tells the bot what each did:
@@ -227,12 +227,11 @@ registries the ears and eyes own, it offers the bot `people.link`, `people.unlin
 ```pycon
 >>> from mosfet.abilities import memory, people
 >>> mind = memory.Memory()
->>> household = (memory.Member(id="ada", name="Ada", role="child", born=2018),)
 >>> house = bot.define(
 ...     "house",
 ...     bot.cognition(testing.Scripted(), intuition=testing.Decider(), memory=mind, associative=True),
 ...     bot.attach(computer.Computer(id="kitchen")),
-...     bot.attach(people.People(memory=mind, household=household)),
+...     bot.attach(people.People(memory=mind)),
 ... )
 >>> [(part.id, part.kind) for part in bot.describe(house).bots[0].parts]
 [('kitchen', 'device'), ('people', 'ability')]
@@ -245,10 +244,10 @@ remembers in a fresh one of its own), is [`B0020`](bot_diagnostics.md#b0020). An
 [`people_without_associative`](bot_diagnostics.md#people_without_associative) lint warns of.
 
 Whether to ask who an unknown voice is, which voice is whose, what someone is called and whom to
-forget are the bot's choices; nothing asks, links or names for it. The household is the owner's: it
-is declared to memory each time the bot starts (a member left out of it is no longer declared), no
-tool carries a role or a birth year, and memory refuses to rename, unlink an owner's ref from, or
-forget a declared person or the bot itself (`declared`). Each ref is one person's: linking a voice
+forget are the bot's choices; nothing asks, links or names for it. Who lives in the house, and whether
+someone is a child, are things the bot learns and remembers, never configuration: no tool carries a
+role or a birth year, and memory refuses to rename, unlink the own refs of, or forget the bot itself
+(`declared`). Each ref is one person's: linking a voice
 that is someone else's is a `conflict`, and so is linking the bot's own. Forgetting a person erases
 their voice and face prints too. Nothing here decides what the bot says to anyone, or treats anyone
 differently; a child's turn reaches the bot as a fact about who is speaking, never as a rule.
