@@ -31,6 +31,7 @@ from mosfet.devices import phone as phone_device
 from mosfet.environment import SoundData, SoundEvent, Environment
 from tests.bot.abilities.support import dispatch_ability_for_test, shared_hsm_context, start_abilities_for_test
 from tests.bot.abilities.cognition.metadata_contract import assert_metadata_is_not_coordination
+from tests.bot.behavior.support import LoopGatedSource
 from tests.hsm_model import choice_transitions, transition_map
 from tests.devices.phone.handset import carrier_spans, published_names
 from tests.hsm_instance_state import phone_firmware
@@ -1188,6 +1189,32 @@ def test_a_learned_behavior_meets_only_its_own_percept_of_a_batch() -> None:
     assert isinstance(output, cognition.types.CompletionData)
     assert output.output is not None
     # Each run met one sound: its own percept's event, never the batch.
+    assert [selection.reason for selection in output.output] == ["phone.ringing", "door.knock"]
+
+
+def test_autonomy_builds_a_learned_behavior_off_the_event_loop(monkeypatch: pytest.MonkeyPatch) -> None:
+    """D-R-51: materializing a learned behavior evaluates its source off the loop, so speech keeps flowing."""
+
+    async def run() -> tuple[object, LoopGatedSource]:
+        installed = behavior.start(_ECHO_KIND_BEHAVIOR_SOURCE, name="EchoKind", triggers=(SoundEvent.name,))
+        store = await _attached_memory(installed)
+        gated = LoopGatedSource(asyncio.get_running_loop())
+        gated.install(monkeypatch)
+        autonomy = cognition.Autonomy(memory=store)
+        ctx = shared_hsm_context()
+        await start_abilities_for_test(ctx, autonomy)
+        turn = _batch_turn(
+            dataclasses.replace(SoundEvent.with_data(SoundData(audio=b"ring", kind="phone.ringing")), id="ring"),
+            dataclasses.replace(SoundEvent.with_data(SoundData(audio=b"knock", kind="door.knock")), id="knock"),
+        )
+        return await dispatch_ability_for_test(autonomy, ctx, turn, timeout=30.0), gated
+
+    output, gated = asyncio.run(run())
+
+    assert gated.blocked == 0
+    assert gated.served > 0
+    assert isinstance(output, cognition.types.CompletionData)
+    assert output.output is not None
     assert [selection.reason for selection in output.output] == ["phone.ringing", "door.knock"]
 
 

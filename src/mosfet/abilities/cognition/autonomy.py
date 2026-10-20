@@ -2103,7 +2103,8 @@ class Autonomy(ability.Ability[types.TurnData, types.CompletionData]):
         )
         try:
             if isinstance(candidate, Instance):
-                program = behavior.build(candidate.source)
+                # Parsing runs an isolated Starlark worker process: keep it off the event loop.
+                program = await asyncio.to_thread(behavior.build, candidate.source)
                 input_adapter = behavior_input_payload
             else:
                 program = candidate.factory()

@@ -6,6 +6,7 @@ from ... import ability
 from ... import memory
 from ... import processing
 
+import asyncio
 import dataclasses
 import datetime
 import typing
@@ -777,7 +778,9 @@ class Revision(processing.Processing):
             written = _coerce_change(completion.output)
             existing = await inventory.load_behavior(ctx, instance._memory, write.existing_behavior.name)
             written = written.model_copy(update={"triggers": _grounded_triggers(write, written)})
-            checked = _check(write, written)
+            # Checking parses the source in an isolated worker and dry-runs it: seconds of
+            # blocking work. Keep it off the event loop so speech and ingress keep flowing.
+            checked = await asyncio.to_thread(_check, write, written)
             candidate = _inventory_instance(written, checked.value, existing)
             data = _CheckedData(
                 write=write,

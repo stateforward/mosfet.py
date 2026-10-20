@@ -1,7 +1,11 @@
 import asyncio
 import datetime
+import threading
 
 import hsm
+import pytest
+
+from mosfet.behavior import source
 
 
 def require_model(model: hsm.Model | None) -> hsm.Model:
@@ -147,3 +151,41 @@ class ManualTimers(hsm.Clock):
                 waiter.set_result(at)
                 break
         return duration
+
+
+# Longest a gated parse waits for the event loop; it elapses only when the loop is blocked.
+_LOOP_GATE_SECONDS = 5.0
+
+
+class LoopGatedSource:
+    """Gates ``source.parse_source`` on ``loop`` running a callback before the real evaluation.
+
+    The real evaluation blocks its caller for seconds on an isolated worker interpreter. Each
+    gated parse first hands ``loop`` a callback and waits for it to run: if the source is
+    parsed on ``loop``'s own thread, that thread is blocked, the callback never runs, and the
+    parse fails (bounded by ``_LOOP_GATE_SECONDS``) and counts in ``blocked``. Otherwise it
+    counts in ``served`` and the real evaluation runs.
+    """
+
+    loop: asyncio.AbstractEventLoop
+    served: int
+    blocked: int
+
+    def __init__(self, loop: asyncio.AbstractEventLoop) -> None:
+        self.loop = loop
+        self.served = 0
+        self.blocked = 0
+
+    def install(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        parse = source.parse_source
+
+        def gated(program: str) -> source.Source:
+            ran = threading.Event()
+            _ = self.loop.call_soon_threadsafe(ran.set)
+            if not ran.wait(timeout=_LOOP_GATE_SECONDS):
+                self.blocked += 1
+                raise source.SourceError("the event loop never ran while behavior source was evaluated.")
+            self.served += 1
+            return parse(program)
+
+        monkeypatch.setattr(source, "parse_source", gated)

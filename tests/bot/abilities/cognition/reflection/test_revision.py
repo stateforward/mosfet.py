@@ -17,6 +17,7 @@ from tests.bot.abilities.cognition.test_cognition import FixedProcessor
 from tests.bot.abilities.cognition.test_cognition import cognition_input
 from tests.bot.abilities.cognition.test_cognition import focus_output
 from tests.bot.abilities.support import dispatch_ability_for_test, shared_hsm_context, start_abilities_for_test
+from tests.bot.behavior.support import LoopGatedSource
 
 ANSWER_RING_BEHAVIOR_SOURCE = """
 input_event = hsm.event(
@@ -264,6 +265,36 @@ def test_revision_creates_validates_and_persists_a_behavior() -> None:
     assert output.applied.name == "AnswerIncomingRing"
     assert output.applied.triggers == ("environment.sound",)
     assert output.applied.description == "Answer an incoming ring."
+
+
+def test_revision_checks_a_written_behavior_off_the_event_loop(monkeypatch: pytest.MonkeyPatch) -> None:
+    """D-R-51: checking a written behavior evaluates its source off the loop, so speech and ingress keep flowing."""
+
+    async def run() -> tuple[revision.OutputData, LoopGatedSource]:
+        gated = LoopGatedSource(asyncio.get_running_loop())
+        gated.install(monkeypatch)
+        _, store = await _attached_memory()
+        actor = revision.Revision(
+            processor=FixedProcessor(
+                write=behavior.ChangeData(name="AnswerIncomingRing", source=ANSWER_RING_BEHAVIOR_SOURCE)
+            ),
+            memory=store,
+        )
+        output = await dispatch_ability_for_test(
+            actor,
+            None,
+            _revision_input(behavior.CreateData(name="AnswerIncomingRing", triggers=("environment.sound",))),
+            timeout=_REVISION_TIMEOUT_SECONDS,
+        )
+        assert isinstance(output, revision.OutputData)
+        return output, gated
+
+    output, gated = asyncio.run(run())
+
+    assert gated.blocked == 0
+    assert gated.served > 0
+    assert isinstance(output.applied, behavior.CreateData)
+    assert output.applied.source == ANSWER_RING_BEHAVIOR_SOURCE
 
 
 def test_revision_keeps_the_existing_behaviors_own_grounded_triggers() -> None:
