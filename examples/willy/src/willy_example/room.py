@@ -157,7 +157,7 @@ type Connect = collections.abc.Callable[[str], collections.abc.Awaitable[Socket]
 class Microphone(typing.Protocol):
     """The room's microphone: it captures 16 kHz mono s16le and hands each block to ``heard``, from any thread."""
 
-    def start(self, heard: collections.abc.Callable[[bytes], None]) -> None:
+    def start(self, heard: collections.abc.Callable[[bytes], None], /) -> None:
         """Start capturing; each block is handed to ``heard`` as it is captured."""
         ...
 
@@ -181,7 +181,7 @@ class Speaker(typing.Protocol):
 class Keyboard(typing.Protocol):
     """The room's keyboard: it hands each line typed on it to ``typed``, without its line ending, from any thread."""
 
-    def start(self, typed: collections.abc.Callable[[str], None]) -> None:
+    def start(self, typed: collections.abc.Callable[[str], None], /) -> None:
         """Start taking lines; each is handed to ``typed`` as it is entered."""
         ...
 
@@ -193,7 +193,7 @@ class Keyboard(typing.Protocol):
 class Camera(typing.Protocol):
     """The room's camera: it hands a still to ``seen`` every so often, from any thread."""
 
-    def start(self, seen: collections.abc.Callable[[media.Image], None]) -> None:
+    def start(self, seen: collections.abc.Callable[[media.Image], None], /) -> None:
         """Start capturing stills."""
         ...
 
@@ -375,7 +375,7 @@ _ReleasedEvent = hsm.Event[_SignalData](
 )
 
 
-def _peer_uri(url: str, peer: str) -> str:
+def peer_uri(url: str, peer: str) -> str:
     """The version 1 path for ``peer`` at ``url``.
 
     Raises:
@@ -456,7 +456,7 @@ class Room(Traced):
         super().__init__()
         if connect_timeout <= datetime.timedelta() or open_timeout <= datetime.timedelta():
             raise ValueError("connect_timeout and open_timeout must be positive.")
-        self._uri = _peer_uri(url, peer)
+        self._uri = peer_uri(url, peer)
         self._token = token
         self._microphone = microphone
         self._speaker = speaker
@@ -871,7 +871,7 @@ class SoundDeviceMicrophone:
         self._load = load
         self._stream = None
 
-    def start(self, heard: collections.abc.Callable[[bytes], None]) -> None:
+    def start(self, heard: collections.abc.Callable[[bytes], None], /) -> None:
         """Open and start the default input.
 
         Raises:
@@ -986,7 +986,7 @@ class OpenCvCamera:
         self._stopping = threading.Event()
         self._thread = None
 
-    def start(self, seen: collections.abc.Callable[[media.Image], None]) -> None:
+    def start(self, seen: collections.abc.Callable[[media.Image], None], /) -> None:
         """Open the camera and start capturing on its own thread."""
 
         self._stopping.clear()
@@ -1084,7 +1084,7 @@ def main(argv: collections.abc.Sequence[str] | None = None) -> int:
     _ = parser.add_argument("--camera", action="store_true", help="also send this host's camera")
     try:
         arguments = parser.parse_args(argv, namespace=_Arguments())
-        _ = _peer_uri(arguments.url, arguments.peer)
+        _ = peer_uri(arguments.url, arguments.peer)
     except (_UsageError, ValueError) as error:
         print(f"willy-room: {error}", file=sys.stderr)
         return _USAGE
@@ -1151,6 +1151,7 @@ __all__ = [
     "Speaker",
     "connect_websocket",
     "main",
+    "peer_uri",
 ]
 
 if __name__ == "__main__":
