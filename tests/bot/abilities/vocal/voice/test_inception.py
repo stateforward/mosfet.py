@@ -295,6 +295,52 @@ def test_a_bot_made_by_a_designing_source_is_given_one_voice_conceived_from_its_
     assert bot.inception.failures == []
 
 
+def _conceive_schema(offered: hsm.Event[typing.Any]) -> dict[str, typing.Any]:
+    schema = offered.schema
+    assert isinstance(schema, type) and issubclass(schema, pydantic.BaseModel)
+    return schema.model_json_schema()
+
+
+def test_a_designing_sources_frame_bounds_the_described_voice_by_the_designers_limit() -> None:
+    """D-R-35 (Willy run 7, D-1): the schema let a description run to 1000 characters while the designer takes 300,
+    so the model wrote past the bound it was only told as a number, and every conception was refused. The frame's
+    conceive schema now carries the designer's limit itself; nothing else in it changes."""
+
+    async def run() -> processing.InputData:
+        shelf = Shelf()
+        maker = Maker(described())
+        bot = await make(shelf=shelf, studio=Studio(shelf, max_description=300), maker=maker)
+        await made(bot)
+        await bot.stop()
+        (asked,) = maker.inputs
+        return asked
+
+    asked = asyncio.run(run())
+
+    (offered,) = asked.schemas
+    assert (offered.name, offered.kind) == (voice.ConceiveEvent.name, voice.ConceiveEvent.kind)
+    schema = _conceive_schema(offered)
+    expected = voice.ConceiveData.model_json_schema()
+    expected["$defs"]["Described"]["properties"]["description"]["maxLength"] = 300
+    assert schema == expected
+
+
+def test_a_catalog_sources_frame_offers_the_conceive_event_as_it_is() -> None:
+    warm = voice.Entry(ref=voice.Ref(source="lab", key="warm"), name="warm")
+
+    async def run() -> processing.InputData:
+        maker = Maker(shortlisted("warm"))
+        bot = await make(shelf=Shelf(warm), maker=maker, allowed=("warm",))
+        await made(bot)
+        await bot.stop()
+        (asked,) = maker.inputs
+        return asked
+
+    asked = asyncio.run(run())
+
+    assert asked.schemas == (voice.ConceiveEvent,)
+
+
 def test_a_bot_made_by_a_catalog_source_is_given_the_one_voice_shortlisted_from_its_catalog() -> None:
     warm = voice.Entry(ref=voice.Ref(source="lab", key="warm"), name="warm", description="A warm, unhurried voice.")
     buddy = voice.Entry(

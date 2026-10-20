@@ -20,8 +20,10 @@ allowed a voice to be born at all. Nothing else its source holds is ever offered
 maker designed on a shared engine. The view bounds only what a bot is born as: a voice it was already given is
 checked against the whole catalog, and stays its own for life.
 
-The conception is mechanical to check and nothing else: a conception of the wrong kind, a description longer than the
-source takes, or a ref outside the view the model was shown is refused (``invalid_response``) and conceived again
+A designing source's frame offers a private copy of :data:`conception.ConceiveEvent`, of the same name, whose described
+description is bounded by the designer's ``max_description`` (D-R-35), so the limit is in the schema the model writes
+against. The conception is mechanical to check and nothing else: a conception of the wrong kind, a description longer
+than the source takes, or a ref outside the view the model was shown is refused (``invalid_response``) and conceived again
 after ``retry_after``. Inception enrolls nothing: the bot learns its own voice id by hearing itself (P-12).
 
 A bot without memory remembers no voice, so every start of it is an inception.
@@ -501,7 +503,36 @@ class Inception(ability.Ability[None, voice.VoiceData]):
         with span.operation("bot.voice.conceive", scope=_SCOPE, component=_COMPONENT, stage="conceive") as active:
             try:
                 shown = await Inception._shown(instance)
-                frame = processing.InputData(input=shown, schemas=(conception.ConceiveEvent,), actors={})
+                offered: hsm.Event[typing.Any] = conception.ConceiveEvent
+                bound = shown.description_max_chars
+                if bound is not None:
+                    # D-R-35: a designing source's limit is in the schema the model writes against, not only a
+                    # number it is shown: a private copy of the conceive event, its description bounded by it.
+                    described = pydantic.create_model(
+                        "Described",
+                        __base__=conception.Described,
+                        description=(
+                            typing.Annotated[
+                                str, conception.Described.model_fields["description"], pydantic.Field(max_length=bound)
+                            ],
+                            ...,
+                        ),
+                    )
+                    offered = hsm.Event[conception.ConceiveData](
+                        name=conception.ConceiveEvent.name,
+                        kind=conception.ConceiveEvent.kind,
+                        schema=pydantic.create_model(
+                            "ConceiveData",
+                            __base__=conception.ConceiveData,
+                            conception=(
+                                typing.Annotated[
+                                    described | conception.Shortlisted, pydantic.Field(discriminator="kind")
+                                ],
+                                conception.ConceiveData.model_fields["conception"],
+                            ),
+                        ),
+                    )
+                frame = processing.InputData(input=shown, schemas=(offered,), actors={})
                 terminal = await ability.run_terminal_operation(
                     ctx,
                     child=child,
