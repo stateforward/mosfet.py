@@ -361,4 +361,5 @@ studio (publishes topology into the `web/` studio for inspection) with `BOT_MODE
 | `mosfet-provider-pyannote` | voice diarization & speaker identification |
 | `mosfet-provider-speech-server` | speech-server clients for `listening.Listening`: `Transcription` (streaming `/v1/audio/stream` session), `Diarizer` (`/v1/diarize`), `VoiceEmbedder` (`/v1/embed`) and `AffectClassifier` (`/v1/emotion`), with stdlib 16 kHz mono resampling |
 | `mosfet-provider-sqlite-memory` | SQLite + sqlite-vec for `memory.Memory`: `open_engine` (vec0 loaded), the `Database` handle opened on first use, the `VecIndex` vector index and the `IdentityStore` |
+| `mosfet-provider-decision` | decision-model selection on any server that speaks the decisions wire format (`POST /v1/systemone`, such as anygame's decide): `Processor`, a `processing.DecisionProcessor` for intuition, over `Client` (httpx, `base_url` and an optional `api_key`) |
 | `mosfet-provider-typesafe` | label-tier selection (system_one Choice/Score/Noul): `Processor`, a `processing.DecisionProcessor` for intuition |

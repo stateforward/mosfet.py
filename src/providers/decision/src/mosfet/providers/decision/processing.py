@@ -1,0 +1,275 @@
+"""Decision-model processor: intuition's reflex selection as one decision request.
+
+`Processor` is a `processing.DecisionProcessor`: a decision model chooses among the offered
+events with a calibrated probability for each, so it is a processor intuition runs on.
+
+The mapping is structural, not behavioral:
+
+- **state** is the turn as the model may see it: the stimulus envelope (name, data) as a
+  structured JSON document, so the live event data rides as JSON instead of a text template.
+- The **event menu** is one choice question per turn (``selection``): its criteria are the offered
+  event names, each described by the first line of its event schema's description, together with a
+  reserved pass criterion ("none of these") that maps to the typed explicit decline (an unhandled
+  intuition output), which the host cascades to deliberative reasoning, never a handled-empty
+  selection.
+- **Payload fields are filled by selection over supplied options**, never authored. For each
+  offered event's required payload keys, candidate values come mechanically from the turn's own
+  evidence (the stimulus data mapping, then the schema's own enum options); each key gets its own
+  choice question whose criteria are the candidate values, so the answer label *is* the payload
+  value and can never leave the menu. An event with a required key that has no grounded candidate
+  is left unoffered: fail-closed at the menu, before any request.
+- **Only the chosen option is returned** (D-R-28): one single-choice question chooses one event,
+  returned with the chosen probability as its confidence and its grounded payload. The other options'
+  probabilities are not selections. Intuition's confidence gate still applies to the one returned.
+"""
+
+from __future__ import annotations
+
+import collections.abc
+import time
+import typing
+
+import httpx
+import pydantic
+
+import mosfet.telemetry
+from mosfet.abilities import processing
+from mosfet.abilities.cognition import intuition as cognition_intuition
+
+from . import _json
+from . import client
+
+_PROVIDER: typing.Final = "decision"
+_SELECTION: typing.Final = "selection"
+_RESERVED_PASS_CRITERION: typing.Final = "__unhandled__"
+_DEFAULT_PASS_WORDING: typing.Final = "None of these: leave the turn unhandled."
+_SELECTION_INSTRUCTIONS: typing.Final = (
+    "Choose the single criterion that answers this turn from the bot's own peripheral "
+    "transducers: the criterion text names the situation. Choose the pass criterion when "
+    "none offered fits."
+)
+_PAYLOAD_KEY_INSTRUCTIONS: typing.Final = (
+    "Fill one payload field for the selected event: the criteria are the exact values the "
+    "evidence offers. Pick the value the turn supports."
+)
+
+
+class ProcessingError(RuntimeError):
+    """A decision could not be made: the server failed, or its answer does not fit the menu it was asked."""
+
+
+class PayloadGroundingError(ProcessingError):
+    """The chosen event's payload key was answered with a value that is not one of its grounded candidates."""
+
+
+def _pydantic_schema(event: processing.Event[typing.Any]) -> type[pydantic.BaseModel] | None:
+    schema = event.schema
+    return schema if isinstance(schema, type) and issubclass(schema, pydantic.BaseModel) else None
+
+
+def _event_wording(event: processing.Event[typing.Any]) -> str:
+    """The first line of the event schema's JSON schema description (D-R-29), or the event's name."""
+
+    schema = _pydantic_schema(event)
+    description = None if schema is None else schema.model_json_schema().get("description")
+    if isinstance(description, str) and description.strip():
+        return description.strip().splitlines()[0]
+    return event.name
+
+
+def _single_enabler(
+    event_name: str,
+    actor_events: collections.abc.Mapping[str, collections.abc.Sequence[str]],
+) -> str | None:
+    enablers = actor_events.get(event_name)
+    if enablers is not None and len(enablers) == 1:
+        return next(iter(enablers))
+    return None
+
+
+def _stimulus_document(stimulus: object) -> dict[str, typing.Any]:
+    """The stimulus envelope as structured state: name plus live event data."""
+
+    if isinstance(stimulus, processing.Event):
+        event = typing.cast(processing.Event[typing.Any], stimulus)
+        return {"envelope": {"name": event.name}, "data": _json.jsonable(event.data)}
+    return {"data": _json.jsonable(stimulus)}
+
+
+def _payload_required_keys(event: processing.Event[typing.Any]) -> tuple[str, ...]:
+    schema = _pydantic_schema(event)
+    if schema is None:
+        return ()
+    return tuple(name for name, field in schema.model_fields.items() if field.is_required())
+
+
+def _candidate_values(
+    event: processing.Event[typing.Any],
+    key: str,
+    stimulus_data: typing.Any,
+) -> dict[str, typing.Any]:
+    """Candidate values for one payload key by label, derived mechanically from bot evidence.
+
+    Sources, in order: the stimulus data mapping (the value the turn itself carries), then the
+    schema's own enum options. Nothing is invented; nothing is recovered from prose.
+    """
+
+    candidates: list[typing.Any] = []
+    if isinstance(stimulus_data, dict):
+        value = typing.cast(dict[str, typing.Any], stimulus_data).get(key)
+        if value is not None:
+            candidates.append(value)
+    schema = _pydantic_schema(event)
+    field = None if schema is None else schema.model_fields.get(key)
+    if field is not None and field.annotation is not None:
+        enum = pydantic.TypeAdapter(field.annotation).json_schema().get("enum")
+        if isinstance(enum, list):
+            candidates.extend(item for item in typing.cast(list[typing.Any], enum) if item is not None)
+    return {str(candidate): candidate for candidate in candidates}
+
+
+def _payload_key_wording(event_name: str, key: str) -> str:
+    return f"Which value fills {key!r} for {event_name}?"
+
+
+class Processor(processing.DecisionProcessor):
+    """A decision processor on the decision server at ``base_url``: one choice over the offered event menu.
+
+    ``api_key`` is sent as a bearer only when given. ``model`` names the model a server that serves
+    several should answer with. ``timeout`` (seconds) bounds each request; the cognition step
+    timeout bounds the turn regardless. ``pass_wording`` describes the pass criterion. ``transport``
+    replaces the network (tests). Construction opens nothing: each turn is one request.
+    """
+
+    _client: client.Client
+    _model: str | None
+    _pass_wording: str
+
+    def __init__(
+        self,
+        *,
+        base_url: str,
+        api_key: str | None = None,
+        model: str | None = None,
+        timeout: float | None = None,
+        pass_wording: str = _DEFAULT_PASS_WORDING,
+        transport: httpx.AsyncBaseTransport | None = None,
+    ) -> None:
+        """Raises ``ValueError`` as :class:`client.Client` does for its arguments."""
+
+        self._client = client.Client(base_url=base_url, api_key=api_key, timeout=timeout, transport=transport)
+        self._model = model
+        self._pass_wording = pass_wording
+
+    @typing.override
+    async def process(
+        self, input: processing.InputData, *, drafts: processing.DraftSink | None = None
+    ) -> processing.Events:
+        """Decide this turn's one event, or decline it to reasoning.
+
+        Raises :class:`ProcessingError` when the server fails (its :class:`client.Error` is the
+        cause) or answers outside the menu, and :class:`PayloadGroundingError` when a payload
+        value is not one of its candidates.
+        """
+
+        del drafts
+        stimulus_document = _stimulus_document(input.input)
+        stimulus_data = stimulus_document.get("data")
+        groundable: dict[str, processing.Event[typing.Any]] = {}
+        candidates: dict[tuple[str, str], dict[str, typing.Any]] = {}
+        for event in input.schemas:
+            if not event.name or processing.is_deliberative_handoff_schema(event.schema):
+                continue
+            keyed = {key: _candidate_values(event, key, stimulus_data) for key in _payload_required_keys(event)}
+            if not all(keyed.values()):
+                continue
+            groundable[event.name] = event
+            candidates.update({(event.name, key): values for key, values in keyed.items()})
+        if not groundable:
+            return ()
+
+        criteria: dict[str, str | None] = {name: _event_wording(event) for name, event in groundable.items()}
+        criteria[_RESERVED_PASS_CRITERION] = self._pass_wording
+        questions: dict[str, client.Choice] = {
+            _SELECTION: client.Choice(instructions=input.instructions or _SELECTION_INSTRUCTIONS, criteria=criteria)
+        }
+        for (name, key), values in candidates.items():
+            wording = _payload_key_wording(name, key)
+            questions[f"{name}::{key}"] = client.Choice(
+                instructions=f"{wording} {_PAYLOAD_KEY_INSTRUCTIONS}",
+                criteria=dict.fromkeys(values, wording),
+            )
+        request = client.Request(state={"turn": stimulus_document}, questions=questions, model=self._model)
+
+        started = time.monotonic()
+        # D-R-31: the request is logged under the model that answered it, once the server named it; a failed
+        # or cancelled request is still logged, under the model it asked for.
+        model = self._model
+        try:
+            try:
+                answered = await self._client.decide(request)
+                if answered.model is not None:
+                    model = answered.model
+            finally:
+                mosfet.telemetry.record_generator_request(
+                    provider=_PROVIDER,
+                    model=model,
+                    messages=[request.state],
+                    tools={name: question.model_dump(mode="json") for name, question in request.questions.items()},
+                )
+        except client.Error as error:
+            mosfet.telemetry.record_generator_response(
+                provider=_PROVIDER,
+                model=self._model,
+                response=None,
+                latency_s=time.monotonic() - started,
+                error=error,
+            )
+            raise ProcessingError(f"The decision request failed: {error}") from error
+        mosfet.telemetry.record_generator_response(
+            provider=_PROVIDER,
+            model=model,
+            response=answered.model_dump(mode="json"),
+            latency_s=time.monotonic() - started,
+        )
+
+        selection = answered.answers.get(_SELECTION)
+        if selection is None:
+            raise ProcessingError("The decision server answered no selection.")
+        chosen = selection.choice
+        if chosen == _RESERVED_PASS_CRITERION:
+            # Explicit unhandled, not a handled-empty selection: the pass criterion means "none offered
+            # fits". Intuition's own envelope for that is OutputData(result=None), which the host reads as
+            # unhandled and cascades to reasoning; an empty tuple would be a handled turn with no actions.
+            # The abstract Processor protocol declares Events only, so the double cast marks that
+            # runtime-declared shape as intentional at this one boundary.
+            envelope = cognition_intuition.OutputData(result=None, reason=self._pass_wording)
+            return typing.cast(processing.Events, typing.cast(object, envelope))
+        event = groundable.get(chosen)
+        if event is None:
+            raise ProcessingError(f"The decision server chose an unknown criterion {chosen!r}.")
+
+        data: dict[str, object] = {}
+        for (name, key), values in candidates.items():
+            if name != chosen:
+                continue
+            answer = answered.answers.get(f"{name}::{key}")
+            if answer is None or answer.choice not in values:
+                raise PayloadGroundingError(f"The decision server chose no grounded {key!r} value for {name}.")
+            data[key] = values[answer.choice]
+        return (
+            processing.SelectedEvent(
+                event=chosen,
+                target=_single_enabler(chosen, input.actor_events),
+                data=data or None,
+                reason=None,
+                confidence=processing.normalize_confidence(selection.probabilities.get(chosen, selection.confidence)),
+            ),
+        )
+
+
+__all__ = [
+    "PayloadGroundingError",
+    "ProcessingError",
+    "Processor",
+]

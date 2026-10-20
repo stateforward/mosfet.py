@@ -1,0 +1,47 @@
+[project]
+name = "mosfet-provider-decision"
+dynamic = ["version"]
+description = "Decision-model provider for stateforward.mosfet: intuition decides on any server that speaks the decisions wire format (POST /v1/systemone)."
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+  "httpx>=0.28,<1",
+  "stateforward.mosfet>=0.1.0,<0.2.0",
+]
+
+[dependency-groups]
+dev = [
+  "pytest>=9.0.3,<10.0.0",
+  "ruff~=0.11.13",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+exclude = ["src/mosfet/__init__.pyi"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mosfet"]
+
+[tool.hatch.version]
+path = "src/mosfet/providers/decision/__init__.py"
+
+[tool.uv.sources]
+stateforward-mosfet = { workspace = true }
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+  "live: hits a real decision server (skipped by default)",
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py313"
+
+[tool.basedpyright]
+reportImportCycles = false
+include = ["src", "tests"]
+extraPaths = ["src", "../../../src", "../../..", "src/mosfet/providers/decision"]
+pythonVersion = "3.13"
