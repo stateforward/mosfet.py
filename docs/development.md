@@ -302,7 +302,8 @@ inception model is shown the traits, the languages and the source's capacity: th
 `max_description`, or the allowed catalog entries (`vocal.voice.InceptionInput`); with neither,
 inception fails without asking. It is offered only `bot.ability.voice.conceive`; its one
 conception (a voice described within the designer's `max_description`, or one allowed entry
-shortlisted by ref) is checked mechanically,
+shortlisted by ref) is checked mechanically (a refused conception is conceived again at once,
+shown why in `InceptionInput.refused`, at most twice before the attempt rests for `retry_after`),
 made permanent by the source, written down once as `vocal.voice.Given` (fail-closed), and given
 to Speaking (`speaking.VoiceEvent`), which constructs its encoder once. On every later start the
 row is recalled and the catalog is checked to still hold the voice, with no model call. A voice

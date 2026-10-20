@@ -128,6 +128,13 @@ class InceptionInput(pydantic.BaseModel):
         description="The catalog's voices, when the source does not design voices; empty when it does.",
     )
     omitted: int = pydantic.Field(default=0, ge=0, description="How many catalog voices were left out of entries.")
+    refused: str | None = pydantic.Field(
+        default=None,
+        description=(
+            "Why your last conception of this voice was refused; conceive it again within what it says. Null on a "
+            "first conception."
+        ),
+    )
 
 
 __all__ = ["MAX_ENTRIES", "ConceiveData", "ConceiveEvent", "Conception", "Described", "InceptionInput", "Shortlisted"]

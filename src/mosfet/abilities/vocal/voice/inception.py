@@ -23,8 +23,10 @@ checked against the whole catalog, and stays its own for life.
 A designing source's frame offers a private copy of :data:`conception.ConceiveEvent`, of the same name, whose described
 description is bounded by the designer's ``max_description`` (D-R-35), so the limit is in the schema the model writes
 against. The conception is mechanical to check and nothing else: a conception of the wrong kind, a description longer
-than the source takes, or a ref outside the view the model was shown is refused (``invalid_response``) and conceived again
-after ``retry_after``. Inception enrolls nothing: the bot learns its own voice id by hearing itself (P-12).
+than the source takes, or a ref outside the view the model was shown is refused (``invalid_response``). A refused
+conception is conceived again at once, the model shown why (``InceptionInput.refused``, D-R-35), at most twice (the
+D-R-12 repair bound); a third refusal fails the attempt, which is conceived afresh after ``retry_after`` like any other.
+Inception enrolls nothing: the bot learns its own voice id by hearing itself (P-12).
 
 A bot without memory remembers no voice, so every start of it is an inception.
 
@@ -77,6 +79,8 @@ _DEFAULT_INCEPTION_TIMEOUT = datetime.timedelta(seconds=180)
 # One recall question is a single-row read; a memory or speaker not up yet is asked again soon.
 _RECALL_ATTEMPT_TIMEOUT = datetime.timedelta(seconds=1)
 _RETRY_DELAY = datetime.timedelta(milliseconds=100)
+# A refused conception is conceived again at once at most this many times (the D-R-12 repair bound).
+_RECONCEPTIONS = 2
 
 # The keys of a source's voices, as refs carry them.
 _KEYS: pydantic.TypeAdapter[tuple[str, ...]] = pydantic.TypeAdapter(
@@ -145,6 +149,15 @@ class _FailedData(pydantic.BaseModel):
     message: str
 
 
+class _RefusedData(pydantic.BaseModel):
+    """A refused conception: why, shown to the model when it conceives again, and how many tries were refused."""
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(frozen=True)
+
+    message: str
+    refusals: int = pydantic.Field(ge=1)
+
+
 def _completion(name: str, schema: type[pydantic.BaseModel]) -> hsm.Event[typing.Any]:
     return hsm.Event[typing.Any](name=f"bot.ability.voice.{name}", kind=hsm.CompletionEventKind, schema=schema)
 
@@ -161,6 +174,9 @@ _ConceivedEvent = _completion("conceived", _ConceivedData)
 _CreatedEvent = _completion("created", _GivenData)
 _RememberedEvent = _completion("remembered", _GivenData)
 _AttemptFailedEvent = _error("attempt.failed")
+_RefusedEvent = hsm.Event[_RefusedData](
+    name="bot.ability.voice.conception.refused", kind=hsm.ErrorEventKind, schema=_RefusedData
+)
 _VoicedEvent = _completion("voiced", _VoicedData)
 _SpeakingAbsentEvent = _error("speaking.absent")
 _VoicingFailedEvent = _error("voicing.failed")
@@ -194,9 +210,10 @@ class Inception(ability.Ability[None, voice.VoiceData]):
     It takes no input: what it does is fixed by its makers' composition. ``catalog`` is the voice source; a
     ``designer`` of the same source makes the voice from a description, and without one the voice is shortlisted from
     the catalog. ``processor`` is the inception model, wrapped in a child ``processing.Processing`` with no
-    instructions of its own. ``speaking`` and ``memory`` are peers reached only by message. Each inception attempt
-    that fails is retried after ``retry_after``; ``inception_timeout`` bounds conceiving and voicing. ``allowed`` are
-    the keys of the voices of a source without a ``designer`` that its owner allows it to be born as; none by default.
+    instructions of its own. ``speaking`` and ``memory`` are peers reached only by message. A refused conception is
+    conceived again at once, at most twice; each inception attempt that fails is retried after ``retry_after``;
+    ``inception_timeout`` bounds each conception and voicing. ``allowed`` are the keys of the voices of a source
+    without a ``designer`` that its owner allows it to be born as; none by default.
 
     Raises:
         ValueError: if ``designer`` names another source than ``catalog`` or is given with ``allowed`` keys, a
@@ -428,8 +445,9 @@ class Inception(ability.Ability[None, voice.VoiceData]):
             instance._attempt_started = None
 
     @staticmethod
-    async def _shown(instance: "Inception") -> conception.InceptionInput:
-        """What the inception model is shown: the traits, the languages, and the source's capacity, nothing else.
+    async def _shown(instance: "Inception", refused: str | None) -> conception.InceptionInput:
+        """What the inception model is shown: the traits, the languages, the source's capacity, and why its last
+        conception was refused when it was; nothing else.
 
         A catalog source's capacity is the voices of it the bot's owner allowed. Previews are never shown: a
         model-facing input carries no audio.
@@ -439,7 +457,10 @@ class Inception(ability.Ability[None, voice.VoiceData]):
         traits = instance._traits.traits
         if designer is not None:
             return conception.InceptionInput(
-                traits=traits, languages=instance._languages, description_max_chars=designer.max_description
+                traits=traits,
+                languages=instance._languages,
+                description_max_chars=designer.max_description,
+                refused=refused,
             )
         listed = [
             entry
@@ -452,7 +473,11 @@ class Inception(ability.Ability[None, voice.VoiceData]):
             )
         shown = tuple(entry.model_copy(update={"preview": None}) for entry in listed[: conception.MAX_ENTRIES])
         return conception.InceptionInput(
-            traits=traits, languages=instance._languages, entries=shown, omitted=len(listed) - len(shown)
+            traits=traits,
+            languages=instance._languages,
+            entries=shown,
+            omitted=len(listed) - len(shown),
+            refused=refused,
         )
 
     @staticmethod
@@ -496,13 +521,17 @@ class Inception(ability.Ability[None, voice.VoiceData]):
 
     @staticmethod
     async def _conceive(ctx: hsm.Context, instance: "Inception", event: hsm.Event[typing.Any]) -> None:
-        """Ask the inception model for one conception of the bot's voice, from its traits alone."""
+        """Ask the inception model for one conception of the bot's voice, from its traits alone.
+
+        Conceiving again after a refusal (``_RefusedData``), the model is shown why its last conception was refused.
+        """
 
         child = instance._processing
         operation_id = uuid.uuid4().hex
+        prior = event.data if isinstance(event.data, _RefusedData) else None
         with span.operation("bot.voice.conceive", scope=_SCOPE, component=_COMPONENT, stage="conceive") as active:
             try:
-                shown = await Inception._shown(instance)
+                shown = await Inception._shown(instance, None if prior is None else prior.message)
                 offered: hsm.Event[typing.Any] = conception.ConceiveEvent
                 bound = shown.description_max_chars
                 if bound is not None:
@@ -546,7 +575,14 @@ class Inception(ability.Ability[None, voice.VoiceData]):
                 if not isinstance(completed, processing.CompletionData):
                     failure = completed.message if isinstance(completed, ability.FailureData) else "no answer"
                     raise catalog.Error("unavailable", f"The inception model could not conceive a voice: {failure}")
-                conceived = Inception._conceived(shown, completed.output)
+                try:
+                    conceived = Inception._conceived(shown, completed.output)
+                except catalog.Error as refusal:
+                    # Refused, not failed: the model answered outside what it was asked, and is told why.
+                    span.record_failure(active, refusal.kind)
+                    refused = _RefusedData(message=str(refusal), refusals=1 if prior is None else prior.refusals + 1)
+                    Inception._step(ctx, instance, event, _RefusedEvent, refused)
+                    return
             except (asyncio.CancelledError, TimeoutError) as error:
                 # Conceiving was left, or timed out, before the model answered: stop it, so a late conception
                 # never lands.
@@ -658,6 +694,25 @@ class Inception(ability.Ability[None, voice.VoiceData]):
             return
         Inception._settle_attempt(instance, "failed")
         Inception._fail(ctx, instance, event, failure.message)
+
+    @staticmethod
+    def _may_conceive_again(ctx: hsm.Context, instance: "Inception", event: hsm.Event[typing.Any]) -> bool:
+        """A refused conception is still within the immediate re-conceptions allowed."""
+
+        del ctx, instance
+        data = event.data
+        return isinstance(data, _RefusedData) and data.refusals <= _RECONCEPTIONS
+
+    @staticmethod
+    def _refuse(ctx: hsm.Context, instance: "Inception", event: hsm.Event[typing.Any]) -> None:
+        """A refused try is a failed one: counted, and told to the owner."""
+
+        data = event.data
+        if not isinstance(data, _RefusedData):
+            # Unreachable: paired with guards that narrow this payload.
+            return
+        Inception._settle_attempt(instance, "failed")
+        Inception._fail(ctx, instance, event, f"Inception could not conceive the bot's voice: {data.message}")
 
     @staticmethod
     def _fail_conceiving_timeout(ctx: hsm.Context, instance: "Inception", event: hsm.Event[typing.Any]) -> None:
@@ -855,6 +910,19 @@ class Inception(ability.Ability[None, voice.VoiceData]):
             ),
             hsm.transition(
                 hsm.on(_ConceivedEvent), hsm.guard(_payload_is(_ConceivedData)), hsm.target("/Inception/creating")
+            ),
+            # Refused: conceived again at once with why, within the bound; past it, rested like any failed attempt.
+            hsm.transition(
+                hsm.on(_RefusedEvent),
+                hsm.guard(_may_conceive_again),
+                hsm.effect(_refuse),
+                hsm.target("/Inception/conceiving"),
+            ),
+            hsm.transition(
+                hsm.on(_RefusedEvent),
+                hsm.guard(_payload_is(_RefusedData)),
+                hsm.effect(_refuse),
+                hsm.target("/Inception/resting"),
             ),
             hsm.transition(
                 hsm.on(_AttemptFailedEvent),

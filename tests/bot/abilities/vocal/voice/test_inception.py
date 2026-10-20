@@ -644,6 +644,67 @@ def test_a_conception_outside_what_was_asked_is_refused_and_conceived_again(
     assert len(bot.voices.calls) == 1
 
 
+def test_a_refused_conception_is_conceived_again_at_once_with_the_refusal_fed_back() -> None:
+    """D-R-35 (Willy run 7, D-1): a refused conception was conceived afresh after ``retry_after``, never told why, so
+    the model wrote the same too-long voice again. It is now asked again at once, shown why it was refused."""
+
+    async def run() -> tuple[Bot, Maker, Studio]:
+        shelf = Shelf()
+        studio = Studio(shelf, max_description=30)
+        maker = Maker(described("x" * 40), described("A warm voice, slow to anger."))
+        # A retry after the rest would outlast the wait: only an immediate re-conception makes the voice in time.
+        bot = await make(shelf=shelf, studio=studio, maker=maker, retry_after=datetime.timedelta(seconds=30))
+        await made(bot)
+        await bot.stop()
+        return bot, maker, studio
+
+    bot, maker, studio = asyncio.run(run())
+
+    first, second = (typing.cast(voice.InceptionInput, asked.input) for asked in maker.inputs)
+    assert first.refused is None
+    assert second.refused is not None and "longer than the source's 30" in second.refused
+    assert second.model_copy(update={"refused": None}) == first
+    (message,) = bot.inception.messages()
+    assert message == f"Inception could not conceive the bot's voice: {second.refused}"
+    assert [request.description for request in studio.requests] == ["A warm voice, slow to anger."]
+
+
+def test_a_conception_refused_three_times_rests_before_it_is_conceived_again(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """At most two immediate re-conceptions (the D-R-12 repair bound): the third refusal rests for ``retry_after``,
+    as any failed attempt does, and every refused try is counted failed."""
+
+    async def run() -> tuple[Bot, Maker, str]:
+        shelf = Shelf()
+        maker = Maker(described("x" * 40))
+        bot = await make(
+            shelf=shelf,
+            studio=Studio(shelf, max_description=30),
+            maker=maker,
+            retry_after=datetime.timedelta(seconds=30),
+        )
+        await wait_until(lambda: bot.state().endswith("/resting"))
+        await settle()
+        state = bot.state()
+        await bot.stop()
+        return bot, maker, state
+
+    with metric_reader.recording(tmp_path, monkeypatch) as reader:
+        before = _counts(reader, "bot.voice.inception.count", "bot.voice.origin", "bot.outcome")
+        bot, maker, state = asyncio.run(run())
+        inceptions = _counts(reader, "bot.voice.inception.count", "bot.voice.origin", "bot.outcome") - before
+
+    assert state.endswith("/resting")
+    refused = [typing.cast(voice.InceptionInput, asked.input).refused for asked in maker.inputs]
+    assert len(refused) == 3
+    assert refused[0] is None
+    assert all(reason is not None and "longer than the source's 30" in reason for reason in refused[1:])
+    assert len(bot.inception.messages()) == 3
+    assert inceptions == collections.Counter({("designed", "failed"): 3})
+    assert bot.voices.calls == []
+
+
 def test_a_voice_the_source_cannot_make_is_conceived_and_made_again() -> None:
     async def run() -> tuple[Bot, Maker, Studio]:
         shelf = Shelf()
