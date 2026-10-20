@@ -167,21 +167,15 @@ def test_the_env_example_is_the_lab_and_every_setting_in_it_is_valid() -> None:
 
     settings = willy_example.Settings.model_validate(given)
 
-    # Every required address is the lab model server's but speech, which is the speech engine anygame's family
-    # shares on CT 107 (D-R-26), and the decision server is reached through a local forward; nothing in it is a
-    # secret but the lab's keyless placeholder, and the local decision server takes no key at all.
+    # Every required address is Willy's own lab stack, CT 108, speech and the decision server included (R-14);
+    # nothing in it is a secret but the lab's keyless placeholder, and the local decision server takes no key.
     assert set(_REQUIRED) <= set(given)
-    assert given["WILLY_TTS_URL"] == "http://192.168.2.32:8002"
-    assert all(
-        "192.168.2.2:" in given[name]
-        for name in _REQUIRED
-        if name.endswith("_URL") and name not in {"WILLY_TTS_URL", "DECISION_BASE_URL"}
-    )
+    assert all("192.168.2.2:" in given[name] for name in _REQUIRED if name.endswith("_URL"))
     assert (settings.model, settings.embed_model) == ("qwen3.8-27b", "embeddinggemma-2")
     assert [room.id for room in settings.rooms] == ["living-room"]
     assert given["OPENAI_API_KEY"] == "local"
     # D-R-36: decide's context is 2048 tokens, and each decision request is fitted to it.
-    assert (settings.decision_base_url, settings.decision_max_context_tokens) == ("http://127.0.0.1:8102", 2048)
+    assert (settings.decision_base_url, settings.decision_max_context_tokens) == ("http://192.168.2.2:8102", 2048)
     secrets = {"COMPUTER_TOKEN_SECRET", "OPENAI_API_KEY_FILE", "DECISION_API_KEY", "DECISION_API_KEY_FILE"}
     assert not secrets & set(given)
 

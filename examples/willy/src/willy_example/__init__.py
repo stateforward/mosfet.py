@@ -133,10 +133,10 @@ class Settings(pydantic.BaseModel):
         alias="DECISION_BASE_URL",
         min_length=1,
         description=(
-            "The decision server Willy's intuition decides on, which speaks the decisions wire format: anygame's"
-            + " decide, or a hosted server with the same format."
+            "The decision server Willy's intuition decides on, which speaks the decisions wire format: the lab's"
+            + " decide, or any server with the same format."
         ),
-        examples=["http://127.0.0.1:8102"],
+        examples=["http://192.168.2.2:8102"],
     )
     decision_max_context_tokens: int | None = pydantic.Field(
         default=None,
@@ -176,10 +176,10 @@ class Settings(pydantic.BaseModel):
         alias="WILLY_TTS_URL",
         min_length=1,
         description=(
-            "The speech engine's root: its voices, its voice designer, and speech under /v1. The lab's is the "
-            "Breeze engine anygame's family shares on CT 107."
+            "The speech engine's root: its voices, its voice designer, and speech under /v1. The lab's is a "
+            "Breeze engine."
         ),
-        examples=["http://192.168.2.32:8002"],
+        examples=["http://192.168.2.2:8002"],
     )
     voiceprint_url: str = pydantic.Field(
         alias="WILLY_VOICEPRINT_URL",

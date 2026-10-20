@@ -5,9 +5,9 @@
 Two gates, and both must hold: every test here is ``live``, so ``-m "not live"`` (CI, and every other gate)
 deselects it, and it is skipped unless ``WILLY_LIVE=1``. With ``WILLY_LIVE=1`` nothing is skipped: a missing or
 malformed ``WILLY_*`` setting is a failure naming it, and so is a lab service that does not answer, so a down
-server never passes silently. The lab is CT 108 (``.env.example``; its runbook is ``lab-ct108.md``), except speech:
-Willy speaks on the Breeze engine anygame's family shares on CT 107 (``sidekick-tts-engine-breeze``), which this
-check never restarts. If a unit is down, step L1 fails naming it and where it runs.
+server never passes silently. The lab is Willy's own stack on CT 108 (``.env.example``; its runbook is
+``lab-ct108.md``), speech and the decision server included. If a unit is down, step L1 fails naming it and where it
+runs.
 
 The test writes its own ``bot.define`` of Willy's shape, as the bot file does, on the real parts: the lab's
 language model (``openai_compat.Processor``), memory on its embeddings, the voice registry on an
@@ -44,7 +44,8 @@ and its bound:
 * L6 own voice (90 s): Speaking says a fixed reply; its echo, played by the room's speaker into the room's
   microphone, resolves to ``you``, and ``you.refs`` lists that ``voice:`` ref. When no turn shows it within
   20 s, A speaks in the room again, which gives Willy one.
-* L7 forget (60 s): forgetting A's person erases A's print, so A's next utterance is a new ref, unknown.
+* L7 forget (60 s): forgetting A's person erases A's print, so A's next utterance is a new ref and not that
+  person: unknown, unless Willy itself has come to know the new voice again.
 
 The run takes about fifteen minutes, most of it Willy's birth on the 27B model, which thinks by default. The
 owner's ``WILLY_HOST``, ``WILLY_PORT`` and ``WILLY_CAMERA`` are not used: the room is served on loopback, and
@@ -124,13 +125,12 @@ _POLL_SECONDS = 0.1
 # listening.overlap instead.
 _HEARD = frozenset({conversation.OutputEvent.name, listening.OverlapEvent.name})
 _SECRETS_DIRECTORY = pathlib.Path("/run/secrets")
-# Where each unit runs: the lab model server's runbook, or anygame's CT 107, whose speech engine Willy shares.
+# Where each unit runs: Willy's lab stack, whose runbook says how to start and stop it.
 _CT108 = "lab-ct108.md"
-_CT107 = "anygame's CT 107 (192.168.2.32), which mosfet never restarts"
 # Each of the lab's services, by the setting that names it, the unit that serves it and where that unit runs.
 _HEALTH = (
     ("WILLY_STT_URL", "mosfet-stt", _CT108),
-    ("WILLY_TTS_URL", "sidekick-tts-engine-breeze", _CT107),
+    ("WILLY_TTS_URL", "mosfet-tts", _CT108),
     ("WILLY_VOICEPRINT_URL", "mosfet-voiceprint", _CT108),
     ("WILLY_EMOTION_URL", "mosfet-emotion", _CT108),
     ("WILLY_DIAR_URL", "mosfet-diar", _CT108),
@@ -377,6 +377,18 @@ def _heard(stimulus: hsm.Event[typing.Any]) -> bool:
     """Whether heard speech woke the turn, alone or with what else queued."""
 
     return any(percept.name in _HEARD for percept in _percepts(stimulus))
+
+
+def _known_by_willy(model: Recorded) -> set[str]:
+    """Every voice or person Willy itself chose to remember something about (``memory.know``)."""
+
+    known: set[str] = set()
+    for selected in model.chosen:
+        if selected.event == memory.KnowEvent.name and isinstance(selected.data, dict):
+            about = typing.cast(dict[str, object], selected.data).get("about")
+            if isinstance(about, str):
+                known.add(about)
+    return known
 
 
 def _names_chosen(model: Recorded) -> list[str]:
@@ -926,6 +938,9 @@ async def _knows_people(house: House, settings: willy_example.Settings, speech_u
     async with _step("L7 forget", _TALKED_OVER_BOUND):
         turn = await house.heard_saying(leaves, "L7", lambda call: all(not present.known for present in _others(call)))
     (forgotten,) = _others(turn)
-    # The print went with the person: A's voice is a new voice to Willy now, and nobody it knows.
+    # The print went with the person: A's voice is a new voice to Willy now, and not the person it forgot.
     assert forgotten.ref != a_ref, "L7: A's print outlived the person it was linked to"
-    assert forgotten.known is False, "L7: a forgotten voice was shown as someone Willy knows"
+    assert forgotten.person != a_person, "L7: a forgotten person was shown again"
+    # Nobody Willy knows, unless Willy itself has since come to know this voice again: that is its own.
+    if forgotten.known:
+        assert forgotten.ref in _known_by_willy(house.model), "L7: a forgotten voice was shown as someone Willy knows"
