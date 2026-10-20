@@ -396,6 +396,19 @@ def test_a_request_over_max_context_tokens_cuts_its_turn_instructions_to_their_l
     assert after.get("cut", 0.0) - before.get("cut", 0.0) == 1.0
 
 
+def test_what_someone_said_or_typed_reaches_the_decision_whole() -> None:
+    """D-R-47 (Willy browser UI): the state dropped every string over 40 characters as prose, so a typed line or a
+    transcript reached decide as null and intuition judged a turn whose words it never saw. Text is the turn."""
+
+    line = "Hi Willy, this is a test from the browser. Can you hear me?"
+    server = _Decide({"selection": (_PASS, {_PASS: 1.0})})
+
+    _ = _run(_processor(server), input_payload={"text": line}, schemas=_answer_call_offered())
+
+    (sent,) = server.requests
+    assert sent["state"]["turn"]["data"]["text"] == line
+
+
 def test_the_token_estimate_learns_from_what_the_server_counted() -> None:
     """D-R-45 (Willy live check): decide counts tokens with its own tokenizer and prompt template, so requests
     fitted at a guessed 3 bytes a token still overran its context and were refused (422). The processor learns

@@ -21,10 +21,9 @@ JSONValue = str | int | float | bool | None
 def jsonable(value: object) -> JSONValue | list[typing.Any] | dict[str, typing.Any]:
     """Convert a caller object to the decision state shape or raise ValueError.
 
-    Label-tier state discipline: bytes and media drop (the state document is a compact
-    judgment input, not a media payload — serialized base64 once blew the request budget),
-    and strings longer than 40 characters drop rather than truncate (identifiers and
-    kinds stay; prose does not belong in a label-tier document).
+    Media never belongs in the state (serialized base64 once blew the request budget), but text is
+    the turn: what someone said or typed is kept whole, however long (D-R-47). A request it makes
+    too long for the decision model is fitted, then refused and handed to reasoning (D-R-36).
     """
 
     if value is None or isinstance(value, int | bool):
@@ -44,8 +43,6 @@ def jsonable(value: object) -> JSONValue | list[typing.Any] | dict[str, typing.A
         items = typing.cast("collections.abc.Iterable[typing.Any]", value)
         return [jsonable(item) for item in items]
     if isinstance(value, str):
-        if len(value) > 40:
-            return None
         return value
     if isinstance(value, datetime.datetime | datetime.date | datetime.time):
         return value.isoformat()
