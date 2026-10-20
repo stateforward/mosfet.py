@@ -1030,6 +1030,8 @@ class Interpretation(ability.Ability[sensitivity.OutputData, cognition.InputData
     # The audio this ear has heard, in seconds (its own clock), and the second it last heard the bot producing at.
     _heard_seconds: float
     _produced_at: float | None
+    # The sample rate of the last sound this ear heard, or None before any: the own copy is enrolled at it (D-R-37).
+    _heard_rate_hz: int | None
     # Who was heard opening the open utterance (direct identification); every product of the window carries it.
     _active_voices: tuple[voice.HeardVoice, ...]
     # Union of participants stamped on the sound admitted into the open utterance (machine-owned, reset with it).
@@ -1139,6 +1141,7 @@ class Interpretation(ability.Ability[sensitivity.OutputData, cognition.InputData
         self._open_speech_echo = False
         self._heard_seconds = 0.0
         self._produced_at = None
+        self._heard_rate_hz = None
         self._active_voices = ()
         self._active_participants = ()
         self._active_operation_id = None
@@ -1227,6 +1230,7 @@ class Interpretation(ability.Ability[sensitivity.OutputData, cognition.InputData
         arrived_at = instance._heard_seconds
         if sound.sample_rate_hz and sound.channels:
             instance._heard_seconds += len(sound.audio) // (2 * sound.channels) / sound.sample_rate_hz
+            instance._heard_rate_hz = sound.sample_rate_hz
         produced_at = instance._produced_at
         echo = sensed.producing or (produced_at is not None and arrived_at < produced_at + recognition.ECHO_SECONDS)
         if sensed.producing:
@@ -2250,6 +2254,7 @@ class Interpretation(ability.Ability[sensitivity.OutputData, cognition.InputData
             embedder,
             registry,
             copy,
+            rate_hz=instance._heard_rate_hz,
             timeout=_STAGE_OPERATION_TIMEOUT,
             operation_id=instance._active_operation_id or event.id or uuid.uuid4().hex,
             metadata=event.metadata,

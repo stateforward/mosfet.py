@@ -16,9 +16,12 @@ in time. Failures the registry answers it counts itself. A segment the classifie
 
 from __future__ import annotations
 
+import array
+import asyncio
 import collections.abc
 import dataclasses
 import datetime
+import sys
 import typing
 import uuid
 
@@ -215,28 +218,67 @@ async def identify(
     return tuple(voices)
 
 
+def _resampled(segment: voice.VoiceSegment, rate_hz: int) -> voice.VoiceSegment:
+    """The segment's signed 16-bit little-endian PCM at ``rate_hz``, over the same span of time.
+
+    Each channel is linearly interpolated between the two source frames either side of each new frame; a trailing
+    partial frame is dropped. CPU-bound: callers run it off the event loop.
+    """
+
+    channels = segment.channels
+    frames = len(segment.audio) // (2 * channels)
+    if frames == 0:
+        return segment
+    samples = array.array("h", segment.audio[: frames * 2 * channels])
+    if sys.byteorder == "big":
+        samples.byteswap()
+    count = max(1, round(frames * rate_hz / segment.sample_rate_hz))
+    step = segment.sample_rate_hz / rate_hz
+    resampled = array.array("h", bytes(2 * count * channels))
+    for frame in range(count):
+        position = frame * step
+        before = min(int(position), frames - 1)
+        after = min(before + 1, frames - 1)
+        fraction = position - before if after > before else 0.0
+        for channel in range(channels):
+            low = samples[before * channels + channel]
+            high = samples[after * channels + channel]
+            resampled[frame * channels + channel] = round(low + (high - low) * fraction)
+    if sys.byteorder == "big":
+        resampled.byteswap()
+    return segment.model_copy(update={"audio": resampled.tobytes(), "sample_rate_hz": rate_hz})
+
+
 async def enroll(
     context: hsm.Context,
     embedder: Embedder,
     registry: identification.Registry,
     copy: enrollment.EnrollData,
     *,
+    rate_hz: int | None,
     timeout: datetime.timedelta,
     operation_id: str,
     metadata: collections.abc.Mapping[str, typing.Any],
 ) -> identification.Recognition | identification.FailureKind:
     """Embed the mouth's copy of the bot's own voice and enroll it as its own.
 
+    ``rate_hz`` is the sample rate the ear last heard sound at, or ``None`` when it has heard nothing yet. The copy
+    comes at the mouth's rate; it is embedded at the ear's (D-R-37), so the own print and the prints of what the ear
+    hears are made from audio at one rate. ``None`` embeds the copy as it came.
+
     The copy's ``voice_id``, once learned, is the id it refines; without one, identification matches
     the nearest own voice or mints one. Returns the registry's recognition, whose ``id`` is the bot's
     own voice id, or the failure kind.
     """
 
+    segment = copy.segment
+    if rate_hz is not None and rate_hz != segment.sample_rate_hz:
+        segment = await asyncio.to_thread(_resampled, segment, rate_hz)
     try:
         embeddings = await embed(
             context,
             embedder,
-            (copy.segment,),
+            (segment,),
             timeout=timeout,
             operation_id=f"{operation_id}:enroll",
             metadata=metadata,

@@ -961,6 +961,52 @@ def test_the_bots_own_voice_is_stamped_as_itself_but_is_never_a_source() -> None
     assert handoffs[0].participants == (itself,)
 
 
+# 1.5 s of the mouth's 24 kHz PCM, 0, 300, 600 repeating; the same second and a half at 16 kHz alternates 0 and 450.
+_OWN_24K = b"".join(((index % 3) * 300).to_bytes(2, "little", signed=True) for index in range(36_000))
+_OWN_16K = b"".join((0 if index % 2 == 0 else 450).to_bytes(2, "little", signed=True) for index in range(24_000))
+
+
+@pytest.mark.parametrize(
+    ("hears", "expected_rate_hz", "expected_audio"),
+    [(True, 16_000, _OWN_16K), (False, 24_000, _OWN_24K)],
+    ids=["after-hearing-16khz", "before-hearing-anything"],
+)
+def test_the_bots_own_print_is_enrolled_at_the_rate_the_local_ear_last_heard(
+    hears: bool, expected_rate_hz: int, expected_audio: bytes
+) -> None:
+    async def run() -> voice.VoiceSegment:
+        detector = SequenceVoiceActivityClassifier(_SILENCE_APPLY)
+        identifier = FixedVoiceClassifier(voice.identification.VoiceEmbedding(embedding=(0.6, 0.8), model="fixture"))
+        listening_ability = RecordingListening(
+            voice_activity_classifier=detector, voice_classifier=identifier, registry=voice_registry()
+        )
+        ctx = hsm.Context()
+        await start_ability_tree(ctx, listening_ability)
+        if hears:
+            await arrives_from(listening_ability, somebody_speaking(1), source="the-callers-microphone")
+            await wait_until(lambda: detector.index >= 1)
+        copy = listening.EnrollData(
+            segment=voice.VoiceSegment(
+                audio=_OWN_24K,
+                media_type="audio/pcm",
+                sample_rate_hz=24_000,
+                channels=1,
+                start_seconds=0.0,
+                end_seconds=1.5,
+            ),
+        )
+        _ = await hsm.dispatch(ctx, listening_ability, listening.EnrollEvent.with_data_and_id(copy, "enroll"))
+        calls = identifier.calls
+        await wait_until(lambda: bool(calls))
+        return calls[0].segments[0]
+
+    enrolled = asyncio.run(run())
+
+    assert (enrolled.sample_rate_hz, enrolled.channels) == (expected_rate_hz, 1)
+    assert (enrolled.start_seconds, enrolled.end_seconds) == (0.0, 1.5)
+    assert enrolled.audio == expected_audio
+
+
 def test_an_enrollment_copy_needs_no_voice_id_and_its_reply_names_one() -> None:
     segment = voice.VoiceSegment(
         audio=b"\x02\x00" * 24_000,

@@ -592,6 +592,48 @@ def test_the_bots_own_voice_enrolled_on_the_stream_path_is_never_a_source_and_it
     assert speech.participants == (identification.participant("voice", own_id, own=True),)
 
 
+# 1.5 s of the mouth's 24 kHz PCM, 0, 300, 600 repeating; the same second and a half at 16 kHz alternates 0 and 450.
+_OWN_24K = b"".join(((index % 3) * 300).to_bytes(2, "little", signed=True) for index in range(36_000))
+_OWN_16K = b"".join((0 if index % 2 == 0 else 450).to_bytes(2, "little", signed=True) for index in range(24_000))
+
+
+@pytest.mark.parametrize(
+    ("hears", "expected_rate_hz", "expected_audio"),
+    [(True, 16_000, _OWN_16K), (False, 24_000, _OWN_24K)],
+    ids=["after-hearing-16khz", "before-hearing-anything"],
+)
+def test_the_bots_own_print_is_enrolled_at_the_rate_the_stream_ear_last_heard(
+    hears: bool, expected_rate_hz: int, expected_audio: bytes
+) -> None:
+    async def run() -> voice.VoiceSegment:
+        sessions = Sessions()
+        classifier = FixedVoiceClassifier(voice.identification.VoiceEmbedding(embedding=(0.6, 0.8), model="m"))
+        ctx = shared_hsm_context()
+        ear = await _ear(sessions, voice_classifier=classifier, registry=_registry(), ctx=ctx)
+        if hears:
+            await arrives(ear, heard(5))
+            await _wait(lambda: len(sessions.made) == 1 and bool(sessions.made[0].audio()))
+        copy = listening.EnrollData(
+            segment=voice.VoiceSegment(
+                audio=_OWN_24K,
+                media_type="audio/pcm",
+                sample_rate_hz=24_000,
+                channels=1,
+                start_seconds=0.0,
+                end_seconds=1.5,
+            ),
+        )
+        _ = await hsm.dispatch(ctx, ear, listening.EnrollEvent.with_data_and_id(copy, "enroll"))
+        await _wait(lambda: bool(classifier.calls))
+        return classifier.calls[0].segments[0]
+
+    enrolled = asyncio.run(run())
+
+    assert (enrolled.sample_rate_hz, enrolled.channels) == (expected_rate_hz, 1)
+    assert (enrolled.start_seconds, enrolled.end_seconds) == (0.0, 1.5)
+    assert enrolled.audio == expected_audio
+
+
 def test_an_overlap_while_producing_is_a_fact_carrying_the_words_so_far(
     tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

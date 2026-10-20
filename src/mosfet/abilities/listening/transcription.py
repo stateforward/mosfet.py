@@ -946,6 +946,8 @@ class Transcription(ability.Ability[sensitivity.OutputData, cognition.InputData]
     _closing: dict[str, Source]
     # Sources closed when perception ended (detach), stopped when the next source starts or this stops.
     _closed: list[Source]
+    # The sample rate of the last sound handed to a source, or None before any: the own copy is enrolled at it.
+    _heard_rate_hz: int | None
 
     def __init__(
         self,
@@ -1018,6 +1020,7 @@ class Transcription(ability.Ability[sensitivity.OutputData, cognition.InputData]
         self._forwarded = {}
         self._closing = {}
         self._closed = []
+        self._heard_rate_hz = None
         children = tuple(child for child in (self._embedder, self._diarizer, self._affect) if child is not None)
         self._attachment_group: attachment.Group | None = attachment.Group(*children)
 
@@ -1101,6 +1104,9 @@ class Transcription(ability.Ability[sensitivity.OutputData, cognition.InputData]
         key = Transcription._key(event)
         source = instance._sources[key]
         instance._forwarded[key] += 1
+        sensed = event.data
+        assert isinstance(sensed, sensitivity.OutputData)
+        instance._heard_rate_hz = sensed.sound.sample_rate_hz
         _ = hsm.dispatch(ctx, source, dataclasses.replace(event, target=hsm.id(source)))
 
     @staticmethod
@@ -1176,6 +1182,9 @@ class Transcription(ability.Ability[sensitivity.OutputData, cognition.InputData]
             return
         instance._sources[data.key] = data.source
         instance._forwarded[data.key] = 1
+        sensed = data.sound.data
+        assert sensed is not None
+        instance._heard_rate_hz = sensed.sound.sample_rate_hz
         _ = hsm.dispatch(ctx, data.source, dataclasses.replace(data.sound, target=hsm.id(data.source)))
 
     @staticmethod
@@ -1268,6 +1277,7 @@ class Transcription(ability.Ability[sensitivity.OutputData, cognition.InputData]
                 embedder,
                 registry,
                 copy,
+                rate_hz=instance._heard_rate_hz,
                 timeout=_STAGE_TIMEOUT,
                 operation_id=event.id or uuid.uuid4().hex,
                 metadata=event.metadata,
