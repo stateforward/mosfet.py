@@ -28,6 +28,7 @@ import typing
 import uuid
 
 import mosfet
+import pydantic
 import sqlalchemy
 from sqlalchemy import Delete, Insert, Select, Update, and_, delete, func, or_, select, update
 from sqlalchemy.dialects import sqlite
@@ -1139,24 +1140,131 @@ def _rename(connection: Connection, idx: index.Index, row: _PersonRow, name: str
         idx.remove(connection, [row.seq])
 
 
-def _take(connection: Connection, ref: str, person: int, stamp: str) -> int:
-    """Make ``ref`` the bot's link to ``person``, merging a provisional person that held only it; the person-count change.
+_PERSON_ID: typing.Final = pydantic.TypeAdapter[str](payload.PersonId)
 
-    A ref that is already ``person``'s keeps how it was linked. The link raises ``_Refusal`` (conflict)
-    when the ref belongs to anyone else: they keep it until it is unlinked.
+
+@dataclasses.dataclass(frozen=True)
+class _Subject:
+    """Who a fact names, resolved: the person, and the ref when it was named by one."""
+
+    row: _PersonRow
+    ref: str | None
+    own: bool
+
+
+def _subject(connection: Connection, who: str) -> _Subject:
+    """Resolve a person id or a ref memory holds; raises ``_Refusal`` (not_found) for anyone else."""
+
+    try:
+        person = _PERSON_ID.validate_python(who)
+    except pydantic.ValidationError:
+        found = connection.execute(
+            select(_PERSON_REFS.c.person_seq, _PERSON_REFS.c.origin).where(_PERSON_REFS.c.ref == who)
+        ).first()
+        if found is None:
+            raise _Refusal(
+                payload.FailureKind.NOT_FOUND, f"Memory holds no ref {who!r}; name a ref the turn showed."
+            ) from None
+        holder = _person_by_seq(connection, int(found[0]))
+        return _Subject(row=holder, ref=who, own=str(found[1]) == "own" or holder.id == payload.SELF)
+    row = _person_by_id(connection, person)
+    if row is None:
+        raise _Refusal(payload.FailureKind.NOT_FOUND, "Memory holds no such person.")
+    return _Subject(row=row, ref=None, own=row.id == payload.SELF)
+
+
+def _refs(connection: Connection, seq: int) -> tuple[str, ...]:
+    """Every ref of the person ``seq``, newest link first."""
+
+    return tuple(
+        connection.execute(
+            select(_PERSON_REFS.c.ref)
+            .where(_PERSON_REFS.c.person_seq == seq)
+            .order_by(_PERSON_REFS.c.linked_at.desc(), _PERSON_REFS.c.ref)
+        ).scalars()
+    )
+
+
+def _join(connection: Connection, mover: _Subject, into: _PersonRow, stamp: str) -> tuple[tuple[str, ...], int]:
+    """Make ``mover`` ``into``'s: the ref alone when its unnamed person has others, else that whole person.
+
+    A whole person folds in: its refs become ``into``'s and its involves links are re-pointed. Returns
+    the refs that moved and the person-count change.
     """
 
-    current = _linked_persons(connection, [ref]).get(ref)
-    if current == person:
-        return 0
-    change = 0
-    if current is not None:
-        if not (_provisional(_person_by_seq(connection, current)) and _ref_count(connection, current) == 1):
-            raise _Refusal(payload.FailureKind.CONFLICT, f"{ref} belongs to another person; unlink it from them first.")
-        _merge(connection, current, person)
-        change = -1
-    _ = connection.execute(person_ref_upsert_clause(ref=ref, person=person, origin="model", at=stamp))
-    return change
+    held = _refs(connection, mover.row.seq)
+    moved = held if mover.ref is None or len(held) == 1 else (mover.ref,)
+    for ref in moved:
+        _ = connection.execute(person_ref_upsert_clause(ref=ref, person=into.seq, origin="model", at=stamp))
+    if len(moved) < len(held):
+        return moved, 0
+    _merge(connection, mover.row.seq, into.seq)
+    return moved, -1
+
+
+def _know(
+    connection: Connection, idx: index.Index, data: payload.PersonKnowData, stamp: str
+) -> tuple[payload.PersonDoneData, int]:
+    """One fact the bot learned about a person; raises ``_Refusal`` for what memory refuses.
+
+    The bot itself is ``self`` and keeps its own refs: a fact that would change either is a conflict.
+    ``same_as`` moves whoever nobody has named into the other's person (two persons the bot named stay
+    two: conflict); ``name`` names ``about``'s person; ``not_same_as`` gives the ref that joined them a
+    fresh provisional person.
+    """
+
+    about = _subject(connection, data.about)
+    fact = data.fact
+    if isinstance(fact, payload.NameFact):
+        if about.own:
+            raise _Refusal(payload.FailureKind.CONFLICT, "The bot itself is not a person the bot names.")
+        _rename(connection, idx, about.row, fact.name, stamp)
+        named = _person_by_seq(connection, about.row.seq)
+        return payload.PersonDoneData(
+            op="know", person=_person(connection, named), refs=_refs(connection, named.seq)
+        ), 0
+    other = _subject(connection, fact.other)
+    together = about.row.seq == other.row.seq
+    if isinstance(fact, payload.SameAsFact):
+        if together:
+            return payload.PersonDoneData(
+                op="know", person=_person(connection, about.row), refs=_refs(connection, about.row.seq)
+            ), 0
+        if about.own or other.own:
+            raise _Refusal(
+                payload.FailureKind.CONFLICT, "Only the producers that know the bot's own voice make a ref its own."
+            )
+        if _provisional(about.row):
+            moved, change = _join(connection, about, other.row, stamp)
+            person = other.row
+        elif _provisional(other.row):
+            moved, change = _join(connection, other, about.row, stamp)
+            person = about.row
+        else:
+            raise _Refusal(
+                payload.FailureKind.CONFLICT,
+                "Both are people you named; say a ref is not the same as one of them first.",
+            )
+        return payload.PersonDoneData(
+            op="know", person=_person(connection, person), refs=_refs(connection, person.seq), moved=moved
+        ), change
+    if not together:
+        return payload.PersonDoneData(
+            op="know", person=_person(connection, about.row), refs=_refs(connection, about.row.seq)
+        ), 0
+    # The ref that joined them goes: about's when it is one, else other's.
+    side = about if about.ref is not None else other
+    if side.ref is None:
+        raise _Refusal(payload.FailureKind.INVALID_INPUT, "A person is always themself; name one of their refs.")
+    if side.own:
+        raise _Refusal(payload.FailureKind.CONFLICT, "That ref is the bot's own.")
+    released = side.ref
+    fresh = _mint(connection, stamp)
+    _ = connection.execute(person_ref_upsert_clause(ref=released, person=fresh, origin="stamped", at=stamp))
+    now = _subject(connection, data.about).row
+    return payload.PersonDoneData(
+        op="know", person=_person(connection, now), refs=_refs(connection, now.seq), released=released
+    ), 1
 
 
 def _statement(
@@ -1170,53 +1278,16 @@ def _statement(
         rows.sort(key=lambda row: (row.id != payload.SELF, row.seq))
         persons = tuple(_person(connection, row) for row in rows[: payload.MAX_PERSONS])
         return payload.PersonDoneData(op="list", persons=persons), change
-    if isinstance(data, payload.PersonLinkData):
-        if data.person == payload.SELF:
-            raise _Refusal(
-                payload.FailureKind.CONFLICT, "Only the producers that know the bot's own voice make a ref its own."
-            )
-        if data.person is None:
-            person = _mint(connection, stamp, name=data.name)
-            change += 1
-        else:
-            row = _person_by_id(connection, data.person)
-            if row is None:
-                raise _Refusal(payload.FailureKind.NOT_FOUND, "Memory holds no such person.")
-            person = row.seq
-        change += _take(connection, data.ref, person, stamp)
-        done = payload.PersonDoneData(op="link", person=_person(connection, _person_by_seq(connection, person)))
-        return done, change
-    if isinstance(data, payload.PersonUnlinkData):
-        found = connection.execute(
-            select(_PERSON_REFS.c.person_seq, _PERSON_REFS.c.origin).where(_PERSON_REFS.c.ref == data.ref)
-        ).first()
-        if found is None:
-            raise _Refusal(payload.FailureKind.NOT_FOUND, "Memory holds no such ref.")
-        holder, origin = _person_by_seq(connection, int(found[0])), str(found[1])
-        if origin == "own" or holder.id == payload.SELF:
-            raise _Refusal(payload.FailureKind.CONFLICT, "That ref is the bot's own.")
-        fresh = _mint(connection, stamp)
-        _ = connection.execute(person_ref_upsert_clause(ref=data.ref, person=fresh, origin="stamped", at=stamp))
-        done = payload.PersonDoneData(op="unlink", person=_person(connection, _person_by_seq(connection, fresh)))
-        return done, change + 1
+    if isinstance(data, payload.PersonKnowData):
+        done, known = _know(connection, idx, data, stamp)
+        return done, change + known
     row = _person_by_id(connection, data.person)
     if row is None:
         raise _Refusal(payload.FailureKind.NOT_FOUND, "Memory holds no such person.")
     if row.seq == self_seq:
-        raise _Refusal(payload.FailureKind.CONFLICT, "The bot itself is not a person the bot names or forgets.")
-    # Name and forget both answer with every ref the person has: its prints are kept, or erased.
-    refs = tuple(
-        connection.execute(
-            select(_PERSON_REFS.c.ref)
-            .where(_PERSON_REFS.c.person_seq == row.seq)
-            .order_by(_PERSON_REFS.c.linked_at.desc(), _PERSON_REFS.c.ref)
-        ).scalars()
-    )
-    if isinstance(data, payload.PersonNameData):
-        _rename(connection, idx, row, data.name, stamp)
-        return payload.PersonDoneData(
-            op="name", person=_person(connection, _person_by_seq(connection, row.seq)), refs=refs
-        ), change
+        raise _Refusal(payload.FailureKind.CONFLICT, "The bot itself cannot be forgotten.")
+    # Forget answers with every ref the person had, so their prints can be erased.
+    refs = _refs(connection, row.seq)
     as_it_was = _person(connection, row)
     _ = connection.execute(delete(_PERSON_REFS).where(_PERSON_REFS.c.person_seq == row.seq))
     for clause in forget_clauses([row.seq]):

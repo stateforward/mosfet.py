@@ -7,18 +7,23 @@ import collections.abc
 import dataclasses
 import datetime
 import itertools
+import pathlib
+import time
 import typing
+import uuid
 
 import hsm
 import mosfet
 import pytest
 
-from mosfet import environment, media
-from mosfet.abilities import ability, embedding, memory, processing
+from mosfet import environment, lifecycle, media
+from mosfet.abilities import ability, embedding, identification, memory, processing
 from mosfet.abilities.ability import Effort
 from mosfet.abilities.cognition import event as projection
 from mosfet.abilities.language import text
 from mosfet.protocols import attachment
+
+from tests import metric_reader
 
 _PNG = b"\x89PNG\r\n\x1a\n" + b"png-body"
 _WAIT = 3.0
@@ -69,7 +74,12 @@ class Owner(hsm.Instance):
         self.changed = asyncio.Event()
 
     def replies(self, request_id: str) -> list[hsm.Event[typing.Any]]:
-        names = {memory.AssociatedEvent.name, memory.RecollectedEvent.name, ability.FailedEvent.name}
+        names = {
+            memory.AssociatedEvent.name,
+            memory.RecollectedEvent.name,
+            memory.KnownEvent.name,
+            ability.FailedEvent.name,
+        }
         return [event for event in self.events if event.id == request_id and event.name in names]
 
     async def until(self, predicate: collections.abc.Callable[[], bool]) -> None:
@@ -214,10 +224,17 @@ def test_associative_attaches_through_its_empty_group_and_owns_a_detaching_state
     for state in ("initializing", "idle", "busy", "detaching", "degraded"):
         assert f"/AssociativeLifecycle/attached/behavior/{state}" in model.members
     assert memory.Associative.effort is Effort.M
-    assert memory.Associative.detached_requests == (memory.AssociateEvent, memory.RecallEvent)
-    # Recall is a model-callable tool; associating is not.
-    assert memory.RecallEvent.kind == processing.EventKind
-    assert memory.AssociateEvent.kind != processing.EventKind
+    assert memory.Associative.detached_requests == (
+        memory.AssociateEvent,
+        memory.RecallEvent,
+        memory.KnowEvent,
+        memory.ForgetEvent,
+    )
+    # Recall, knowing and forgetting are model-callable tools; associating and their outcomes are not.
+    for tool in (memory.RecallEvent, memory.KnowEvent, memory.ForgetEvent):
+        assert tool.kind == processing.EventKind
+    for answer in (memory.AssociateEvent, memory.KnownEvent):
+        assert answer.kind != processing.EventKind
 
 
 # --- scoring and budget -------------------------------------------------------------------------
@@ -417,7 +434,7 @@ def test_recall_is_offered_while_idle_and_only_then() -> None:
 
     idle, busy = asyncio.run(scenario())
 
-    assert idle == {memory.RecallEvent.name}
+    assert idle == {memory.RecallEvent.name, memory.KnowEvent.name, memory.ForgetEvent.name}
     assert busy == set()
 
 
@@ -593,8 +610,9 @@ def test_a_turn_says_who_is_speaking_who_is_present_and_who_the_bot_is() -> None
     async def scenario() -> hsm.Event[typing.Any]:
         harness = await _harness()
         await harness.attach_memory()
-        # Nobody declares Ada (R-11): the bot learned her voice and her name.
-        await harness.person(memory.PersonLinkData(ref=child.ref, name="Ada"))
+        # Nobody declares Ada (R-11): the bot heard her voice and learned her name (R-12).
+        await harness.remember(_episode("Hi, I'm Ada.", "ada", participants=(child,)))
+        await harness.person(memory.PersonKnowData(about=child.ref, fact=memory.NameFact(name="Ada")))
         await harness.remember(_episode("Hello, I am here.", "spoke", participants=(mouth,)))
         await harness.attach()
         cue = memory.CueData(cue=(text.TextPart(text="who is that?"),), participants=(child, stranger, seen))
@@ -646,3 +664,446 @@ def test_the_bots_own_voice_on_the_turn_is_the_bot() -> None:
     (present,) = surfaced.people
     assert (present.ref, present.person, present.known) == (mouth.ref, memory.SELF, True)
     assert surfaced.you.refs == (mouth.ref,)
+
+
+# --- knowing people (R-12, D-R-41) -----------------------------------------------------------------
+#
+# Every test pins a capacity and never a choice: a fact is known or a person forgotten only because the
+# test dispatched it itself, standing in for cognition selecting the tool. The parts are real: a Memory,
+# a voice ``identification.Registry`` over a ``Matcher`` and an ``InProcessStore``, all reached by message.
+
+_POLICY = identification.MatchPolicy(threshold=0.50, margin=0.05, refine_threshold=0.65)
+# Two orthogonal voiceprints: similarity 0, so they are never one voice.
+_VOICE_A = identification.Print(vector=(0.6180339887, 0.7861513778), model="voice-model")
+_VOICE_B = identification.Print(vector=(-0.7861513778, 0.6180339887), model="voice-model")
+_VOICE_C = identification.Print(vector=(-0.6180339887, -0.7861513778), model="voice-model")
+_FAR_FUTURE = datetime.datetime(2100, 1, 1, tzinfo=datetime.UTC)
+_NOBODY = "0123456789abcdef0123456789abcdef"
+_FACT_TIMEOUT = datetime.timedelta(seconds=2)
+
+
+def _registry(prints: identification.InProcessStore) -> identification.Registry:
+    return identification.Registry(
+        identifier=identification.Matcher(store=prints, policy=_POLICY),
+        kind="voice",
+        max_unlinked_age=datetime.timedelta(days=30),
+        max_ids=64,
+    )
+
+
+@dataclasses.dataclass
+class Knowing:
+    harness: Harness
+    prints: identification.InProcessStore
+    voices: identification.Registry
+
+    async def ask(
+        self, child: hsm.Instance, request: hsm.Event[typing.Any], data: object, *answers: hsm.Event[typing.Any]
+    ) -> object:
+        terminal = await ability.run_terminal_operation(
+            self.harness.ctx,
+            child=child,
+            request=request.with_data_and_id(data, uuid.uuid4().hex),
+            terminals=answers,
+            timeout=datetime.timedelta(seconds=_WAIT),
+        )
+        return terminal.data
+
+    async def heard(self, voiceprint: identification.Print) -> str:
+        """The ref of the voice ``voiceprint`` is, as the ear learns it from the registry; memory perceives it."""
+
+        identified = await self.ask(
+            self.voices,
+            identification.IdentifyEvent,
+            identification.IdentifyData(prints=(voiceprint,)),
+            identification.IdentifiedEvent,
+            identification.FailedEvent,
+        )
+        assert isinstance(identified, identification.IdentifiedData), identified
+        (recognition,) = identified.recognitions
+        assert recognition is not None
+        ref = identification.ref("voice", recognition.id)
+        _ = await self.who(ref)
+        return ref
+
+    async def own(self, voiceprint: identification.Print) -> str:
+        """The ref of the bot's own voice, enrolled the way speaking enrolls it."""
+
+        enrolled = await self.ask(
+            self.voices,
+            identification.EnrollEvent,
+            identification.EnrollData(id=None, print=voiceprint, own=True),
+            identification.EnrolledEvent,
+            identification.FailedEvent,
+        )
+        assert isinstance(enrolled, identification.Recognition), enrolled
+        return identification.ref("voice", enrolled.id)
+
+    async def who(self, ref: str, *, own: bool = False) -> memory.Present:
+        """Who memory says ``ref`` is on the next turn it takes part in."""
+
+        found = await self.ask(
+            self.harness.memory,
+            memory.SearchEvent,
+            memory.SearchData(
+                cue=(),
+                participants=(mosfet.Participant(ref=ref, role=mosfet.ParticipantRole.SOURCE, own=own),),
+                nearest=0,
+                recent=0,
+                present=0,
+                linked=0,
+            ),
+            memory.FoundEvent,
+            memory.FailedEvent,
+        )
+        assert isinstance(found, memory.FoundData), found
+        (present,) = found.people
+        return present
+
+    async def persons(self) -> tuple[memory.Person, ...]:
+        listed = await self.ask(
+            self.harness.memory, memory.PersonEvent, memory.PersonListData(), memory.PersonDoneEvent, memory.FailedEvent
+        )
+        assert isinstance(listed, memory.PersonDoneData), listed
+        return listed.persons
+
+    async def select(self, request: hsm.Event[typing.Any], data: object) -> hsm.Event[typing.Any]:
+        """Stand in for cognition selecting a tool; return what the bot is told came of it."""
+
+        request_id = uuid.uuid4().hex
+        _ = await hsm.dispatch(
+            self.harness.ctx,
+            self.harness.associative,
+            dataclasses.replace(
+                request.with_data_and_id(data, request_id),
+                source=hsm.id(self.harness.owner),
+                target=hsm.id(self.harness.associative),
+            ),
+        )
+        return await self.harness.reply(request_id)
+
+    async def know(self, about: str, fact: memory.Fact) -> hsm.Event[typing.Any]:
+        return await self.select(memory.KnowEvent, memory.KnowData(about=about, fact=fact))
+
+    async def forget(self, person: str) -> hsm.Event[typing.Any]:
+        return await self.select(memory.ForgetEvent, memory.ForgetData(person=person, note="asked to be forgotten"))
+
+    def prune_unlinked(self) -> int:
+        """Retention, run far in the future: every print no named person holds is pruned."""
+
+        return self.prints.prune("voice", unseen_before=_FAR_FUTURE, max_ids=64)
+
+
+def _known(observed: hsm.Event[typing.Any]) -> memory.KnownData:
+    assert observed.name == memory.KnownEvent.name, observed
+    assert isinstance(observed.data, memory.KnownData)
+    return observed.data
+
+
+def _refused(observed: hsm.Event[typing.Any]) -> memory.FailureData:
+    assert observed.name == ability.FailedEvent.name, observed
+    assert isinstance(observed.data, memory.FailureData), observed.data
+    return observed.data
+
+
+def _knowing[T](
+    scenario: collections.abc.Callable[[Knowing], collections.abc.Awaitable[T]],
+    *,
+    prints: identification.InProcessStore | None = None,
+    timeout: datetime.timedelta = _FACT_TIMEOUT,
+) -> T:
+    async def run() -> T:
+        ctx = environment.Environment()
+        owner, memory_owner = Owner(), Owner()
+        for actor in (owner, memory_owner):
+            _ = await mosfet.started(ctx, actor, Owner.model)
+        store_prints = prints if prints is not None else identification.InProcessStore(max_ids=64)
+        voices = _registry(store_prints)
+        store = memory.Memory(engine=memory.store.open_sqlite_engine())
+        associative = memory.Associative(memory=store, registries=(voices,), timeout=timeout)
+        harness = Harness(ctx=ctx, memory=store, associative=associative, owner=owner, memory_owner=memory_owner)
+        await harness.attach_memory()
+        _ = await voices.attach(
+            ctx, attachment.AttachEvent.with_data_and_id(attachment.AttachData(actor=memory_owner), "voices")
+        )
+        await memory_owner.until(
+            lambda: any(
+                e.name == attachment.AttachCompleteEvent.name and e.source == hsm.id(voices)
+                for e in memory_owner.events
+            )
+        )
+        await harness.attach()
+        try:
+            return await scenario(Knowing(harness=harness, prints=store_prints, voices=voices))
+        finally:
+            for part in (associative, voices, store):
+                if lifecycle.is_started(part):
+                    await part.stop(ctx)
+
+    return asyncio.run(run())
+
+
+def test_associative_takes_one_registry_of_each_kind() -> None:
+    store = memory.Memory()
+    with pytest.raises(ValueError, match="voice"):
+        _ = memory.Associative(
+            memory=store,
+            registries=(
+                _registry(identification.InProcessStore(max_ids=4)),
+                _registry(identification.InProcessStore(max_ids=4)),
+            ),
+        )
+
+
+def test_naming_a_strangers_voice_makes_the_next_turn_know_them_and_keeps_its_print() -> None:
+    async def scenario(knowing: Knowing) -> tuple[memory.Present, memory.KnownData, memory.Present, bool]:
+        ref = await knowing.heard(_VOICE_A)
+        stranger = await knowing.who(ref)
+        known = _known(await knowing.know(ref, memory.NameFact(name="Sam")))
+        named = await knowing.who(ref)
+        _ = knowing.prune_unlinked()
+        return stranger, known, named, await knowing.heard(_VOICE_A) == ref
+
+    stranger, known, named, kept = _knowing(scenario)
+
+    assert stranger.known is False
+    assert (known.op, known.person.name, known.person.refs) == ("know", "Sam", (stranger.ref,))
+    assert (named.person, named.known) == (known.person.id, True)
+    # The print of a voice whose person is named is kept through retention (D-W8-18).
+    assert kept
+
+
+def test_a_person_can_have_two_voices() -> None:
+    async def scenario(knowing: Knowing) -> tuple[str, str, memory.KnownData, memory.Present]:
+        first, second = await knowing.heard(_VOICE_A), await knowing.heard(_VOICE_B)
+        sam = _known(await knowing.know(first, memory.NameFact(name="Sam"))).person
+        both = _known(await knowing.know(second, memory.SameAsFact(other=sam.id)))
+        return first, second, both, await knowing.who(second)
+
+    first, second, both, present = _knowing(scenario)
+
+    assert first != second
+    assert set(both.person.refs) == {first, second}
+    assert (present.person, present.known) == (both.person.id, True)
+
+
+def test_a_voice_that_is_someone_elses_is_a_conflict_the_bot_perceives_and_their_link_stands() -> None:
+    async def scenario(knowing: Knowing) -> tuple[str, str, memory.FailureData, memory.Present, bool]:
+        first, second = await knowing.heard(_VOICE_A), await knowing.heard(_VOICE_B)
+        sam = _known(await knowing.know(first, memory.NameFact(name="Sam"))).person
+        _ = _known(await knowing.know(second, memory.NameFact(name="Max")))
+        refused = _refused(await knowing.know(first, memory.SameAsFact(other=second)))
+        present = await knowing.who(first)
+        _ = knowing.prune_unlinked()
+        return first, sam.id, refused, present, await knowing.heard(_VOICE_A) == first
+
+    ref, sam, refused, present, kept = _knowing(scenario)
+
+    assert refused.kind is memory.FailureKind.CONFLICT
+    assert (present.ref, present.person, present.known) == (ref, sam, True)
+    assert kept
+
+
+def test_the_bots_own_voice_is_never_anyone_elses() -> None:
+    async def scenario(knowing: Knowing) -> tuple[memory.FailureData, memory.FailureData, tuple[memory.Person, ...]]:
+        own = await knowing.own(_VOICE_A)
+        _ = await knowing.who(own, own=True)
+        itself = _refused(await knowing.know(own, memory.NameFact(name="Sam")))
+        other = await knowing.heard(_VOICE_B)
+        joined = _refused(await knowing.know(other, memory.SameAsFact(other=own)))
+        return itself, joined, await knowing.persons()
+
+    itself, joined, persons = _knowing(scenario)
+
+    assert (itself.kind, joined.kind) == (memory.FailureKind.CONFLICT, memory.FailureKind.CONFLICT)
+    assert [person.name for person in persons if person.name is not None] == []
+
+
+def test_a_voice_the_registry_says_is_the_bots_own_is_taken_back_from_the_person_it_joined() -> None:
+    """Memory has not yet heard the own voice as the bot's; the registry refuses its mark, so the fact is undone."""
+
+    async def scenario(knowing: Knowing) -> tuple[memory.FailureData, memory.Present, str]:
+        own = await knowing.own(_VOICE_A)
+        _ = await knowing.who(own)
+        other = await knowing.heard(_VOICE_B)
+        sam = _known(await knowing.know(other, memory.NameFact(name="Sam"))).person
+        refused = _refused(await knowing.know(own, memory.SameAsFact(other=sam.id)))
+        return refused, await knowing.who(own), sam.id
+
+    refused, present, sam = _knowing(scenario)
+
+    assert refused.kind is memory.FailureKind.CONFLICT
+    assert present.person != sam and present.known is False
+
+
+def test_a_fact_about_a_ref_nobody_perceived_is_not_found_and_marks_nothing() -> None:
+    async def scenario(knowing: Knowing) -> tuple[memory.FailureData, memory.FailureData, int]:
+        ref = await knowing.heard(_VOICE_A)
+        made_up = _refused(await knowing.know("voice:never-heard", memory.NameFact(name="Sam")))
+        nobody = _refused(await knowing.know(ref, memory.SameAsFact(other=_NOBODY)))
+        return made_up, nobody, knowing.prune_unlinked()
+
+    made_up, nobody, pruned = _knowing(scenario)
+
+    assert (made_up.kind, nobody.kind) == (memory.FailureKind.NOT_FOUND, memory.FailureKind.NOT_FOUND)
+    # Nothing was marked, so the voice nobody named is pruned.
+    assert pruned == 1
+
+
+def test_a_voice_joined_to_a_person_nobody_has_named_is_not_kept() -> None:
+    """The mark follows known (D-W8-18, D-R-39): a person nobody named keeps no print."""
+
+    async def scenario(knowing: Knowing) -> tuple[memory.Present, int]:
+        first, second = await knowing.heard(_VOICE_A), await knowing.heard(_VOICE_B)
+        _ = _known(await knowing.know(second, memory.SameAsFact(other=first)))
+        return await knowing.who(second), knowing.prune_unlinked()
+
+    present, pruned = _knowing(scenario)
+
+    assert present.known is False
+    assert pruned == 2
+
+
+def test_naming_a_person_keeps_every_one_of_their_prints() -> None:
+    async def scenario(knowing: Knowing) -> tuple[tuple[str, str], memory.Present, int, tuple[str, str]]:
+        first, second = await knowing.heard(_VOICE_A), await knowing.heard(_VOICE_B)
+        stranger = _known(await knowing.know(second, memory.SameAsFact(other=first))).person
+        _ = _known(await knowing.know(stranger.id, memory.NameFact(name="Sam")))
+        known = await knowing.who(second)
+        pruned = knowing.prune_unlinked()
+        return (first, second), known, pruned, (await knowing.heard(_VOICE_A), await knowing.heard(_VOICE_B))
+
+    before, known, pruned, after = _knowing(scenario)
+
+    assert known.known is True
+    assert pruned == 0
+    assert after == before
+
+
+class SlowLinks(identification.InProcessStore):
+    """A store whose every link mark takes ``delay``: each one well within the timeout, all of them not."""
+
+    delay: float = 0.3
+
+    @typing.override
+    def link(self, kind: identification.Kind, id: identification.Id, linked: bool) -> None:
+        time.sleep(self.delay)
+        super().link(kind, id, linked)
+
+
+def test_a_fact_whose_every_step_answers_within_the_timeout_is_known_however_long_it_takes_in_all() -> None:
+    """``timeout`` bounds each step of a fact, never the fact as a whole: naming three voices marks three prints."""
+
+    async def scenario(knowing: Knowing) -> tuple[hsm.Event[typing.Any], tuple[memory.Person, ...], int]:
+        voices = [await knowing.heard(voiceprint) for voiceprint in (_VOICE_A, _VOICE_B, _VOICE_C)]
+        for other in voices[1:]:
+            _ = _known(await knowing.know(other, memory.SameAsFact(other=voices[0])))
+        named = await knowing.know(voices[0], memory.NameFact(name="Sam"))
+        return named, await knowing.persons(), knowing.prune_unlinked()
+
+    named, persons, pruned = _knowing(
+        scenario, prints=SlowLinks(max_ids=64), timeout=datetime.timedelta(milliseconds=600)
+    )
+
+    known = _known(named)
+    assert (known.person.name, len(known.person.refs)) == ("Sam", 3)
+    assert [person.name for person in persons if person.name is not None] == ["Sam"]
+    # Every print of theirs was marked, so retention keeps all three.
+    assert pruned == 0
+
+
+def test_not_the_same_as_gives_a_voice_back_to_nobody_and_lets_its_print_go() -> None:
+    async def scenario(knowing: Knowing) -> tuple[str, str, memory.KnownData, memory.Present, int]:
+        ref = await knowing.heard(_VOICE_A)
+        sam = _known(await knowing.know(ref, memory.NameFact(name="Sam"))).person
+        apart = _known(await knowing.know(ref, memory.NotSameAsFact(other=sam.id)))
+        return ref, sam.id, apart, await knowing.who(ref), knowing.prune_unlinked()
+
+    ref, sam, apart, present, pruned = _knowing(scenario)
+
+    assert (apart.person.name, apart.person.refs) == (None, (ref,))
+    assert apart.person.id != sam
+    assert (present.person, present.known) == (apart.person.id, False)
+    assert pruned == 1
+
+
+def test_forgetting_a_person_erases_their_prints() -> None:
+    async def scenario(
+        knowing: Knowing,
+    ) -> tuple[tuple[str, str], memory.KnownData, tuple[str, str], tuple[memory.Person, ...]]:
+        first, second = await knowing.heard(_VOICE_A), await knowing.heard(_VOICE_B)
+        sam = _known(await knowing.know(first, memory.NameFact(name="Sam"))).person
+        _ = _known(await knowing.know(second, memory.SameAsFact(other=sam.id)))
+        forgotten = _known(await knowing.forget(sam.id))
+        return (
+            (first, second),
+            forgotten,
+            (await knowing.heard(_VOICE_A), await knowing.heard(_VOICE_B)),
+            await knowing.persons(),
+        )
+
+    before, forgotten, after, persons = _knowing(scenario)
+
+    assert (forgotten.op, forgotten.person.name) == ("forget", "Sam")
+    assert set(forgotten.person.refs) == set(before)
+    # Their prints are gone: the same voices are strangers now, under ids never seen before.
+    assert not set(after) & set(before)
+    assert all(person.id != forgotten.person.id for person in persons)
+
+
+def test_the_bot_itself_cannot_be_forgotten() -> None:
+    async def scenario(knowing: Knowing) -> memory.FailureData:
+        return _refused(await knowing.forget(memory.SELF))
+
+    assert _knowing(scenario).kind is memory.FailureKind.CONFLICT
+
+
+def test_a_detached_associative_answers_a_fact_unavailable() -> None:
+    async def run() -> hsm.Event[typing.Any]:
+        ctx = environment.Environment()
+        owner = Owner()
+        _ = await mosfet.started(ctx, owner, Owner.model)
+        detached = memory.Associative(memory=memory.Memory())
+        model = detached.model
+        assert model is not None
+        _ = await mosfet.started(ctx, detached, model)
+        request = dataclasses.replace(
+            memory.ForgetEvent.with_data_and_id(memory.ForgetData(person=_NOBODY), "forget"),
+            source=hsm.id(owner),
+            target=hsm.id(detached),
+        )
+        _ = await hsm.dispatch(ctx, detached, request)
+        await owner.until(lambda: bool(owner.replies("forget")))
+        await detached.stop(ctx)
+        return owner.replies("forget")[0]
+
+    answered = asyncio.run(run())
+
+    assert answered.name == ability.FailedEvent.name
+    assert isinstance(answered.data, memory.FailureData) and answered.data.kind is memory.FailureKind.UNAVAILABLE
+
+
+def test_telemetry_counts_each_fact_with_closed_attributes(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def scenario(knowing: Knowing) -> None:
+        first, second = await knowing.heard(_VOICE_A), await knowing.heard(_VOICE_B)
+        _ = await knowing.know(first, memory.NameFact(name="Sam"))
+        _ = await knowing.know(second, memory.NameFact(name="Max"))
+        _ = await knowing.know(first, memory.SameAsFact(other=second))
+
+    with metric_reader.recording(tmp_path, monkeypatch) as reader:
+        before = {
+            tuple(sorted(point.attributes.items())): point.value for point in reader.points("bot.memory.know.count")
+        }
+        _knowing(scenario)
+        after = {
+            tuple(sorted(point.attributes.items())): point.value for point in reader.points("bot.memory.know.count")
+        }
+
+    counted = {key: value - before.get(key, 0.0) for key, value in after.items() if value != before.get(key, 0.0)}
+
+    def key(op: str, outcome: str, kind: str) -> tuple[tuple[str, object], ...]:
+        return (("bot.failure.kind", kind), ("bot.memory.know.op", op), ("bot.outcome", outcome))
+
+    assert counted == {key("know", "ok", "none"): 2.0, key("know", "failed", "conflict"): 1.0}

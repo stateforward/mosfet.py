@@ -15,9 +15,9 @@ shared actor. The one file database on ``<data dir>/memory.sqlite3``, shared by 
 prints, so a person and the prints of their voice live and are forgotten together: a ``sqlite_memory.Database``
 handle that opens nothing here; the first of them to start opens and migrates it, after ``bot.run`` has created
 the data dir private (``0700``), because it holds those prints. A database that cannot be opened fails Willy's
-start, under ``bot.run``. The memory itself, shared by cognition,
-identity and people. The voice registry, owned by the ear that hears with it and asked by people to keep or erase a
-print. The ear, which the mouth tells what it is saying so the bot can
+start, under ``bot.run``. The memory itself, shared by cognition and
+identity. The voice registry, owned by the ear that hears with it and given to the cognition, whose memory keeps or
+erases a print as Willy learns or forgets whose it is. The ear, which the mouth tells what it is saying so the bot can
 learn its own voice. The conversation, shared by communication and the mouth. And the mouth, the one
 ``speaking.Speaking`` that the bot speaks through, in the voice it is born with: every room's computer hears it
 and plays it on that room's speaker, like an intercom.
@@ -25,8 +25,9 @@ and plays it on that room's speaker, like an intercom.
 Then one ``bot.define`` constructs every other part inline: Willy's traits, the source of its voice (the lab's
 shared speech engine, which designs it at Willy's birth; Willy is allowed none of the engine's other voices, so it
 is born only as the one it designs), its cognition on the lab's language model with its intuition on the
-decision model and the speech seed that takes heard speech into a conversation, its ear and its sense of its own name, its mouth, its
-conversations, its capacity to know people, which it learns itself, and one computer per room, set on the
+decision model, the speech seed that takes heard speech into a conversation and the registries whose prints follow
+whom it knows (people it learns itself), its ear and its sense of its own name, its mouth, its conversations, and one
+computer per room, set on the
 object the owner names in that room. With ``WILLY_CAMERA=1`` a face registry and an eye join them, seeing through
 the rooms' cameras with the OpenCV Zoo's YuNet and SFace.
 """
@@ -44,7 +45,6 @@ from mosfet.abilities import (
     identity,
     listening,
     memory,
-    people,
     seeing,
     speaking,
 )
@@ -169,6 +169,7 @@ if __name__ == "__main__":
                 max_context_tokens=settings.decision_max_context_tokens,
             ),
             memory=store,
+            registries=(voices, *faces),
             associative=True,
             consolidation=True,
             autonomy=True,
@@ -200,7 +201,6 @@ if __name__ == "__main__":
         ),
         bot.output(mouth),
         bot.attach(communication.Communication(conversations=(talk,), speaking=mouth)),
-        bot.attach(people.People(memory=store, registries=(voices, *faces))),
         *(
             bot.attach(
                 computer.Computer(

@@ -1,4 +1,4 @@
-from mosfet.abilities import people
+from mosfet.abilities import memory
 from mosfet.abilities.hearing import speech as hearing_speech
 
 import pydantic
@@ -26,16 +26,15 @@ def test_speech_decoding_events_use_concrete_pydantic_schemas() -> None:
     assert output_schema["format"] == expected_output_schema["format"]
 
 
-def test_people_events_use_concrete_pydantic_schemas() -> None:
+def test_knowing_people_events_use_concrete_pydantic_schemas() -> None:
+    """R-12: what the bot learns about people is memory's capacity, under memory's event names."""
+
     events = (
-        (people.LinkEvent, people.LinkData),
-        (people.UnlinkEvent, people.UnlinkData),
-        (people.NameEvent, people.NameData),
-        (people.ForgetEvent, people.ForgetData),
-        (people.ChangedEvent, people.ChangedData),
-        (people.FailedEvent, people.FailureData),
+        (memory.KnowEvent, memory.KnowData, "bot.ability.memory.know"),
+        (memory.ForgetEvent, memory.ForgetData, "bot.ability.memory.forget"),
+        (memory.KnownEvent, memory.KnownData, "bot.ability.memory.known"),
     )
 
-    for event, data in events:
-        assert event.name.startswith("bot.ability.people.")
+    for event, data, name in events:
+        assert event.name == name
         assert object_dict(event.schema) == object_dict(data.model_json_schema())

@@ -296,21 +296,65 @@ def test_a_person_is_frozen_and_shows_at_most_sixteen_refs() -> None:
 
 def test_a_person_statement_is_one_typed_op() -> None:
     adapter = pydantic.TypeAdapter(memory.PersonData)
-    assert isinstance(adapter.validate_python({"op": "link", "ref": "voice:3f2a"}), memory.PersonLinkData)
-    assert isinstance(adapter.validate_python({"op": "unlink", "ref": "voice:3f2a"}), memory.PersonUnlinkData)
-    assert isinstance(adapter.validate_python({"op": "name", "person": _SAM, "name": "Sam"}), memory.PersonNameData)
+    know = adapter.validate_python({"op": "know", "about": "voice:3f2a", "fact": {"kind": "name", "name": "Sam"}})
+    assert isinstance(know, memory.PersonKnowData) and know.fact == memory.NameFact(name="Sam")
     assert isinstance(adapter.validate_python({"op": "forget", "person": _SAM}), memory.PersonForgetData)
     assert isinstance(adapter.validate_python({"op": "list"}), memory.PersonListData)
-    invalids: tuple[dict[str, object], ...] = ({"op": "rename", "person": _SAM}, {"op": "declare", "members": []})
+    # R-12: the bot's link, unlink and name are facts it knows, never statements of their own.
+    invalids: tuple[dict[str, object], ...] = (
+        {"op": "rename", "person": _SAM},
+        {"op": "declare", "members": []},
+        {"op": "link", "ref": "voice:3f2a"},
+        {"op": "unlink", "ref": "voice:3f2a"},
+        {"op": "name", "person": _SAM, "name": "Sam"},
+    )
     for invalid in invalids:
         with pytest.raises(pydantic.ValidationError):
             _ = adapter.validate_python(invalid)
 
 
+def test_a_fact_about_a_person_is_one_of_three_typed_facts() -> None:
+    """R-12: what the bot learns about people is a typed fact: the same person as, called, not the same as."""
+
+    adapter = pydantic.TypeAdapter[memory.SameAsFact | memory.NameFact | memory.NotSameAsFact](memory.Fact)
+    assert adapter.validate_python({"kind": "same_as", "other": _SAM}) == memory.SameAsFact(other=_SAM)
+    assert adapter.validate_python({"kind": "name", "name": "Sam"}) == memory.NameFact(name="Sam")
+    assert adapter.validate_python({"kind": "not_same_as", "other": "voice:a"}) == memory.NotSameAsFact(other="voice:a")
+    for invalid in ({"kind": "role", "role": "child"}, {"kind": "same_as"}, {"kind": "name", "name": ""}):
+        with pytest.raises(pydantic.ValidationError):
+            _ = adapter.validate_python(invalid)
+
+
+def test_knowing_and_forgetting_are_described_tools_that_carry_no_role_and_no_made_up_example() -> None:
+    for data in (memory.KnowData, memory.ForgetData, memory.SameAsFact, memory.NameFact, memory.NotSameAsFact):
+        schema = data.model_json_schema()
+        properties = typing.cast(dict[str, dict[str, object]], schema["properties"])
+        assert schema.get("description"), data
+        assert not {"role", "born", "declared"} & set(properties), data
+        assert all(field.get("description") for name, field in properties.items() if name != "fact"), data
+    know = typing.cast(dict[str, dict[str, object]], memory.KnowData.model_json_schema()["properties"])
+    # A ref and a name are complete answers: an example of either names nobody, or someone else.
+    assert "examples" not in know["about"]
+    assert "examples" not in memory.NameFact.model_json_schema()["properties"]["name"]
+    assert memory.KnowData(about="voice:a", fact=memory.NameFact(name="Sam")).note is None
+    with pytest.raises(pydantic.ValidationError):
+        _ = memory.KnowData(about="", fact=memory.NameFact(name="Sam"))
+    with pytest.raises(pydantic.ValidationError):
+        _ = memory.ForgetData(person="voice:a")
+    known = memory.KnownData(op="know", person=memory.Person(id=_SAM, name="Sam"))
+    assert (known.op, known.person.name) == ("know", "Sam")
+
+
 def test_a_person_statement_reply_carries_the_person_and_its_refs() -> None:
     done = memory.PersonDoneData(op="forget", person=memory.Person(id=_SAM), refs=("voice:a", "face:b"))
-    assert (done.op, done.refs, done.persons) == ("forget", ("voice:a", "face:b"), ())
-    assert set(memory.PersonDoneData.model_fields) == {"op", "person", "refs", "persons"}
+    assert (done.op, done.refs, done.persons, done.moved, done.released) == (
+        "forget",
+        ("voice:a", "face:b"),
+        (),
+        (),
+        None,
+    )
+    assert set(memory.PersonDoneData.model_fields) == {"op", "person", "refs", "persons", "moved", "released"}
     with pytest.raises(pydantic.ValidationError):
         _ = memory.PersonDoneData.model_validate({"op": "rename"})
 

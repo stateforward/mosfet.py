@@ -404,10 +404,11 @@ class Cognition(ability.Ability[InputData, OutputData]):
     leaves the turn without associations; it never fails the turn.
 
     Every frame Cognition builds also holds ``associative`` (under ``memory``), so a stage whose
-    effort ceiling admits it (Reasoning, not Intuition) is offered ``bot.ability.memory.recall``.
-    What a recall brings to mind (``memory.RecollectedEvent``), or its typed failure, comes back to
-    Cognition and goes to the body as a ``cognition.InputEvent`` observing it: a new turn the bot
-    decides on, the way a routine tick is.
+    effort ceiling admits it (Reasoning, not Intuition) is offered ``bot.ability.memory.recall``,
+    ``bot.ability.memory.know`` and ``bot.ability.memory.forget``. What a recall brings to mind
+    (``memory.RecollectedEvent``), what memory now knows of a person (``memory.KnownEvent``), or a
+    typed failure, comes back to Cognition and goes to the body as a ``cognition.InputEvent``
+    observing it: a new turn the bot decides on, the way a routine tick is.
 
     With ``consolidation`` composed too, Cognition rests once it has been idle for ``rest_after``:
     it sends ``consolidation`` a ``memory.RestEvent``, and the first cognition input wakes it with
@@ -2023,18 +2024,19 @@ class Cognition(ability.Ability[InputData, OutputData]):
         )
 
     @staticmethod
-    def _is_recall_outcome(
+    def _is_memory_outcome(
         ctx: hsm.Context,
         instance: "Cognition",
         event: hsm.Event[typing.Any],
     ) -> bool:
-        """What the bot's own recall brought to mind, or why it could not: from Associative, by data type."""
+        """What the bot's own recall brought to mind, what memory now knows of a person, or why it could not:
+        from Associative, by data type."""
 
         del ctx
         return (
             instance._associative is not None
             and event.source == hsm.id(instance._associative)
-            and isinstance(event.data, memory.RecollectionData | ability.FailureData)
+            and isinstance(event.data, memory.RecollectionData | memory.KnownData | ability.FailureData)
             and bool(instance._attachments)
         )
 
@@ -2261,8 +2263,8 @@ class Cognition(ability.Ability[InputData, OutputData]):
                 hsm.effect(_observe),
             ),
             hsm.transition(
-                hsm.on(memory.RecollectedEvent, ability.FailedEvent),
-                hsm.guard(_is_recall_outcome),
+                hsm.on(memory.RecollectedEvent, memory.KnownEvent, ability.FailedEvent),
+                hsm.guard(_is_memory_outcome),
                 hsm.effect(_observe),
             ),
             hsm.transition(
@@ -2329,8 +2331,8 @@ class Cognition(ability.Ability[InputData, OutputData]):
                 hsm.effect(_observe),
             ),
             hsm.transition(
-                hsm.on(memory.RecollectedEvent, ability.FailedEvent),
-                hsm.guard(_is_recall_outcome),
+                hsm.on(memory.RecollectedEvent, memory.KnownEvent, ability.FailedEvent),
+                hsm.guard(_is_memory_outcome),
                 hsm.effect(_observe),
             ),
             hsm.transition(

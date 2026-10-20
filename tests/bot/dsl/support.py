@@ -20,7 +20,7 @@ import pydantic
 
 import mosfet
 from mosfet import bot
-from mosfet.abilities import communication, memory, people, processing, speaking, vocal
+from mosfet.abilities import communication, memory, processing, speaking, vocal
 from mosfet.bot import diagnostics
 from mosfet.devices import phone
 from mosfet.environment import Environment
@@ -202,7 +202,6 @@ _NAMESPACE_MODULES = {
     "bot": bot,
     "phone": phone,
     "memory": memory,
-    "people": people,
     "communication": communication,
     "speaking": speaking,
     "hsm": hsm,

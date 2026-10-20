@@ -84,7 +84,7 @@ from opentelemetry import metrics
 
 import mosfet
 from mosfet import abilities, behavior, lifecycle
-from mosfet.abilities import cognition, memory, persona, processing, speaking, vocal
+from mosfet.abilities import cognition, identification, memory, persona, processing, speaking, vocal
 from mosfet.behavior import schedule
 from mosfet.device import Device
 from mosfet.environment import Environment
@@ -460,7 +460,12 @@ def _mind(
         else None,
         routines=None if now is None else cognition.Routines(memory=store, now=now),
         memory=store,
-        associative=memory.Associative(memory=store) if declared.associative else None,
+        associative=memory.Associative(
+            memory=store,
+            registries=tuple(typing.cast(collections.abc.Sequence[identification.Registry], declared.registries)),
+        )
+        if declared.associative
+        else None,
         consolidation=memory.Consolidation(memory=store, processor=processor) if declared.consolidation else None,
         persona=self_knowledge,
         voice=voice,

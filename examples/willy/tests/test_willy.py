@@ -3,16 +3,16 @@
 Each test writes its own ``bot.define`` of Willy's shape: the speech seed and associations on a scripted model
 (``testing.Scripted``), the real ``listening.Listening`` on the speech server's own wire, the real
 ``speaking.Speaking`` and ``communication.Communication``, a voice ``identification.Registry`` over an
-``InProcessStore``, an in-process ``memory.Memory`` and the real ``people.People``. The fakes sit at the provider
+``InProcessStore`` given to the cognition, and an in-process ``memory.Memory`` that knows people. The fakes sit at the provider
 seams only: a scripted speech server behind ``speech_server.Transcription``'s ``connect`` (it hears each second
 of audio as one turn), and the voiceprint and diarization servers behind ``httpx.MockTransport``, where a voice
 is the sample value its audio is made of. Sound reaches the bot the way a room's computer puts it in the house: as
 ``environment.sound`` from that room.
 
 These tests pin perception and capacity: who Willy is shown is speaking, who is present and who it is itself,
-and what it is offered to do about them. They never pin a choice. Every link is scripted, or dispatched by the
+and what it is offered to do about them. They never pin a choice. Every fact is scripted, or dispatched by the
 test standing in for a selection, only to prove that the capacity works; with a model that chooses nothing,
-nothing is linked, named or forgotten, and nobody is asked anything.
+nothing is known, named or forgotten, and nobody is asked anything.
 """
 
 import asyncio
@@ -29,7 +29,7 @@ import hsm
 import mosfet
 import willy_example
 from mosfet import bot, environment
-from mosfet.abilities import communication, identification, listening, memory, people, processing, speaking, vocal
+from mosfet.abilities import communication, identification, listening, memory, processing, speaking, vocal
 from mosfet.abilities.communication import conversation
 from mosfet.bot import testing
 from mosfet.devices import audio
@@ -162,7 +162,6 @@ class House:
     run: testing.Run
     model: testing.Scripted
     intuition: testing.Decider
-    capacity: people.People
     mouth: Mouth
     prints: Prints
 
@@ -195,10 +194,12 @@ class House:
         return _first_calls(self.model.woken_by(name))
 
     async def select(self, request: hsm.Event[typing.Any], data: object) -> None:
-        """Stand in for Willy selecting a People tool; wait until Willy is told it was done."""
+        """Stand in for Willy selecting a memory tool on a turn it was offered one; wait until Willy is told of it."""
 
+        # The memory a turn offered the model is the actor cognition dispatches the selection to.
+        offered = next(call.actors["memory"] for call in self.model.calls() if "memory" in call.actors)
         request_id = uuid.uuid4().hex
-        _ = await hsm.dispatch(self.run.environment, self.capacity, request.with_data_and_id(data, request_id))
+        _ = await hsm.dispatch(self.run.environment, offered, request.with_data_and_id(data, request_id))
         async with asyncio.timeout(_WAIT):
             while not any(_stimulus_id(call) == request_id for call in self.model.calls()):
                 await asyncio.sleep(0.01)
@@ -285,7 +286,6 @@ async def willy(
         talk = conversation.Conversation()
         mouth = Mouth()
         voice = speaking.Speaking(encoder=mouth, speaker=audio.Speaker(), listening=(hearing,), conversation=(talk,))
-        capacity = people.People(memory=store, registries=(voices,))
         defined = bot.define(
             "willy",
             bot.traits(*willy_example.DEFAULT_TRAITS.traits),
@@ -293,6 +293,7 @@ async def willy(
                 model,
                 intuition=decider,
                 memory=store,
+                registries=(voices,),
                 associative=True,
                 autonomy=True,
                 seeds=(communication.speech_heard_seed(),),
@@ -300,10 +301,9 @@ async def willy(
             bot.input(hearing),
             bot.output(voice),
             bot.attach(communication.Communication(conversations=(talk,), speaking=voice)),
-            bot.attach(capacity),
         )
         async with testing.running(defined) as run:
-            yield House(run=run, model=model, intuition=decider, capacity=capacity, mouth=mouth, prints=prints)
+            yield House(run=run, model=model, intuition=decider, mouth=mouth, prints=prints)
 
 
 class Busy(testing.Decider):
@@ -380,20 +380,24 @@ def test_a_strangers_voice_reaches_willy_unknown_and_knowing_them_is_offered() -
     # The typed unknown fact: a voice nobody has named. What to do about it is Willy's.
     assert stranger.known is False
     assert _person(turn, stranger.person).name is None
-    assert {people.LinkEvent.name, people.NameEvent.name, people.ForgetEvent.name} <= _offered(turn)
+    assert {memory.KnowEvent.name, memory.ForgetEvent.name} <= _offered(turn)
     assert _recalled(turn).you.id == memory.SELF
 
 
 def test_a_voice_willy_names_is_known_by_that_name_next_turn() -> None:
     """Nobody lists the household: Willy learns who a voice is, and the next turn shows it what it learned."""
 
-    link = testing.Choice(stimulus=_HEARD, event=people.LinkEvent.name, data={"ref": "voice:ada-voice", "name": "Ada"})
+    know = testing.Choice(
+        stimulus=_HEARD,
+        event=memory.KnowEvent.name,
+        data={"about": "voice:ada-voice", "fact": {"kind": "name", "name": "Ada"}},
+    )
 
     async def run() -> tuple[processing.InputData, processing.InputData]:
-        async with willy(link, heard_before=(("ada-voice", _ADA),)) as house:
+        async with willy(know, heard_before=(("ada-voice", _ADA),)) as house:
             await house.say(_ADA)
             _ = await house.turns(1)
-            _ = await house.turns(1, people.ChangedEvent.name)
+            _ = await house.turns(1, memory.KnownEvent.name)
             await house.say(_ADA)
             first, second = await house.turns(2)
             return first, second
@@ -471,7 +475,7 @@ def test_forgetting_a_person_erases_their_voiceprint() -> None:
             await house.say(_SAM)
             (first,) = await house.turns(1)
             (sam,) = _sources(first)
-            await house.select(people.ForgetEvent, people.ForgetData(person=sam.person, reason="asked to forget"))
+            await house.select(memory.ForgetEvent, memory.ForgetData(person=sam.person, note="asked to forget"))
             await house.say(_SAM)
             _, second = await house.turns(2)
             return first, second

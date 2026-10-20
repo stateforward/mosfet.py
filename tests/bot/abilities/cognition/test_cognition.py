@@ -4821,6 +4821,56 @@ def test_a_recall_that_fails_is_observed_too_never_silently_dropped() -> None:
     assert failure.message.startswith("unavailable")
 
 
+def test_reasoning_may_know_a_fact_about_a_person_and_what_memory_says_of_it_becomes_an_observation() -> None:
+    """R-12: knowing who someone is is memory's capacity, offered to reasoning; its outcome is a new turn."""
+
+    async def run() -> tuple[list[processing.InputData], list[processing.InputData], hsm.Event[typing.Any], str]:
+        store = memory.Memory()
+        associative = memory.Associative(memory=store)
+        ability, ctx, body, intuition_processor, reasoning_processor = await _recalling_cognition(associative, store)
+        try:
+            await _remember_by_message(
+                ctx,
+                store,
+                memory.EpisodeData(
+                    turn_id="heard",
+                    parts=(text.TextPart(text="Hi, I'm Ada."),),
+                    participants=(_ADA,),
+                    outcome=memory.Outcome.COMPLETED,
+                ),
+            )
+            know = memory.KnowData(about=_ADA.ref, fact=memory.NameFact(name="Ada"))
+            reasoning_processor.output = cognition.reasoning.OutputData(
+                result=(
+                    cognition.types.EventData(
+                        event=memory.KnowEvent.name, data=know.model_dump(exclude_none=True), reason="she said so"
+                    ),
+                )
+            )
+            _ = await hsm.dispatch(
+                ctx, ability, ability.input_event.with_data_and_id(await started_cognition_input(ctx), "turn-1")
+            )
+            await _until_routines(lambda: bool(body.handoffs), timeout=5.0)
+            return intuition_processor.calls, reasoning_processor.calls, body.handoffs[0], hsm.id(associative)
+        finally:
+            await ability.stop(ctx)
+
+    intuition_calls, reasoning_calls, handoff, associative_id = asyncio.run(run())
+
+    offered = {event.name for event in reasoning_calls[0].schemas}
+    assert {memory.KnowEvent.name, memory.ForgetEvent.name} <= offered
+    assert not {memory.KnowEvent.name, memory.ForgetEvent.name} & {event.name for event in intuition_calls[0].schemas}
+    data = handoff.data
+    assert isinstance(data, cognition.InputData)
+    stimulus = data.stimulus
+    assert isinstance(stimulus, hsm.Event)
+    assert stimulus.name == memory.KnownEvent.name
+    assert stimulus.source == associative_id
+    known = stimulus.data
+    assert isinstance(known, memory.KnownData)
+    assert (known.op, known.person.name, known.person.refs) == ("know", "Ada", (_ADA.ref,))
+
+
 # --- rest ---------------------------------------------------------------------------------------
 
 

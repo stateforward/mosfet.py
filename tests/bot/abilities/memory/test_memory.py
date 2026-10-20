@@ -1399,6 +1399,27 @@ def test_an_own_voice_is_self_and_a_provisional_own_ref_merges_into_self() -> No
     assert persons == 1
 
 
+async def _seen(harness: Harness, *refs: str, own: bool = False) -> None:
+    """Memory perceives ``refs`` on a turn, as it does every participant: each is someone already."""
+
+    participants = tuple(
+        _voice(ref.partition(":")[2], own=own) if ref.startswith("voice:") else _face(ref) for ref in refs
+    )
+    _ = await harness.ask(memory.RememberEvent, _episode(" ".join(refs), turn_id=refs[0], participants=participants))
+
+
+def _face(ref: str) -> mosfet.Participant:
+    return mosfet.Participant(ref=ref, role=mosfet.ParticipantRole.SOURCE)
+
+
+def _know(about: str, fact: memory.Fact) -> memory.PersonKnowData:
+    return memory.PersonKnowData(about=about, fact=fact)
+
+
+def _named(name: str) -> memory.NameFact:
+    return memory.NameFact(name=name)
+
+
 def test_an_own_ref_linked_to_another_person_stays_theirs_and_is_counted(
     tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1409,8 +1430,10 @@ def test_an_own_ref_linked_to_another_person_stays_theirs_and_is_counted(
     async def scenario(reader: metric_reader.Reader) -> tuple[list[tuple[typing.Any, ...]], float]:
         harness = await _harness()
         await harness.attached()
-        sam = await _person(harness, memory.PersonLinkData(ref="voice:a", name="Sam"))
+        await _seen(harness, "voice:a", "voice:b")
+        sam = await _person(harness, _know("voice:b", _named("Sam")))
         assert sam.person is not None
+        _ = await _person(harness, _know("voice:a", memory.SameAsFact(other="voice:b")))
         _ = await harness.ask(memory.RememberEvent, _episode("me?", participants=(_voice("a", own=True),)))
         conflicts = sum(point.value for point in reader.points("bot.memory.person.conflict.count"))
         return _links(harness), conflicts
@@ -1418,119 +1441,182 @@ def test_an_own_ref_linked_to_another_person_stays_theirs_and_is_counted(
     with metric_reader.recording(tmp_path, monkeypatch) as reader:
         links, conflicts = asyncio.run(scenario(reader))
 
-    ((ref, person, origin),) = links
-    assert (ref, origin) == ("voice:a", "model")
-    assert _is_minted(person)
+    by_ref = _by_ref(links)
+    assert by_ref["voice:a"][1] == "model"
+    assert by_ref["voice:a"][0] == by_ref["voice:b"][0] and _is_minted(by_ref["voice:a"][0])
     assert conflicts == 1
 
 
-def test_link_merges_a_provisional_person_and_re_points_its_involves_edges() -> None:
+def test_naming_a_ref_names_the_person_it_is_and_answers_every_ref_of_theirs() -> None:
+    """R-12: "voice:abc is Sam" is a typed fact memory keeps; the reply carries every ref, so prints are kept."""
+
+    async def scenario() -> tuple[memory.PersonDoneData, list[tuple[typing.Any, ...]]]:
+        harness = await _harness()
+        await harness.attached()
+        await _seen(harness, "voice:s")
+        named = await _person(harness, _know("voice:s", _named("Sam")))
+        return named, harness.rows("SELECT key, text FROM bot_memory_node WHERE kind = 'person' ORDER BY seq")
+
+    named, persons = _run(scenario)
+    assert named.op == "know"
+    assert named.person is not None and (named.person.name, named.person.refs) == ("Sam", ("voice:s",))
+    assert named.refs == ("voice:s",)
+    assert (named.moved, named.released) == ((), None)
+    assert [text for _, text in persons] == ["", "Sam"]
+
+
+def test_naming_a_person_by_id_renames_them() -> None:
+    async def scenario() -> memory.PersonDoneData:
+        harness = await _harness()
+        await harness.attached()
+        await _seen(harness, "voice:s")
+        sam = await _person(harness, _know("voice:s", _named("Sam")))
+        assert sam.person is not None
+        return await _person(harness, _know(sam.person.id, _named("Samuel")))
+
+    renamed = _run(scenario)
+    assert renamed.person is not None and renamed.person.name == "Samuel"
+
+
+def test_same_as_folds_a_voice_nobody_named_into_the_person_and_re_points_its_involves_edges() -> None:
     async def scenario() -> tuple[memory.PersonDoneData, list[tuple[typing.Any, ...]], list[tuple[typing.Any, ...]]]:
         harness = await _harness()
         await harness.attached()
+        await _seen(harness, "voice:g")
         _ = await harness.ask(memory.RememberEvent, _episode("hello", participants=(_voice("a"),)))
-        gabe = await _person(harness, memory.PersonLinkData(ref="+15550001", name="Gabe"))
+        gabe = await _person(harness, _know("voice:g", _named("Gabe")))
         assert gabe.person is not None
-        linked = await _person(harness, memory.PersonLinkData(ref="voice:a", person=gabe.person.id))
+        known = await _person(harness, _know("voice:a", memory.SameAsFact(other=gabe.person.id)))
         persons = harness.rows("SELECT key FROM bot_memory_node WHERE kind = 'person' ORDER BY seq")
-        assert _by_ref(_links(harness))["voice:a"] == (gabe.person.id, "model")
-        return linked, _involved(harness), persons
+        return known, _involved(harness), persons
 
-    linked, involved, persons = _run(scenario)
-    assert linked.op == "link"
-    assert linked.person is not None
-    gabe = linked.person.id
-    assert (linked.person.name, set(linked.person.refs)) == ("Gabe", {"voice:a", "+15550001"})
-    assert involved == [("hello", gabe)]
+    known, involved, persons = _run(scenario)
+    assert known.person is not None
+    gabe = known.person.id
+    assert (known.person.name, set(known.person.refs)) == ("Gabe", {"voice:a", "voice:g"})
+    assert known.moved == ("voice:a",)
+    assert set(known.refs) == {"voice:a", "voice:g"}
+    assert ("hello", gabe) in involved
     assert persons == [("self",), (gabe,)]
+
+
+def test_same_as_is_symmetric_the_ref_nobody_named_is_the_one_that_moves() -> None:
+    async def scenario() -> memory.PersonDoneData:
+        harness = await _harness()
+        await harness.attached()
+        await _seen(harness, "voice:g", "voice:new")
+        _ = await _person(harness, _know("voice:g", _named("Gabe")))
+        return await _person(harness, _know("voice:g", memory.SameAsFact(other="voice:new")))
+
+    known = _run(scenario)
+    assert known.person is not None and known.person.name == "Gabe"
+    assert set(known.person.refs) == {"voice:g", "voice:new"} and known.moved == ("voice:new",)
+
+
+def test_a_person_nobody_named_folds_whole_into_the_person_they_are() -> None:
+    async def scenario() -> memory.PersonDoneData:
+        harness = await _harness()
+        await harness.attached()
+        await _seen(harness, "voice:a", "face:b", "voice:g")
+        stranger = await _person(harness, _know("face:b", memory.SameAsFact(other="voice:a")))
+        assert stranger.person is not None and stranger.person.name is None
+        _ = await _person(harness, _know("voice:g", _named("Gabe")))
+        return await _person(harness, _know(stranger.person.id, memory.SameAsFact(other="voice:g")))
+
+    known = _run(scenario)
+    assert known.person is not None and known.person.name == "Gabe"
+    assert set(known.person.refs) == {"voice:a", "face:b", "voice:g"}
+    assert set(known.moved) == {"voice:a", "face:b"}
 
 
 def test_one_person_has_many_refs_and_each_ref_is_one_persons() -> None:
     async def scenario() -> tuple[memory.PersonDoneData, memory.FailureKind, list[tuple[typing.Any, ...]]]:
         harness = await _harness()
         await harness.attached()
-        sam = await _person(harness, memory.PersonLinkData(ref="voice:a", name="Sam"))
-        assert sam.person is not None and _is_minted(sam.person.id) and sam.person.name == "Sam"
-        both = await _person(harness, memory.PersonLinkData(ref="face:b", person=sam.person.id))
-        gabe = await _person(harness, memory.PersonLinkData(ref="+15550001", name="Gabe"))
-        assert gabe.person is not None
-        taken = await _refused(harness, memory.PersonLinkData(ref="voice:a", person=gabe.person.id))
+        await _seen(harness, "voice:a", "face:b", "voice:g")
+        sam = await _person(harness, _know("voice:a", _named("Sam")))
+        assert sam.person is not None
+        both = await _person(harness, _know("face:b", memory.SameAsFact(other=sam.person.id)))
+        _ = await _person(harness, _know("voice:g", _named("Gabe")))
+        taken = await _refused(harness, _know("voice:a", memory.SameAsFact(other="voice:g")))
         return both, taken, _links(harness)
 
     both, taken, links = _run(scenario)
     assert both.person is not None and set(both.person.refs) == {"voice:a", "face:b"}
+    # Two people the bot named are two people: one id is one person's until it is not the same as them.
     assert taken is memory.FailureKind.CONFLICT
     by_ref = _by_ref(links)
-    assert by_ref["face:b"] == by_ref["voice:a"] == (both.person.id, "model")
+    assert by_ref["face:b"][0] == by_ref["voice:a"][0] == both.person.id
 
 
-def test_linking_to_the_bot_itself_or_an_unknown_person_is_refused() -> None:
-    async def scenario() -> tuple[memory.FailureKind, memory.FailureKind, list[tuple[typing.Any, ...]]]:
+def test_a_fact_about_the_bot_itself_or_about_nobody_memory_holds_is_refused() -> None:
+    async def scenario() -> tuple[list[memory.FailureKind], list[tuple[typing.Any, ...]]]:
         harness = await _harness()
         await harness.attached()
-        itself = await _refused(harness, memory.PersonLinkData(ref="voice:a", person=memory.SELF))
-        unknown = await _refused(harness, memory.PersonLinkData(ref="voice:a", person=_NOBODY))
-        return itself, unknown, _links(harness)
-
-    itself, unknown, links = _run(scenario)
-    # Only the producers that know the bot's own voice make a ref its own: anyone else's is a conflict.
-    assert (itself, unknown) == (memory.FailureKind.CONFLICT, memory.FailureKind.NOT_FOUND)
-    assert links == []
-
-
-def test_the_bot_names_a_person_it_learned_never_itself() -> None:
-    async def scenario() -> tuple[memory.PersonDoneData, list[memory.FailureKind], list[tuple[typing.Any, ...]]]:
-        harness = await _harness()
-        await harness.attached()
-        stranger = await _person(harness, memory.PersonLinkData(ref="voice:s"))
-        assert stranger.person is not None and stranger.person.name is None
-        named = await _person(harness, memory.PersonNameData(person=stranger.person.id, name="Sam"))
+        await _seen(harness, "voice:a")
+        await _seen(harness, "voice:mouth", own=True)
         refused = [
-            await _refused(harness, memory.PersonNameData(person=memory.SELF, name="Willy")),
-            await _refused(harness, memory.PersonNameData(person=_NOBODY, name="Sam")),
+            await _refused(harness, _know("voice:a", memory.SameAsFact(other=memory.SELF))),
+            await _refused(harness, _know("voice:a", memory.SameAsFact(other="voice:mouth"))),
+            await _refused(harness, _know(memory.SELF, _named("Willy"))),
+            await _refused(harness, _know("voice:mouth", memory.NotSameAsFact(other=memory.SELF))),
+            await _refused(harness, _know("voice:never-heard", _named("Sam"))),
+            await _refused(harness, _know(_NOBODY, _named("Sam"))),
+            await _refused(harness, _know("voice:a", memory.SameAsFact(other=_NOBODY))),
         ]
-        return named, refused, harness.rows("SELECT key, text FROM bot_memory_node WHERE kind = 'person' ORDER BY seq")
-
-    named, refused, persons = _run(scenario)
-    assert named.person is not None and (named.person.name, named.person.refs) == ("Sam", ("voice:s",))
-    # Every ref of the named person, so People keeps each of their prints (D-W8-18).
-    assert named.refs == ("voice:s",)
-    assert refused == [memory.FailureKind.CONFLICT, memory.FailureKind.NOT_FOUND]
-    assert [text for _, text in persons] == ["", "Sam"]
-
-
-def test_unlink_gives_the_ref_a_fresh_provisional_person_and_keeps_past_attributions() -> None:
-    async def scenario() -> tuple[str, list[tuple[typing.Any, ...]], list[tuple[typing.Any, ...]], list[str]]:
-        harness = await _harness()
-        await harness.attached()
-        sam = await _person(harness, memory.PersonLinkData(ref="voice:a", name="Sam"))
-        assert sam.person is not None
-        _ = await harness.ask(memory.RememberEvent, _episode("before", participants=(_voice("a"),)))
-        unlinked = await _person(harness, memory.PersonUnlinkData(ref="voice:a"))
-        assert unlinked.op == "unlink" and unlinked.person is not None
-        assert unlinked.person.id != sam.person.id and unlinked.person.refs == ("voice:a",)
-        _ = await harness.ask(memory.RememberEvent, _episode("after", turn_id="2", participants=(_voice("a"),)))
-        refused = [(await _refused(harness, memory.PersonUnlinkData(ref="voice:nobody"))).value]
-        return sam.person.id, _links(harness), _involved(harness), refused
-
-    sam, links, involved, refused = _run(scenario)
-    fresh = next(person for ref, person, _ in links if ref == "voice:a")
-    assert fresh != sam and _is_minted(fresh)
-    assert ("voice:a", fresh, "model") not in links
-    assert involved == [("before", sam), ("after", fresh)]
-    assert refused == ["not_found"]
-
-
-def test_an_own_ref_cannot_be_unlinked_from_self() -> None:
-    async def scenario() -> tuple[memory.FailureKind, list[tuple[typing.Any, ...]]]:
-        harness = await _harness()
-        await harness.attached()
-        _ = await harness.ask(memory.RememberEvent, _episode("spoken", participants=(_voice("mouth", own=True),)))
-        return await _refused(harness, memory.PersonUnlinkData(ref="voice:mouth")), _links(harness)
+        return refused, _links(harness)
 
     refused, links = _run(scenario)
-    assert refused is memory.FailureKind.CONFLICT
-    assert links == [("voice:mouth", "self", "own")]
+    conflict, not_found = memory.FailureKind.CONFLICT, memory.FailureKind.NOT_FOUND
+    # Only the producers that know the bot's own voice make a ref its own; a ref nobody perceived is nobody's.
+    assert refused == [conflict, conflict, conflict, conflict, not_found, not_found, not_found]
+    assert _by_ref(links)["voice:mouth"] == ("self", "own")
+
+
+def test_a_person_is_always_themself() -> None:
+    async def scenario() -> memory.FailureKind:
+        harness = await _harness()
+        await harness.attached()
+        await _seen(harness, "voice:a")
+        sam = await _person(harness, _know("voice:a", _named("Sam")))
+        assert sam.person is not None
+        return await _refused(harness, _know(sam.person.id, memory.NotSameAsFact(other=sam.person.id)))
+
+    assert _run(scenario) is memory.FailureKind.INVALID_INPUT
+
+
+def test_not_same_as_gives_the_ref_a_fresh_provisional_person_and_keeps_past_attributions() -> None:
+    async def scenario() -> tuple[
+        str, memory.PersonDoneData, list[tuple[typing.Any, ...]], list[tuple[typing.Any, ...]]
+    ]:
+        harness = await _harness()
+        await harness.attached()
+        await _seen(harness, "voice:a")
+        sam = await _person(harness, _know("voice:a", _named("Sam")))
+        assert sam.person is not None
+        _ = await harness.ask(memory.RememberEvent, _episode("before", turn_id="1", participants=(_voice("a"),)))
+        released = await _person(harness, _know("voice:a", memory.NotSameAsFact(other=sam.person.id)))
+        _ = await harness.ask(memory.RememberEvent, _episode("after", turn_id="2", participants=(_voice("a"),)))
+        return sam.person.id, released, _links(harness), _involved(harness)
+
+    sam, released, links, involved = _run(scenario)
+    assert released.op == "know" and released.released == "voice:a"
+    # The answer is who ``about`` is now: a person nobody has named.
+    assert released.person is not None and released.person.name is None and released.person.refs == ("voice:a",)
+    fresh = _by_ref(links)["voice:a"][0]
+    assert fresh != sam and _is_minted(fresh) and fresh == released.person.id
+    assert ("before", sam) in involved and ("after", fresh) in involved
+
+
+def test_not_same_as_two_people_already_apart_changes_nothing() -> None:
+    async def scenario() -> memory.PersonDoneData:
+        harness = await _harness()
+        await harness.attached()
+        await _seen(harness, "voice:a", "voice:b")
+        return await _person(harness, _know("voice:a", memory.NotSameAsFact(other="voice:b")))
+
+    apart = _run(scenario)
+    assert apart.released is None and apart.person is not None and apart.person.refs == ("voice:a",)
 
 
 def test_forget_deletes_the_person_its_refs_and_its_involves_links_and_keeps_the_episodes() -> None:
@@ -1539,27 +1625,28 @@ def test_forget_deletes_the_person_its_refs_and_its_involves_links_and_keeps_the
     ]:
         harness = await _harness()
         await harness.attached()
-        sam = await _person(harness, memory.PersonLinkData(ref="voice:a", name="Sam"))
+        await _seen(harness, "voice:a", "face:b")
+        sam = await _person(harness, _know("voice:a", _named("Sam")))
         assert sam.person is not None
-        _ = await _person(harness, memory.PersonLinkData(ref="face:b", person=sam.person.id))
+        _ = await _person(harness, _know("face:b", memory.SameAsFact(other=sam.person.id)))
         _ = await harness.ask(
             memory.RememberEvent,
-            _episode("Sam waved", participants=(_voice("a"), mosfet.Participant(ref="face:b", role=_ADA.role))),
+            _episode("Sam waved", turn_id="waved", participants=(_voice("a"), _face("face:b"))),
         )
         forgotten = await _person(harness, memory.PersonForgetData(person=sam.person.id))
         refused = [
             await _refused(harness, memory.PersonForgetData(person=memory.SELF)),
             await _refused(harness, memory.PersonForgetData(person=sam.person.id)),
         ]
-        episodes = harness.rows("SELECT text FROM bot_memory_node WHERE kind = 'episode'")
+        episodes = harness.rows("SELECT text FROM bot_memory_node WHERE kind = 'episode' ORDER BY seq")
         return forgotten, refused, episodes, _involved(harness)
 
     forgotten, refused, episodes, involved = _run(scenario)
     assert forgotten.op == "forget"
     assert set(forgotten.refs) == {"voice:a", "face:b"}
     assert refused == [memory.FailureKind.CONFLICT, memory.FailureKind.NOT_FOUND]
-    assert episodes == [("Sam waved",)]
-    assert involved == []
+    assert ("Sam waved",) in episodes
+    assert all(text != "Sam waved" for text, _ in involved)
 
 
 def test_person_statements_to_a_memory_that_is_not_attached_are_unavailable() -> None:

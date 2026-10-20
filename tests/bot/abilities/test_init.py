@@ -1,7 +1,7 @@
 import hsm
 
 from mosfet import abilities
-from mosfet.abilities import embedding, identification, people, sandbox, seeing
+from mosfet.abilities import embedding, identification, memory, sandbox, seeing
 
 
 def test_ability_defines_operation_contract() -> None:
@@ -46,24 +46,19 @@ def test_abilities_export_the_sandbox_package_with_its_host_protocol_module() ->
     )
 
 
-def test_abilities_export_the_people_package() -> None:
-    assert abilities.people is people
-    assert abilities.People is people.People
-    assert {"people", "People"} <= set(abilities.__all__)
-    assert "events" not in people.__all__
+def test_people_are_known_through_memory_and_no_people_package_is_exported() -> None:
+    """R-12: knowing who someone is, is remembering it; the people ability is gone."""
+
+    assert not {"people", "People"} & set(abilities.__all__)
     assert {
-        "People",
-        "LinkData",
-        "UnlinkData",
-        "NameData",
+        "KnowData",
+        "KnowEvent",
+        "KnownData",
+        "KnownEvent",
         "ForgetData",
-        "ChangedData",
-        "FailureData",
-        "FailureKind",
-        "LinkEvent",
-        "UnlinkEvent",
-        "NameEvent",
         "ForgetEvent",
-        "ChangedEvent",
-        "FailedEvent",
-    } <= set(people.__all__)
+        "Fact",
+        "SameAsFact",
+        "NameFact",
+        "NotSameAsFact",
+    } <= set(memory.__all__)

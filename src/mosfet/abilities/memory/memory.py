@@ -14,7 +14,7 @@ holds a canonical vector per node in its embedder's space. Requests:
 * ``LeaseEvent`` (``LeaseData``) → ``LeasedEvent``
 * ``ConsolidateEvent`` (``ConsolidateData``, model-callable) → ``ConsolidatedEvent``
 * ``ReleaseEvent`` (``ReleaseData``) → ``ReleasedEvent``
-* ``PersonEvent`` (``PersonData``: name, link, unlink, forget, list) → ``PersonDoneEvent``
+* ``PersonEvent`` (``PersonData``: know a fact, forget, list) → ``PersonDoneEvent``
 
 Memory is the authority on who is who: every participant ref belongs to exactly one person
 (``bot_person_ref``), resolved inside the transaction that keeps an episode. A ref first seen gets a
@@ -59,7 +59,7 @@ Telemetry (cardinality, METRICS > SPANS > Logs; every attribute value comes from
 
 Spans ``bot.memory.<operation>`` (component ``memory``), one per SQL step, carry only bounded
 counts, whether the step resumes after an embed, and a person statement's ``bot.memory.person.op``
-(5 values); node ids, unit ids, person ids, participant refs, names, relation labels, text, images,
+(3 values); node ids, unit ids, person ids, participant refs, names, relation labels, text, images,
 vectors, and space names are never attributes.
 """
 
@@ -172,7 +172,7 @@ ConsolidatedEvent = hsm.Event[payload.ConsolidatedData](
 ReleaseEvent = hsm.Event[payload.ReleaseData](name="bot.ability.memory.release", schema=payload.ReleaseData)
 ReleasedEvent = hsm.Event[payload.ReleasedData](name="bot.ability.memory.released", schema=payload.ReleasedData)
 PersonEvent = hsm.Event[payload.PersonData](name="bot.ability.memory.person", schema=payload.PersonData)
-"""One person statement (name, link, unlink, forget, list); not model-callable."""
+"""One person statement (know a fact, forget, list); not model-callable: ``Associative`` offers the bot its facts."""
 PersonDoneEvent = hsm.Event[payload.PersonDoneData](
     name="bot.ability.memory.person.done", schema=payload.PersonDoneData
 )

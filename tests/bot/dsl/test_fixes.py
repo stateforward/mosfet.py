@@ -26,13 +26,11 @@ FIXABLE = [
     "B0017",
     "B0018",
     "B0019",
-    "B0020",
     "B0021",
     "conflicting_ids",
     "empty_timeouts",
     "misplaced_ids",
     "mixed",
-    "people_without_associative",
     "unnamed",
 ]
 """The wrong files whose every diagnostic carries a machine-applicable rewrite."""

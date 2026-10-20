@@ -26,7 +26,7 @@ import hsm
 
 import mosfet.device
 from mosfet import abilities, behavior, environment
-from mosfet.abilities import memory, persona, processing, vocal
+from mosfet.abilities import identification, memory, persona, processing, vocal
 from mosfet.abilities.communication.conversation.conversation import snake_case
 from mosfet.behavior import schedule
 
@@ -106,6 +106,7 @@ class CognitionElement(Member, hsm.NamespaceElement, kind=CognitionKind):
     processor: object = None
     intuition: object = None
     memory: object = None
+    registries: object = ()
     associative: bool = False
     consolidation: bool = False
     autonomy: bool = False
@@ -630,6 +631,7 @@ class RedefinableCognition(_Single[CognitionElement]):
     processor: object = None
     intuition: object = None
     memory: object = None
+    registries: object = ()
     associative: bool = False
     consolidation: bool = False
     autonomy: bool = False
@@ -643,6 +645,7 @@ class RedefinableCognition(_Single[CognitionElement]):
             processor=self.processor,
             intuition=self.intuition,
             memory=self.memory,
+            registries=self.registries,
             associative=self.associative,
             consolidation=self.consolidation,
             autonomy=self.autonomy,
@@ -909,6 +912,7 @@ def cognition(
     *faculties: Element[hsm.Element],
     intuition: processing.DecisionProcessor | None = None,
     memory: memory.Memory | None = None,
+    registries: collections.abc.Sequence[identification.Registry] = (),
     associative: bool = False,
     consolidation: bool = False,
     autonomy: bool = False,
@@ -925,7 +929,11 @@ def cognition(
             bot's fast first decision on every turn: never a chat model. It is required; ``bot.define``
             reports a cognition without one (B0024), or given a chat processor (B0025).
         memory: The memory every faculty shares; a fresh in-memory one when omitted.
-        associative: Whether it recalls associations before it decides.
+        registries: The voice and face registries its ears and eyes own, at most one of each kind. What the
+            bot remembers about who people are keeps their prints (a named person's) or erases them (a
+            forgotten one's); without them, memory alone knows who is who.
+        associative: Whether it recalls associations before it decides, and remembers who people are: who
+            is speaking and who is present reach it with every turn, and it may know or forget a person.
         consolidation: Whether it consolidates what it remembers.
         autonomy: Whether it can wake itself, and run the behaviors it has before it deliberates.
         seeds: Native behaviors its autonomy runs beside the ones it learns, such as
@@ -938,6 +946,7 @@ def cognition(
         processor=processor,
         intuition=intuition,
         memory=memory,
+        registries=registries,
         associative=associative,
         consolidation=consolidation,
         autonomy=autonomy,

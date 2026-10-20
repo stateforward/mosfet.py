@@ -8,8 +8,8 @@ the owner lists has a ``computer.Computer`` of its own, named for the room and s
 ``environment.Object``, a shelf or a counter), and served by one ``websocket.Server`` on this host; a far side in
 each room carries the room's microphone and speaker (and camera) to it. Willy hears through ``listening`` on the
 lab's streaming speech server, with voiceprints, diarization and the tone of voice; speaks through ``speaking`` in
-the one voice it is given when it is born; and knows people through ``people``: a person is one node in its
-memory with every voice (and face) the bot has linked to them, each voice one person's.
+the one voice it is given when it is born; and knows people by remembering them: a person is one node in its
+memory with every voice (and face) the bot has learned is theirs, each voice one person's.
 
 Nothing here tells Willy what to do. It is given no instruction text and no reply: a voice nobody has named is a
 fact it is shown (``known`` false), and whether to ask who that is, what to call them, whom a voice belongs to and

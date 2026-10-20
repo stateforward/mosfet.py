@@ -713,8 +713,9 @@ class Registry(ability.Ability[IdentifyData, IdentifiedData]):
     def kind(self) -> Kind:
         """The kind of identity this registry serves, fixed when it was built.
 
-        Like :meth:`identity`, it is a construction-time fact a peer may ask for (``people.People`` knows
-        which registry a ``voice:`` or ``face:`` ref belongs to by it); it reads no machine state, and
+        Like :meth:`identity`, it is a construction-time fact a peer may ask for (``memory.Associative``
+        knows which registry a ``voice:`` or ``face:`` ref belongs to by it, and ``bot.define`` checks a
+        cognition is given one of each kind); it reads no machine state, and
         everything the registry does is still reached only by its request events.
         """
 

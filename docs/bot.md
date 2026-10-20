@@ -216,41 +216,53 @@ Seeds without autonomy are [`B0021`](bot_diagnostics.md#b0021); a voice needs th
 
 ## Knowing people
 
-A bot for a household learns who people are; nobody lists them for it. Its ears and eyes tell voices and faces apart (each
-`voice:` or `face:` ref is a print a registry recognized); its memory holds who each ref belongs to,
-and it is the bot itself, `self`, with its own voice ids; with `associative=True` every turn says who
-is speaking and who is present, and a ref nobody has named is `known=false`.
-`people.People` is the capacity to say who is who. Attached with the cognition's own memory and the
-registries the ears and eyes own, it offers the bot `people.link`, `people.unlink`, `people.name` and
-`people.forget`, and tells the bot what each did:
+A bot for a household learns who people are; nobody lists them for it. Its ears and eyes tell voices
+and faces apart (each `voice:` or `face:` ref is a print a registry recognized); its memory holds who
+each ref belongs to, and it is the bot itself, `self`, with its own voice ids. With `associative=True`
+every turn says who is speaking and who is present, and a ref nobody has named is `known=false`.
+
+Knowing who someone is, is remembering it. With `associative=True` the bot is offered
+`bot.ability.memory.know`, a typed fact `about` a ref or a person (`same_as` someone, `name`, or
+`not_same_as` someone, as in "voice:3f2a9c is Sam"), and `bot.ability.memory.forget` for a person; it is
+told what memory now holds of them with `memory.KnownEvent`, or why memory refused. The cognition is
+given the registries its ears and eyes own, so a person's prints are kept once the bot has named them,
+and erased when it forgets them:
 
 ```pycon
->>> from mosfet.abilities import memory, people
->>> mind = memory.Memory()
+>>> import datetime
+>>> from mosfet.abilities import identification, memory
+>>> voices = identification.Registry(
+...     identifier=identification.Matcher(
+...         store=identification.InProcessStore(max_ids=64),
+...         policy=identification.MatchPolicy(threshold=0.5, margin=0.05, refine_threshold=0.65),
+...     ),
+...     kind="voice",
+...     max_unlinked_age=datetime.timedelta(days=30),
+...     max_ids=64,
+... )
 >>> house = bot.define(
 ...     "house",
-...     bot.cognition(testing.Scripted(), intuition=testing.Decider(), memory=mind, associative=True),
+...     bot.cognition(testing.Scripted(), intuition=testing.Decider(), associative=True, registries=(voices,)),
 ...     bot.attach(computer.Computer(id="kitchen")),
-...     bot.attach(people.People(memory=mind)),
 ... )
->>> [(part.id, part.kind) for part in bot.describe(house).bots[0].parts]
-[('kitchen', 'device'), ('people', 'ability')]
+>>> bot.describe(house).bots[0].faculties
+('intuition', 'reasoning', 'reflection', 'associative')
+>>> memory.KnowEvent.name, memory.ForgetEvent.name
+('bot.ability.memory.know', 'bot.ability.memory.forget')
 
 ```
 
-People is given the very memory the cognition is: another one, or a cognition with no `memory=` (which
-remembers in a fresh one of its own), is [`B0020`](bot_diagnostics.md#b0020). And without
-`associative=True` the bot is never told whom it knows, which the
-[`people_without_associative`](bot_diagnostics.md#people_without_associative) lint warns of.
+`registries=` takes `identification.Registry`s, one of each kind ([`B0006`](bot_diagnostics.md#b0006)
+otherwise).
 
 Whether to ask who an unknown voice is, which voice is whose, what someone is called and whom to
 forget are the bot's choices; nothing asks, links or names for it. Who lives in the house, and whether
-someone is a child, are things the bot learns and remembers, never configuration: no tool carries a
-role or a birth year, and memory refuses to rename, unlink the own refs of, or forget the bot itself
-(`conflict`). Each ref is one person's: linking a voice
-that is someone else's is a `conflict`, and so is linking the bot's own. Forgetting a person erases
-their voice and face prints too. Nothing here decides what the bot says to anyone, or treats anyone
-differently; a child's turn reaches the bot as a fact about who is speaking, never as a rule.
+someone is a child, are things the bot learns and remembers, never configuration: no fact carries a
+role or a birth year. Each ref is one person's: a fact that would make a voice two people's is a
+`conflict` (say it is `not_same_as` one of them first), and so is any fact that would change the bot
+itself or its own voice. Forgetting a person erases their voice and face prints too. Nothing here
+decides what the bot says to anyone, or treats anyone differently; a child's turn reaches the bot as a
+fact about who is speaking, never as a rule.
 
 ## Starting, stopping and testing a bot
 

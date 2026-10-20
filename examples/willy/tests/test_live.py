@@ -13,8 +13,8 @@ The test writes its own ``bot.define`` of Willy's shape, as the bot file does, o
 language model (``openai_compat.Processor``), memory on its embeddings, the voice registry on an
 ``IdentityStore`` sharing memory's file database in the test's data directory, ``listening.Listening`` on the
 streaming speech server with voiceprints, diarization and tone, ``speaking.Speaking`` in the voice Willy is born
-with (``bot.voice`` on the lab's catalog and designer), ``identity.Identity``, ``communication.Communication``
-and ``people.People``. The room is one ``computer.Computer`` served by a loopback ``websocket.Server``, and its
+with (``bot.voice`` on the lab's catalog and designer), ``identity.Identity``, ``communication.Communication``,
+and the voice registry given to the cognition, whose memory knows people. The room is one ``computer.Computer`` served by a loopback ``websocket.Server``, and its
 far side is ``willy_example.room`` itself. The far side's sound card is the one seam: a scripted microphone that
 streams in real time (what the test says, and silence between), and a speaker that keeps what it played. Nothing
 else is faked, and no audio is committed: the strangers' speech is made by the lab's speech engine at test time,
@@ -35,10 +35,9 @@ and its bound:
 * L2 birth (300 s): Willy is born with a voice. Speaking constructs its encoder from the voice inception gave
   it, and memory keeps that voice.
 * L3 unknown voice (60 s): A's utterance, through the room's far side, reaches the model as a ``source`` that is
-  a ``voice:`` ref nobody is known by (``known`` false), and ``people.link`` is offered.
-* L4 link is a capacity (60 s): the test links A's ref to a new person, Sam. A's next utterance is the same ref
-  (a real voiceprint match through the persistent store), ``known`` true, and Sam. Should Willy have linked A
-  itself first, the test's link is a ``conflict`` (recorded): A is then known as the person Willy chose.
+  a ``voice:`` ref nobody is known by (``known`` false), and ``memory.know`` is offered.
+* L4 knowing is a capacity (60 s): the test has Willy remember that A's ref is called Sam. A's next utterance is
+  the same ref (a real voiceprint match through the persistent store), ``known`` true, and Sam.
 * L5 two voices, one utterance (60 s): A then B in one utterance are two distinct ``source`` voice refs on one
   turn (diarization and voiceprints).
 * L6 own voice (90 s): Speaking says a fixed reply; its echo, played by the room's speaker into the room's
@@ -84,7 +83,6 @@ from mosfet.abilities import (
     identity,
     listening,
     memory,
-    people,
     processing,
     speaking,
     vocal,
@@ -434,7 +432,6 @@ class House:
     run: testing.Run
     model: Recorded
     store: memory.Memory
-    capacity: people.People
     mouth: speaking.Speaking
     microphone: Microphone
     speaker: Speaker
@@ -466,10 +463,12 @@ class House:
             await asyncio.sleep(_POLL_SECONDS)
 
     async def select(self, request: hsm.Event[typing.Any], data: pydantic.BaseModel) -> object:
-        """Stand in for Willy selecting a People tool: dispatch it, and return what Willy was told came of it."""
+        """Stand in for Willy selecting a memory tool: dispatch it, and return what Willy was told came of it."""
 
+        # The memory a turn offered the model is the actor cognition dispatches the selection to.
+        offered = next(call.actors["memory"] for call in self.model.calls if "memory" in call.actors)
         request_id = uuid.uuid4().hex
-        _ = await hsm.dispatch(self.run.environment, self.capacity, request.with_data_and_id(data, request_id))
+        _ = await hsm.dispatch(self.run.environment, offered, request.with_data_and_id(data, request_id))
         while True:
             for call in self.model.calls:
                 stimulus = _stimulus(call)
@@ -588,7 +587,6 @@ async def _live(
             ),
             report,
         )
-        capacity = people.People(memory=store, registries=(voices,))
         willy = bot.define(
             "willy",
             bot.traits(*settings.traits.traits),
@@ -607,6 +605,7 @@ async def _live(
                     max_context_tokens=settings.decision_max_context_tokens,
                 ),
                 memory=store,
+                registries=(voices,),
                 associative=True,
                 consolidation=True,
                 autonomy=True,
@@ -626,7 +625,6 @@ async def _live(
             ),
             bot.output(mouth),
             bot.attach(communication.Communication(conversations=(talk,), speaking=mouth)),
-            bot.attach(capacity),
             bot.attach(
                 computer.Computer(
                     id=place.id,
@@ -642,7 +640,6 @@ async def _live(
                 run=run,
                 model=model,
                 store=store,
-                capacity=capacity,
                 mouth=mouth,
                 microphone=microphone,
                 speaker=speaker,
@@ -701,26 +698,24 @@ async def _knows_people(house: House, settings: willy_example.Settings, speech_u
     (stranger,) = _others(turn)
     # The typed unknown fact: a voice nobody is known by. What to do about it is Willy's.
     assert stranger.known is False, "L3: a voice Willy has never heard was shown as someone it knows"
-    assert people.LinkEvent.name in _offered(turn), "L3: knowing who a voice is was not offered"
+    assert memory.KnowEvent.name in _offered(turn), "L3: knowing who a voice is was not offered"
     a_ref = stranger.ref
 
-    async with _step("L4 link is a capacity", _HEARD_BOUND):
-        linked = await house.select(
-            people.LinkEvent,
-            people.LinkData(ref=a_ref, person=None, name="Sam", reason="the live check stands in for a selection"),
+    async with _step("L4 knowing is a capacity", _HEARD_BOUND):
+        known = await house.select(
+            memory.KnowEvent,
+            memory.KnowData(
+                about=a_ref, fact=memory.NameFact(name="Sam"), note="the live check stands in for a selection"
+            ),
         )
         after = house.mark()
         await house.microphone.say(await _spoken(a, _A_AGAIN))
         turn = await house.turn(after, "L4", lambda call: bool(_others(call)))
     (again,) = _others(turn)
-    assert again.ref == a_ref, "L4: A's voice was not matched to the ref it was linked by"
-    assert again.known is True, "L4: A's linked voice was not shown as someone Willy knows"
-    if isinstance(linked, people.FailureData):
-        # Willy had linked A itself before the test did (recorded above): A is the person it chose.
-        assert linked.kind is people.FailureKind.CONFLICT, f"L4: linking A's voice failed {linked.kind}"
-    else:
-        assert isinstance(linked, people.ChangedData)
-        assert _person(turn, again.person).name == "Sam", "L4: the person A's voice was linked to is not Sam"
+    assert again.ref == a_ref, "L4: A's voice was not matched to the ref Willy knows it by"
+    assert again.known is True, "L4: A's named voice was not shown as someone Willy knows"
+    assert isinstance(known, memory.KnownData), f"L4: remembering who A is failed: {known}"
+    assert _person(turn, again.person).name == "Sam", "L4: the person A's voice is was not called Sam"
     a_person = again.person
 
     async with _step("L5 two voices, one utterance", _HEARD_BOUND):
@@ -762,9 +757,9 @@ async def _knows_people(house: House, settings: willy_example.Settings, speech_u
 
     async with _step("L7 forget", _HEARD_BOUND):
         forgot = await house.select(
-            people.ForgetEvent, people.ForgetData(person=a_person, reason="the live check stands in for a selection")
+            memory.ForgetEvent, memory.ForgetData(person=a_person, note="the live check stands in for a selection")
         )
-        assert isinstance(forgot, people.ChangedData), f"L7: forgetting A's person failed: {forgot}"
+        assert isinstance(forgot, memory.KnownData), f"L7: forgetting A's person failed: {forgot}"
         after = house.mark()
         await house.microphone.say(await _spoken(a, _A_LEAVES))
         turn = await house.turn(after, "L7", lambda call: bool(_others(call)))

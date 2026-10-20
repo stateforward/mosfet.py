@@ -424,54 +424,168 @@ class Person(pydantic.BaseModel):
     )
 
 
-class PersonNameData(pydantic.BaseModel):
-    """Name a person the bot perceived; never the bot itself."""
+Who = typing.Annotated[
+    str,
+    pydantic.StringConstraints(min_length=1, max_length=200),
+    pydantic.Field(
+        description=(
+            "Someone memory knows, written the way the turn or memory showed them: a person id ('self' or the 32 "
+            "hex characters memory minted), or a ref such as a voice or face ref from people. Never one made up."
+        ),
+    ),
+]
+"""A person id or a participant ref: a value that is a ``PersonId`` names a person, any other a ref."""
 
-    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
-        frozen=True,
-        extra="forbid",
-        json_schema_extra={"examples": [{"op": "name", "person": "3f2a9c0d4b5e6f708192a3b4c5d6e7f8"}]},
-    )
 
-    op: typing.Literal["name"] = "name"
-    person: PersonId
-    name: Name
-
-
-class PersonLinkData(pydantic.BaseModel):
-    """Make ``ref`` a person's: ``person``, or a new person (named ``name``, or not yet) when it is None."""
+class SameAsFact(pydantic.BaseModel):
+    """``about`` and ``other`` are one and the same person."""
 
     model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
         frozen=True,
         extra="forbid",
         json_schema_extra={
-            "examples": [{"op": "link", "ref": "voice:3f2a9c", "person": "3f2a9c0d4b5e6f708192a3b4c5d6e7f8"}]
+            "description": (
+                "The same person as other: a voice, face or person nobody has named yet becomes theirs. Two people "
+                "you have both named stay two until you say a ref is not the same as one of them."
+            ),
         },
     )
 
-    op: typing.Literal["link"] = "link"
-    ref: Ref
-    person: PersonId | None = pydantic.Field(
-        default=None, description="Whose ref it is; None makes a new person for it."
-    )
-    name: Name | None = pydantic.Field(default=None, description="The new person's name, when person is None.")
-
-    @pydantic.model_validator(mode="after")
-    def _validate_name(self) -> typing.Self:
-        if self.person is not None and self.name is not None:
-            raise ValueError("name only names a new person (person is None)")
-        return self
+    kind: typing.Literal["same_as"] = pydantic.Field(default="same_as", description="This fact: the same person.")
+    # No example: the other is someone the turn or memory showed, and an example is nobody's.
+    other: Who = pydantic.Field(description="Who about is the same person as: a ref or a person id, as shown.")
 
 
-class PersonUnlinkData(pydantic.BaseModel):
-    """Take ``ref`` from its person: it gets a fresh provisional person, and past episodes stay where they were."""
+class NameFact(pydantic.BaseModel):
+    """``about`` is called ``name``."""
 
     model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
-        frozen=True, extra="forbid", json_schema_extra={"examples": [{"op": "unlink", "ref": "voice:3f2a9c"}]}
+        frozen=True,
+        extra="forbid",
+        json_schema_extra={
+            "description": (
+                "What the person about is called; it replaces any name you gave them before. To say a voice is "
+                "someone you already know, say it is the same as them instead."
+            ),
+        },
     )
 
-    op: typing.Literal["unlink"] = "unlink"
-    ref: Ref
+    kind: typing.Literal["name"] = pydantic.Field(default="name", description="This fact: what they are called.")
+    name: Name = pydantic.Field(
+        description="Their name, exactly as it was given to you: the name itself and nothing around it."
+    )
+
+
+class NotSameAsFact(pydantic.BaseModel):
+    """``about`` and ``other`` are not one person."""
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
+        frozen=True,
+        extra="forbid",
+        json_schema_extra={
+            "description": (
+                "Not the same person as other: a ref you took for theirs becomes nobody's you know again, and what "
+                "you remember from before stays with whoever you thought it was then."
+            ),
+        },
+    )
+
+    kind: typing.Literal["not_same_as"] = pydantic.Field(
+        default="not_same_as", description="This fact: not the same person."
+    )
+    other: Who = pydantic.Field(description="Who about is not: a ref or a person id, as shown.")
+
+
+Fact = typing.Annotated[SameAsFact | NameFact | NotSameAsFact, pydantic.Field(discriminator="kind")]
+"""One fact the bot learned about a person, discriminated by ``kind``."""
+
+_NOTE = pydantic.Field(
+    default=None,
+    min_length=1,
+    max_length=200,
+    description="Optional short note on how you know; it is remembered with what you did.",
+    examples=["They said so."],
+)
+
+
+class KnowData(pydantic.BaseModel):
+    """What the bot learned about a person, to remember."""
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
+        frozen=True,
+        extra="forbid",
+        json_schema_extra={
+            "description": (
+                "Remember a fact about someone you perceive or know: that they are the same person as someone, what "
+                "they are called, or that they are not the same person as someone. Each voice, face or other ref is "
+                "exactly one person's, and your own voice is always yours: a fact that would make a ref two people's, "
+                "or change you yourself, is refused. This only remembers; it says nothing to anyone."
+            ),
+        },
+    )
+
+    # No example, deliberately: about is someone the turn or memory showed, and an example is nobody's.
+    about: Who = pydantic.Field(description="Who the fact is about: a ref or a person id, as the turn or memory shows.")
+    fact: Fact = pydantic.Field(description="What you learned: same_as, name or not_same_as.")
+    note: str | None = _NOTE
+
+
+class ForgetData(pydantic.BaseModel):
+    """A person the bot is to forget."""
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
+        frozen=True,
+        extra="forbid",
+        json_schema_extra={
+            "description": (
+                "Forget a person: who they are, which voices and faces were theirs, and the voice and face prints "
+                "themselves are erased, so you will not recognize them again. What you remember happening stays, "
+                "without them in it. You yourself cannot be forgotten."
+            ),
+        },
+    )
+
+    person: PersonId = pydantic.Field(description="The id of the person to forget, as memory showed them.")
+    note: str | None = _NOTE
+
+
+class KnownData(pydantic.BaseModel):
+    """What memory now holds after the bot knew or forgot something about a person."""
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
+        frozen=True,
+        extra="forbid",
+        json_schema_extra={
+            "description": (
+                "Observation: memory remembers what you said about a person. person is who about is now (for "
+                "forget, who they were)."
+            ),
+            "examples": [
+                {"op": "know", "person": {"id": "3f2a9c0d4b5e6f708192a3b4c5d6e7f8", "refs": ["voice:3f2a9c"]}}
+            ],
+        },
+    )
+
+    op: typing.Literal["know", "forget"] = pydantic.Field(
+        description="What you did: know or forget.", examples=["know"]
+    )
+    person: Person = pydantic.Field(description="know: who about is now; forget: the person as they were.")
+
+
+class PersonKnowData(pydantic.BaseModel):
+    """Remember one fact about a person, in one transaction."""
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
+        frozen=True,
+        extra="forbid",
+        json_schema_extra={
+            "examples": [{"op": "know", "about": "voice:3f2a9c", "fact": {"kind": "name", "name": "Sam"}}]
+        },
+    )
+
+    op: typing.Literal["know"] = "know"
+    about: Who
+    fact: Fact
 
 
 class PersonForgetData(pydantic.BaseModel):
@@ -498,21 +612,19 @@ class PersonListData(pydantic.BaseModel):
 
 
 PersonData = typing.Annotated[
-    PersonNameData | PersonLinkData | PersonUnlinkData | PersonForgetData | PersonListData,
+    PersonKnowData | PersonForgetData | PersonListData,
     pydantic.Field(discriminator="op"),
 ]
 """One person statement, discriminated by ``op``; Memory answers each in one transaction."""
 
 PERSON_DATA: typing.Final = (
-    PersonNameData,
-    PersonLinkData,
-    PersonUnlinkData,
+    PersonKnowData,
     PersonForgetData,
     PersonListData,
 )
 """Every ``PersonData`` variant, for typed admission."""
 
-PersonOp: typing.TypeAlias = typing.Literal["name", "link", "unlink", "forget", "list"]
+PersonOp: typing.TypeAlias = typing.Literal["know", "forget", "list"]
 
 
 class PersonDoneData(pydantic.BaseModel):
@@ -528,21 +640,27 @@ class PersonDoneData(pydantic.BaseModel):
         },
     )
 
-    op: PersonOp = pydantic.Field(description="The statement answered.", examples=["link"])
+    op: PersonOp = pydantic.Field(description="The statement answered.", examples=["know"])
     person: Person | None = pydantic.Field(
         default=None,
-        description=(
-            "The person the statement is about, as it now is (link: whose the ref is; unlink: the ref's fresh "
-            "person; name: the named person; forget: the person as it was). None for list."
-        ),
+        description="know: who about is now; forget: the person as it was. None for list.",
     )
     refs: tuple[Ref, ...] = pydantic.Field(
         default=(),
         max_length=256,
         description=(
-            "name: every ref the named person has, so their prints can be kept; forget: every ref the forgotten "
-            "person had, so their prints can be erased."
+            "know: every ref the person about is now has, so their prints can be kept once they are named; "
+            "forget: every ref the forgotten person had, so their prints can be erased."
         ),
+    )
+    moved: tuple[Ref, ...] = pydantic.Field(
+        default=(),
+        max_length=256,
+        description="know (same_as): the refs that became the person's, so a link a registry refuses can be undone.",
+    )
+    released: Ref | None = pydantic.Field(
+        default=None,
+        description="know (not_same_as): the ref that is nobody's the bot knows now, so its print need not be kept.",
     )
     persons: tuple[Person, ...] = pydantic.Field(
         default=(),
@@ -1322,30 +1440,34 @@ __all__ = [
     "Episode",
     "EpisodeData",
     "EpisodesData",
+    "Fact",
     "FailureData",
     "FailureKind",
     "FetchData",
     "FetchedData",
+    "ForgetData",
     "FoundData",
+    "KnowData",
+    "KnownData",
     "Lane",
     "LeaseData",
     "LeasedData",
     "LinkData",
     "MergeData",
     "Name",
+    "NameFact",
     "Node",
     "NodeKind",
+    "NotSameAsFact",
     "Outcome",
     "Person",
     "PersonData",
     "PersonDoneData",
     "PersonForgetData",
     "PersonId",
-    "PersonLinkData",
+    "PersonKnowData",
     "PersonListData",
-    "PersonNameData",
     "PersonOp",
-    "PersonUnlinkData",
     "Present",
     "RecallData",
     "RecentData",
@@ -1355,6 +1477,7 @@ __all__ = [
     "ReleasedData",
     "RememberedData",
     "RestData",
+    "SameAsFact",
     "SearchData",
     "UnitData",
     "UnitNode",
@@ -1364,5 +1487,6 @@ __all__ = [
     "UnitRole",
     "WakeData",
     "Weights",
+    "Who",
     "approximate_tokens",
 ]

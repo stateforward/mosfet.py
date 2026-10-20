@@ -4,7 +4,7 @@ error[B0018]: `bot.allow` names no lint `no_device`
 7 | model = bot.define("…", bot.cognition(support.Silent(), intuition=support.Undecided()), bot.allow("no_device"))
   |                                                                                                   ^^^^^^^^^^^ not a lint
   |
-  = note: the lints are `no_devices`, `ability_without_tools`, `instruction_like_traits`, `empty_timeouts`, `unused_register`, `unreachable_state`, `command_without_examples`, `people_without_associative`
+  = note: the lints are `no_devices`, `ability_without_tools`, `instruction_like_traits`, `empty_timeouts`, `unused_register`, `unreachable_state`, `command_without_examples`
 help: did you mean `no_devices`?
   |
 7 | model = bot.define("…", bot.cognition(support.Silent(), intuition=support.Undecided()), bot.allow("no_devices"))

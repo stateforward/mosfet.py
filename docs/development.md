@@ -172,10 +172,13 @@ participants, acts, outcome) as an episode node, linked by
 canonical vector per node in its embedder's `embedding.Space`. A person is one node keyed by
 person id with many refs, and each ref is exactly one person's (`bot_person_ref`, the ref its
 primary key): a ref first seen gets a provisional person, a ref stamped `own` is the bot's own
-person `self` (created when Memory opens), and `PersonEvent` links, unlinks, names, forgets and
-lists persons, refusing `conflict` (a ref that is another person's, or a statement about the bot
-itself or its own refs) or `not_found` with nothing changed. Nobody declares a household: who
-everyone is is what the bot learns. `SearchEvent` runs the nearest, recent, present, and
+person `self` (created when Memory opens), and `PersonEvent` knows a typed fact about a person
+(`same_as` someone, `name`, `not_same_as` someone), forgets and lists persons, refusing `conflict`
+(a fact that would make a ref two named persons', or change the bot itself or its own refs),
+`not_found` or `invalid_input` with nothing changed. Nobody declares a household: who everyone is is
+what the bot learns, through `Associative`'s model-callable `memory.know` and `memory.forget`, whose
+outcome (`KnownEvent`, or a typed refusal) the bot perceives; a print is kept once its person is
+named and erased with them, through the registries the cognition is given (`registries=`). `SearchEvent` runs the nearest, recent, present, and
 one-link lanes at once and says who is here (each participant resolved to its person, `known`
 false for someone nobody has named, those persons, and the bot itself as `you`),
 which `Associative` hands the turn as `AssociationsData.people`/`persons`/`you`; `FetchEvent` reads nodes in full (image bytes on request) and can

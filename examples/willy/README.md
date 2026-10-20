@@ -35,10 +35,12 @@ with one `bot.define` that constructs every part inline, and runs it with `bot.r
   and the speech seed that takes heard speech into a conversation. Its memory recalls by the lab's
   EmbeddingGemma 2 vectors.
 - **Name.** `identity.Identity`: Willy is born nameless and may take a name when someone gives it one.
-- **People.** `people.People`, the capacity to link a voice to a person, name a person, unlink a voice and
-  forget a person. Nobody is listed for Willy: it learns who everyone is itself.
+- **People.** Knowing who someone is, is remembering it: its memory offers Willy `memory.know` (a voice is the
+  same person as someone, is called something, or is not the same person as someone) and `memory.forget` (a
+  person, and their prints with them). The cognition is given the voice (and face) registries, so a person's prints
+  are kept once Willy has named them. Nobody is listed for Willy: it learns who everyone is itself.
 - **Eye** (`WILLY_CAMERA=1`). `seeing.Seeing` over the rooms' cameras, with the OpenCV Zoo's YuNet and SFace
-  into a face registry that people also links and forgets.
+  into a face registry whose prints follow what Willy remembers, the same way.
 
 Nothing in it tells Willy what to do: it is given no instruction text, no seeded reply and no rule about
 whom to answer.
@@ -124,10 +126,11 @@ whether someone is a child are things Willy learns from the people themselves an
 learns everything else: a voice nobody has named is a fact it is shown, and what it makes of it is its own.
 
 Kids are present, so it matters where the line is. The owner supplies capacities (what is attached here: the
-rooms' speakers and microphones, memory and people; there is no web, purchasing or messaging) and Willy's traits.
+rooms' speakers and microphones, and memory, which knows people; there is no web, purchasing or messaging) and
+Willy's traits.
 Code may refuse a capacity and may expose a fact Willy has learned. Code never decides a reply, filters what Willy
 says, inserts a warning or treats a child's turn differently: what to say to anyone, and how, is Willy's. Every
-link records when Willy made it, so the owner can audit it.
+fact Willy remembers about a person records when it learned it, so the owner can audit it.
 
 ## Biometric privacy
 
@@ -164,10 +167,10 @@ websocket server and a real computer on a counter, with fake sound card and came
 put into the house, what the computer hears comes out of the speaker, a still reaches the house, and a refused
 token, nothing to connect to or a sound card that cannot open end it `1`. `test_willy.py` writes its own small
 `bot.define` of Willy's shape, with a scripted model, the real ear, mouth,
-memory and people, and fakes at the provider seams only: the speech server's wire behind
+and memory with its registries, and fakes at the provider seams only: the speech server's wire behind
 `speech_server.Transcription(connect=...)`, and the voiceprint and diarization servers behind
-`httpx.MockTransport`. They pin what Willy perceives and what it can do (a stranger is `known=false` and linking
-is offered; a voice Willy names is known by that name next turn; two voices in one turn are two sources; its own voice is
+`httpx.MockTransport`. They pin what Willy perceives and what it can do (a stranger is `known=false` and knowing who
+they are is offered; a voice Willy names is known by that name next turn; two voices in one turn are two sources; its own voice is
 `you`; forgetting a person erases their print), never what it chooses.
 
 ## Live check
@@ -190,8 +193,8 @@ The test writes its own `bot.define` of Willy's shape on the real parts and the 
 on loopback and `willy_example.room` as its far side; the far side's sound card is a scripted microphone and
 speaker, and the strangers' speech is made by the lab's speech engine at test time, in two catalog voices that are
 not Willy's. Step by step, each bounded: the lab answers (L1, 10 s); Willy is born with a voice that memory keeps
-(L2, 300 s); a stranger's voice reaches it unknown, with linking offered (L3); a link the test makes, standing in
-for a selection, makes that voice known by the next utterance (L4); two voices in one utterance are two sources
+(L2, 300 s); a stranger's voice reaches it unknown, with knowing who they are offered (L3); a fact the test has
+Willy remember, standing in for a selection, makes that voice known by the next utterance (L4); two voices in one utterance are two sources
 (L5); its own voice, echoed through the room's microphone, is `you` (L6, 90 s); and forgetting the person erases
 the print (L7); 60 s each unless given. It asserts perception and capacity only. Whatever Willy chose on each
 turn (whether it asked who the stranger was, what it said, the tools it called) is recorded, never asserted:
