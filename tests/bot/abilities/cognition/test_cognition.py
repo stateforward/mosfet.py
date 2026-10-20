@@ -1575,21 +1575,19 @@ class _FailingStepProcessor(processing.DecisionProcessor):
         raise RuntimeError("the step failed")
 
 
-@pytest.mark.parametrize("stage", ["intuition", "reasoning"])
-def test_a_step_that_fails_is_a_typed_failure_the_bot_perceives_but_failing_on_it_is_not_handed_back(
-    stage: typing.Literal["intuition", "reasoning"],
-) -> None:
+def test_a_step_that_fails_is_a_typed_failure_the_bot_perceives_but_failing_on_it_is_not_handed_back() -> None:
     """D-R-13 (live round 2, E3): after a reasoning step failed (not timed out), no turn ran until the
     person typed again, and the screen said "writing code…" indefinitely. A failed step is now handed
     back as a typed failure the bot perceives as its next turn, like a timed-out one; a step that fails
-    while the bot perceives that failure is not handed back again."""
+    while the bot perceives that failure is not handed back again. (A failing intuition hands its turn
+    to reasoning instead, D-R-36.)"""
+
+    stage = "reasoning"
 
     async def run() -> tuple[list[hsm.Event[typing.Any]], str]:
         failing = _FailingStepProcessor()
         intuition, reasoning = cognition_abilities(
-            intuition_processor=failing
-            if stage == "intuition"
-            else RecordingIntuitionProcessor(cognition.intuition.OutputData(reason="needs thought")),
+            intuition_processor=RecordingIntuitionProcessor(cognition.intuition.OutputData(reason="needs thought")),
             reasoning_processor=failing,
         )
         store = memory.Memory()
@@ -1637,6 +1635,90 @@ def test_a_step_that_fails_is_a_typed_failure_the_bot_perceives_but_failing_on_i
     assert isinstance(failed, cognition.StepFailedData)
     assert (failed.stage, failed.turn_id, failed.stimulus) == (stage, "failing-turn", mosfet.InputEvent.name)
     assert failed.message == f"Cognition's {stage} step failed, so the turn failed: the step failed"
+
+
+class _UnreadableOnce(hsm.Instance):
+    """A live actor whose state, once armed, cannot be read the next time, so only intuition's frame fails."""
+
+    effort: typing.ClassVar[abilities.ability.Effort] = abilities.ability.Effort.XS
+    model: typing.ClassVar[hsm.Model | None] = mosfet.define(
+        "UnreadableOnce",
+        hsm.initial(hsm.target("/UnreadableOnce/active")),
+        hsm.state("active"),
+    )
+    armed: bool = False
+
+    @typing.override
+    def take_snapshot(self) -> hsm.Snapshot:
+        if self.armed:
+            self.armed = False
+            raise RuntimeError("actor state unavailable")
+        return super().take_snapshot()
+
+
+@pytest.mark.parametrize("failing", ["decider", "frame"])
+def test_a_failing_intuition_hands_its_turn_to_reasoning_in_the_same_turn(
+    failing: str, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D-R-36 (Willy run 7, D-2): decide refused an over-long request, the turn failed at intuition, and reasoning
+    never saw what was said. An intuition whose decider fails, or whose frame cannot be built, now hands the same
+    turn to reasoning: nothing is handed back, and the turn is remembered as reasoning settles it."""
+
+    def cascaded(reader: metric_reader.Reader) -> float:
+        return sum(
+            point.value
+            for point in reader.points("bot.cognition.step.failure.count")
+            if point.attributes.get("stage") == "intuition"
+            and point.attributes.get("kind") == "failed"
+            and point.attributes.get("outcome") == "cascaded"
+        )
+
+    async def run() -> tuple[list[hsm.Event[typing.Any]], cognition.InputData, list[processing.InputData], str]:
+        reasoning_processor = RecordingReasoningProcessor(no_output("reasoned"))
+        intuition, reasoning = cognition_abilities(
+            intuition_processor=_FailingStepProcessor() if failing == "decider" else None,
+            reasoning_processor=reasoning_processor,
+        )
+        store = memory.Memory()
+        ability = cognition.Cognition(
+            intuition=intuition,
+            reasoning=reasoning,
+            reflection=cognition.Reflection(processor=FixedProcessor(no_output("reflection")), memory=store),
+            memory=store,
+        )
+        ctx = shared_hsm_context()
+        body = _StepTimeoutBody()
+        _ = await mosfet.started(ctx, body, body.model)
+        _ = await ability.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=body)))
+        await wait_until(lambda: ability.state().endswith("/idle"))
+        turn = (await started_cognition_input(ctx)).model_copy(update={"participants": (_ADA,)})
+        if failing == "frame":
+            actor = _UnreadableOnce()
+            assert actor.model is not None
+            _ = await mosfet.started(ctx, actor, actor.model)
+            actor.armed = True
+            turn = turn.model_copy(update={"actors": {**turn.actors, "broken": actor}})
+        _ = await hsm.dispatch(ctx, ability, ability.input_event.with_data_and_id(turn, "cascading-turn"))
+        await wait_until(lambda: any(event.name == cognition.OutputEvent.name for event in body.told))
+        await wait_until(lambda: ability.state().endswith("/idle"))
+        for _ in range(50):
+            await asyncio.sleep(0)
+        (kept,) = await _remembered(ctx, store)
+        return list(body.told), turn, reasoning_processor.calls, kept.outcome.value
+
+    with metric_reader.recording(tmp_path, monkeypatch) as reader:
+        before = cascaded(reader)
+        told, turn, reasoning_calls, outcome = asyncio.run(run())
+        after = cascaded(reader)
+
+    (frame,) = reasoning_calls
+    assert isinstance(frame.input, cognition.reasoning.ProcessorInput)
+    assert frame.input.host_input.input == turn.stimulus
+    assert [event.name for event in told] == [cognition.OutputEvent.name]
+    (output,) = told
+    assert (output.id, output.data) == ("cascading-turn", no_output("reasoned"))
+    assert outcome == memory.Outcome.COMPLETED.value
+    assert after - before == 1.0
 
 
 def test_a_step_is_given_a_local_models_time_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2209,11 +2291,12 @@ def test_cognitive_operation_output_rejects_legacy_payload_wrapper() -> None:
 
 def test_cognitive_rejects_output_for_unoffered_event() -> None:
     async def run() -> tuple[str, list[abilities.FailureData]]:
+        # Intuition leaves the turn to reasoning, whose selection is rejected (a rejected intuition would cascade).
         ability = RecordingCognition(
-            intuition_processor=RecordingOutputOperation(
+            intuition_processor=RecordingIntuitionProcessor(cognition.intuition.OutputData(reason="needs thought")),
+            reasoning_processor=RecordingOutputOperation(
                 cognition.types.EventData(event="nope.unavailable", reason="unoffered"),
             ),
-            reasoning_processor=FailingReasoningProcessor(),
         )
         ctx = await start_cognition_ability_for_test(ability)
 
@@ -4253,7 +4336,7 @@ def test_cognition_remembers_a_failed_turn_with_its_stimulus_and_no_acts() -> No
     assert kept.acts == ()
 
 
-class _RefusingIntuitionProcessor(processing.DecisionProcessor):
+class _RefusingProcessor(processing.Processor):
     @typing.override
     async def process(
         self, input: processing.InputData, *, drafts: processing.DraftSink | None = None
@@ -4270,7 +4353,12 @@ def test_cognition_remembers_a_failed_turn_with_its_failure_after_what_it_percei
 
     async def run() -> tuple[memory.Episode, ...]:
         store = memory.Memory()
-        ability = RecordingCognition(intuition_processor=_RefusingIntuitionProcessor(), store=store)
+        # Intuition leaves the turn to reasoning, whose step fails (a failing intuition would cascade, D-R-36).
+        ability = RecordingCognition(
+            intuition_processor=RecordingIntuitionProcessor(cognition.intuition.OutputData(reason="needs thought")),
+            reasoning_processor=_RefusingProcessor(),
+            store=store,
+        )
         ctx = await start_cognition_ability_for_test(ability)
         _ = await hsm.dispatch(
             ctx, ability, ability.input_event.with_data_and_id(await started_cognition_input(ctx), "refused-turn")
@@ -4354,6 +4442,9 @@ async def _remembered_after_unframed_turn(
 
 
 def test_cognition_remembers_a_failed_turn_whose_intuition_frame_cannot_be_built() -> None:
+    """The turn cascades to reasoning (D-R-36), whose frame offers the same unreadable actor, so it fails there,
+    once, and is remembered once."""
+
     async def run() -> tuple[list[abilities.FailureData], tuple[memory.Episode, ...]]:
         store = memory.Memory()
         ability = RecordingCognition(store=store)

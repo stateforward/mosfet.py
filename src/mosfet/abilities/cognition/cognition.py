@@ -195,7 +195,9 @@ class StepFailedData(ability.FailureData):
 
     The bot perceives this as a turn of its own: which step failed and why, and which turn failed for
     which stimulus. Only that turn failed; nothing was rebooted and every ability kept its state. A
-    step that fails while the bot perceives a failed step is not handed back again.
+    step that fails while the bot perceives a failed step is not handed back again. An intuition that
+    fails is not handed back either: its turn goes on to reasoning, so the stage is autonomy or
+    reasoning in practice.
     """
 
     # The base names its own description in json_schema_extra; this payload's docstring describes it.
@@ -230,8 +232,9 @@ _HANDED_BACK = metrics.get_meter("mosfet.abilities.cognition").create_counter(
     unit="{failure}",
     description=(
         "Steps of a turn that failed or outlasted the step timeout, by stage (autonomy, intuition, reasoning), "
-        "kind (failed, timed_out) and outcome: handed_back (the bot perceives it as its next turn) or bounded "
-        "(the turn that failed was itself perceiving a failed step, so it is not handed back again)."
+        "kind (failed, timed_out) and outcome: handed_back (the bot perceives it as its next turn), bounded "
+        "(the turn that failed was itself perceiving a failed step, so it is not handed back again) or cascaded "
+        "(an intuition that failed, or whose frame could not be built, so reasoning took the same turn)."
     ),
 )
 
@@ -382,12 +385,15 @@ class Cognition(ability.Ability[InputData, OutputData]):
     observing ``StepTimedOutEvent``, a new turn the bot decides on, while the step is stopped the
     way a cancel stops it. Nothing reboots and no ability loses its state, unless the step cannot be
     stopped within the cancel teardown bound. An association that outlasts it leaves the turn
-    without associations. A step that fails (autonomy, intuition or reasoning, or a frame that
-    cannot be built for one) is handed back the same way, as a ``cognition.InputEvent`` observing
+    without associations. A step that fails (autonomy or reasoning, or a frame that cannot be built
+    for reasoning) is handed back the same way, as a ``cognition.InputEvent`` observing
     ``StepFailedEvent``. Both are bounded: a step that fails or outlasts its timeout on a turn
     taken up for a failed step is not handed back again (``bot.cognition.step.failure.count``
-    counts each, by stage, kind and outcome). A turn taken up for a handed-back intuition failure
-    passes intuition, so reasoning, a stage that can perceive that failure, decides it.
+    counts each, by stage, kind and outcome). An intuition that fails, or whose frame cannot be
+    built, hands the same turn to reasoning instead (outcome ``cascaded``): nothing is handed back
+    and reasoning settles the turn. A turn taken up for a handed-back intuition failure (an
+    intuition step that outlasted its timeout) passes intuition, so reasoning, a stage that can
+    perceive that failure, decides it.
 
     With ``memory`` composed, Cognition attaches it and remembers every turn it settles —
     completed, failed, or cancelled — as one ``memory.RememberEvent`` it does not wait on: what it
@@ -760,7 +766,8 @@ class Cognition(ability.Ability[InputData, OutputData]):
 
         A turn that perceives a handed-back intuition failure (its stimulus, or any percept of its
         ``bot.perceived`` batch) passes intuition unhandled, so reasoning, a stage that can perceive
-        that failure, takes it (D-R-30).
+        that failure, takes it (D-R-30). So does a turn whose intuition frame cannot be built: the
+        same turn cascades to reasoning (D-R-36).
         """
 
         public_metadata = _public_metadata(dict(event.metadata))
@@ -771,15 +778,28 @@ class Cognition(ability.Ability[InputData, OutputData]):
             if isinstance(perceived, hsm.Event) and isinstance(perceived.data, mosfet.PerceivedData)
             else (perceived,)
         )
-        if any(
+        frame: processing.InputData | None = None
+        if not any(
             isinstance(stimulus, hsm.Event)
             and isinstance(stimulus.data, StepFailedData | StepTimedOutData)
             and stimulus.data.stage == "intuition"
             for stimulus in stimuli
         ):
-            if processing.active_operation(instance, base) is None:
-                _ = await processing.start_operation(instance, base)
-            turn = Cognition._turn(instance, cognition_input, base, associations=associations, acted=acted)
+            try:
+                frame = Cognition._build_processing_input(
+                    instance,
+                    cognition_input,
+                    recalled=associations,
+                    acted=acted,
+                )
+            except Exception:
+                # The documented boundary: an intuition frame that cannot be built cascades to reasoning, whose
+                # own frame build reports what failed if it fails too (D-R-36).
+                _HANDED_BACK.add(1, {"stage": "intuition", "kind": "failed", "outcome": "cascaded"})
+        if processing.active_operation(instance, base) is None:
+            _ = await processing.start_operation(instance, base)
+        turn = Cognition._turn(instance, cognition_input, base, associations=associations, acted=acted)
+        if frame is None:
             _ = hsm.dispatch(
                 ctx,
                 instance,
@@ -792,51 +812,10 @@ class Cognition(ability.Ability[InputData, OutputData]):
                 ),
             )
             return
-        try:
-            input = Cognition._build_processing_input(
-                instance,
-                cognition_input,
-                recalled=associations,
-                acted=acted,
-            )
-        except Exception as error:
-            failed = _failure(operation_id, str(error))
-            Cognition._remember(
-                ctx,
-                instance,
-                operation_id=base,
-                outcome=memory.Outcome.FAILED,
-                metadata=public_metadata,
-                cognition_input=cognition_input,
-                output=() if acted is None else acted.acts,
-                failure=failed.failure,
-            )
-            Cognition._hand_back_step_failure(
-                ctx,
-                instance,
-                stage="intuition",
-                message=str(error),
-                turn_id=base,
-                cognition_input=cognition_input,
-                metadata=public_metadata,
-            )
-            _ = hsm.dispatch(
-                ctx,
-                instance,
-                dataclasses.replace(
-                    _ApplyFailedEvent.with_data(failed),
-                    id=operation_id,
-                    metadata=public_metadata,
-                ),
-            )
-            return
-        if processing.active_operation(instance, base) is None:
-            _ = await processing.start_operation(instance, base)
-        turn = Cognition._turn(instance, cognition_input, base, associations=associations, acted=acted)
         hop_id = f"{base}{_INTUITION_ID_SUFFIX}"
         input_event = dataclasses.replace(
             instance._intuition.input_event.with_data_and_id(
-                intuition.InputData(turn=turn, processing_input=input),
+                intuition.InputData(turn=turn, processing_input=frame),
                 hop_id,
             ),
             metadata=public_metadata,
@@ -1252,11 +1231,12 @@ class Cognition(ability.Ability[InputData, OutputData]):
             stage="reasoning",
             context=telemetry.event_context(event),
         ):
+            # Intuition's completion (unhandled, or passed), or its failure, which cascades here (D-R-36).
             completion = event.data
-            cognition_input = completion.turn.input if isinstance(completion, types.CompletionData) else None
-            operation_id = completion.turn.operation_id if isinstance(completion, types.CompletionData) else None
+            reached = completion.turn if isinstance(completion, types.CompletionData | types.FailureData) else None
+            operation_id = None if reached is None else reached.operation_id
             public_metadata = _public_metadata(dict(event.metadata))
-            if cognition_input is None:
+            if reached is None:
                 # No turn reached this stage, so there is nothing to remember.
                 _ = hsm.dispatch(
                     ctx,
@@ -1270,8 +1250,9 @@ class Cognition(ability.Ability[InputData, OutputData]):
                     ),
                 )
                 return
-            associations = completion.turn.associations if isinstance(completion, types.CompletionData) else None
-            acted = completion.turn.acted if isinstance(completion, types.CompletionData) else None
+            cognition_input = reached.input
+            associations = reached.associations
+            acted = reached.acted
             base = operation_id if operation_id else uuid.uuid4().hex
             try:
                 input = Cognition._build_processing_input(
@@ -1389,12 +1370,10 @@ class Cognition(ability.Ability[InputData, OutputData]):
                 # What failed, without the turn it correlates: the episode already holds that turn.
                 failure=ability.FailureData(message=failure.message),
             )
-            # The failure's modeled source says which step it was.
-            stage: typing.Literal["autonomy", "intuition", "reasoning"] = (
+            # The failure's modeled source says which step it was; intuition's failure cascades instead.
+            stage: typing.Literal["autonomy", "reasoning"] = (
                 "autonomy"
                 if instance._autonomy is not None and event.source == hsm.id(instance._autonomy)
-                else "intuition"
-                if event.source == hsm.id(instance._intuition)
                 else "reasoning"
             )
             Cognition._hand_back_step_failure(
@@ -1417,6 +1396,13 @@ class Cognition(ability.Ability[InputData, OutputData]):
                 metadata=_public_metadata(dict(event.metadata)),
             ),
         )
+
+    @staticmethod
+    def _cascade_intuition_failure(ctx: hsm.Context, instance: "Cognition", event: hsm.Event[typing.Any]) -> None:
+        """Count an intuition that failed: its turn goes on to reasoning, with nothing handed back (D-R-36)."""
+
+        del ctx, instance, event
+        _HANDED_BACK.add(1, {"stage": "intuition", "kind": "failed", "outcome": "cascaded"})
 
     @staticmethod
     def _open_turn(ctx: hsm.Context, instance: "Cognition", event: hsm.Event[typing.Any]) -> None:
@@ -2441,12 +2427,12 @@ class Cognition(ability.Ability[InputData, OutputData]):
                     hsm.effect(_finish_turn),
                     hsm.target("/Cognition/ready/settling"),
                 ),
+                # A failing intuition hands the same turn to reasoning (D-R-36); a timed-out one is stopped below.
                 hsm.transition(
                     hsm.on(ability.FailedEvent),
                     hsm.guard(_matches_intuition_failure),
-                    hsm.effect(_fail_child),
-                    hsm.effect(_finish_turn),
-                    hsm.target("/Cognition/ready/settling"),
+                    hsm.effect(_cascade_intuition_failure),
+                    hsm.target("/Cognition/processing/reasoning"),
                 ),
                 hsm.transition(
                     hsm.on(_ChildHopTimedOutEvent),

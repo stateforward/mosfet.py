@@ -146,7 +146,10 @@ any one stimulus. The turn is remembered as one episode of `bot.perceived`, ever
 under the participants' union. A failed or timed-out step of a batch names `bot.perceived` as its
 stimulus and is handed back once, unless every percept was itself a failed step. A turn that
 perceives a handed-back intuition failure, as its stimulus or as any percept of its batch, passes
-intuition, so reasoning, a stage that can perceive that failure, decides it.
+intuition, so reasoning, a stage that can perceive that failure, decides it. An intuition that
+fails, or whose frame cannot be built, hands the same turn to reasoning: nothing is handed back
+(`bot.cognition.step.failure.count{outcome="cascaded"}`), so only an intuition step that outlasts
+its timeout is perceived as a failure.
 
 Leaving `active` (deactivation, reboot, the cancel bound that degrades the body, or stopping)
 releases whatever is still held: never replayed, counted in
