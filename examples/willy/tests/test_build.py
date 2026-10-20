@@ -6,6 +6,8 @@ the README documents. Every endpoint is a closed local port: nothing reaches the
 and its birth (which asks the model for a voice) fails and waits, as it would with the lab down.
 """
 
+import asyncio
+import collections.abc
 import os
 import pathlib
 import signal
@@ -20,8 +22,9 @@ import pydantic
 import pytest
 import sqlalchemy
 import willy_example
-from mosfet.abilities import memory, persona
+from mosfet.abilities import memory, persona, processing
 from mosfet.environment import space
+from mosfet.providers import openai_compat
 
 _CLOSED = "127.0.0.1:9"
 _REQUIRED = {
@@ -91,6 +94,70 @@ def test_every_owner_setting_has_a_working_value(tmp_path: pathlib.Path) -> None
     ]
     assert all(room.placement.threshold_db is None for room in settings.rooms)
     assert settings.traits == persona.Traits(traits=("patient", "exact"))
+
+
+class _Recorder:
+    """A chat endpoint that records the body each request carries beyond its messages, and selects nothing."""
+
+    model: str = "local-model"
+
+    def __init__(self) -> None:
+        self.bodies: list[dict[str, object]] = []
+
+    async def create_chat_completion(
+        self,
+        *,
+        messages: collections.abc.Sequence[dict[str, object]],
+        tools: collections.abc.Sequence[object] = (),
+        response_format: object | None = None,
+        extra_body: collections.abc.Mapping[str, object] | None = None,
+    ) -> dict[str, object]:
+        del messages, tools, response_format
+        self.bodies.append(dict(extra_body or {}))
+        return {"choices": [{"finish_reason": "stop", "message": {"content": "[]"}}]}
+
+    def stream_chat_completion(
+        self,
+        *,
+        messages: collections.abc.Sequence[dict[str, object]],
+        tools: collections.abc.Sequence[object] = (),
+        response_format: object | None = None,
+        extra_body: collections.abc.Mapping[str, object] | None = None,
+    ) -> collections.abc.AsyncIterator[dict[str, object]]:
+        del messages, tools, response_format, extra_body
+        raise AssertionError("a turn with no drafts is asked for whole")
+
+
+@pytest.mark.parametrize(
+    ("given", "body"),
+    [
+        ({}, {"chat_template_kwargs": {"enable_thinking": True}, "thinking_token_budget": 256}),
+        (
+            {"WILLY_THINKING_TOKENS": "1024"},
+            {"chat_template_kwargs": {"enable_thinking": True}, "thinking_token_budget": 1024},
+        ),
+        ({"WILLY_THINKING_TOKENS": "0"}, {"chat_template_kwargs": {"enable_thinking": False}}),
+    ],
+    ids=["default", "owner-budget", "off"],
+)
+def test_willy_reasons_after_thinking_within_the_owners_budget(given: dict[str, str], body: dict[str, object]) -> None:
+    """R-18: a reasoning turn thinks first, within WILLY_THINKING_TOKENS; 0 turns thinking off and sends no budget."""
+
+    settings = willy_example.Settings.model_validate({**_REQUIRED, **given})
+    endpoint = _Recorder()
+    reasoning = openai_compat.Processor(client=endpoint, provider="willy", extra_body=settings.thinking)
+
+    _ = asyncio.run(reasoning.process(processing.InputData(input="hello", instructions="Select events.")))
+
+    assert endpoint.bodies == [body]
+
+
+@pytest.mark.parametrize("value", ["-1", "lots"])
+def test_a_thinking_budget_is_a_count_of_tokens(value: str) -> None:
+    message = _refused({**_REQUIRED, "WILLY_THINKING_TOKENS": value})
+
+    assert "WILLY_THINKING_TOKENS" in message
+    assert value not in message
 
 
 def test_the_owner_lists_nobody_willy_learns_who_people_are_itself() -> None:
@@ -176,6 +243,8 @@ def test_the_env_example_is_the_lab_and_every_setting_in_it_is_valid() -> None:
     assert given["OPENAI_API_KEY"] == "local"
     # D-R-36: decide's context is 2048 tokens, and each decision request is fitted to it.
     assert (settings.decision_base_url, settings.decision_max_context_tokens) == ("http://192.168.2.2:8102", 2048)
+    # R-18: the lab's reasoning turns think within 256 tokens, 4-7 s on a full Willy turn.
+    assert settings.thinking_tokens == 256
     secrets = {"COMPUTER_TOKEN_SECRET", "OPENAI_API_KEY_FILE", "DECISION_API_KEY", "DECISION_API_KEY_FILE"}
     assert not secrets & set(given)
 

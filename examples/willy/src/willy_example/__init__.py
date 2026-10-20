@@ -148,6 +148,17 @@ class Settings(pydantic.BaseModel):
         ),
         examples=[2048],
     )
+    thinking_tokens: int = pydantic.Field(
+        default=256,
+        alias="WILLY_THINKING_TOKENS",
+        ge=0,
+        description=(
+            "How many tokens Willy's language model may think for on a reasoning turn before it chooses what to"
+            + " do (its chat template's thinking channel, capped by the server's thinking token budget); 0 turns"
+            + " thinking off."
+        ),
+        examples=[256],
+    )
     embed_url: str = pydantic.Field(
         alias="WILLY_EMBED_URL",
         min_length=1,
@@ -241,6 +252,14 @@ class Settings(pydantic.BaseModel):
         description="The owner's traits for Willy, comma separated.",
         examples=["warm,patient,curious,honest"],
     )
+
+    @property
+    def thinking(self) -> dict[str, object]:
+        """What every reasoning request adds to its body: thinking on within ``thinking_tokens``, or off at 0."""
+
+        if not self.thinking_tokens:
+            return {"chat_template_kwargs": {"enable_thinking": False}}
+        return {"chat_template_kwargs": {"enable_thinking": True}, "thinking_token_budget": self.thinking_tokens}
 
     @pydantic.model_validator(mode="before")
     @classmethod

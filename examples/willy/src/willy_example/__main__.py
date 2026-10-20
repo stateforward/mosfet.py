@@ -1,8 +1,9 @@
 """Willy's bot file: ``python -m willy_example`` runs the household bot on this host.
 
 Reads the owner's :class:`~willy_example.Settings` from the environment (the lab model server's ``WILLY_*_URL``
-addresses and models, ``DECISION_BASE_URL``, and the optional ``DECISION_MAX_CONTEXT_TOKENS``, room, camera
-and trait variables) and its secrets: ``openai_api_key`` (a placeholder for the lab's keyless servers),
+addresses and models, ``DECISION_BASE_URL``, and the optional ``DECISION_MAX_CONTEXT_TOKENS``,
+``WILLY_THINKING_TOKENS``, room, camera and trait variables) and its secrets: ``openai_api_key`` (a placeholder for
+the lab's keyless servers),
 the optional ``decision_api_key`` (the key of the decision server Willy's intuition decides on; without it none is
 sent, as the local decide expects) and ``computer_token_secret``, the key every
 room's far side signs its token with. Each is the Docker secret, the file named by ``<NAME>_FILE``, or
@@ -24,10 +25,10 @@ and plays it on that room's speaker, like an intercom.
 
 Then one ``bot.define`` constructs every other part inline: Willy's traits, the source of its voice (the lab's
 shared speech engine, which designs it at Willy's birth; Willy is allowed none of the engine's other voices, so it
-is born only as the one it designs), its cognition on the lab's language model with its intuition on the
-decision model, the speech seed that takes heard speech into a conversation and the registries whose prints follow
-whom it knows (people it learns itself), its ear and its sense of its own name, its mouth, its conversations, and one
-computer per room, set on the
+is born only as the one it designs), its cognition on the lab's language model, which thinks first within the
+owner's ``WILLY_THINKING_TOKENS``, with its intuition on the decision model, the speech seed that takes heard
+speech into a conversation and the registries whose prints follow whom it knows (people it learns itself), its
+ear and its sense of its own name, its mouth, its conversations, and one computer per room, set on the
 object the owner names in that room. With ``WILLY_CAMERA=1`` a face registry and an eye join them, seeing through
 the rooms' cameras with the OpenCV Zoo's YuNet and SFace.
 """
@@ -162,6 +163,7 @@ if __name__ == "__main__":
             openai_compat.Processor(
                 client=openai_compat.ChatClient(model=settings.model, base_url=settings.llm_url, api_key=api_key),
                 provider="willy",
+                extra_body=settings.thinking,
             ),
             intuition=decision.Processor(
                 base_url=settings.decision_base_url,
