@@ -42,6 +42,12 @@ MIN_NEW_VOICE_SECONDS = 1.0
 A print from under a second of speech is too little to tell a voice by (D-W8-21 D7); a known voice is still
 named from a shorter segment.
 """
+ECHO_SECONDS = 1.0
+"""How long after the bot last produced sound what an ear hears may still be its own echo, in seconds of heard audio.
+
+Speech heard while the bot is producing, or within this much heard audio after, is identified match-only (D-R-37): a
+voice already known is named, and a voice nobody knows makes no new voice, since it may be the bot's own coming back.
+"""
 _IDENTIFICATION = metrics.get_meter("bot.abilities.listening").create_counter(
     "bot.identification.count",
     unit="{print}",
@@ -155,8 +161,9 @@ async def identify(
 
     A segment with no voiceprint, whose embedding cannot be printed, or that the registry does not answer
     in time, is ``None``. A voice nobody knows is made into a new voice only from a segment of at least
-    ``MIN_NEW_VOICE_SECONDS``; from a shorter one it is ``None``. With ``match_only`` (an overlap: the bot's own
-    voice is in that audio too), a voice nobody knows is ``None`` from any segment, and no new voice is made.
+    ``MIN_NEW_VOICE_SECONDS``; from a shorter one it is ``None``. With ``match_only`` (an overlap, or speech heard
+    while the bot produced sound or within ``ECHO_SECONDS`` after: the bot's own voice may be in that audio), a voice
+    nobody knows is ``None`` from any segment, and no new voice is made.
     """
 
     fingerprinted = [(index, embedding) for index, embedding in enumerate(embeddings) if embedding is not None]
@@ -265,6 +272,7 @@ async def enroll(
 
 
 __all__ = [
+    "ECHO_SECONDS",
     "MAX_PARTICIPANTS",
     "MIN_NEW_VOICE_SECONDS",
     "Embedder",

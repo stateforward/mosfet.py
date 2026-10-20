@@ -27,7 +27,10 @@ With an affect classifier composed, the turn
 also carries the tone of its longest voice (``SpeechData.affect``), heard while its voices are
 identified (:mod:`~mosfet.abilities.listening.tone`). Partial words never reach cognition on their
 own; they ride only on the overlap fact, whose voice is recognized match-only: the bot's own voice is in
-that audio too, so it names a voice already known and never makes a new one.
+that audio too, so it names a voice already known and never makes a new one. A turn is recognized match-only the
+same way when any of it was heard while the bot was producing, or within ``recognition.ECHO_SECONDS`` of heard audio
+after the source last heard it producing, its own voice predicted and not streamed included (D-R-37): that may be the
+bot's own voice coming back. Time here is the audio the source heard, never a wall clock.
 
 Telemetry: ``bot.listening.transcription.gated.count`` (sounds not streamed as predicted own voice),
 ``bot.listening.transcription.dropped.count`` (``bot.listening.transcription.drop.reason``: ``sessions``
@@ -129,6 +132,8 @@ class _Turn:
     spans: tuple[voice.detection.VoiceDetectionSegment, ...]
     participants: tuple[mosfet.Participant, ...]
     parent: mosfet.StimulusData[SoundData] | None
+    # Heard while the bot was producing, or within recognition.ECHO_SECONDS after: identified match-only.
+    echo: bool
 
 
 class _HeardData(pydantic.BaseModel):
@@ -207,6 +212,8 @@ _SessionUnavailableEvent = hsm.Event[_HeardData](
 )
 _CloseEvent = hsm.Event[_HeardData](name="bot.ability.listening.transcription.source.close", schema=_HeardData)
 _SourceIdleEvent = hsm.Event[_IdleData](name="bot.ability.listening.transcription.source.idle", schema=_IdleData)
+# A sound of this source arrived as the bot's own voice predicted, and was not streamed: the bot is producing.
+_ProducedEvent = hsm.Event[_HeardData](name="bot.ability.listening.transcription.source.produced", schema=_HeardData)
 _SourceStartedEvent = hsm.Event[_StartedData](
     name="bot.ability.listening.transcription.source.started", kind=hsm.CompletionEventKind, schema=_StartedData
 )
@@ -268,6 +275,10 @@ class Source(Traced):
     # What the session was last told about the bot's mouth; what the latest scored sound says.
     _producing_told: bool
     _producing: bool
+    # The heard-audio second this source last heard the bot producing at, and whether the current turn was heard
+    # while it produced or within recognition.ECHO_SECONDS after (D-R-37).
+    _produced_at: float | None
+    _echo: bool
     # The one turn being finished, and the overlap being recognized: each for one active operation.
     _turn: _Turn | None
     _overlap_voiced_seconds: float
@@ -312,6 +323,8 @@ class Source(Traced):
         self._parent = None
         self._producing_told = False
         self._producing = False
+        self._produced_at = None
+        self._echo = False
         self._turn = None
         self._overlap_voiced_seconds = 0.0
 
@@ -428,7 +441,13 @@ class Source(Traced):
         )
         frame_bytes = 2 * sound.channels
         instance._heard += 1
+        arrived_at = instance._received_seconds
         instance._received_seconds += len(sound.audio) // frame_bytes / sound.sample_rate_hz
+        if sensed.producing:
+            instance._produced_at = instance._received_seconds
+            instance._echo = True
+        elif instance._produced_at is not None and arrived_at < instance._produced_at + recognition.ECHO_SECONDS:
+            instance._echo = True
         if instance._ring_rate_hz != sound.sample_rate_hz or instance._ring_channels != sound.channels:
             instance._ring = bytearray()
             instance._ring_rate_hz = sound.sample_rate_hz
@@ -439,6 +458,13 @@ class Source(Traced):
             del instance._ring[: len(instance._ring) - bound]
         instance._participants = recognition.merge(instance._participants, sound.participants)
         instance._parent = sensed.parent
+
+    @staticmethod
+    def _mark_produced(ctx: hsm.Context, instance: "Source", event: hsm.Event[typing.Any]) -> None:
+        """The bot's own voice arrived here as predicted and was not streamed: it was producing as of now."""
+
+        del ctx, event
+        instance._produced_at = instance._received_seconds
 
     @staticmethod
     def _remember_partial(ctx: hsm.Context, instance: "Source", event: hsm.Event[typing.Any]) -> None:
@@ -482,6 +508,7 @@ class Source(Traced):
         instance._transcripts = []
         instance._partial = None
         instance._participants = ()
+        instance._echo = False
 
     @staticmethod
     def _count_failure(ctx: hsm.Context, instance: "Source", event: hsm.Event[typing.Any]) -> None:
@@ -520,6 +547,7 @@ class Source(Traced):
             spans=tuple(spans),
             participants=instance._participants,
             parent=instance._parent,
+            echo=instance._echo,
         )
         Source._restart_turn(instance)
 
@@ -619,7 +647,10 @@ class Source(Traced):
 
     @staticmethod
     async def _run_turn(ctx: hsm.Context, instance: "Source", event: hsm.Event[typing.Any]) -> None:
-        """Identify who spoke in the ended turn and hear its tone, then hand it on."""
+        """Identify who spoke in the ended turn and hear its tone, then hand it on.
+
+        A turn heard while the bot produced sound, or just after, is identified match-only (``_Turn.echo``).
+        """
 
         turn = instance._turn
         assert turn is not None
@@ -632,7 +663,7 @@ class Source(Traced):
         ) as active:
             segments = await Source._diarize(instance, event, turn)
             heard, affect = await asyncio.gather(
-                Source._identify(instance, event, segments, match_only=False),
+                Source._identify(instance, event, segments, match_only=turn.echo),
                 tone.classify(
                     instance.context(),
                     instance._affect,
@@ -768,6 +799,7 @@ class Source(Traced):
                 spans=(),
                 participants=(),
                 parent=None,
+                echo=True,
             )
         )
         # Match only: the overlap's audio carries the bot's own voice too, so it names a voice already known
@@ -810,6 +842,7 @@ class Source(Traced):
                 stream.OverlapEvent,
                 stream.FailedEvent,
                 _CloseEvent,
+                _ProducedEvent,
             ),
             hsm.activity(_open),
             hsm.transition(hsm.on(_SessionOpenedEvent), hsm.target("/Source/open")),
@@ -821,6 +854,7 @@ class Source(Traced):
             hsm.initial(hsm.target("/Source/open/hearing")),
             # Sound keeps streaming while a turn or an overlap is identified: the next turn has begun.
             hsm.transition(hsm.on(sensitivity.OutputEvent), hsm.effect(_hear)),
+            hsm.transition(hsm.on(_ProducedEvent), hsm.effect(_mark_produced)),
             hsm.transition(hsm.on(stream.PartialEvent), hsm.effect(_remember_partial)),
             hsm.transition(hsm.on(stream.TranscriptEvent), hsm.effect(_remember_transcript)),
             hsm.transition(hsm.on(stream.VoiceStartedEvent), hsm.effect(_remember_voice_start)),
@@ -1043,6 +1077,16 @@ class Transcription(ability.Ability[sensitivity.OutputData, cognition.InputData]
     def _count_gated(ctx: hsm.Context, instance: "Transcription", event: hsm.Event[typing.Any]) -> None:
         del ctx, instance, event
         _GATED.add(1)
+
+    @staticmethod
+    def _tell_produced(ctx: hsm.Context, instance: "Transcription", event: hsm.Event[typing.Any]) -> None:
+        """Tell the source streaming this sound's source that the bot was producing, though nothing was streamed."""
+
+        source = instance._sources.get(Transcription._key(event))
+        if source is not None:
+            _ = hsm.dispatch(
+                ctx, source, dataclasses.replace(_ProducedEvent.with_data(_HeardData()), target=hsm.id(source))
+            )
 
     @staticmethod
     def _drop(reason: typing.Literal["sessions", "format", "unavailable"]) -> collections.abc.Callable[..., None]:
@@ -1274,7 +1318,7 @@ class Transcription(ability.Ability[sensitivity.OutputData, cognition.InputData]
             hsm.transition(hsm.on(cognition.InputEvent), hsm.effect(_emit_product)),
             hsm.state(
                 "Streaming",
-                hsm.transition(hsm.on(input_event), hsm.guard(_is_gated), hsm.effect(_count_gated)),
+                hsm.transition(hsm.on(input_event), hsm.guard(_is_gated), hsm.effect(_count_gated, _tell_produced)),
                 hsm.transition(hsm.on(input_event), hsm.guard(_is_unstreamable), hsm.effect(_drop("format"))),
                 hsm.transition(hsm.on(input_event), hsm.guard(_is_heard_source), hsm.effect(_forward)),
                 hsm.transition(

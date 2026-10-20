@@ -457,6 +457,97 @@ def test_a_new_voice_is_made_only_from_at_least_a_second_of_it(tenths: int, know
     assert held == int(named)
 
 
+@pytest.mark.parametrize(
+    ("while_producing", "quiet", "after_tenths", "made"),
+    [
+        (True, False, 0, False),  # the turn itself was heard while the bot spoke
+        (False, False, 0, False),  # it began right as the bot stopped
+        (False, False, 5, False),  # half a second after: still the echo window
+        (False, True, 5, False),  # the bot's voice was heard only as predicted (not streamed), then stopped
+        (False, False, 11, True),  # past recognition.ECHO_SECONDS: anybody's voice again
+    ],
+)
+def test_a_voice_nobody_knows_heard_while_the_bot_speaks_or_just_after_makes_no_new_voice(
+    while_producing: bool, quiet: bool, after_tenths: int, made: bool
+) -> None:
+    """D-R-37 (Willy run 7, D-4): Willy's own sentence, heard back in its own voice and not matched to its own print,
+    made a phantom stranger that Willy then linked as a person. While the bot speaks, and for
+    ``recognition.ECHO_SECONDS`` of heard audio after, a voice nobody knows is identified match-only: a voice already
+    known is still named, and no new one is made. Time is the audio the ear heard, never a wall clock."""
+
+    now = datetime.datetime.now(datetime.UTC)
+    store = identification.InProcessStore(max_ids=16)
+
+    async def run() -> StreamingListening:
+        sessions = Sessions()
+        classifier = FixedVoiceClassifier(voice.identification.VoiceEmbedding(embedding=(0.6, 0.8), model="m"))
+        ear = await _ear(sessions, voice_classifier=classifier, registry=_registry(store))
+        await arrives(ear, heard())  # the caller's source is open before the bot speaks
+        await _wait(lambda: len(sessions.made) == 1 and len(sessions.made[0].audio()) == 1)
+        session = sessions.made[0]
+
+        async def streamed(sound: SoundData) -> None:
+            # A turn ends only after its sound reached the session: the session hears before it can say.
+            count = len(session.audio())
+            await arrives(ear, sound)
+            await _wait(lambda: len(session.audio()) == count + 1)
+
+        await produce(ear)
+        if while_producing:
+            await streamed(heard(12))
+        else:
+            # The bot's voice in the room: loud enough to stream, or quiet enough to be predicted and not.
+            if quiet:
+                await arrives(ear, heard(level=1.0))
+            else:
+                await streamed(heard())
+            await session.say(stream.TurnEndedEvent.with_data(stream.TurnEndedData(at_seconds=0.2, text="")))
+            await produce(ear, duration=0.0)
+            if after_tenths:
+                await streamed(heard(after_tenths))
+                await session.say(stream.TurnEndedEvent.with_data(stream.TurnEndedData(at_seconds=1.0, text="")))
+            await streamed(heard(12))
+        await produce(ear, duration=0.0)
+        await session.say(stream.TurnEndedEvent.with_data(stream.TurnEndedData(at_seconds=2.0, text="hello there")))
+        await _wait(lambda: bool(_speech(ear)))
+        return ear
+
+    ear = asyncio.run(run())
+
+    (speech,) = _speech(ear)
+    assert speech.content == "hello there"
+    assert len(speech.voices) == int(made)
+    held = store.prune("voice", unseen_before=now + datetime.timedelta(days=1), max_ids=16)
+    assert held == int(made)
+    assert listening.recognition.ECHO_SECONDS == 1.0
+
+
+def test_a_voice_already_known_heard_in_the_echo_window_is_still_named() -> None:
+    now = datetime.datetime.now(datetime.UTC)
+    store = identification.InProcessStore(max_ids=16)
+    _ = store.enroll("voice", "known-a", identification.Print(vector=(0.6, 0.8), model="m"), False, _POLICY, at=now)
+
+    async def run() -> StreamingListening:
+        sessions = Sessions()
+        classifier = FixedVoiceClassifier(voice.identification.VoiceEmbedding(embedding=(0.6, 0.8), model="m"))
+        ear = await _ear(sessions, voice_classifier=classifier, registry=_registry(store))
+        await produce(ear)
+        await arrives(ear, heard(12))
+        await _wait(lambda: len(sessions.made) == 1 and len(sessions.made[0].audio()) == 1)
+        await produce(ear, duration=0.0)
+        await sessions.made[0].say(
+            stream.TurnEndedEvent.with_data(stream.TurnEndedData(at_seconds=1.2, text="hello there"))
+        )
+        await _wait(lambda: bool(_speech(ear)))
+        return ear
+
+    ear = asyncio.run(run())
+
+    (speech,) = _speech(ear)
+    (named,) = speech.voices
+    assert (named.recognition.id, named.recognition.recognized) == ("known-a", True)
+
+
 def test_the_bots_own_voice_enrolled_on_the_stream_path_is_never_a_source_and_its_id_is_told() -> None:
     async def run() -> tuple[StreamingListening, list[hsm.Event[typing.Any]]]:
         sessions = Sessions()
