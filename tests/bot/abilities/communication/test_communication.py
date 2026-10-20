@@ -529,6 +529,41 @@ def test_drafts_open_the_response_and_reach_speaking_part_by_part_under_its_id_u
     assert (output.text, output.spoken, output.outcome) == ("Oh, you got me.", "Oh, you got me.", "completed")
 
 
+def test_a_part_streamed_in_schema_order_reaches_speakings_first_draft_with_its_expression() -> None:
+    amused = vocal.speech.Expression(emotion="amused", intensity=0.6)
+    final = (vocal.speech.Part(words="Oh, you got me.", expression=amused),)
+    # The tool call as a model writes it: every object's fields in the order its schema declares them.
+    arguments = json.dumps(
+        {
+            "events": [
+                {
+                    "event": communication.RespondEvent.name,
+                    "data": communication.RespondData(parts=final).model_dump(mode="json", exclude_defaults=True),
+                }
+            ]
+        }
+    )
+    parser = processing.DraftParser((communication.RespondEvent,))
+    drafts = [draft for character in arguments for draft in parser.feed(character)]
+
+    async def run() -> list[tuple[str, str, object]]:
+        ctx = Environment()
+        voice = ForwardRecordingSpeaking(Script())
+        comm = communication.Communication(active_conversation=_conversation(), speaking=voice)
+        collector = await _owned(ctx, voice, comm)
+        for draft in drafts:
+            _ = await hsm.dispatch(ctx, comm, communication.DraftEvent.with_data_and_id(draft, "op-1"))
+        _ = await hsm.dispatch(ctx, comm, _reply(final, "op-1"))
+        await _wait_until(lambda: bool(_spoken(collector)))
+        return _forwarded(voice)
+
+    forwarded = asyncio.run(run())
+    first = forwarded[0]
+    assert (first[0], first[1]) == (speaking.DraftEvent.name, "op-1")
+    assert isinstance(first[2], speaking.DraftData)
+    assert (first[2].part, first[2].offset, first[2].expression) == (0, 0, amused)
+
+
 def test_an_invalid_drafted_expression_is_forwarded_without_it_and_counted(
     tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

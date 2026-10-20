@@ -143,6 +143,12 @@ class Part(pydantic.BaseModel):
         },
     )
 
+    # Declared before the words: a model writes a part's fields in schema order, and how to say the part rides its
+    # first draft only when it is written before the words begin (D-R-38).
+    expression: Expression | None = pydantic.Field(
+        default=None,
+        description="How to say this part, written before its words; omit it to say the words naturally.",
+    )
     words: str = pydantic.Field(
         min_length=1,
         max_length=2000,
@@ -150,9 +156,6 @@ class Part(pydantic.BaseModel):
             "The words of this part, read aloud literally. Continue the reply exactly, including any space or "
             "punctuation that joins this part to the one before it."
         ),
-    )
-    expression: Expression | None = pydantic.Field(
-        default=None, description="How to say this part; omit it to say the words naturally."
     )
 
     @pydantic.field_validator("words")

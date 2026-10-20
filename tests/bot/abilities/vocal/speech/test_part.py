@@ -26,7 +26,8 @@ def test_a_part_is_words_verbatim_and_an_optional_expression_and_its_schema_has_
     schema = speech.Part.model_json_schema()
     assert "examples" not in json.dumps(schema)
     assert "Split the reply into parts only where the way you say it changes" in schema["description"]
-    assert list(schema["properties"]) == ["words", "expression"]
+    # The model writes a part's fields in schema order: how to say it comes before the words, so it rides the first draft.
+    assert tuple(schema["properties"]) == ("expression", "words")
 
 
 def test_an_expression_directs_at_least_one_cue_within_its_bounds() -> None:
