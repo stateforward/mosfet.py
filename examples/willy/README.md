@@ -95,6 +95,36 @@ opened), `64` for bad flags, `78` for a missing or unreadable secret. It writes 
 (meter scope `willy_example.room`) counts connects by outcome, messages by channel, drops by channel and closes by
 reason; the room's name, the url, the token and every sound and image never are attributes.
 
+Given a keyboard, a room's far side also opens the computer's `keyboard` channel and types each line on it key by
+key, then Enter. Nothing is focused on a room's computer, so Willy is told `computer.text.entered` with no field:
+a typed line wakes a turn of its own, and answering aloud (`communication.respond`) is offered on it.
+
+## Talk to Willy in a browser
+
+`willy_example.ui` is a room's far side in a browser tab: your microphone, your speakers, a text box and
+(optionally) your camera, all in one page. Run the bot file (see Running it), then, in a second terminal:
+
+```sh
+examples/willy/.venv/bin/python -m willy_example.ui --url ws://127.0.0.1:8765 --peer living-room \
+  --secret-file examples/willy/secrets/computer_token_secret [--port 8780] [--camera]
+```
+
+and open `http://127.0.0.1:8780/`. The page shows whether it is linked to Willy's computer. Press **Start** to
+turn on the microphone and sound (the browser asks for the microphone, and the camera with `--camera`); **Mute**
+stops sending what you say, and **Push to talk** sends it only while you hold the button or the space bar. Type a
+line and press Enter to type it on the room's computer. Willy's voice plays in the page, in order and without
+gaps, and the log shows each line you typed and each time Willy spoke, with when.
+
+`--peer` is the room you are in, one of `WILLY_ROOMS`; a room's computer takes one far side at a time, so use a
+room no other far side is connected as. The page is served on `127.0.0.1` only, and only a page served by the
+bridge may open its socket. Opening the page in a second tab takes over from the first. The browser cancels the
+echo of what the page plays from what its microphone hears; with speakers rather than headphones, Willy still
+knows its own voice if some gets through. Like the room's far side, it decides nothing: it captures, carries and
+plays. Exit codes are the room's (`0` left or closed normally, `1` failed or refused, or the port is taken, `64`
+bad flags, `78` missing secret); the page's address goes to stderr and nothing to stdout. Its telemetry (meter
+scope `willy_example.ui`) counts pages by outcome, messages by kind and drops by kind and why, never the room's
+name, what was typed or any sound or image.
+
 ## Settings
 
 | Variable | Default | What it is |
@@ -166,14 +196,19 @@ The tests are hermetic. `test_build.py` covers the settings and the bot file run
 process (it becomes ready on closed endpoints and stops on SIGTERM; a bad setting exits `1` naming it).
 `test_room.py` runs the room's far side against a real
 websocket server and a real computer on a counter, with fake sound card and camera: what the microphone hears is
-put into the house, what the computer hears comes out of the speaker, a still reaches the house, and a refused
-token, nothing to connect to or a sound card that cannot open end it `1`. `test_willy.py` writes its own small
+put into the house, what the computer hears comes out of the speaker, a still reaches the house, a typed line
+reaches the computer's holder as text entered with no field, and a refused token, nothing to connect to or a
+sound card that cannot open end it `1`. `test_ui.py` runs the browser bridge the same way, with a WebSocket client
+standing in for the page: the page's sound reaches the house, what the computer plays reaches the page with its
+rate, a typed line reaches the holder, what the bridge cannot take is dropped and the page told, the page is
+served on loopback only and refuses another origin, and the exit codes hold. `test_willy.py` writes its own small
 `bot.define` of Willy's shape, with a scripted model, the real ear, mouth,
 and memory with its registries, and fakes at the provider seams only: the speech server's wire behind
 `speech_server.Transcription(connect=...)`, and the voiceprint and diarization servers behind
 `httpx.MockTransport`. They pin what Willy perceives and what it can do (a stranger is `known=false` and knowing who
 they are is offered; a voice Willy names is known by that name next turn; two voices in one turn are two sources; its own voice is
-`you`; forgetting a person erases their print), never what it chooses.
+`you`; forgetting a person erases their print; a line typed in a room wakes a turn with answering offered), never
+what it chooses.
 
 ## Live check
 
