@@ -588,7 +588,7 @@ async def _live(
             ),
             report,
         )
-        capacity = people.People(memory=store, registries=(voices,), household=settings.household)
+        capacity = people.People(memory=store, registries=(voices,))
         willy = bot.define(
             "willy",
             bot.traits(*settings.traits.traits),

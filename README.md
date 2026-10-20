@@ -153,7 +153,7 @@ OPENAI_BASE_URL=http://127.0.0.1:8080/v1 OPENAI_MODEL=... OPENAI_API_KEY=... DEC
 ```
 
 [`examples/willy`](examples/willy/README.md) is one bot for a whole house, on local models: a computer in
-each room, and the capacity to learn who people are, under the owner's household:
+each room, and the capacity to learn who people are, by itself:
 
 ```bash
 uv sync --project examples/willy

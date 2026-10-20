@@ -13,9 +13,9 @@ memory with every voice (and face) the bot has linked to them, each voice one pe
 
 Nothing here tells Willy what to do. It is given no instruction text and no reply: a voice nobody has named is a
 fact it is shown (``known`` false), and whether to ask who that is, what to call them, whom a voice belongs to and
-whom to forget are its own choices. What the owner fixes are facts and capacities: who lives in the house (the
-household file: each member's id, name, adult or child, and birth year, which Willy can never change), Willy's
-traits, and what Willy can do at all, which is what is attached here.
+whom to forget are its own choices. Nobody is listed for it either: who lives in the house, who visits, and
+whether someone is a child are things Willy learns and remembers itself. What the owner fixes are Willy's traits
+and what Willy can do at all, which is what is attached here.
 
 Every model runs locally, on the lab model server (see ``.env.example``): the language model, its embeddings,
 streaming speech to text, speech, voice design, voiceprints, diarization and tone.
@@ -23,12 +23,11 @@ streaming speech to text, speech, voice design, voiceprints, diarization and ton
 
 import collections.abc
 import datetime
-import json
 import pathlib
 import typing
 
 import pydantic
-from mosfet.abilities import embedding, identification, memory, persona, vocal
+from mosfet.abilities import embedding, identification, persona, vocal
 from mosfet.environment import space
 
 DEFAULT_TRAITS: typing.Final = persona.Traits(traits=("warm", "patient", "curious", "honest"))
@@ -39,8 +38,6 @@ ROOM_SPACING_M: typing.Final = 10.0
 """How far apart, in metres along one line, the rooms are placed, in the order the owner lists them."""
 MAX_ROOMS: typing.Final = 16
 """Most rooms one Willy serves."""
-MAX_HOUSEHOLD_FILE_BYTES: typing.Final = 64 * 1024
-"""The largest household file read; a household is a short list."""
 
 LANGUAGES: typing.Final[tuple[vocal.speech.Locale, ...]] = ("en",)
 """The languages Willy speaks, and the lab's speech engine renders."""
@@ -110,8 +107,7 @@ class Settings(pydantic.BaseModel):
 
     Each field is read from the variable its alias names; a variable set to the empty string is unset. Every
     address is required: where the owner's model server is has no safe default. A value is never shown in an
-    error: the error names the variable and what is wrong with it. ``WILLY_HOUSEHOLD_FILE`` names a JSON file
-    (a list of ``memory.Member``), which is read here, at the process boundary, when the settings are.
+    error: the error names the variable and what is wrong with it.
     """
 
     model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
@@ -239,12 +235,6 @@ class Settings(pydantic.BaseModel):
         description="The owner's traits for Willy, comma separated.",
         examples=["warm,patient,curious,honest"],
     )
-    household: tuple[memory.Member, ...] = pydantic.Field(
-        default=(),
-        alias="WILLY_HOUSEHOLD_FILE",
-        description="A JSON file listing who lives in the house; unset, nobody is declared and Willy learns everyone.",
-        examples=["./household.json"],
-    )
 
     @pydantic.model_validator(mode="before")
     @classmethod
@@ -282,25 +272,6 @@ class Settings(pydantic.BaseModel):
             raise ValueError("must name each room once")
         return tuple(rooms)
 
-    @pydantic.field_validator("household", mode="before")
-    @classmethod
-    def _read_household(cls, value: object) -> object:
-        """Read the household file the variable names: JSON, at most ``MAX_HOUSEHOLD_FILE_BYTES`` (file I/O)."""
-
-        if not isinstance(value, str):
-            return value
-        try:
-            with pathlib.Path(value).open("rb") as file:
-                content = file.read(MAX_HOUSEHOLD_FILE_BYTES + 1)
-        except OSError as error:
-            raise ValueError(f"cannot be read ({error.strerror or type(error).__name__})") from None
-        if len(content) > MAX_HOUSEHOLD_FILE_BYTES:
-            raise ValueError(f"is larger than {MAX_HOUSEHOLD_FILE_BYTES} bytes")
-        try:
-            return typing.cast(object, json.loads(content))
-        except ValueError:
-            raise ValueError('is not JSON: it must be a list of members, such as [{"id": "ada", ...}]') from None
-
     @pydantic.model_validator(mode="after")
     def _see_with_models(self) -> typing.Self:
         if self.camera and self.face_models is None:
@@ -316,7 +287,6 @@ __all__ = [
     "EXPRESSIVENESS",
     "FACE_POLICY",
     "LANGUAGES",
-    "MAX_HOUSEHOLD_FILE_BYTES",
     "MAX_ROOMS",
     "MAX_VOICE_IDS",
     "ROOM_SPACING_M",

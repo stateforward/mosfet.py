@@ -22,9 +22,9 @@ examples/builder_bot/.venv/bin/builder-terminal --secret-file examples/builder_b
 shown, and whom a voice belongs to, what to call someone and whether to ask are its own choices. Its bot file,
 `willy_example/__main__.py`, has one `bot.define`: a `computer.Computer` per room, each set on an
 `environment.Object` and served by one `websocket.Server`, an ear and a mouth on the lab's streaming speech
-server, a voice it is given when it is born, and `people.People` under the owner's household file. Every model
-runs on the local lab server. See [`willy/README.md`](willy/README.md) for the settings, the household and where
-safety sits:
+server, a voice it is given when it is born, and `people.People`. Nobody lists the household for it: it learns
+who everyone is itself. Every model runs on the local lab server. See [`willy/README.md`](willy/README.md) for
+the settings and where safety sits:
 
 ```bash
 uv sync --project examples/willy

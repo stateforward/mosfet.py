@@ -36,7 +36,7 @@ with one `bot.define` that constructs every part inline, and runs it with `bot.r
   EmbeddingGemma 2 vectors.
 - **Name.** `identity.Identity`: Willy is born nameless and may take a name when someone gives it one.
 - **People.** `people.People`, the capacity to link a voice to a person, name a person, unlink a voice and
-  forget a person, under the owner's household.
+  forget a person. Nobody is listed for Willy: it learns who everyone is itself.
 - **Eye** (`WILLY_CAMERA=1`). `seeing.Seeing` over the rooms' cameras, with the OpenCV Zoo's YuNet and SFace
   into a face registry that people also links and forgets.
 
@@ -48,7 +48,6 @@ whom to answer.
 ```sh
 uv sync --project examples/willy
 cp examples/willy/.env.example examples/willy/.env          # the lab's addresses; edit the rooms
-cp examples/willy/household.example.json examples/willy/household.json   # optional: who lives here
 python -c "import secrets; print(secrets.token_urlsafe(32))" > examples/willy/secrets/computer_token_secret
 set -a; . examples/willy/.env; set +a
 examples/willy/.venv/bin/python -m willy_example --secrets-dir examples/willy/secrets --ready-file /tmp/willy-ready
@@ -57,8 +56,8 @@ examples/willy/.venv/bin/python -m willy_example --secrets-dir examples/willy/se
 Willy keeps its memory and every voiceprint in one SQLite file, `<data dir>/memory.sqlite3` (`--data-dir` or
 `MOSFET_DATA_DIR`). The bot file opens nothing: the file is opened when Willy starts, inside the data dir
 `bot.run` has created private (`0700`), and one that cannot be opened fails Willy's start there. The process options, exit codes and stop bound are `bot.run`'s
-([`docs/runtime.md`](../../docs/runtime.md)). A missing or malformed setting or secret, or an unreadable or
-malformed household file, ends the process with exit `1`, naming it, before anything starts.
+([`docs/runtime.md`](../../docs/runtime.md)). A missing or malformed setting or secret ends the process with exit
+`1`, naming it, before anything starts.
 
 The data dir is also how Willy knows its voice. A new or wiped data dir forgets the id of the voice Willy
 designed, so its next start designs one more voice on the shared engine and speaks in that one; the earlier
@@ -106,7 +105,6 @@ reason; the room's name, the url, the token and every sound and image never are 
 | `WILLY_ROOMS` | `living-room:shelf` | each room and what its computer sits on, `room:object,...`; rooms are placed 10 m apart in the order given |
 | `WILLY_CAMERA`, `WILLY_FACE_MODELS` | `0`, unset | `1` to see; the directory holding `face_detection_yunet_2023mar.onnx` and `face_recognition_sface_2021dec.onnx` |
 | `WILLY_TRAITS` | `warm,patient,curious,honest` | the owner's traits for Willy, comma separated |
-| `WILLY_HOUSEHOLD_FILE` | unset | a JSON list of who lives in the house; unset, nobody is declared and Willy learns everyone |
 | `DECISION_BASE_URL` | required | the decision server Willy's intuition decides on, which speaks the decisions wire format (anygame's decide, `http://127.0.0.1:8102` in `.env.example`) |
 | `DECISION_MAX_CONTEXT_TOKENS` | unset | the decision model's context in tokens (`2048` for decide in `.env.example`); each decision request is fitted to it by cutting the turn's context, never its stimuli |
 
@@ -119,25 +117,17 @@ which every room's far side signs its token with, `openai_api_key`, a placeholde
 servers (`OPENAI_API_KEY=local` in `.env` does as well), and, optionally, `decision_api_key`, the decision
 server's key. The local decide takes no key, and without the secret Willy sends it none.
 
-## The household, and where safety sits
+## Who lives here, and where safety sits
 
-The household file lists who lives in the house, each a `memory.Member`:
+Nobody lists the household for Willy. Who lives in the house, who is visiting, what each of them is called and
+whether someone is a child are things Willy learns from the people themselves and remembers, the same way it
+learns everything else: a voice nobody has named is a fact it is shown, and what it makes of it is its own.
 
-```json
-[{"id": "gabe", "name": "Gabe", "role": "adult"}, {"id": "ada", "name": "Ada", "role": "child", "born": 2018}]
-```
-
-These are the owner's facts, and Willy cannot change them: no tool carries a role or a birth year, and memory
-refuses to rename, unlink a declared voice of, or forget a declared person (`declared`). Willy sees the facts on
-every turn that involves the person. Removing a member from the file undeclares them on the next start; Willy
-may then forget them.
-
-Kids are present, so it matters where the line is. The owner supplies facts (who lives here, adult or child, a
-birth year) and capacities (what is attached here: the rooms' speakers and microphones, memory and people; there
-is no web, purchasing or messaging). Code may refuse a capacity and may expose a fact. Code never decides a reply,
-filters what Willy says, inserts a warning or treats a child's turn differently: what to say to anyone, and how,
-is Willy's. Every link records whether the bot or the owner made it, and when, so the owner can audit and correct
-it.
+Kids are present, so it matters where the line is. The owner supplies capacities (what is attached here: the
+rooms' speakers and microphones, memory and people; there is no web, purchasing or messaging) and Willy's traits.
+Code may refuse a capacity and may expose a fact Willy has learned. Code never decides a reply, filters what Willy
+says, inserts a warning or treats a child's turn differently: what to say to anyone, and how, is Willy's. Every
+link records when Willy made it, so the owner can audit it.
 
 ## Biometric privacy
 
@@ -148,7 +138,7 @@ recording of anyone's voice or image: a print is logged as `<biometric:Print>`, 
 their kind and length only (`<media:audio:32000 bytes>`). It does write text: transcripts of what anyone said,
 prompts and model output reach `otel-logs.jsonl`, so leave it off unless you are debugging. Privacy wins over
 debugging detail. A print nobody
-is known by is pruned 30 days after it was last heard (at most 1000 are kept); a print of someone named or declared is
+is known by is pruned 30 days after it was last heard (at most 1000 are kept); a print of someone named is
 kept, and one linked to a person nobody has named is still pruned.
 Forgetting a person erases their prints with them. A voice heard over Willy's own (an overlap, while it is
 speaking) is only matched to a voice it already knows: that audio is Willy's voice too, so no new voice is made
@@ -167,7 +157,7 @@ uv sync --project examples/willy
 examples/willy/.venv/bin/python -m pytest -m "not live" -q examples/willy/tests
 ```
 
-The tests are hermetic. `test_build.py` covers the settings, the household file and the bot file run as a child
+The tests are hermetic. `test_build.py` covers the settings and the bot file run as a child
 process (it becomes ready on closed endpoints and stops on SIGTERM; a bad setting exits `1` naming it).
 `test_room.py` runs the room's far side against a real
 websocket server and a real computer on a counter, with fake sound card and camera: what the microphone hears is
@@ -177,7 +167,7 @@ token, nothing to connect to or a sound card that cannot open end it `1`. `test_
 memory and people, and fakes at the provider seams only: the speech server's wire behind
 `speech_server.Transcription(connect=...)`, and the voiceprint and diarization servers behind
 `httpx.MockTransport`. They pin what Willy perceives and what it can do (a stranger is `known=false` and linking
-is offered; a link makes a declared child's voice hers; two voices in one turn are two sources; its own voice is
+is offered; a voice Willy names is known by that name next turn; two voices in one turn are two sources; its own voice is
 `you`; forgetting a person erases their print), never what it chooses.
 
 ## Live check

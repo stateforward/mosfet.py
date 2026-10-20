@@ -51,7 +51,6 @@ _PRINTS = {
     _WILLY: (0.0, 0.0, 1.0),
 }
 _HEARD = conversation.OutputEvent.name
-_ADA_MEMBER = memory.Member(id="ada", name="Ada", role=memory.Role.CHILD, born=2018)
 
 
 def _pcm(voice: int, seconds: float) -> bytes:
@@ -247,7 +246,6 @@ def _offered(call: processing.InputData) -> frozenset[str]:
 @contextlib.asynccontextmanager
 async def willy(
     *choices: testing.Choice,
-    household: tuple[memory.Member, ...] = (),
     heard_before: tuple[tuple[str, int], ...] = (),
     intuition: testing.Decider | None = None,
 ) -> collections.abc.AsyncGenerator[House]:
@@ -287,7 +285,7 @@ async def willy(
         talk = conversation.Conversation()
         mouth = Mouth()
         voice = speaking.Speaking(encoder=mouth, speaker=audio.Speaker(), listening=(hearing,), conversation=(talk,))
-        capacity = people.People(memory=store, registries=(voices,), household=household)
+        capacity = people.People(memory=store, registries=(voices,))
         defined = bot.define(
             "willy",
             bot.traits(*willy_example.DEFAULT_TRAITS.traits),
@@ -379,20 +377,20 @@ def test_a_strangers_voice_reaches_willy_unknown_and_knowing_them_is_offered() -
 
     (stranger,) = _sources(turn)
     assert stranger.ref.startswith("voice:")
-    # The typed unknown fact: a voice nobody has named or declared. What to do about it is Willy's.
+    # The typed unknown fact: a voice nobody has named. What to do about it is Willy's.
     assert stranger.known is False
     assert _person(turn, stranger.person).name is None
     assert {people.LinkEvent.name, people.NameEvent.name, people.ForgetEvent.name} <= _offered(turn)
     assert _recalled(turn).you.id == memory.SELF
 
 
-def test_a_voice_willy_links_to_a_declared_child_is_known_as_her_next_turn() -> None:
-    link = testing.Choice(
-        stimulus=_HEARD, event=people.LinkEvent.name, data={"ref": "voice:ada-voice", "person": "ada"}
-    )
+def test_a_voice_willy_names_is_known_by_that_name_next_turn() -> None:
+    """Nobody lists the household: Willy learns who a voice is, and the next turn shows it what it learned."""
+
+    link = testing.Choice(stimulus=_HEARD, event=people.LinkEvent.name, data={"ref": "voice:ada-voice", "name": "Ada"})
 
     async def run() -> tuple[processing.InputData, processing.InputData]:
-        async with willy(link, household=(_ADA_MEMBER,), heard_before=(("ada-voice", _ADA),)) as house:
+        async with willy(link, heard_before=(("ada-voice", _ADA),)) as house:
             await house.say(_ADA)
             _ = await house.turns(1)
             _ = await house.turns(1, people.ChangedEvent.name)
@@ -405,9 +403,9 @@ def test_a_voice_willy_links_to_a_declared_child_is_known_as_her_next_turn() -> 
     (before,) = _sources(first)
     assert (before.ref, before.known) == ("voice:ada-voice", False)
     (after,) = _sources(second)
-    assert (after.ref, after.person, after.known) == ("voice:ada-voice", "ada", True)
-    ada = _person(second, "ada")
-    assert (ada.name, ada.role, ada.born, ada.declared) == ("Ada", memory.Role.CHILD, 2018, True)
+    assert (after.ref, after.known) == ("voice:ada-voice", True)
+    ada = _person(second, after.person)
+    assert ada.name == "Ada"
     assert "voice:ada-voice" in ada.refs
 
 

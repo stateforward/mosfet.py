@@ -6,7 +6,6 @@ the README documents. Every endpoint is a closed local port: nothing reaches the
 and its birth (which asks the model for a voice) fails and waits, as it would with the lab down.
 """
 
-import json
 import os
 import pathlib
 import signal
@@ -41,20 +40,10 @@ _REQUIRED = {
 _SECRETS = {"OPENAI_API_KEY": "key-5d1a", "DECISION_API_KEY": "key-9b07", "COMPUTER_TOKEN_SECRET": "secret-8e3f"}
 # A local decision server takes no key, so the bot file needs no decision_api_key for it.
 _KEYLESS = {name: secret for name, secret in _SECRETS.items() if name != "DECISION_API_KEY"}
-_HOUSEHOLD = [
-    {"id": "gabe", "name": "Gabe", "role": "adult"},
-    {"id": "ada", "name": "Ada", "role": "child", "born": 2018},
-]
 # Starting the child imports mosfet and the providers before the bot file runs; that is not under test.
 _RUN_BOUND = 60.0
 # Stop grace (8 s default) plus the 1.5 s bounded process exit and scheduling slack.
 _STOP_BOUND = 10.5
-
-
-def _household(tmp_path: pathlib.Path, content: str) -> str:
-    path = tmp_path / "household.json"
-    _ = path.write_text(content, encoding="utf-8")
-    return str(path)
 
 
 def test_the_required_settings_alone_take_every_default() -> None:
@@ -68,11 +57,10 @@ def test_the_required_settings_alone_take_every_default() -> None:
     )
     assert (settings.host, settings.port, settings.camera, settings.face_models) == ("127.0.0.1", 8765, False, None)
     assert (settings.decision_base_url, settings.decision_max_context_tokens) == (f"http://{_CLOSED}", None)
-    # One room, its computer on a shelf; nobody is declared, so Willy learns everyone.
+    # One room, its computer on a shelf.
     assert settings.rooms == (
         willy_example.Room(id="living-room", on="shelf", placement=space.Placement(position=space.Position(0.0, 0.0))),
     )
-    assert settings.household == ()
     assert (
         settings.traits
         == willy_example.DEFAULT_TRAITS
@@ -90,7 +78,6 @@ def test_every_owner_setting_has_a_working_value(tmp_path: pathlib.Path) -> None
             "WILLY_CAMERA": "1",
             "WILLY_FACE_MODELS": str(tmp_path),
             "WILLY_TRAITS": "patient, exact",
-            "WILLY_HOUSEHOLD_FILE": _household(tmp_path, json.dumps(_HOUSEHOLD)),
             "DECISION_MAX_CONTEXT_TOKENS": "2048",
         }
     )
@@ -104,18 +91,26 @@ def test_every_owner_setting_has_a_working_value(tmp_path: pathlib.Path) -> None
     ]
     assert all(room.placement.threshold_db is None for room in settings.rooms)
     assert settings.traits == persona.Traits(traits=("patient", "exact"))
-    assert settings.household == (
-        memory.Member(id="gabe", name="Gabe", role=memory.Role.ADULT),
-        memory.Member(id="ada", name="Ada", role=memory.Role.CHILD, born=2018),
-    )
+
+
+def test_the_owner_lists_nobody_willy_learns_who_people_are_itself() -> None:
+    """R-11: there is no household to declare; who lives here is something Willy learns and remembers."""
+
+    assert not {name for name in willy_example.Settings.model_fields if "household" in name}
+    assert not {name for name in willy_example.__all__ if "HOUSEHOLD" in name}
+    assert not (_PROJECT / "household.example.json").exists()
+    # An old household variable names nothing Willy reads.
+    assert willy_example.Settings.model_validate(
+        {**_REQUIRED, "WILLY_HOUSEHOLD_FILE": "./household.json"}
+    ) == willy_example.Settings.model_validate(_REQUIRED)
 
 
 def test_an_empty_variable_is_unset() -> None:
     settings = willy_example.Settings.model_validate(
-        {**_REQUIRED, "WILLY_ROOMS": "", "WILLY_PORT": "", "WILLY_TRAITS": "", "WILLY_HOUSEHOLD_FILE": ""}
+        {**_REQUIRED, "WILLY_ROOMS": "", "WILLY_PORT": "", "WILLY_TRAITS": ""}
     )
 
-    assert (settings.port, settings.traits, settings.household) == (8765, willy_example.DEFAULT_TRAITS, ())
+    assert (settings.port, settings.traits) == (8765, willy_example.DEFAULT_TRAITS)
     assert [room.id for room in settings.rooms] == ["living-room"]
 
 
@@ -163,29 +158,6 @@ def test_seeing_needs_the_face_models() -> None:
     assert "WILLY_FACE_MODELS" in _refused({**_REQUIRED, "WILLY_CAMERA": "1"})
 
 
-@pytest.mark.parametrize(
-    "content",
-    [
-        "not json",
-        json.dumps({"id": "ada", "name": "Ada"}),
-        json.dumps([{"id": "ada", "name": "Ada", "role": "boss"}]),
-        json.dumps([{"id": "self", "name": "Me"}]),
-        json.dumps([{"id": "ada", "name": "Ada", "age": 8}]),
-    ],
-)
-def test_a_bad_household_file_is_refused_and_named_without_its_content(tmp_path: pathlib.Path, content: str) -> None:
-    message = _refused({**_REQUIRED, "WILLY_HOUSEHOLD_FILE": _household(tmp_path, content)})
-
-    assert "WILLY_HOUSEHOLD_FILE" in message
-    assert "boss" not in message and "Me" not in message
-
-
-def test_a_missing_or_oversized_household_file_is_refused(tmp_path: pathlib.Path) -> None:
-    assert "cannot be read" in _refused({**_REQUIRED, "WILLY_HOUSEHOLD_FILE": str(tmp_path / "absent.json")})
-    oversized = " " * (willy_example.MAX_HOUSEHOLD_FILE_BYTES + 1)
-    assert "larger than" in _refused({**_REQUIRED, "WILLY_HOUSEHOLD_FILE": _household(tmp_path, oversized)})
-
-
 _PROJECT = pathlib.Path(__file__).resolve().parents[1]
 
 
@@ -212,17 +184,6 @@ def test_the_env_example_is_the_lab_and_every_setting_in_it_is_valid() -> None:
     assert (settings.decision_base_url, settings.decision_max_context_tokens) == ("http://127.0.0.1:8102", 2048)
     secrets = {"COMPUTER_TOKEN_SECRET", "OPENAI_API_KEY_FILE", "DECISION_API_KEY", "DECISION_API_KEY_FILE"}
     assert not secrets & set(given)
-
-
-def test_the_household_example_is_a_household() -> None:
-    settings = willy_example.Settings.model_validate(
-        {**_REQUIRED, "WILLY_HOUSEHOLD_FILE": str(_PROJECT / "household.example.json")}
-    )
-
-    assert settings.household == (
-        memory.Member(id="gabe", name="Gabe", role=memory.Role.ADULT),
-        memory.Member(id="ada", name="Ada", role=memory.Role.CHILD, born=2018),
-    )
 
 
 def _environ(**given: str) -> dict[str, str]:
@@ -272,7 +233,6 @@ def test_python_m_defines_willy_and_serves_the_house_until_sigterm(
             **decider,
             WILLY_PORT=str(_free_port()),
             WILLY_ROOMS="kitchen:counter,den:shelf",
-            WILLY_HOUSEHOLD_FILE=_household(tmp_path, json.dumps(_HOUSEHOLD)),
         ),
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -325,7 +285,6 @@ def test_python_m_opens_its_database_only_once_willy_starts(tmp_path: pathlib.Pa
             **_REQUIRED,
             **_SECRETS,
             WILLY_PORT=str(_free_port()),
-            WILLY_HOUSEHOLD_FILE=_household(tmp_path, json.dumps(_HOUSEHOLD)),
         ),
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -352,14 +311,13 @@ def test_python_m_opens_its_database_only_once_willy_starts(tmp_path: pathlib.Pa
     ("given", "named"),
     [
         ({"WILLY_DIAR_URL": ""}, b"WILLY_DIAR_URL"),
-        ({"WILLY_HOUSEHOLD_FILE": "{household}"}, b"WILLY_HOUSEHOLD_FILE"),
+        ({"WILLY_PORT": "boss"}, b"WILLY_PORT"),
     ],
 )
 def test_python_m_names_a_bad_setting_and_exits_1_without_a_secret(
     tmp_path: pathlib.Path, given: dict[str, str], named: bytes
 ) -> None:
-    household = _household(tmp_path, json.dumps([{"id": "ada", "name": "Ada", "role": "boss"}]))
-    environ = {**_REQUIRED, **_SECRETS, **{name: value.format(household=household) for name, value in given.items()}}
+    environ = {**_REQUIRED, **_SECRETS, **given}
     finished = subprocess.run(
         [sys.executable, "-m", "willy_example", "--data-dir", str(tmp_path / "data")],
         cwd=tmp_path,
