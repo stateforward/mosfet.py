@@ -34,7 +34,7 @@ if typing.TYPE_CHECKING:
     from .reasoning import Reasoning
     from .reflection import Reflection
     from .routines import Routines
-    from .types import EventData, IgnoreData, IgnoreEvent, is_ignore_event, is_output
+    from .types import EventData, IgnoreData, IgnoreEvent, RecalledData, is_ignore_event, is_output
 
 _LAZY_EXPORT_MODULES = {
     "InputEvent": ".cognition",
@@ -61,6 +61,7 @@ _LAZY_EXPORT_MODULES = {
     "EventData": ".types",
     "IgnoreData": ".types",
     "IgnoreEvent": ".types",
+    "RecalledData": ".types",
     "is_ignore_event": ".types",
     "is_output": ".types",
 }
@@ -90,6 +91,7 @@ __all__ = [
     "EventData",
     "IgnoreData",
     "IgnoreEvent",
+    "RecalledData",
     "is_ignore_event",
     "is_output",
     "autonomy",

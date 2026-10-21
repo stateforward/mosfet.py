@@ -5,6 +5,7 @@ from .. import processing
 from .. import vocal
 from ..language import text
 
+import asyncio
 import dataclasses
 import datetime
 import logging
@@ -42,6 +43,7 @@ from .types import OUTPUT_SCHEMA_CONTRACT, EventData, OutputData, is_output
 # Not a metric/span attribute; not stored on the cognition instance (HSM-COMPLETION-001).
 _AUTONOMY_ID_SUFFIX = ":autonomy"
 _ASSOCIATE_ID_SUFFIX = ":associate"
+_RECENT_ID_SUFFIX = ":recent"
 _INTUITION_ID_SUFFIX = ":intuition"
 _REASONING_ID_SUFFIX = ":reasoning"
 _REFLECTION_ID_SUFFIX = ":reflection"
@@ -403,6 +405,12 @@ class Cognition(ability.Ability[InputData, OutputData]):
     their frames' ``recalled`` context) and to reflection. An association that fails or times out
     leaves the turn without associations; it never fails the turn.
 
+    With ``stm_memory`` (the body's short-term register, injected and reached only by message), a
+    turn autonomy leaves unhandled also asks it, in parallel with associating, for the recent turns:
+    what was heard and said just before, oldest first, without the turn's own stimulus. They ride the
+    turn to intuition and reasoning as ``recalled`` (``types.RecalledData``), ahead of what memory
+    associates. A read that fails or times out leaves the turn without them; it never fails the turn.
+
     Every frame Cognition builds also holds ``associative`` (under ``memory``), so a stage whose
     effort ceiling admits it (Reasoning, not Intuition) is offered ``bot.ability.memory.recall``,
     ``bot.ability.memory.know`` and ``bot.ability.memory.forget``. What a recall brings to mind
@@ -448,6 +456,8 @@ class Cognition(ability.Ability[InputData, OutputData]):
     _routines: routines.Routines | None
     _memory: memory.Memory | None
     _associative: memory.Associative | None
+    # The body's short-term register, injected: a peer reached only by message, never attached here.
+    _stm_memory: memory.StmMemory | None
     _consolidation: memory.Consolidation | None
     _persona: persona.Persona | None
     # What persona last told Cognition, by event: durable self-knowledge, not turn scratch.
@@ -510,11 +520,15 @@ class Cognition(ability.Ability[InputData, OutputData]):
         instance: "Cognition",
         cognition_input: InputData,
         *,
-        recalled: memory.AssociationsData | None = None,
+        associations: memory.AssociationsData | None = None,
+        recent: tuple[memory.stm.Turn, ...] = (),
         acted: types.ActedData | None = None,
     ) -> processing.InputData:
         """Deliberation's frame for the turn: offered events, the world and self blocks, then what
-        behaviors already did on its percepts (``acted``), as a fact of the turn after those blocks."""
+        behaviors already did on its percepts (``acted``), as a fact of the turn after those blocks.
+
+        What the bot has in mind beside the stimulus rides as ``recalled``: the ``recent`` turns
+        short-term memory holds, then what long-term memory ``associations`` surfaced; none when neither."""
 
         associative = instance._associative
         told = instance._persona_told
@@ -535,7 +549,9 @@ class Cognition(ability.Ability[InputData, OutputData]):
             frame = frame.model_copy(
                 update={"instructions": "\n".join(block for block in (frame.instructions, fact) if block)}
             )
-        return frame if recalled is None else frame.model_copy(update={"recalled": recalled})
+        if not recent and associations is None:
+            return frame
+        return frame.model_copy(update={"recalled": types.RecalledData(recent=recent, associations=associations)})
 
     @staticmethod
     def _turn(
@@ -544,6 +560,7 @@ class Cognition(ability.Ability[InputData, OutputData]):
         operation_id: str,
         *,
         associations: memory.AssociationsData | None = None,
+        recent: tuple[memory.stm.Turn, ...] = (),
         acted: types.ActedData | None = None,
     ) -> types.TurnData:
         operation = processing.active_operation(instance, operation_id)
@@ -553,6 +570,7 @@ class Cognition(ability.Ability[InputData, OutputData]):
             operation_id=operation_id,
             generation=hsm.id(operation),
             associations=associations,
+            recent=recent,
             acted=acted,
         )
 
@@ -760,9 +778,10 @@ class Cognition(ability.Ability[InputData, OutputData]):
         cognition_input: InputData,
         operation_id: str | None,
         associations: memory.AssociationsData | None,
+        recent: tuple[memory.stm.Turn, ...],
         acted: types.ActedData | None,
     ) -> None:
-        """Build intuition's frame (with what memory surfaced as ``recalled``, and what behaviors
+        """Build intuition's frame (with the recent turns and what memory surfaced as ``recalled``, and what behaviors
         already did as ``acted``) and hop to it.
 
         A turn that perceives a handed-back intuition failure (its stimulus, or any percept of its
@@ -790,7 +809,8 @@ class Cognition(ability.Ability[InputData, OutputData]):
                 frame = Cognition._build_processing_input(
                     instance,
                     cognition_input,
-                    recalled=associations,
+                    associations=associations,
+                    recent=recent,
                     acted=acted,
                 )
             except Exception:
@@ -799,7 +819,7 @@ class Cognition(ability.Ability[InputData, OutputData]):
                 _HANDED_BACK.add(1, {"stage": "intuition", "kind": "failed", "outcome": "cascaded"})
         if processing.active_operation(instance, base) is None:
             _ = await processing.start_operation(instance, base)
-        turn = Cognition._turn(instance, cognition_input, base, associations=associations, acted=acted)
+        turn = Cognition._turn(instance, cognition_input, base, associations=associations, recent=recent, acted=acted)
         if frame is None:
             _ = hsm.dispatch(
                 ctx,
@@ -992,6 +1012,7 @@ class Cognition(ability.Ability[InputData, OutputData]):
                     cognition_input=data.turn.input,
                     operation_id=data.turn.operation_id,
                     associations=data.turn.associations,
+                    recent=data.turn.recent,
                     acted=data.turn.acted,
                 )
                 return
@@ -1007,6 +1028,7 @@ class Cognition(ability.Ability[InputData, OutputData]):
                     cognition_input=data.turn.input,
                     operation_id=data.turn.operation_id,
                     associations=None,
+                    recent=(),
                     acted=data.turn.acted,
                 )
                 return
@@ -1019,6 +1041,7 @@ class Cognition(ability.Ability[InputData, OutputData]):
                 cognition_input=data,
                 operation_id=event.id or None,
                 associations=None,
+                recent=(),
                 acted=None,
             )
 
@@ -1028,7 +1051,13 @@ class Cognition(ability.Ability[InputData, OutputData]):
         instance: "Cognition",
         event: hsm.Event[typing.Any],
     ) -> None:
-        """Ask Associative, by message, what memory associates with the stimulus; never fails the turn."""
+        """Ask, by message and at once, what memory associates with the stimulus and what the recent turns were.
+
+        Associative (long-term memory) and the short-term register answer in parallel, each within the
+        step timeout. Either one absent, failing or late leaves the turn without what it would have
+        given; neither fails the turn. The recent turns leave out every turn whose id is this turn's
+        stimulus (or one of the percepts of its ``bot.perceived`` batch), which the turn already shows.
+        """
 
         with span.operation(
             "bot.cognition.stage",
@@ -1047,39 +1076,81 @@ class Cognition(ability.Ability[InputData, OutputData]):
                 assert is_input(data)
                 cognition_input = data
                 operation_id = event.id or uuid.uuid4().hex
-            associative = instance._associative
-            assert associative is not None
             if processing.active_operation(instance, operation_id) is None:
                 _ = await processing.start_operation(instance, operation_id)
-            associations: memory.AssociationsData | None = None
             child_timeout = instance._child_operation_timeout
-            try:
-                terminal = await ability.run_terminal_operation(
-                    ctx,
-                    child=associative,
-                    request=dataclasses.replace(
-                        memory.AssociateEvent.with_data_and_id(
-                            memory.CueData(
-                                cue=projection.memory_content(
-                                    cognition_input.stimulus,
-                                    capacity=_MEMORY_IMAGES,
-                                    budget_bytes=memory.MAX_EPISODE_TEXT_BYTES,
+            timeout = child_timeout if child_timeout is not None else types.STEP_TIMEOUT
+            metadata = _public_metadata(dict(event.metadata))
+
+            async def associate() -> memory.AssociationsData | None:
+                associative = instance._associative
+                if associative is None:
+                    return None
+                try:
+                    terminal = await ability.run_terminal_operation(
+                        ctx,
+                        child=associative,
+                        request=dataclasses.replace(
+                            memory.AssociateEvent.with_data_and_id(
+                                memory.CueData(
+                                    cue=projection.memory_content(
+                                        cognition_input.stimulus,
+                                        capacity=_MEMORY_IMAGES,
+                                        budget_bytes=memory.MAX_EPISODE_TEXT_BYTES,
+                                    ),
+                                    participants=cognition_input.participants,
                                 ),
-                                participants=cognition_input.participants,
+                                f"{operation_id}{_ASSOCIATE_ID_SUFFIX}",
                             ),
-                            f"{operation_id}{_ASSOCIATE_ID_SUFFIX}",
+                            metadata=metadata,
                         ),
-                        metadata=_public_metadata(dict(event.metadata)),
-                    ),
-                    terminals=(memory.AssociatedEvent, ability.FailedEvent),
-                    timeout=child_timeout if child_timeout is not None else types.STEP_TIMEOUT,
+                        terminals=(memory.AssociatedEvent, ability.FailedEvent),
+                        timeout=timeout,
+                    )
+                except (TimeoutError, RuntimeError):
+                    return None
+                return terminal.data if isinstance(terminal.data, memory.AssociationsData) else None
+
+            async def recall_recent() -> tuple[memory.stm.Turn, ...]:
+                register = instance._stm_memory
+                if register is None:
+                    return ()
+                try:
+                    terminal = await ability.run_terminal_operation(
+                        ctx,
+                        child=register,
+                        request=dataclasses.replace(
+                            memory.stm.RecentTurnsEvent.with_data_and_id(
+                                memory.stm.RecentTurnsData(), f"{operation_id}{_RECENT_ID_SUFFIX}"
+                            ),
+                            metadata=metadata,
+                        ),
+                        terminals=(memory.stm.RecentTurnsOutputEvent, register.failed_event),
+                        timeout=timeout,
+                    )
+                except (TimeoutError, RuntimeError):
+                    return ()
+                if not isinstance(terminal.data, memory.stm.RecentTurnsOutputData):
+                    return ()
+                stimulus = cognition_input.stimulus
+                stimuli = (
+                    tuple(percept.stimulus for percept in stimulus.data.percepts)
+                    if isinstance(stimulus, hsm.Event) and isinstance(stimulus.data, mosfet.PerceivedData)
+                    else ()
                 )
-            except (TimeoutError, RuntimeError):
-                terminal = None
-            if terminal is not None and isinstance(terminal.data, memory.AssociationsData):
-                associations = terminal.data
+                # The ids this turn already shows: its stimulus's, or each percept's of its batch.
+                shown: set[str] = set()
+                for given in (stimulus, *stimuli):
+                    observed = given if isinstance(given, hsm.Event) else given.observation
+                    if observed is not None and observed.id:
+                        shown.add(observed.id)
+                return tuple(turn for turn in terminal.data.turns if turn.id not in shown)
+
+            associations, recent = await asyncio.gather(associate(), recall_recent())
             active.set_attribute("bot.cognition.associated", associations is not None)
-            turn = Cognition._turn(instance, cognition_input, operation_id, associations=associations, acted=acted)
+            turn = Cognition._turn(
+                instance, cognition_input, operation_id, associations=associations, recent=recent, acted=acted
+            )
             _ = hsm.dispatch(
                 ctx,
                 instance,
@@ -1088,7 +1159,7 @@ class Cognition(ability.Ability[InputData, OutputData]):
                     id=operation_id,
                     source=hsm.id(instance),
                     target=hsm.id(instance),
-                    metadata=_public_metadata(dict(event.metadata)),
+                    metadata=metadata,
                 ),
             )
 
@@ -1132,13 +1203,15 @@ class Cognition(ability.Ability[InputData, OutputData]):
         )
 
     @staticmethod
-    def _has_associative(
+    def _can_recall(
         ctx: hsm.Context,
         instance: "Cognition",
         event: hsm.Event[typing.Any],
     ) -> bool:
+        """Whether a turn has anything to recall beside its stimulus: long-term associations or recent turns."""
+
         del ctx, event
-        return instance._associative is not None
+        return instance._associative is not None or instance._stm_memory is not None
 
     @staticmethod
     def _acknowledge_associating_cancel(
@@ -1253,13 +1326,15 @@ class Cognition(ability.Ability[InputData, OutputData]):
                 return
             cognition_input = reached.input
             associations = reached.associations
+            recent = reached.recent
             acted = reached.acted
             base = operation_id if operation_id else uuid.uuid4().hex
             try:
                 input = Cognition._build_processing_input(
                     instance,
                     cognition_input,
-                    recalled=associations,
+                    associations=associations,
+                    recent=recent,
                     acted=acted,
                 )
             except Exception as error:
@@ -1293,7 +1368,9 @@ class Cognition(ability.Ability[InputData, OutputData]):
                     ),
                 )
                 return
-            turn = Cognition._turn(instance, cognition_input, base, associations=associations, acted=acted)
+            turn = Cognition._turn(
+                instance, cognition_input, base, associations=associations, recent=recent, acted=acted
+            )
             hop_id = f"{base}{_REASONING_ID_SUFFIX}"
             input_event = dataclasses.replace(
                 instance._reasoning.input_event.with_data_and_id(
@@ -2288,7 +2365,7 @@ class Cognition(ability.Ability[InputData, OutputData]):
             hsm.transition(
                 hsm.on(input_event),
                 hsm.guard(_has_input),
-                hsm.guard(_has_associative),
+                hsm.guard(_can_recall),
                 hsm.effect(_open_turn),
                 hsm.target("/Cognition/processing/associating"),
             ),
@@ -2359,7 +2436,7 @@ class Cognition(ability.Ability[InputData, OutputData]):
                 hsm.transition(
                     hsm.on(autonomy.OutputEvent),
                     hsm.guard(_autonomy_is_unhandled),
-                    hsm.guard(_has_associative),
+                    hsm.guard(_can_recall),
                     hsm.target("/Cognition/processing/associating"),
                 ),
                 hsm.transition(
@@ -2620,6 +2697,7 @@ class Cognition(ability.Ability[InputData, OutputData]):
         routines: routines.Routines | None = None,
         memory: memory.Memory | None = None,
         associative: memory.Associative | None = None,
+        stm_memory: memory.StmMemory | None = None,
         consolidation: memory.Consolidation | None = None,
         persona: persona.Persona | None = None,
         voice: "vocal.voice.Inception | None" = None,
@@ -2645,6 +2723,7 @@ class Cognition(ability.Ability[InputData, OutputData]):
         self._routines = routines
         self._memory = memory
         self._associative = associative
+        self._stm_memory = stm_memory
         self._consolidation = consolidation
         self._persona = persona
         self._persona_told = None

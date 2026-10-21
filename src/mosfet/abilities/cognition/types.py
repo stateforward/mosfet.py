@@ -1,6 +1,7 @@
 from .. import processing
 from .. import ability
 from .. import memory
+from ..memory import stm
 from . import input as cognition_input
 
 import collections.abc
@@ -183,6 +184,32 @@ class ActedData(pydantic.BaseModel):
     )
 
 
+class RecalledData(pydantic.BaseModel):
+    """What the bot has in mind beside a turn's stimulus: the recent conversation, then what memory associates.
+
+    ``recent`` is what short-term memory holds of the turns just before this one, oldest first, each
+    one compact line, without the turn that is this turn's own stimulus. A prompt that cannot hold
+    them all keeps the newest. ``associations`` is what long-term memory surfaced, which keeps its
+    own ranking and trimming.
+    """
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(frozen=True, extra="forbid")
+    # Chronological: a prompt that cannot hold every turn keeps the newest, so consecutive turns grow at the tail.
+    __model_facing_budgeted_fields__: typing.ClassVar[dict[str, typing.Literal["head", "tail"]]] = {"recent": "tail"}
+
+    recent: tuple[stm.Turn, ...] = pydantic.Field(
+        default=(),
+        description=(
+            "What was heard and said just before this turn, oldest first, from short-term memory; this turn's "
+            "own stimulus is never among them."
+        ),
+    )
+    associations: memory.AssociationsData | None = pydantic.Field(
+        default=None,
+        description="What long-term memory surfaced for this turn; None when nothing was associated.",
+    )
+
+
 class TurnData(pydantic.BaseModel):
     """Typed correlation and body input for one active cognition turn."""
 
@@ -215,6 +242,13 @@ class TurnData(pydantic.BaseModel):
         default=None,
         description=(
             "What memory surfaced for this turn; None when the bot has no associative memory or association failed."
+        ),
+    )
+    recent: tuple[stm.Turn, ...] = pydantic.Field(
+        default=(),
+        description=(
+            "What short-term memory holds of the turns just before this one, oldest first, without this turn's own "
+            "stimulus; empty when the bot has no short-term register or the read failed."
         ),
     )
     acted: ActedData | None = pydantic.Field(
@@ -500,6 +534,7 @@ __all__ = [
     "IgnoreEvent",
     "MAX_SELECTION_REPAIRS",
     "OutputData",
+    "RecalledData",
     "TurnData",
     "OPTIONAL_OUTPUT_SCHEMA",
     "OPTIONAL_OUTPUT_SCHEMA_CONTRACT",

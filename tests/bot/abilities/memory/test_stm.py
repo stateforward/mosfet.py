@@ -1,6 +1,9 @@
 """StmMemory: bounded, access-reinforced short-term memory of admitted stimuli, reached by message."""
 
+from mosfet import media
 from mosfet.abilities import ability
+from mosfet.abilities.cognition import event as projection
+from mosfet.abilities.language import text
 from mosfet.abilities import memory
 from mosfet.abilities.memory import stm
 
@@ -646,3 +649,27 @@ def test_recorded_turns_are_counted_by_direction_and_cut(
 
     changes = {key: value - before.get(key, 0.0) for key, value in after.items() if value - before.get(key, 0.0)}
     assert changes == {("heard", "false"): 1.0, ("said", "true"): 1.0}
+
+
+def test_a_turn_renders_for_a_model_as_one_line_of_when_which_way_who_and_words() -> None:
+    """R-20 C3: id and conversation are correlation the model never reads; cut shows only when true."""
+
+    maya = mosfet.Participant(ref="voice:maya", role=mosfet.ParticipantRole.SOURCE)
+    ada = mosfet.Participant(ref="+15555550100", role=mosfet.ParticipantRole.SOURCE)
+    at = datetime.datetime(2026, 7, 7, 21, 3, 10, 500_000, tzinfo=datetime.UTC)
+
+    def rendered(record: stm.TurnRecordData) -> str:
+        turn = stm.Turn(**record.model_dump(), at=at)
+        parts = projection.model_facing_content(turn, capacity=media.ImageCapacity())
+        return "".join(part.text for part in parts if isinstance(part, text.TextPart))
+
+    whole = stm.TurnRecordData.of(
+        id="turn-1", direction="heard", speakers=(maya, ada), words="Hi <Willy> & co.", conversation="talk-1"
+    )
+    cut = stm.TurnRecordData.of(id="turn-2", direction="said", speakers=(), words="word " * 1_000, conversation="t")
+
+    assert rendered(whole) == (
+        '<memory:turn at="21:03:10Z" direction="heard" who="voice:maya +15555550100">Hi &lt;Willy&gt; &amp; co.'
+        "</memory:turn>"
+    )
+    assert rendered(cut).startswith('<memory:turn at="21:03:10Z" direction="said" cut="true">word word')

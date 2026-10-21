@@ -304,7 +304,10 @@ def _model_element(
     Typed causal parents remain part of the runtime and canonical event data, but they are not
     rendered into the terminal-event prompt projection. Payload inheritance is still represented
     structurally, one element per model level. A ``media.Image`` or ``media.ReleasedImage``
-    renders as an image placeholder.
+    renders as an image placeholder. A payload that defines ``__model_facing_element__()`` owns a
+    compact form instead: it returns ``(attributes, text)``, which render as one element under the
+    payload's tag, its attributes and text escaped like any other value (a remembered turn renders
+    as one line this way).
     """
 
     if isinstance(model, media.Image | media.ReleasedImage):
@@ -312,6 +315,19 @@ def _model_element(
         if envelope is not None:
             _set_event_attributes(placeholder, envelope, budget)
         return placeholder
+    compact = getattr(model, "__model_facing_element__", None)
+    if callable(compact):
+        # A payload that owns a compact form gives its attributes and text; every value is escaped here.
+        attributes, content = typing.cast(tuple[collections.abc.Mapping[str, str], str | None], compact())
+        root = _element(_payload_tag(type(model)), budget)
+        for name, value in attributes.items():
+            _set_attribute(root, name, value, budget)
+        if content is not None:
+            budget.consume_scalar(content)
+            root.text = content
+        if envelope is not None:
+            _set_event_attributes(root, envelope, budget)
+        return root
     if getattr(type(model), "__model_facing_event_data__", False):
         serialized_model = (
             typing.cast(collections.abc.Mapping[str, object], serialized)

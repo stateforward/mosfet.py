@@ -822,7 +822,8 @@ def test_a_heard_turn_offers_the_bot_who_is_speaking_and_who_it_is() -> None:
 
     (frame,) = asyncio.run(run())
 
-    recalled = frame.recalled
+    assert isinstance(frame.recalled, cognition.RecalledData)
+    recalled = frame.recalled.associations
     assert isinstance(recalled, memory.AssociationsData)
     (present,) = recalled.people
     assert (present.ref, present.part, present.known) == (stranger.ref, mosfet.ParticipantRole.SOURCE, False)

@@ -368,7 +368,7 @@ def _body(
         except Exception as error:
             raise _raised(name, voice.location, "voice", error, location) from error
     try:
-        mind = _mind(declared, processor, store, nature, born, None if timeouts is None else timeouts.step)
+        mind = _mind(declared, processor, store, register, nature, born, None if timeouts is None else timeouts.step)
     except Exception as error:
         raise _raised(name, declared.location, "cognition", error, location) from error
     # A firmware of its own for every body: it starts fresh with each start of the model, and takes
@@ -427,6 +427,7 @@ def _mind(
     declared: elements.CognitionElement,
     processor: processing.Processor,
     store: memory.Memory,
+    register: memory.StmMemory | None,
     nature: persona.Traits | None,
     voice: vocal.voice.Inception | None,
     step: datetime.timedelta | None,
@@ -437,6 +438,7 @@ def _mind(
     of ``bot.traits``, which give the bot a persona. Intuition decides on ``declared.intuition``, the
     decision processor; every other faculty thinks on ``processor``. ``step`` is ``bot.timeouts(step=)``,
     the step timeout of cognition and of its reflection; ``None`` keeps cognition's own step timeout for both.
+    ``register`` is ``bot.register``, the body's sensory register: cognition reads the recent turns from it.
 
     Raises:
         TypeError: If ``declared.intuition`` is no decision processor, which ``bot.define`` reports first.
@@ -466,6 +468,7 @@ def _mind(
         )
         if declared.associative
         else None,
+        stm_memory=register,
         consolidation=memory.Consolidation(memory=store, processor=processor) if declared.consolidation else None,
         persona=self_knowledge,
         voice=voice,

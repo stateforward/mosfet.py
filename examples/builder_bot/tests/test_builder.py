@@ -391,7 +391,8 @@ def test_the_persons_earlier_line_is_recalled_through_the_present_lane(tmp_path:
     calls = asyncio.run(run())
 
     (later, *_) = (call for call in calls if typed(call) == "any update on the file")
-    assert isinstance(later.recalled, memory.AssociationsData)
-    (earlier,) = (item for item in later.recalled.items if "write a timer bot file" in item.text)
+    assert isinstance(later.recalled, cognition.RecalledData)
+    assert isinstance(later.recalled.associations, memory.AssociationsData)
+    (earlier,) = (item for item in later.recalled.associations.items if "write a timer bot file" in item.text)
     assert memory.Lane.PRESENT in earlier.lanes
     assert earlier.involves == ("person-1",)

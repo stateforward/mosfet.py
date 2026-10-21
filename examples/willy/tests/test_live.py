@@ -408,8 +408,9 @@ def _names_chosen(model: Recorded) -> list[str]:
 
 def _recalled(call: processing.InputData) -> memory.AssociationsData:
     recalled = call.recalled
-    assert isinstance(recalled, memory.AssociationsData), "the turn was given no associations"
-    return recalled
+    assert isinstance(recalled, cognition.RecalledData), "the turn was given nothing recalled"
+    assert isinstance(recalled.associations, memory.AssociationsData), "the turn was given no associations"
+    return recalled.associations
 
 
 def _others(call: processing.InputData) -> list[memory.Present]:

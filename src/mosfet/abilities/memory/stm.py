@@ -529,6 +529,22 @@ class Turn(TurnRecordData):
         examples=["2026-07-07T12:00:00.123456Z"],
     )
 
+    def __model_facing_element__(self) -> tuple[dict[str, str], str]:
+        """The turn as one line a model reads: when (UTC, to the second), which way, who, and the words.
+
+        ``who`` is each speaker's ``ref``, the same identity reference the stimulus's participants and
+        memory's people carry, so a speaker joins to the person memory knows by that ref. ``id`` and
+        ``conversation`` are correlation, not something the model reads; ``cut`` shows only when the
+        words were cut.
+        """
+
+        attributes = {"at": self.at.astimezone(datetime.UTC).strftime("%H:%M:%SZ"), "direction": self.direction}
+        if self.speakers:
+            attributes["who"] = " ".join(speaker.ref for speaker in self.speakers)
+        if self.cut:
+            attributes["cut"] = "true"
+        return attributes, self.text
+
 
 class RecentTurnsData(pydantic.BaseModel):
     """Read the most recent turns inside the recency window, oldest first."""

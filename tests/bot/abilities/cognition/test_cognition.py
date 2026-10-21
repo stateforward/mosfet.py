@@ -2,6 +2,7 @@ from mosfet import abilities
 import mosfet
 from mosfet import behavior as behavior_events
 from mosfet import event
+from mosfet import media
 from mosfet.abilities import ability as ability_module
 from mosfet.abilities import cognition
 from mosfet.abilities import communication
@@ -691,6 +692,7 @@ class RecordingCognition(cognition.Cognition):
         reflection: cognition.Reflection | None = None,
         store: memory.Memory | None = None,
         associative: memory.Associative | None = None,
+        stm_memory: memory.StmMemory | None = None,
     ) -> None:
         if intuition is None or reasoning is None:
             default_i, default_r = cognition_abilities(
@@ -710,6 +712,7 @@ class RecordingCognition(cognition.Cognition):
             reflection=reflection,
             memory=store,
             associative=associative,
+            stm_memory=stm_memory,
         )
         self.outputs = []
         self.failures = []
@@ -4227,12 +4230,14 @@ def test_cognition_associates_before_intuition_and_remembers_the_completed_turn(
 
     assert result == focus_output("phone", "reasoned focus")
     (intuition_frame,) = intuition_calls
-    surfaced = intuition_frame.recalled
+    assert isinstance(intuition_frame.recalled, cognition.RecalledData)
+    assert intuition_frame.recalled.recent == ()
+    surfaced = intuition_frame.recalled.associations
     assert isinstance(surfaced, memory.AssociationsData)
     assert [item.text for item in surfaced.items] == ["Ada asked for a call at noon."]
     assert surfaced.items[0].involves == (_ADA.ref,)
     (reasoning_frame,) = reasoning_calls
-    assert reasoning_frame.recalled == surfaced
+    assert reasoning_frame.recalled == intuition_frame.recalled
     select = reflection_calls[0].input
     assert isinstance(select, cognition.reflection.ProcessorInput)
     assert select.associations == surfaced
@@ -4280,8 +4285,9 @@ def test_cognition_remembers_what_it_did_alongside_what_it_perceived_and_recalls
     assert "the phone is ringing" in kept.text[did:]
     assert [act.event for act in kept.acts] == [mosfet.FocusDeviceEvent.name]
     _, later = intuition_calls
-    assert isinstance(later.recalled, memory.AssociationsData)
-    (recalled,) = later.recalled.items
+    assert isinstance(later.recalled, cognition.RecalledData)
+    assert isinstance(later.recalled.associations, memory.AssociationsData)
+    (recalled,) = later.recalled.associations.items
     assert recalled.text == kept.text
 
 
@@ -4307,6 +4313,77 @@ def test_an_association_that_fails_leaves_the_turn_without_associations_not_fail
     assert len(intuition_calls) == 1
     assert intuition_calls[0].recalled is None
     assert state.endswith("/idle")
+
+
+_MAYA = mosfet.Participant(ref="voice:maya", role=mosfet.ParticipantRole.SOURCE)
+_OWN = mosfet.Participant(ref="voice:willy", role=mosfet.ParticipantRole.SOURCE, own=True)
+
+
+def _heard_now(turn_id: str) -> hsm.Event[mosfet.InputEventData]:
+    """A stimulus stamped with the id its Conversation wrote its heard turn under."""
+
+    return dataclasses.replace(
+        mosfet.InputEvent.with_data(mosfet.InputEventData(target_device="phone", participants=(_MAYA,))), id=turn_id
+    )
+
+
+def test_recent_turns_reach_reasoning_oldest_first_without_the_turn_being_answered() -> None:
+    """R-20 C3: what was heard and said before this turn reaches reasoning from short-term memory.
+
+    The register's turns ride the turn beside what memory associates, render one compact line each
+    (when, which way, who by their ref, the words), oldest first, and the turn that is this turn's own
+    stimulus is left out, so the stimulus is never shown twice.
+    """
+
+    async def run() -> tuple[list[processing.InputData], list[processing.InputData]]:
+        register = memory.StmMemory()
+        intuition_processor = RecordingIntuitionProcessor(cognition.intuition.OutputData(reason="think it over"))
+        reasoning_processor = RecordingReasoningProcessor(focus_output("phone", "reasoned focus"))
+        ability = RecordingCognition(
+            intuition_processor=intuition_processor,
+            reasoning_processor=reasoning_processor,
+            stm_memory=register,
+        )
+        ctx = await start_cognition_ability_for_test(ability)
+        await start_abilities_for_test(ctx, register)
+        await wait_until(lambda: ability.state().endswith("/idle"))
+        turns: tuple[tuple[str, memory.stm.TurnDirection, mosfet.Participant, str], ...] = (
+            ("earlier", "heard", _MAYA, "Hi Willy, I'm Maya."),
+            ("reply", "said", _OWN, "Nice to meet you, Maya."),
+            ("now", "heard", _MAYA, "What did I just tell you?"),
+        )
+        for turn_id, direction, speaker, words in turns:
+            _ = await hsm.dispatch(
+                ctx,
+                register,
+                memory.stm.TurnEvent.with_data(
+                    memory.stm.TurnRecordData.of(
+                        id=turn_id, direction=direction, speakers=(speaker,), words=words, conversation="talk"
+                    )
+                ),
+            )
+        turn = (await started_cognition_input(ctx)).model_copy(
+            update={"stimulus": _heard_now("now"), "participants": (_MAYA,)}
+        )
+        _ = await dispatch_ability_for_test(ability, ctx, turn)
+        return intuition_processor.calls, reasoning_processor.calls
+
+    intuition_calls, reasoning_calls = asyncio.run(run())
+
+    (frame,) = reasoning_calls
+    recalled = frame.recalled
+    assert isinstance(recalled, cognition.RecalledData)
+    assert [(turn.id, turn.direction) for turn in recalled.recent] == [("earlier", "heard"), ("reply", "said")]
+    assert recalled.associations is None
+    assert intuition_calls[0].recalled == recalled
+    prompt = "".join(
+        part.text for part in frame.model_facing_content(media.ImageCapacity()) if isinstance(part, text.TextPart)
+    )
+    heard = prompt.index('direction="heard" who="voice:maya">Hi Willy, I\'m Maya.</memory:turn>')
+    said = prompt.index('direction="said" who="voice:willy">Nice to meet you, Maya.</memory:turn>')
+    assert heard < said
+    assert prompt.count("What did I just tell you?") == 0
+    assert 'id="earlier"' not in prompt and "conversation=" not in prompt and "cut=" not in prompt
 
 
 def test_cognition_remembers_a_failed_turn_with_its_stimulus_and_no_acts() -> None:

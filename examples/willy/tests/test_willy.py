@@ -31,7 +31,7 @@ import hsm
 import mosfet
 import willy_example
 from mosfet import bot, environment
-from mosfet.abilities import communication, identification, listening, memory, processing, speaking, vocal
+from mosfet.abilities import cognition, communication, identification, listening, memory, processing, speaking, vocal
 from mosfet.abilities.communication import conversation
 from mosfet.bot import testing
 from mosfet.devices import audio, computer
@@ -232,8 +232,9 @@ def _stimulus_id(call: processing.InputData) -> str:
 
 def _recalled(call: processing.InputData) -> memory.AssociationsData:
     recalled = call.recalled
-    assert isinstance(recalled, memory.AssociationsData)
-    return recalled
+    assert isinstance(recalled, cognition.RecalledData)
+    assert isinstance(recalled.associations, memory.AssociationsData)
+    return recalled.associations
 
 
 def _sources(call: processing.InputData) -> list[memory.Present]:
