@@ -25,7 +25,7 @@ opens and reads nothing; the model holds the very instances the file built.
 >>> greeter = bot.define(
 ...     "greeter",
 ...     bot.traits("warm", "curious"),
-...     bot.cognition(testing.Scripted(), intuition=testing.Decider()),
+...     bot.cognition(reasoning=testing.Scripted(), reflex=testing.Decider()),
 ...     bot.attach(computer.Computer(id="desk")),
 ... )
 >>> greeter.qualified_name
@@ -55,7 +55,7 @@ what each bot is made of, and never a value given to a part:
         "curious"
       ],
       "faculties": [
-        "intuition",
+        "reflex",
         "reasoning",
         "reflection"
       ],
@@ -89,13 +89,13 @@ what each bot is made of, and never a value given to a part:
 | Element | What it gives the bot |
 |---|---|
 | `bot.traits(*traits)` | The owner's fixed seed of the bot's nature: short descriptors such as `"curious"`, never instructions. With traits, the bot has a persona that it develops itself. At most one. |
-| `bot.cognition(processor, /, *, intuition, memory=None, associative=False, consolidation=False, autonomy=False, seeds=(), routines=None)` | Its mind: reasoning and reflection on `processor`, intuition on `intuition`, a `processing.DecisionProcessor` (see [Intuition decides on a decision model](#intuition-decides-on-a-decision-model)), plus each faculty switched on, all on one memory (a fresh in-memory `memory.Memory()` when none is given). `seeds` are native behaviors its autonomy runs, and need `autonomy=True`. `routines` is the wall clock routines keep time on. Exactly one. |
+| `bot.cognition(*, reasoning, intuition=None, reflex=None, reflection=None, memory=None, associative=False, consolidation=False, autonomy=False, seeds=(), routines=None)` | Its mind, in tiers a turn takes up in order: its reflex's decision layer on `reflex`, a `processing.DecisionProcessor` (see [Reflex decides on a decision model](#reflex-decides-on-a-decision-model)), intuition on `intuition` and reasoning on `reasoning`, each a `processing.Processor`, with reflection and consolidation on `reflection` (reasoning's when omitted), plus each faculty switched on, all on one memory (a fresh in-memory `memory.Memory()` when none is given). `seeds` are native behaviors its autonomy runs, and need `autonomy=True`. `routines` is the wall clock routines keep time on. Exactly one. |
 | `bot.voice(catalog, /, *, designer=None, languages=("en",), allowed=())` | The source it is given its voice from when it is born, and the voices of it the bot may be born as (see [Hearing, speaking and a voice](#hearing-speaking-and-a-voice)). At most one. |
 | `bot.attach(instance)` | A device it holds, keyed by its `id`, or an ability it acquires. |
 | `bot.input(ability)` | A sense organ: the body fans every environment stimulus out to its input abilities, in parallel. |
 | `bot.output(ability)` | An effector port, off the stimulus fan-out. |
 | `bot.register(store)` | The body's sensory register (a `memory.StmMemory`), recording every admitted stimulus. A `listening.Listening(stm_memory=store)` given the same register writes there every utterance it transcribes, as a heard turn (`memory.stm.TurnEvent`), whoever said it; a `conversation.Conversation(stm_memory=store)` writes there every message the bot commits, as a said turn; and cognition reads the recent turns back from it for every turn it deliberates (`memory.stm.RecentTurnsEvent`). At most one. |
-| `bot.timeouts(*, processing=None, deactivation=None, attachment=None, step=None)` | The bot's bounds, each positive; an omitted one keeps its default. `processing`, `deactivation` and `attachment` are the body's own; `step` bounds each step of a turn in cognition (two minutes by default) and each step of its reflection (its select step, its revision and each authoring call, and stopping either), and a step that outlasts it fails only its turn, which the bot then perceives, as it perceives a step that fails (an intuition that fails instead hands its turn to reasoning in the same turn); a step that fails or outlasts it on a turn taken up only for failed steps is not handed back again. At most one. |
+| `bot.timeouts(*, processing=None, deactivation=None, attachment=None, step=None, reflex=None, intuition=None, reasoning=None)` | The bot's bounds, each positive; an omitted one keeps its default. `processing`, `deactivation` and `attachment` are the body's own; `step` bounds each step of a turn in cognition (two minutes by default) and each step of its reflection (its select step, its revision and each authoring call, and stopping either), and a step that outlasts it fails only its turn, which the bot then perceives, as it perceives a step that fails (a reflex decision or an intuition that fails instead hands its turn on in the same turn); a step that fails or outlasts it on a turn taken up only for failed steps is not handed back again. `reflex`, `intuition` and `reasoning` bound each step of that tier instead, `reflex` each of its two layers; one left unset is bounded by `step`. At most one. |
 | `bot.allow(*lints)` | Lints allowed for this bot (see [Diagnostics](#diagnostics)). |
 | `bot.state`, `bot.transition`, `bot.on`, `bot.after`, ... | The hsm element functions, re-exported as the same objects: the bot's [firmware](#the-bots-firmware). |
 
@@ -119,12 +119,17 @@ with no transport is a computer with no remote side, unplugged. `websocket.Serve
 `audio.Speaker()` and needs only its `encoder`. `docker.Host` derives its capacity from its runtime,
 and `sandbox.Spec` gives `HOME` the workspace.
 
-## Intuition decides on a decision model
+## Reflex decides on a decision model
 
-Intuition is the bot's fast first decision on every turn: it chooses among the events the turn offers, each with
-its confidence, and hands what it does not decide to reasoning. It runs on a decision model, never a chat model, so
-`bot.cognition` takes it apart from its processor: `intuition=` is a `processing.DecisionProcessor`. Reasoning,
-reflection, consolidation and the voice inception stay on `processor`. The decision processor is
+Reflex is the bot's fast first decision on every turn: its behaviors (the ones autonomy runs) match the turn first,
+and its decision layer chooses among the events the turn offers for what they leave unhandled, each with its
+confidence, and hands what it does not decide on to the tier it chooses (R-23): to intuition, a chat model that
+answers in words now without thinking first (and may still hand the turn on to reasoning), or to reasoning, which
+thinks it through first. Its failures and unsure choices go on to intuition. The decision layer runs on a decision model, never a chat
+model, so `bot.cognition` takes it apart from the others: `reflex=` is a `processing.DecisionProcessor`, and
+`intuition=`, `reasoning=` and `reflection=` are chat models' `processing.Processor`s. Reflection and consolidation
+think on `reflection=`, or on `reasoning=` when it is not given; the voice inception stays on `reasoning=`. Without
+`reflex=` or `intuition=`, the turn goes on to the next tier given. The decision processor is
 `decision.Processor(...)` (`from mosfet.providers import decision`), on any server that speaks the decisions wire
 format (`POST /v1/systemone`), given as `base_url=`:
 
@@ -136,8 +141,8 @@ the turn's instructions to their leading lines, never its stimuli or the offered
 [`src/providers/decision/README.md`](../src/providers/decision/README.md).
 
 In a test, the offline one is `testing.Decider()`, which makes only the choices the test writes down and otherwise
-hands the turn to reasoning. A cognition without `intuition=` is `B0024`; a chat processor given as `intuition=` is
-`B0025`.
+hands the turn on. A cognition without `reasoning=` is `B0024`; a chat processor given as `reflex=` is `B0025`; a
+decision processor given as `intuition=`, `reasoning=` or `reflection=` is `B0026`.
 
 ## Objects and placements
 
@@ -153,7 +158,7 @@ on it through its own `placement=`, and `surface(offset)` is where a thing set o
 Placement(position=Position(x=2.5, y=1.0, z=0.0), threshold_db=None, on='desk')
 >>> keeper = bot.define(
 ...     "keeper",
-...     bot.cognition(testing.Scripted(), intuition=testing.Decider()),
+...     bot.cognition(reasoning=testing.Scripted(), reflex=testing.Decider()),
 ...     bot.attach(computer.Computer(id="computer", placement=desk.surface())),
 ... )
 >>> [part.id for part in bot.describe(keeper).bots[0].parts]
@@ -200,13 +205,13 @@ only what the bot is born as: a voice it was already given stays its own.
 ...     "talker",
 ...     bot.traits("warm", "patient"),
 ...     bot.voice(Shelf(), languages=("en",)),
-...     bot.cognition(testing.Scripted(), intuition=testing.Decider(), autonomy=True, seeds=(communication.speech_heard_seed(),)),
+...     bot.cognition(reasoning=testing.Scripted(), reflex=testing.Decider(), autonomy=True, seeds=(communication.speech_heard_seed(),)),
 ...     bot.output(speaking.Speaking(encoder=encoder)),
 ...     bot.attach(computer.Computer(id="kitchen")),
 ... )
 >>> outline = bot.describe(talker).bots[0]
 >>> outline.faculties, outline.seeds
-(('intuition', 'reasoning', 'reflection', 'autonomy', 'voice'), ('SpeechHeard',))
+(('reflex', 'reasoning', 'reflection', 'autonomy', 'voice'), ('SpeechHeard',))
 
 ```
 
@@ -242,11 +247,11 @@ and erased when it forgets them:
 ... )
 >>> house = bot.define(
 ...     "house",
-...     bot.cognition(testing.Scripted(), intuition=testing.Decider(), associative=True, registries=(voices,)),
+...     bot.cognition(reasoning=testing.Scripted(), reflex=testing.Decider(), associative=True, registries=(voices,)),
 ...     bot.attach(computer.Computer(id="kitchen")),
 ... )
 >>> bot.describe(house).bots[0].faculties
-('intuition', 'reasoning', 'reflection', 'associative')
+('reflex', 'reasoning', 'reflection', 'associative')
 >>> memory.KnowEvent.name, memory.ForgetEvent.name
 ('bot.ability.memory.know', 'bot.ability.memory.forget')
 
@@ -385,7 +390,7 @@ do when it rings:
 >>> timer = bot.define(
 ...     "timer",
 ...     bot.traits("attentive"),
-...     bot.cognition(testing.Scripted(), intuition=testing.Decider()),
+...     bot.cognition(reasoning=testing.Scripted(), reflex=testing.Decider()),
 ...     bot.attribute("minutes", int, 0),
 ...     bot.initial(bot.target("idle")),
 ...     bot.state("idle", bot.transition(bot.on(SetEvent), bot.effect(remember), bot.target("../running"))),
@@ -475,10 +480,10 @@ returns them, and `bot.allow` allows one for a bot when it is deliberate:
 >>> import warnings
 >>> with warnings.catch_warnings():
 ...     warnings.simplefilter("ignore", bot.LintWarning)
-...     lonely = bot.define("lonely", bot.cognition(testing.Scripted(), intuition=testing.Decider()))
+...     lonely = bot.define("lonely", bot.cognition(reasoning=testing.Scripted(), reflex=testing.Decider()))
 >>> [found.code for found in bot.check(lonely)]
 ['no_devices']
->>> quiet = bot.define("lonely", bot.cognition(testing.Scripted(), intuition=testing.Decider()), bot.allow("no_devices"))
+>>> quiet = bot.define("lonely", bot.cognition(reasoning=testing.Scripted(), reflex=testing.Decider()), bot.allow("no_devices"))
 >>> bot.check(quiet)
 ()
 
@@ -501,8 +506,8 @@ if __name__ == "__main__":
     greeter = bot.define(
         "greeter",
         bot.cognition(
-            openai_compat.Processor(client=openai_compat.ChatClient(model=settings.model)),
-            intuition=decision.Processor(
+            reasoning=openai_compat.Processor(client=openai_compat.ChatClient(model=settings.model)),
+            reflex=decision.Processor(
                 base_url=settings.decision_base_url,
                 max_context_tokens=settings.decision_max_context_tokens,
             ),

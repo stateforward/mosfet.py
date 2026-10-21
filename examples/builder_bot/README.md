@@ -13,13 +13,13 @@ builder = bot.define(
     "builder",
     bot.traits(*settings.traits.traits),
     bot.cognition(
-        openai_compat.Processor(
+        reasoning=openai_compat.Processor(
             client=openai_compat.ChatClient(model=settings.model, base_url=settings.base_url, api_key=...),
             provider="builder_bot",
             stream=settings.stream,
             tool_choice=settings.tool_choice,
         ),
-        intuition=decision.Processor(
+        reflex=decision.Processor(
             base_url=settings.decision_base_url,
             api_key=decision_key,
             max_context_tokens=settings.decision_max_context_tokens,
@@ -68,7 +68,7 @@ bot.run(builder, actors=(server,), process=process)
   screen shows what the bot shows, and the keyboard types into the field the bot focused.
 * **Its bench** is a `sandbox.Sandbox` on a `docker.Host` over a rootless Docker or Podman socket. The bot may
   run commands, write and read files, and start over on a fresh machine.
-* **Its mind** is the full cognition, without voice: intuition, reasoning, reflection with its persona, the
+* **Its mind** is the full cognition, without voice: reflex, reasoning, reflection with its persona, the
   routines it authors, and memory kept in `<data dir>/memory.sqlite3`. One local OpenAI-compatible model does
   all of its thinking.
 
@@ -139,7 +139,7 @@ chmod 0600 examples/builder_bot/secrets/*
 | `OPENAI_STREAM` | env | `true` | `false` for an endpoint that cannot stream a tool call (a proxy that sends only keep-alives); then nothing the bot writes reaches the screen until the call ends |
 | `OPENAI_TOOL_CHOICE` | env | `required` | The tool choice each call sends: `auto` for an endpoint whose guided decoding of a required tool call degrades what the model writes (one that drops the line breaks in code); then the model may also answer in content, which is read as the same events array |
 | `openai_api_key` | secret, required | | The endpoint's key; a placeholder for a keyless server |
-| `DECISION_BASE_URL` | env, required | | The decision server the bot's intuition decides on, which speaks the decisions wire format (anygame's decide, for example `http://127.0.0.1:8102`, or a hosted server with the same format). Intuition is never a chat model: it runs on this decision model, while reasoning and reflection run on the endpoint above |
+| `DECISION_BASE_URL` | env, required | | The decision server the bot's reflex decides on, which speaks the decisions wire format (anygame's decide, for example `http://127.0.0.1:8102`, or a hosted server with the same format). Reflex's decision layer is never a chat model: it runs on this decision model, while reasoning and reflection run on the endpoint above |
 | `DECISION_MAX_CONTEXT_TOKENS` | env | unset | The decision model's context in tokens (2048 for decide); each decision request is fitted to it by cutting the turn's context, never its stimuli. Unset, requests are sent whole |
 | `decision_api_key` | secret | unset | The decision server's key, sent as a bearer only when given; a local decide takes none |
 | `BUILDER_SANDBOX_SOCKET` | env, required | | The rootless Docker or Podman API socket |

@@ -1,162 +1,112 @@
-from mosfet.abilities.cognition import intuition
-from mosfet.abilities.cognition import types
-from mosfet.abilities.cognition import input as cognition_input
-from mosfet.abilities import ability as ability_module
+"""Intuition: the fast tier between reflex and reasoning, a chat model with Reasoning's chart (D-R-52)."""
+
+from mosfet.abilities import ability
+from mosfet.abilities import cognition
 from mosfet.abilities import processing
-from mosfet.abilities import sandbox
-import mosfet
-from mosfet import event
+from mosfet.abilities.cognition import intuition as intuition_module
+from mosfet.environment import SoundData, SoundEvent
+from mosfet.telemetry import span
 
 import asyncio
-import collections.abc
-import datetime
-import inspect
 import typing
 
 import hsm
+import mosfet
 import pydantic
 import pytest
+from mosfet import event
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
 from tests.bot.abilities.cognition.metadata_contract import assert_metadata_is_not_coordination
-from tests.bot.abilities.support import dispatch_ability_for_test, shared_hsm_context
+from tests.bot.abilities.support import dispatch_ability_for_test, shared_hsm_context, start_abilities_for_test
 from tests.hsm_model import choice_transitions, transition_map
-from tests.hsm_instance_state import start_ability_tree
 
 
-def _accept_selection(ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event[typing.Any]) -> None:
-    del ctx, instance, event
+class _SaidData(pydantic.BaseModel):
+    text: str
 
 
-class _SelectionData(pydantic.BaseModel):
+_SayEvent = hsm.Event[_SaidData](name="tests.intuition.say", kind=event.EventKind, schema=_SaidData)
+
+
+class _ThinkData(pydantic.BaseModel):
     value: str
 
 
-_SelectionEvent = hsm.Event[_SelectionData](
-    name="tests.intuition.selection",
-    kind=event.EventKind,
-    schema=_SelectionData,
-)
+_ThinkEvent = hsm.Event[_ThinkData](name="tests.intuition.think", kind=event.EventKind, schema=_ThinkData)
 
 
-class _SelectionActor(hsm.Instance):
-    """Minimal recipient used to exercise the real typed dispatch boundary."""
+class _Mouth(hsm.Instance):
+    """An M-effort actor within intuition's ceiling that keeps what it was told to say."""
+
+    effort: typing.ClassVar[ability.Effort] = ability.Effort.M
+    said: list[str]
+
+    @staticmethod
+    def _say(ctx: hsm.Context, instance: "_Mouth", event: hsm.Event[typing.Any]) -> None:
+        del ctx
+        data = event.data
+        assert isinstance(data, _SaidData)
+        instance.said.append(data.text)
 
     model: typing.ClassVar[hsm.Model | None] = mosfet.define(
-        "IntuitionSelectionActor",
-        hsm.initial(hsm.target("/IntuitionSelectionActor/active")),
-        hsm.state(
-            "active",
-            hsm.transition(hsm.on(_SelectionEvent), hsm.effect(_accept_selection)),
-            hsm.transition(hsm.on(mosfet.FocusDeviceEvent), hsm.effect(_accept_selection)),
-        ),
+        "IntuitionMouth",
+        hsm.initial(hsm.target("/IntuitionMouth/active")),
+        hsm.state("active", hsm.transition(hsm.on(_SayEvent), hsm.effect(_say))),
+    )
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.said = []
+
+
+def _accept(ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event[typing.Any]) -> None:
+    del ctx, instance, event
+
+
+class _Bench(hsm.Instance):
+    """An L-effort actor: above intuition's ceiling, held by reasoning."""
+
+    effort: typing.ClassVar[ability.Effort] = ability.Effort.L
+    model: typing.ClassVar[hsm.Model | None] = mosfet.define(
+        "IntuitionBench",
+        hsm.initial(hsm.target("/IntuitionBench/active")),
+        hsm.state("active", hsm.transition(hsm.on(_ThinkEvent), hsm.effect(_accept))),
     )
 
 
-class _SequenceProcessor(processing.DecisionProcessor):
-    calls: list[processing.InputData]
-    outputs: tuple[object, ...]
+class _Host(hsm.Instance):
+    """The cognition host's call surface as a frame offers it: the deliberative handoff."""
 
-    def __init__(self, *outputs: object) -> None:
+    model: typing.ClassVar[hsm.Model | None] = mosfet.define(
+        "IntuitionHost",
+        hsm.initial(hsm.target("/IntuitionHost/active")),
+        hsm.state("active", hsm.transition(hsm.on(cognition.reasoning.InputEvent), hsm.effect(_accept))),
+    )
+
+
+class _Answering(processing.Processor):
+    """A chat model that answers every call with ``answer`` and keeps each frame it was given."""
+
+    calls: list[processing.InputData]
+    answer: processing.Events
+
+    def __init__(self, answer: processing.Events = ()) -> None:
         self.calls = []
-        self.outputs = outputs
+        self.answer = answer
 
     @typing.override
     async def process(
         self, input: processing.InputData, *, drafts: processing.DraftSink | None = None
     ) -> processing.Events:
+        del drafts
         self.calls.append(input)
-        return typing.cast(processing.Events, self.outputs[min(len(self.calls) - 1, len(self.outputs) - 1)])
+        return self.answer
 
 
-class _CyclingProcessor(processing.DecisionProcessor):
-    calls: list[processing.InputData]
-    outputs: tuple[object, ...]
-
-    def __init__(self, *outputs: object) -> None:
-        self.calls = []
-        self.outputs = outputs
-
-    @typing.override
-    async def process(
-        self, input: processing.InputData, *, drafts: processing.DraftSink | None = None
-    ) -> processing.Events:
-        self.calls.append(input)
-        return typing.cast(processing.Events, self.outputs[(len(self.calls) - 1) % len(self.outputs)])
-
-
-def _selection_input(actor: hsm.Instance, *, operation_id: str) -> intuition.InputData:
-    stimulus = mosfet.InputEventData(target_device="phone", priority=0)
-    actors: collections.abc.Mapping[str, hsm.Instance] = {"target": actor}
-    turn = types.TurnData(
-        input=cognition_input.InputData(
-            stimulus=stimulus,
-            actors=actors,
-            focus=None,
-            focus_candidates=(),
-        ),
-        operation_id=operation_id,
-        generation="selection-generation",
-    )
-    return intuition.InputData(
-        turn=turn,
-        processing_input=processing.InputData(
-            input=stimulus,
-            schemas=(_SelectionEvent,),
-            actors=actors,
-        ),
-    )
-
-
-def _selection(*, value: object) -> processing.Events:
-    return (
-        processing.SelectedEvent(
-            event=_SelectionEvent.name,
-            target="target",
-            data={"value": value},
-            confidence=99,
-        ),
-    )
-
-
-def _focus_selection(*, device: object) -> processing.Events:
-    return (
-        processing.SelectedEvent(
-            event=mosfet.FocusDeviceEvent.name,
-            data={"device": device},
-            confidence=99,
-        ),
-    )
-
-
-def _run_intuition(
-    processor: processing.DecisionProcessor,
-    *,
-    operation_id: str,
-) -> tuple[types.CompletionData, processing.DecisionProcessor]:
-    async def run() -> types.CompletionData:
-        ctx = shared_hsm_context()
-        actor = _SelectionActor()
-        assert actor.model is not None
-        _ = await mosfet.started(ctx, actor, actor.model)
-        ability = intuition.Intuition(processor=processor)
-        return typing.cast(
-            types.CompletionData,
-            typing.cast(
-                object,
-                await dispatch_ability_for_test(
-                    ability,
-                    ctx,
-                    _selection_input(actor, operation_id=operation_id),
-                ),
-            ),
-        )
-
-    return asyncio.run(run()), processor
-
-
-class _Chatting(processing.Processor):
-    """A chat model's processor: it writes and calls tools, so it is no decision processor."""
-
+class _Deciding(processing.DecisionProcessor):
     @typing.override
     async def process(
         self, input: processing.InputData, *, drafts: processing.DraftSink | None = None
@@ -165,363 +115,149 @@ class _Chatting(processing.Processor):
         return ()
 
 
-def test_intuition_decides_only_on_a_decision_processor() -> None:
-    # A caller the type checker cannot see: what is given is checked, not promised.
-    chatting = typing.cast(processing.DecisionProcessor, typing.cast(object, _Chatting()))
+def _intuit(
+    processor: processing.Processor,
+) -> tuple[cognition.types.CompletionData, processing.InputData, _Mouth]:
+    async def run() -> tuple[cognition.types.CompletionData, _Mouth]:
+        ctx = shared_hsm_context()
+        mouth, bench, host = _Mouth(), _Bench(), _Host()
+        for actor in (mouth, bench, host):
+            assert actor.model is not None
+            _ = await mosfet.started(ctx, actor, actor.model)
+        stimulus = SoundEvent.with_data(SoundData(audio=b"hello", kind="speech"))
+        turn_input = cognition.InputData(
+            stimulus=stimulus, actors={"mouth": mouth, "sandbox": bench, "cognition": host}
+        )
+        intuition = cognition.Intuition(processor=processor)
+        await start_abilities_for_test(ctx, intuition)
+        output = await dispatch_ability_for_test(
+            intuition,
+            ctx,
+            cognition.intuition.InputData(
+                turn=cognition.types.TurnData(input=turn_input, operation_id="intuition-turn", generation="token"),
+                processing_input=cognition.input.build_processing_input(turn_input),
+            ),
+            timeout=1.0,
+        )
+        return typing.cast(cognition.types.CompletionData, typing.cast(object, output)), mouth
 
-    with pytest.raises(TypeError, match="processing.DecisionProcessor"):
-        _ = intuition.Intuition(processor=chatting)
-
-    assert not hasattr(intuition, "IntuitionProcessor")
+    processing_answer = asyncio.run(run())
+    (frame,) = typing.cast(_Answering, processor).calls
+    return processing_answer[0], frame, processing_answer[1]
 
 
 def test_intuition_never_uses_metadata_for_coordination() -> None:
-    assert_metadata_is_not_coordination(intuition)
+    assert_metadata_is_not_coordination(intuition_module)
 
 
-def test_intuition_returns_directed_terminal_to_one_shot_operation() -> None:
-    async def run() -> hsm.Event[typing.Any]:
-        ctx = shared_hsm_context()
-        actor = _SelectionActor()
-        assert actor.model is not None
-        _ = await mosfet.started(ctx, actor, actor.model)
-        child = intuition.Intuition(processor=_SequenceProcessor(()))
-        await start_ability_tree(ctx, child)
-        operation_id = "intuition-terminal-operation"
-        return await ability_module.run_terminal_operation(
-            ctx,
-            child=child,
-            request=child.input_event.with_data_and_id(
-                _selection_input(actor, operation_id=operation_id),
-                operation_id,
-            ),
-            terminals=(child.output_event, child.failed_event),
-            timeout=datetime.timedelta(seconds=1),
-        )
+def test_intuition_thinks_on_a_chat_model_never_a_decision_model() -> None:
+    """D-R-52: intuition writes words, which a decision model cannot."""
 
-    terminal = asyncio.run(run())
+    with pytest.raises(TypeError, match="DecisionProcessor"):
+        _ = cognition.Intuition(processor=_Deciding())
 
-    assert terminal.name == intuition.OutputEvent.name
-    assert terminal.id == "intuition-terminal-operation"
-    assert terminal.source
-    assert terminal.target
 
+def test_intuition_shares_reasonings_chart_under_its_own_events() -> None:
+    model = typing.cast(hsm.Model, intuition_module.Intuition.submodel)
 
-def test_intuition_classification_updates_tuner_only_in_rtc() -> None:
-    """The asynchronous classifier must not read or mutate the owned tuner."""
+    for state in ("initializing", "idle", "applying", "routing_rejection"):
+        assert f"/Intuition/{state}" in model.members
+    assert transition_map(model)["/Intuition/applying"]["bot.ability.intuition.selection.rejected"]
+    assert len(choice_transitions(model, "/Intuition/routing_rejection")) == 3
+    assert cognition.Intuition.input_event.name == "bot.ability.intuition.input"
+    assert cognition.Intuition.output_event.name == "bot.ability.intuition.output"
 
-    source = inspect.getsource(getattr(intuition.Intuition, "_classify_activity"))
-    assert "_confidence_tuner" not in source
 
+def test_intuition_is_offered_its_ceiling_and_the_handoff_and_told_what_reasoning_holds() -> None:
+    """Its default ceiling is M; the handoff stays offered, and ``<held>`` names what is above M."""
 
-def test_intuition_models_processing_as_explicit_typed_phases() -> None:
-    """Invocation, classification, dispatch, rejection routing, and publication are graph-visible."""
+    _, frame, _ = _intuit(_Answering())
 
-    model = typing.cast(hsm.Model, intuition.Intuition.submodel)
-    transitions = transition_map(model)
-    for path in (
-        "/Intuition/workflow/invoking",
-        "/Intuition/workflow/classifying",
-        "/Intuition/workflow/dispatching",
-        "/Intuition/workflow/routing_rejection",
-        "/Intuition/workflow/publishing",
-    ):
-        assert path in model.members
-    assert transitions["/Intuition/workflow/invoking"]["bot.ability.intuition.invocation.completed"]
-    assert transitions["/Intuition/workflow/classifying"]["bot.ability.intuition.dispatch.planned"]
-    assert transitions["/Intuition/workflow/dispatching"]["bot.ability.intuition.selection.rejected"]
-    # A processor's own refusal of a selection reaches the same repair.
-    assert transitions["/Intuition/workflow/invoking"]["bot.ability.intuition.selection.rejected"]
-    rejection_routes = choice_transitions(model, "/Intuition/workflow/routing_rejection")
-    assert len(rejection_routes) == 3
-    assert rejection_routes[-1].guard is None
-
-
-def test_intuition_retries_selection_rejection_with_pydantic_feedback() -> None:
-    processor = _SequenceProcessor(_selection(value=0), _selection(value="phone"))
-
-    output, _ = _run_intuition(processor, operation_id="repair-selection")
-
-    assert len(processor.calls) == 2
-    feedback = processor.calls[1].feedback or ""
-    assert "The previous event selection was rejected during dispatch." in feedback
-    assert "Input should be a valid string" in feedback
-    assert "input_value" not in feedback
-    assert output.output == (
-        types.EventData(
-            event=_SelectionEvent.name,
-            target="target",
-            data={"value": "phone"},
-        ),
-    )
-
-
-def test_intuition_retries_malformed_focus_selection_with_full_pydantic_feedback() -> None:
-    processor = _SequenceProcessor(_focus_selection(device=0), _selection(value="phone"))
-
-    output, _ = _run_intuition(processor, operation_id="repair-focus-selection")
-
-    assert len(processor.calls) == 2
-    feedback = processor.calls[1].feedback or ""
-    assert "not an instruction" in feedback
-    assert "BEGIN UNTRUSTED VALIDATOR DIAGNOSTIC" in feedback
-    assert "Input should be a valid string" in feedback
-    assert "input_value" not in feedback
-    assert "END UNTRUSTED VALIDATOR DIAGNOSTIC" in feedback
-    assert output.output == (
-        types.EventData(
-            event=_SelectionEvent.name,
-            target="target",
-            data={"value": "phone"},
-        ),
-    )
-
-
-class _HeldThenOfferedProcessor(processing.DecisionProcessor):
-    """First selects an event the turn does not offer, the way the live model picked a held sandbox write.
-
-    Selections are parsed against the offered menu the way a provider's dispatch tool parses them.
-    """
-
-    calls: list[processing.InputData]
-
-    def __init__(self) -> None:
-        self.calls = []
-
-    @typing.override
-    async def process(
-        self, input: processing.InputData, *, drafts: processing.DraftSink | None = None
-    ) -> processing.Events:
-        self.calls.append(input)
-        if len(self.calls) == 1:
-            return processing.events_from_dispatch_args(
-                {"events": [{"event": sandbox.WriteEvent.name, "data": {"path": "fib.py", "content": ""}}]},
-                offered=input.schemas,
-            )
-        return _selection(value="phone")
-
-
-def test_intuition_asks_again_when_the_processor_selects_an_event_the_turn_does_not_offer() -> None:
-    """Live check round 1 (D2): selecting a held event failed the whole turn, with no repair and nothing shown.
-
-    The provider's "unavailable event" error surfaced as apply.failed, so intuition's bounded selection repair
-    never ran. It is now a selection rejection: intuition asks again with the diagnostic.
-    """
-
-    processor = _HeldThenOfferedProcessor()
-
-    output, _ = _run_intuition(processor, operation_id="unoffered-selection")
-
-    assert len(processor.calls) == 2
-    feedback = processor.calls[1].feedback or ""
-    assert f"Processing selected unavailable event: {sandbox.WriteEvent.name}." in feedback
-    assert output.output == (types.EventData(event=_SelectionEvent.name, target="target", data={"value": "phone"}),)
-
-
-def test_intuition_stops_on_same_normalized_selection_rejection() -> None:
-    processor = _SequenceProcessor(_selection(value=0), _selection(value=1), _selection(value="phone"))
-
-    with pytest.raises(RuntimeError, match="selection") as failure:
-        _ = _run_intuition(processor, operation_id="repeated-selection-rejection")
-
-    assert len(processor.calls) == 2
-    assert "input_value" not in str(failure.value)
-
-
-def test_intuition_retries_again_after_different_selection_rejection() -> None:
-    processor = _SequenceProcessor(
-        _selection(value=0),
-        processing.SelectedEvent(
-            event=_SelectionEvent.name,
-            target="target",
-            data={},
-            confidence=99,
-        ),
-        _selection(value="phone"),
-    )
-
-    output, _ = _run_intuition(processor, operation_id="different-selection-rejection")
-
-    assert len(processor.calls) == 3
-    first_feedback = processor.calls[1].feedback or ""
-    second_feedback = processor.calls[2].feedback or ""
-    assert "input_value" not in first_feedback
-    assert "Field required" in second_feedback
-    assert output.output is not None
-
-
-def test_intuition_bounds_alternating_selection_rejections() -> None:
-    processor = _CyclingProcessor(
-        _selection(value=0),
-        processing.SelectedEvent(
-            event=_SelectionEvent.name,
-            target="target",
-            data={},
-            confidence=99,
-        ),
-        _selection(value=1),
-    )
-
-    with pytest.raises(RuntimeError, match="selection"):
-        _ = _run_intuition(processor, operation_id="alternating-selection-rejection")
-
-    assert len(processor.calls) == 3
-    assert all("input_value" not in (call.feedback or "") for call in processor.calls)
-
-
-def test_confidence_gate_drops_low_confidence_and_cascades() -> None:
-    """A composition confidence gate drops below-floor per-event selections.
-
-    All selections dropped: the turn is an explicit unhandled cascade (None output),
-    never a handled-empty selection. High-confidence survivors still dispatch.
-    """
-
-    async def run() -> object:
-        ctx = shared_hsm_context()
-        actor = _SelectionActor()
-        assert actor.model is not None
-        _ = await mosfet.started(ctx, actor, actor.model)
-        ability = intuition.Intuition(
-            processor=_SequenceProcessor(_selection_gate(value="low", confidence=20)),
-            confidence_gate=70,
-        )
-        return await dispatch_ability_for_test(
-            ability,
-            ctx,
-            _selection_input(actor, operation_id="gate-cascade"),
-        )
-
-    completed = asyncio.run(run())
-    assert isinstance(completed, types.CompletionData)
-    assert completed.output is None
-
-
-def test_confidence_gate_passes_high_confidence_survivors() -> None:
-    async def run() -> object:
-        ctx = shared_hsm_context()
-        actor = _SelectionActor()
-        _ = await mosfet.started(ctx, actor, actor.model)
-        ability = intuition.Intuition(
-            processor=_SequenceProcessor(_selection_gate(value="solid", confidence=99)),
-            confidence_gate=95,
-        )
-        return await dispatch_ability_for_test(
-            ability,
-            ctx,
-            _selection_input(actor, operation_id="gate-pass"),
-        )
-
-    completed = asyncio.run(run())
-    assert isinstance(completed, types.CompletionData)
-    assert completed.output == (
-        types.EventData(
-            event=_SelectionEvent.name,
-            target="target",
-            data={"value": "solid"},
-            reason=None,
-        ),
-    )
-
-
-def _selection_gate(*, value: object, confidence: int) -> processing.Events:
-    return (
-        processing.SelectedEvent(
-            event=_SelectionEvent.name,
-            target="target",
-            data={"value": value},
-            confidence=confidence,
-        ),
-    )
-
-
-class _DeliberateActor(hsm.Instance):
-    """An M-effort actor: above intuition's default ceiling, so intuition must never offer it."""
-
-    effort: typing.ClassVar[ability_module.Effort] = ability_module.Effort.M
-    model: typing.ClassVar[hsm.Model | None] = mosfet.define(
-        "IntuitionDeliberateActor",
-        hsm.initial(hsm.target("/IntuitionDeliberateActor/active")),
-        hsm.state("active", hsm.transition(hsm.on(_SelectionEvent), hsm.effect(_accept_selection))),
-    )
-
-
-def test_intuition_offers_only_what_its_own_effort_ceiling_admits() -> None:
-    """The host sends the whole frame; intuition applies its own ceiling to what it offers and dispatches."""
-
-    async def run() -> processing.InputData:
-        ctx = shared_hsm_context()
-        deliberate = _DeliberateActor()
-        assert deliberate.model is not None
-        _ = await mosfet.started(ctx, deliberate, deliberate.model)
-        stimulus = mosfet.InputEventData(target_device="phone", priority=0)
-        turn_input = cognition_input.InputData(stimulus=stimulus, actors={"deliberate": deliberate})
-        processor = _SequenceProcessor(())
-        _ = await dispatch_ability_for_test(
-            intuition.Intuition(processor=processor, max_effort=ability_module.Effort.S),
-            ctx,
-            intuition.InputData(
-                turn=types.TurnData(input=turn_input, operation_id="ceiling-turn", generation="ceiling-generation"),
-                processing_input=cognition_input.build_processing_input(turn_input),
-            ),
-        )
-        (frame,) = processor.calls
-        return frame
-
-    frame = asyncio.run(run())
-
-    assert "deliberate" not in frame.actors
-    assert _SelectionEvent.name not in {schema.name for schema in frame.schemas}
-    assert _SelectionEvent.name not in frame.actor_events
-
-
-class _BenchActor(hsm.Instance):
-    """An M-effort actor enabling the real sandbox run command, as the builder's bench does."""
-
-    effort: typing.ClassVar[ability_module.Effort] = ability_module.Effort.M
-    model: typing.ClassVar[hsm.Model | None] = mosfet.define(
-        "IntuitionBenchActor",
-        hsm.initial(hsm.target("/IntuitionBenchActor/active")),
-        hsm.state("active", hsm.transition(hsm.on(sandbox.RunEvent), hsm.effect(_accept_selection))),
-    )
-
-
-def test_intuition_is_told_what_only_reasoning_holds() -> None:
-    """Live check P1: the bench (sandbox.run, effort M) is above intuition's ceiling (S).
-
-    Intuition never offered it and nothing told the model it existed, so a confident model made
-    up test output instead of escalating. Every intuition turn now names each capacity held above
-    its ceiling, with what it does, so escalating to reasoning is the model's informed choice; the
-    capacity itself stays off intuition's dispatch tool.
-    """
-
-    async def run() -> processing.InputData:
-        ctx = shared_hsm_context()
-        bench = _BenchActor()
-        nearby = _SelectionActor()
-        assert bench.model is not None and nearby.model is not None
-        _ = await mosfet.started(ctx, bench, bench.model)
-        _ = await mosfet.started(ctx, nearby, nearby.model)
-        stimulus = mosfet.InputEventData(target_device="desk", priority=0)
-        turn_input = cognition_input.InputData(stimulus=stimulus, actors={"sandbox": bench, "nearby": nearby})
-        processor = _SequenceProcessor(())
-        _ = await dispatch_ability_for_test(
-            intuition.Intuition(processor=processor, max_effort=ability_module.Effort.S),
-            ctx,
-            intuition.InputData(
-                turn=types.TurnData(input=turn_input, operation_id="held-turn", generation="held-generation"),
-                processing_input=cognition_input.build_processing_input(turn_input),
-            ),
-        )
-        (frame,) = processor.calls
-        return frame
-
-    frame = asyncio.run(run())
-
+    host = frame.input
+    assert isinstance(host, cognition.reasoning.ProcessorInput)
     offered = {schema.name for schema in frame.schemas}
-    assert sandbox.RunEvent.name not in offered
-    assert _SelectionEvent.name in offered
+    assert _SayEvent.name in offered
+    assert cognition.reasoning.InputEvent.name in offered
+    assert _ThinkEvent.name not in offered
     instructions = frame.instructions or ""
-    assert sandbox.RunEvent.name in instructions
-    assert "Run one command in the sandbox and wait for it to finish." in instructions
-    # What intuition itself offers is on its tool, not repeated as something only reasoning holds.
-    assert _SelectionEvent.name not in instructions
+    assert f'<held reached_by="{cognition.reasoning.InputEvent.name}">' in instructions
+    assert f'<capacity event="{_ThinkEvent.name}"' in instructions
+
+
+def test_intuition_that_selects_without_the_handoff_settles_the_turn() -> None:
+    say = processing.SelectedEvent(event=_SayEvent.name, target="mouth", data={"text": "Hello."})
+
+    completion, _, mouth = _intuit(_Answering((say,)))
+
+    assert mouth.said == ["Hello."]
+    assert completion.output is not None
+    assert [item.event for item in completion.output] == [_SayEvent.name]
+    assert completion.turn.acted is None
+
+
+def test_selecting_the_handoff_runs_the_other_selections_first_then_hands_the_turn_on() -> None:
+    """Words before a long think are the bot's own choice; what it said rides the turn's ``acted`` on."""
+
+    say = processing.SelectedEvent(event=_SayEvent.name, target="mouth", data={"text": "Let me think."})
+    handoff = processing.SelectedEvent(event=cognition.reasoning.InputEvent.name, target="cognition", data={})
+
+    completion, _, mouth = _intuit(_Answering((say, handoff)))
+
+    assert mouth.said == ["Let me think."]
+    assert completion.output is None
+    acted = completion.turn.acted
+    assert acted is not None
+    assert acted.percepts == (0,)
+    assert [(item.event, item.data) for item in acted.acts] == [(_SayEvent.name, {"text": "Let me think."})]
+
+
+def test_a_handoff_with_no_actor_to_dispatch_to_hands_on_having_done_nothing() -> None:
+    """Only what was dispatched rides the turn's ``acted``: with no actors on the frame, nothing was."""
+
+    say = processing.SelectedEvent(event=_SayEvent.name, target="mouth", data={"text": "Let me think."})
+    handoff = processing.SelectedEvent(event=cognition.reasoning.InputEvent.name, target="cognition", data={})
+
+    async def run() -> cognition.types.CompletionData:
+        ctx = shared_hsm_context()
+        stimulus = SoundEvent.with_data(SoundData(audio=b"hello", kind="speech"))
+        turn_input = cognition.InputData(stimulus=stimulus, actors={})
+        intuition = cognition.Intuition(processor=_Answering((say, handoff)))
+        await start_abilities_for_test(ctx, intuition)
+        output = await dispatch_ability_for_test(
+            intuition,
+            ctx,
+            cognition.intuition.InputData(
+                turn=cognition.types.TurnData(input=turn_input, operation_id="bare-turn", generation="token"),
+                processing_input=cognition.input.build_processing_input(turn_input),
+            ),
+            timeout=1.0,
+        )
+        return typing.cast(cognition.types.CompletionData, typing.cast(object, output))
+
+    completion = asyncio.run(run())
+
+    assert completion.output is None
+    assert completion.turn.acted is None
+
+
+def test_intuition_reports_its_steps_under_its_own_span(monkeypatch: pytest.MonkeyPatch) -> None:
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    monkeypatch.setattr(span, "tracer_provider", lambda: provider)
+
+    _ = _intuit(_Answering())
+
+    stages = {
+        str((recorded.attributes or {}).get("bot.stage"))
+        for recorded in exporter.get_finished_spans()
+        if recorded.name == "bot.intuition.stage"
+    }
+    assert stages == {"intuition_initialize", "intuition_reason"}
+    (reasoned,) = [
+        recorded
+        for recorded in exporter.get_finished_spans()
+        if (recorded.attributes or {}).get("bot.stage") == "intuition_reason"
+    ]
+    assert (reasoned.attributes or {}).get("bot.intuition.held.count") == 1
+    assert (reasoned.attributes or {}).get("bot.cognition.escalated") is False

@@ -228,8 +228,8 @@ async def bring_up(
         "builder",
         bot.traits(*builder_bot_example.DEFAULT_TRAITS.traits),
         bot.cognition(
-            model,
-            intuition=testing.Decider(),
+            reasoning=model,
+            reflex=testing.Decider(),
             memory=memory.Memory(database=str(tmp_path / "memory.sqlite3")),
             associative=True,
             consolidation=True,

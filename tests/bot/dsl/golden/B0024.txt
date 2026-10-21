@@ -1,14 +1,11 @@
-error[B0024]: `bot.cognition` has no intuition
- --> greeter.py:8:31
+error[B0024]: `bot.cognition` has no reasoning
+ --> greeter.py:8:55
   |
-8 | model = bot.define("…", bot.cognition(support.Silent()), bot.attach(phone.Phone()))
-  |                         ^^^^^^^^^^^^^ no intuition
+8 | model = bot.define("…", bot.cognition(reasoning=None), bot.attach(phone.Phone()))
+  |                                                 ^^^^ no reasoning
   |
-  = note: intuition is the bot's fast first decision on every turn, and it decides on a decision model, never a chat model
-help: give it `intuition=`, a `processing.DecisionProcessor`: `decision.Processor(...)` (`from mosfet.providers import decision`), on any server that speaks the decisions wire format; in a test, the offline one is `testing.Decider()` (`from mosfet.bot import testing`)
-  |
-8 | model = bot.define("…", bot.cognition(support.Silent(), intuition=decision.Processor(base_url="http://127.0.0.1:8102")), bot.attach(phone.Phone()))
-  |                                                       ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  = note: reasoning is the bot's deliberate thinking: every turn its faster tiers hand on ends there, and it reflects and consolidates
+help: give it `reasoning=`, a `processing.Processor` (`from mosfet.abilities import processing`); in a test, the offline one is `testing.Scripted()` (`from mosfet.bot import testing`)
   = explain: bot.explain("B0024")
 
 error: could not define bot `greeter`: 1 error

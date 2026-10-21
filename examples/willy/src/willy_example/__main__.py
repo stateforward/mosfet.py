@@ -4,7 +4,7 @@ Reads the owner's :class:`~willy_example.Settings` from the environment (the lab
 addresses and models, ``DECISION_BASE_URL``, and the optional ``DECISION_MAX_CONTEXT_TOKENS``,
 ``WILLY_THINKING_TOKENS``, ``WILLY_MAX_CONTEXT_TOKENS``, room, camera and trait variables) and its secrets: ``openai_api_key`` (a placeholder for
 the lab's keyless servers),
-the optional ``decision_api_key`` (the key of the decision server Willy's intuition decides on; without it none is
+the optional ``decision_api_key`` (the key of the decision server Willy's reflex decides on; without it none is
 sent, as the local decide expects) and ``computer_token_secret``, the key every
 room's far side signs its token with. Each is the Docker secret, the file named by ``<NAME>_FILE``, or
 ``<NAME>``. The process options (``MOSFET_*`` or flags) are ``bot.process``'s. A missing or malformed setting or
@@ -25,8 +25,9 @@ and plays it on that room's speaker, like an intercom.
 
 Then one ``bot.define`` constructs every other part inline: Willy's traits, the source of its voice (the lab's
 shared speech engine, which designs it at Willy's birth; Willy is allowed none of the engine's other voices, so it
-is born only as the one it designs), its cognition on the lab's language model, which thinks first within the
-owner's ``WILLY_THINKING_TOKENS``, with its intuition on the decision model, the speech seed that takes heard
+is born only as the one it designs), its cognition in three tiers, each bounded by its own step
+timeout: its reflex on the decision model, its intuition on the intuition model with thinking off, and its
+reasoning on the reasoning model, which thinks first within the owner's ``WILLY_THINKING_TOKENS``, the speech seed that takes heard
 speech into a conversation and the registries whose prints follow whom it knows (people it learns itself), its
 ear and its sense of its own name, its mouth, its conversations, and one computer per room, set on the
 object the owner names in that room. With ``WILLY_CAMERA=1`` a face registry and an eye join them, seeing through
@@ -51,7 +52,6 @@ from mosfet.abilities import (
 )
 from mosfet.abilities.communication import conversation
 from mosfet.devices import audio, computer
-from mosfet.providers import decision
 from mosfet.providers import opencv
 from mosfet.providers import openai_compat
 from mosfet.providers import speech_server
@@ -75,6 +75,7 @@ from willy_example import (
     YUNET_FILE,
     Settings,
 )
+from willy_example.tiers import Tiers
 
 if __name__ == "__main__":
     process = bot.process()
@@ -140,6 +141,7 @@ if __name__ == "__main__":
         affect_classifier=speech_server.AffectClassifier(base_url=settings.emotion_url),
         stm_memory=register,
     )
+    tiers = Tiers.of(settings, api_key=api_key, decision_key=decision_key)
     talk = conversation.Conversation(stm_memory=register)
     mouth = speaking.Speaking(
         encoder=lambda key, description: openai_compat.SpeechEncoder(
@@ -165,17 +167,9 @@ if __name__ == "__main__":
             languages=LANGUAGES,
         ),
         bot.cognition(
-            openai_compat.Processor(
-                client=openai_compat.ChatClient(model=settings.model, base_url=settings.llm_url, api_key=api_key),
-                provider="willy",
-                extra_body=settings.thinking,
-                max_context_tokens=settings.max_context_tokens,
-            ),
-            intuition=decision.Processor(
-                base_url=settings.decision_base_url,
-                api_key=decision_key,
-                max_context_tokens=settings.decision_max_context_tokens,
-            ),
+            reasoning=tiers.reasoning,
+            intuition=tiers.intuition,
+            reflex=tiers.reflex,
             memory=store,
             registries=(voices, *faces),
             associative=True,
@@ -184,6 +178,7 @@ if __name__ == "__main__":
             seeds=(communication.speech_heard_seed(),),
             routines=functools.partial(datetime.datetime.now, datetime.UTC),
         ),
+        Tiers.timeouts(),
         bot.input(hearing),
         bot.input(
             identity.Identity(

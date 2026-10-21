@@ -427,7 +427,7 @@ class CapturingCognition(cognition.Cognition):
         self.swallow_cancel = swallow_cancel
         store = memory.Memory()
         super().__init__(
-            intuition=cognition.Intuition(processor=processor),
+            decision=cognition.Decision(processor=processor),
             reasoning=cognition.Reasoning(processor=_NoopReasoningProcessor()),
             reflection=_reflection_for_test(store),
             # Cognition attaches the bot's one memory; Reflection is its peer.
@@ -455,8 +455,8 @@ class _NoopReasoningProcessor(processing.Processor):
         return ()
 
 
-class _PassingIntuitionProcessor(processing.DecisionProcessor):
-    """Selects nothing, which intuition leaves unhandled, so every turn goes on to reasoning."""
+class _PassingDecisionProcessor(processing.DecisionProcessor):
+    """Selects nothing, which decision leaves unhandled, so every turn goes on to reasoning."""
 
     @typing.override
     async def process(
@@ -480,7 +480,7 @@ class InputRecordingCognition(Cognition):
         self.inputs = []
         store = memory.Memory()
         super().__init__(
-            intuition=cognition.Intuition(processor=processor),
+            decision=cognition.Decision(processor=processor),
             reasoning=cognition.Reasoning(processor=_NoopReasoningProcessor()),
             reflection=_reflection_for_test(store),
             # Cognition attaches the bot's one memory; Reflection is its peer.
@@ -495,11 +495,11 @@ class InputRecordingCognition(Cognition):
 
 
 def _reasoning_on(processor: processing.Processor) -> cognition.Cognition:
-    """A cognition whose intuition passes every turn, so ``processor`` decides each one as reasoning."""
+    """A cognition whose decision passes every turn, so ``processor`` decides each one as reasoning."""
 
     store = memory.Memory()
     return cognition.Cognition(
-        intuition=cognition.Intuition(processor=_PassingIntuitionProcessor()),
+        decision=cognition.Decision(processor=_PassingDecisionProcessor()),
         reasoning=cognition.Reasoning(processor=processor),
         reflection=_reflection_for_test(store),
         memory=store,
@@ -509,7 +509,7 @@ def _reasoning_on(processor: processing.Processor) -> cognition.Cognition:
 def as_cognition(
     value: abilities.Ability[typing.Any, typing.Any] | processing.Processing | processing.DecisionProcessor,
 ) -> abilities.Ability[typing.Any, typing.Any]:
-    """Bot cognition is Cognition; wrap a leaf DecisionProcessor as intuition for tests."""
+    """Bot cognition is Cognition; wrap a leaf DecisionProcessor as decision for tests."""
 
     if isinstance(value, cognition.Cognition):
         return value
@@ -521,7 +521,7 @@ def as_cognition(
         raise TypeError("as_cognition expects Cognition, or Processing on a DecisionProcessor, or a DecisionProcessor")
     store = memory.Memory()
     return cognition.Cognition(
-        intuition=cognition.Intuition(processor=processor),
+        decision=cognition.Decision(processor=processor),
         reasoning=cognition.Reasoning(processor=_NoopReasoningProcessor()),
         reflection=_reflection_for_test(store),
         memory=store,
@@ -2546,7 +2546,7 @@ def test_bot_stimuli_without_a_product_neither_wake_nor_hold_cognition_awake() -
         consolidation = RestRecordingConsolidation(memory=store)
         ignore = IgnoreProcessor()
         ability = cognition.Cognition(
-            intuition=cognition.Intuition(processor=ignore),
+            decision=cognition.Decision(processor=ignore),
             reasoning=cognition.Reasoning(processor=_NoopReasoningProcessor()),
             reflection=_reflection_for_test(store),
             memory=store,
@@ -2794,7 +2794,7 @@ def test_bot_processes_observed_device_event_with_trace_metadata() -> None:
 
     assert len(calls) == 1
     assert_heard_phone_ring(calls[0].input)
-    # Intuition/Reasoning inject processing.Processor (not Processing), so model process()
+    # Decision/Reasoning inject processing.Processor (not Processing), so model process()
     # sees the decision input only; HSM event metadata stays on the ability event chain.
     assert input_event_metadata == []
 
@@ -3585,7 +3585,7 @@ def test_bot_rejects_forged_focus_action_source_during_current_processing() -> N
         # The browser is a candidate of this turn, so only the forged source refuses the focus.
         forged = dataclasses.replace(
             mosfet.FocusDeviceEvent.with_data(mosfet.FocusDeviceEventData(device="browser")),
-            id=f"{request.id}:intuition",
+            id=f"{request.id}:decision",
             source="forged-source",
             target=hsm.id(active_bot),
             metadata=dict(request.metadata),
@@ -3632,7 +3632,7 @@ def test_focused_agent_rejects_focus_device_outside_processing_candidates() -> N
             active_bot.context(),
             mosfet.InputEvent.with_data(mosfet.InputEventData(target_device="browser", priority=1)),
         )
-        # Intuition's rejected selections fail it, so reasoning takes the same turn (D-R-36) and selects nothing.
+        # Decision's rejected selections fail it, so reasoning takes the same turn (D-R-36) and selects nothing.
         await wait_until(lambda: len(active_bot.actions) == 2 and active_bot.state() == "/Bot/active/focused")
         await active_bot.dispatch(
             active_bot.context(),
@@ -4452,7 +4452,7 @@ def test_bot_processing_state_routes_ability_failure_to_failed_event() -> None:
     async def run() -> tuple[str, list[mosfet.ProcessingFailedEventData], list[cognition.types.OutputData]]:
         store = memory.Memory()
         failing = cognition.Cognition(
-            intuition=cognition.Intuition(processor=FailingProcessor()),
+            decision=cognition.Decision(processor=FailingProcessor()),
             reasoning=cognition.Reasoning(processor=FailingProcessor()),
             reflection=_reflection_for_test(store),
             memory=store,
@@ -4464,7 +4464,7 @@ def test_bot_processing_state_routes_ability_failure_to_failed_event() -> None:
             active_bot.context(),
             mosfet.InputEvent.with_data(mosfet.InputEventData(target_device="phone", priority=3)),
         )
-        # Intuition's failure hands the turn to reasoning (D-R-36), which fails too. The bot perceives that
+        # Decision's failure hands the turn to reasoning (D-R-36), which fails too. The bot perceives that
         # failed step as one more turn (D-R-13); that turn fails the same way and is not handed back again.
         await wait_until(lambda: len(active_bot.failures) == 2 and active_bot.state() == "/Bot/active/focused")
 
@@ -4888,9 +4888,9 @@ def test_stopping_the_body_stops_every_part_it_started_and_what_each_part_starte
         handset = phone_device.Phone(id="desk", speaker=speaker)
         register = memory.StmMemory()
         store = memory.Memory()
-        intuition = cognition.Intuition(processor=IgnoreProcessor())
+        decision = cognition.Decision(processor=IgnoreProcessor())
         mind = cognition.Cognition(
-            intuition=intuition,
+            decision=decision,
             reasoning=cognition.Reasoning(processor=_NoopReasoningProcessor()),
             reflection=_reflection_for_test(store),
             memory=store,
@@ -4907,13 +4907,13 @@ def test_stopping_the_body_stops_every_part_it_started_and_what_each_part_starte
             "speaker": speaker,
             "register": register,
             "cognition": mind,
-            "intuition": intuition,
+            "decision": decision,
             "memory": store,
         }
         return {name: mosfet.lifecycle.is_started(part) for name, part in parts.items()}
 
     assert asyncio.run(run()) == dict.fromkeys(
-        ("body", "phone", "speaker", "register", "cognition", "intuition", "memory"), False
+        ("body", "phone", "speaker", "register", "cognition", "decision", "memory"), False
     )
 
 

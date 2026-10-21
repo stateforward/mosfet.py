@@ -11,10 +11,10 @@ them fail), and :func:`check` returns them as diagnostics:
 >>> from mosfet.bot import testing
 >>> with warnings.catch_warnings():
 ...     warnings.simplefilter("ignore", bot.LintWarning)
-...     lonely = bot.define("lonely", bot.cognition(testing.Scripted(), intuition=testing.Decider()))
+...     lonely = bot.define("lonely", bot.cognition(reasoning=testing.Scripted(), reflex=testing.Decider()))
 >>> [found.code for found in bot.check(lonely)]
 ['no_devices']
->>> mind = bot.cognition(testing.Scripted(), intuition=testing.Decider())
+>>> mind = bot.cognition(reasoning=testing.Scripted(), reflex=testing.Decider())
 >>> bot.check(bot.define("lonely", mind, bot.allow("no_devices")))
 ()
 
@@ -194,10 +194,7 @@ def empty_timeouts(model: elements.Model) -> list[diagnostics.Diagnostic]:
             ),
         )
         for member in _members(model, elements.TimeoutsElement)
-        if member.processing is None
-        and member.deactivation is None
-        and member.attachment is None
-        and member.step is None
+        if all(value is None for _, value in member.given())
     ]
 
 

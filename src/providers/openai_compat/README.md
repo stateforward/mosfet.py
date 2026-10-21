@@ -4,7 +4,7 @@ OpenAI-compatible provider package for stateforward.mosfet text generation, proc
 
 ## Live Mercury tool-call eval
 
-Evidence suite for Inception Mercury 2 dispatch tool calls (phone-bot intuition shape):
+Evidence suite for Inception Mercury 2 dispatch tool calls (phone-bot reflex decision shape):
 
 ```sh
 # from repo root; requires BOT_MERCURY_API_KEY (or MERCURY_API_KEY / INCEPTION_API_KEY)

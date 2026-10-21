@@ -5,8 +5,8 @@
         [--judge-url URL --judge-model NAME] [--reply-timeout S] [--pause S]
 
 ``--peer`` is a room of Willy's (one of ``WILLY_ROOMS``) no other far side is connected as. The settings are read
-from the process environment once, as Willy's are: ``WILLY_LLM_URL`` and ``WILLY_MODEL`` (the persona's model,
-and the judge's unless ``--judge-url``/``--judge-model`` name another), ``WILLY_TTS_URL`` (the speech engine the
+from the process environment once, as Willy's are: ``WILLY_REASONING_URL`` and ``WILLY_REASONING_MODEL`` (the
+persona's model, and the judge's unless ``--judge-url``/``--judge-model`` name another), ``WILLY_TTS_URL`` (the speech engine the
 people speak through, in its catalog voices), ``WILLY_TRANSCRIBE_URL`` (batch speech to text, which hears Willy),
 and ``WILLY_TRAITS`` (Willy's traits, for the judge; Willy's defaults when unset). The secrets are
 ``computer_token_secret`` (resolved as ``willy_example.room`` resolves it, ``--secret-file`` included) and,
@@ -54,8 +54,8 @@ class _Settings(pydantic.BaseModel):
         frozen=True, extra="ignore", hide_input_in_errors=True
     )
 
-    llm_url: str = pydantic.Field(alias="WILLY_LLM_URL", min_length=1)
-    model: str = pydantic.Field(alias="WILLY_MODEL", min_length=1)
+    reasoning_url: str = pydantic.Field(alias="WILLY_REASONING_URL", min_length=1)
+    reasoning_model: str = pydantic.Field(alias="WILLY_REASONING_MODEL", min_length=1)
     tts_url: str = pydantic.Field(alias="WILLY_TTS_URL", min_length=1)
     transcribe_url: str = pydantic.Field(alias="WILLY_TRANSCRIBE_URL", min_length=1)
     traits: tuple[str, ...] = pydantic.Field(alias="WILLY_TRAITS", default=willy_example.DEFAULT_TRAITS.traits)
@@ -141,8 +141,8 @@ def main(argv: collections.abc.Sequence[str] | None = None) -> int:
         action="append",
         help="a scenario to run, by id; repeat for more; default: every built-in scenario",
     )
-    _ = parser.add_argument("--judge-url", help="the judge's OpenAI-compatible /v1 root; default: WILLY_LLM_URL")
-    _ = parser.add_argument("--judge-model", help="the judge's model; default: WILLY_MODEL")
+    _ = parser.add_argument("--judge-url", help="the judge's OpenAI-compatible /v1 root; default: WILLY_REASONING_URL")
+    _ = parser.add_argument("--judge-model", help="the judge's model; default: WILLY_REASONING_MODEL")
     _ = parser.add_argument(
         "--reply-timeout", type=_seconds, default=30.0, help="seconds to wait for Willy to begin; default: 30"
     )
@@ -198,8 +198,8 @@ def main(argv: collections.abc.Sequence[str] | None = None) -> int:
         return 1
 
     key = None if api_key is None else api_key.get_secret_value() or None
-    judge_url = arguments.judge_url or settings.llm_url
-    judge_model = arguments.judge_model or settings.model
+    judge_url = arguments.judge_url or settings.reasoning_url
+    judge_model = arguments.judge_model or settings.reasoning_model
     speech_url = f"{settings.tts_url.rstrip('/')}/v1"
     services = conversation.Services(
         catalog=speech_server.Catalog(
@@ -211,13 +211,16 @@ def main(argv: collections.abc.Sequence[str] | None = None) -> int:
         transcribe=openai_compat.SpeechDecoder(
             model=willy_example.TRANSCRIPTION_MODEL, base_url=settings.transcribe_url
         ),
-        persona=minds.Persona(openai_compat.ChatClient(model=settings.model, base_url=settings.llm_url, api_key=key)),
+        persona=minds.Persona(
+            openai_compat.ChatClient(model=settings.reasoning_model, base_url=settings.reasoning_url, api_key=key)
+        ),
         judge=minds.Judge(
             openai_compat.ChatClient(model=judge_model, base_url=judge_url, api_key=key), traits=settings.traits
         ),
         judge_info=record.Judge(
             model=judge_model,
-            shares_willys_model=(judge_url.rstrip("/"), judge_model) == (settings.llm_url.rstrip("/"), settings.model),
+            shares_willys_model=(judge_url.rstrip("/"), judge_model)
+            == (settings.reasoning_url.rstrip("/"), settings.reasoning_model),
         ),
     )
     logging.basicConfig(stream=sys.stderr, level=logging.WARNING, format="%(levelname)s %(name)s %(message)s")

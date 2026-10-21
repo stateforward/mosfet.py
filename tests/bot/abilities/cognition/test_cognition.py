@@ -22,6 +22,7 @@ from mosfet.devices import audio
 from mosfet.devices import computer
 from mosfet.environment import Environment
 from mosfet.protocols import attachment
+from mosfet.telemetry import span
 
 import asyncio
 import collections.abc
@@ -35,6 +36,9 @@ import typing
 import xml.etree.ElementTree
 
 import hsm
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from sqlalchemy.engine import Engine
 from tests.bot.abilities.memory.memory_fixtures import execute_on
 from tests.bot.abilities.support import dispatch_ability_for_test, shared_hsm_context, start_abilities_for_test
@@ -181,8 +185,8 @@ def _select_by_query_tags(*, query_tags: str, context_ref: str | None = None, li
 
 # Typed accessors for the protected internals these tests deliberately exercise
 # (same convention as tests/hsm_instance_state.py).
-def cognition_intuition(ability: cognition.Cognition) -> cognition.Intuition:
-    return typing.cast(cognition.Intuition, object.__getattribute__(ability, "_intuition"))
+def cognition_decision(ability: cognition.Cognition) -> cognition.Decision:
+    return typing.cast(cognition.Decision, object.__getattribute__(ability, "_decision"))
 
 
 def cognition_reasoning(ability: cognition.Cognition) -> cognition.Reasoning:
@@ -208,8 +212,8 @@ def reflection_select_processing(ability: cognition.Reflection) -> processing.Pr
 _CognitionGuard = collections.abc.Callable[[hsm.Context, cognition.Cognition, hsm.Event[typing.Any]], bool]
 _ReflectionGuard = collections.abc.Callable[[hsm.Context, cognition.Reflection, hsm.Event[typing.Any]], bool]
 
-cognition_matches_intuition_output = typing.cast(
-    _CognitionGuard, object.__getattribute__(cognition.Cognition, "_matches_intuition_output")
+cognition_matches_decision_output = typing.cast(
+    _CognitionGuard, object.__getattribute__(cognition.Cognition, "_matches_decision_output")
 )
 cognition_matches_autonomy_output = typing.cast(
     _CognitionGuard, object.__getattribute__(cognition.Cognition, "_matches_autonomy_output")
@@ -229,7 +233,7 @@ def _processor_events(output: object) -> processing.Events:
 
 
 def empty_output() -> cognition.types.OutputData:
-    """Empty selection product — intuition treats as unhandled and cascades to reasoning."""
+    """Empty selection product — decision treats as unhandled and cascades to reasoning."""
 
     return ()
 
@@ -338,23 +342,23 @@ class _BotActor(hsm.Instance):
         return False
 
 
-class RecordingIntuitionProcessor(processing.DecisionProcessor):
+class RecordingDecisionProcessor(processing.DecisionProcessor):
     """Return events (with optional patched confidence) or unhandled OutputData."""
 
     calls: list[processing.InputData]
-    output: processing.Events | cognition.intuition.OutputData
+    output: processing.Events | cognition.decision.OutputData
 
     def __init__(
         self,
         output: cognition.types.OutputData
-        | cognition.intuition.OutputData
+        | cognition.decision.OutputData
         | processing.Events
         | processing.SelectedEvent,
         *,
         confidence: int | None = 99,
     ) -> None:
         self.calls = []
-        if isinstance(output, cognition.intuition.OutputData):
+        if isinstance(output, cognition.decision.OutputData):
             if output.result is None:
                 self.output = output
             else:
@@ -369,29 +373,30 @@ class RecordingIntuitionProcessor(processing.DecisionProcessor):
         self, input: processing.InputData, *, drafts: processing.DraftSink | None = None
     ) -> processing.Events:
         self.calls.append(input)
-        if isinstance(self.output, cognition.intuition.OutputData):
+        if isinstance(self.output, cognition.decision.OutputData):
             if self.output.result is None:
-                return _processor_events(processing.Result[processing.Events].unhandled())
+                # The pass, as a decision provider answers it: the envelope, with the tier it hands the turn to.
+                return typing.cast(processing.Events, typing.cast(object, self.output))
             return _as_events(self.output.result)
         return self.output
 
 
-class DelayedIntuitionProcessor(processing.DecisionProcessor):
+class DelayedDecisionProcessor(processing.DecisionProcessor):
     calls: list[processing.InputData]
     cancelled: bool
     release_first: asyncio.Event
-    output: processing.Events | cognition.intuition.OutputData
+    output: processing.Events | cognition.decision.OutputData
 
     def __init__(
         self,
-        output: cognition.types.OutputData | cognition.intuition.OutputData,
+        output: cognition.types.OutputData | cognition.decision.OutputData,
         *,
         confidence: int | None = 99,
     ) -> None:
         self.calls = []
         self.cancelled = False
         self.release_first = asyncio.Event()
-        if isinstance(output, cognition.intuition.OutputData):
+        if isinstance(output, cognition.decision.OutputData):
             if output.result is None:
                 self.output = output
             else:
@@ -410,7 +415,7 @@ class DelayedIntuitionProcessor(processing.DecisionProcessor):
             except asyncio.CancelledError:
                 self.cancelled = True
                 raise
-        if isinstance(self.output, cognition.intuition.OutputData):
+        if isinstance(self.output, cognition.decision.OutputData):
             if self.output.result is None:
                 return _processor_events(processing.Result[processing.Events].unhandled())
             return _as_events(self.output.result)
@@ -686,28 +691,30 @@ class RecordingCognition(cognition.Cognition):
     def __init__(
         self,
         *,
-        intuition: cognition.Intuition | None = None,
+        decision: cognition.Decision | None = None,
         reasoning: cognition.Reasoning | None = None,
         autonomy: cognition.Autonomy | None = None,
-        intuition_processor: processing.DecisionProcessor | None = None,
+        decision_processor: processing.DecisionProcessor | None = None,
         reasoning_processor: processing.Processor | None = None,
         reflection: cognition.Reflection | None = None,
         store: memory.Memory | None = None,
         associative: memory.Associative | None = None,
         stm_memory: memory.StmMemory | None = None,
+        intuition: cognition.Intuition | None = None,
     ) -> None:
-        if intuition is None or reasoning is None:
+        if decision is None or reasoning is None:
             default_i, default_r = cognition_abilities(
-                intuition_processor=intuition_processor,
+                decision_processor=decision_processor,
                 reasoning_processor=reasoning_processor,
             )
-            intuition = intuition or default_i
+            decision = decision or default_i
             reasoning = reasoning or default_r
         reflection = reflection or cognition.Reflection(
             processor=FixedProcessor(no_output("reflection")),
             memory=store if store is not None else memory.Memory(),
         )
         super().__init__(
+            decision=decision,
             intuition=intuition,
             reasoning=reasoning,
             autonomy=autonomy,
@@ -755,7 +762,7 @@ def deliberative_input(
     *,
     schemas: tuple[hsm.Event[object], ...] | None = None,
 ) -> processing.InputData:
-    """Deliberative input for nested processors (intuition/reasoning/reflection)."""
+    """Deliberative input for nested processors (decision/reasoning/reflection)."""
 
     return processing.InputData(
         input=mosfet.InputEventData(target_device="phone", priority=0),
@@ -776,13 +783,13 @@ def cognition_turn(
     )
 
 
-def intuition_input(
+def decision_input(
     input: processing.InputData | None = None,
     *,
     operation_id: str = "test-turn",
     generation: str = "operation-token",
-) -> cognition.intuition.InputData:
-    return cognition.intuition.InputData(
+) -> cognition.decision.InputData:
+    return cognition.decision.InputData(
         turn=cognition_turn(operation_id=operation_id, generation=generation),
         processing_input=input or deliberative_input(),
     )
@@ -802,32 +809,32 @@ def reasoning_input(
 
 def cognition_abilities(
     *,
-    intuition_processor: processing.DecisionProcessor | None = None,
+    decision_processor: processing.DecisionProcessor | None = None,
     reasoning_processor: processing.Processor | None = None,
-) -> tuple[cognition.Intuition, cognition.Reasoning]:
-    intuition = cognition.Intuition(
-        processor=intuition_processor
-        or RecordingIntuitionProcessor(cognition.intuition.OutputData(result=no_output("fast"))),
+) -> tuple[cognition.Decision, cognition.Reasoning]:
+    decision = cognition.Decision(
+        processor=decision_processor
+        or RecordingDecisionProcessor(cognition.decision.OutputData(result=no_output("fast"))),
     )
     reasoning = cognition.Reasoning(
         processor=reasoning_processor or RecordingReasoningProcessor(focus_output("phone", "reasoned focus"))
     )
-    return intuition, reasoning
+    return decision, reasoning
 
 
 def make_cognition(
     *,
-    intuition_processor: processing.DecisionProcessor | None = None,
+    decision_processor: processing.DecisionProcessor | None = None,
     reasoning_processor: processing.Processor | None = None,
     reflection: cognition.Reflection | None = None,
     autonomy: cognition.Autonomy | None = None,
 ) -> cognition.Cognition:
-    intuition, reasoning = cognition_abilities(
-        intuition_processor=intuition_processor,
+    decision, reasoning = cognition_abilities(
+        decision_processor=decision_processor,
         reasoning_processor=reasoning_processor,
     )
     return cognition.Cognition(
-        intuition=intuition,
+        decision=decision,
         reasoning=reasoning,
         autonomy=autonomy,
         reflection=reflection
@@ -843,15 +850,15 @@ def test_cognition_rejects_child_terminal_from_wrong_source() -> None:
         ability = make_cognition()
         ctx = shared_hsm_context()
         await start_abilities_for_test(ctx, ability)
-        child = cognition_intuition(ability)
+        child = cognition_decision(ability)
         turn = cognition_turn(operation_id="forged-turn", generation="forged-operation-token")
         forged = dataclasses.replace(
             child.output_event.with_data(cognition.types.CompletionData(turn=turn, output=None)),
-            id="forged-turn:intuition",
+            id="forged-turn:decision",
             source="forged-child",
             target=hsm.id(ability),
         )
-        return cognition_matches_intuition_output(ctx, ability, forged)
+        return cognition_matches_decision_output(ctx, ability, forged)
 
     assert not asyncio.run(run())
 
@@ -859,7 +866,7 @@ def test_cognition_rejects_child_terminal_from_wrong_source() -> None:
 def test_reflection_rejects_child_terminal_from_wrong_source() -> None:
     async def run() -> bool:
         ability = cognition.Reflection(
-            processor=RecordingIntuitionProcessor(no_output("unused")), memory=memory.Memory()
+            processor=RecordingDecisionProcessor(no_output("unused")), memory=memory.Memory()
         )
         ctx = shared_hsm_context()
         await start_abilities_for_test(ctx, ability)
@@ -945,16 +952,16 @@ def cognition_model_internals(model: object) -> CognitionModelInternals:
 
 
 def test_cognitive_abilities_are_concrete_processing_abilities() -> None:
-    intuition_processor = RecordingIntuitionProcessor(cognition.intuition.OutputData(result=no_output("fast")))
+    decision_processor = RecordingDecisionProcessor(cognition.decision.OutputData(result=no_output("fast")))
     reasoning_processor = RecordingReasoningProcessor(focus_output("phone", "deliberate"))
-    intuition = cognition.Intuition(processor=intuition_processor)
+    decision = cognition.Decision(processor=decision_processor)
     reasoning = cognition.Reasoning(processor=reasoning_processor)
     connection = sqlite3.connect(":memory:", check_same_thread=False)
     try:
         reflection = RecordingReflectionAbility(connection)
 
-        assert isinstance(intuition, abilities.Ability)
-        assert isinstance(intuition, processing.Processing)
+        assert isinstance(decision, abilities.Ability)
+        assert isinstance(decision, processing.Processing)
         assert isinstance(reasoning, abilities.Ability)
         assert isinstance(reasoning, processing.Processing)
         assert isinstance(reflection, abilities.Ability)
@@ -991,9 +998,9 @@ def test_cognition_builds_one_group_for_required_children_and_waits_for_aggregat
 
         monkeypatch.setattr(attachment.Group, "__init__", record_group)
         monkeypatch.setattr(attachment.Group, "attach", hold_attach)
-        intuition, reasoning = cognition_abilities()
+        decision, reasoning = cognition_abilities()
         minimal = cognition.Cognition(
-            intuition=intuition,
+            decision=decision,
             reasoning=reasoning,
             reflection=cognition.Reflection(
                 processor=FixedProcessor(no_output("reflect")),
@@ -1004,7 +1011,7 @@ def test_cognition_builds_one_group_for_required_children_and_waits_for_aggregat
         try:
             maximal = cognition.Cognition(
                 autonomy=cognition.Autonomy(),
-                intuition=cognition.Intuition(processor=RecordingIntuitionProcessor(no_output("fast"))),
+                decision=cognition.Decision(processor=RecordingDecisionProcessor(no_output("fast"))),
                 reasoning=cognition.Reasoning(processor=RecordingReasoningProcessor(no_output("slow"))),
                 reflection=cognition.Reflection(
                     processor=FixedProcessor(no_output("reflect")),
@@ -1033,9 +1040,7 @@ def test_cognition_builds_one_group_for_required_children_and_waits_for_aggregat
         await minimal.stop(minimal.context())
         del maximal
         cognition_groups = [
-            members
-            for members in groups
-            if members and isinstance(members[0], cognition.Autonomy | cognition.Intuition)
+            members for members in groups if members and isinstance(members[0], cognition.Autonomy | cognition.Decision)
         ]
         return cognition_groups, len(requests), state
 
@@ -1043,12 +1048,12 @@ def test_cognition_builds_one_group_for_required_children_and_waits_for_aggregat
 
     assert len(groups) == 2
     assert len(groups[0]) == 3
-    assert isinstance(groups[0][0], cognition.Intuition)
+    assert isinstance(groups[0][0], cognition.Decision)
     assert isinstance(groups[0][1], cognition.Reasoning)
     assert isinstance(groups[0][2], cognition.Reflection)
     assert len(groups[1]) == 4
     assert isinstance(groups[1][0], cognition.Autonomy)
-    assert isinstance(groups[1][1], cognition.Intuition)
+    assert isinstance(groups[1][1], cognition.Decision)
     assert isinstance(groups[1][2], cognition.Reasoning)
     assert isinstance(groups[1][3], cognition.Reflection)
     assert request_count == 1
@@ -1191,10 +1196,10 @@ def test_cognition_detaches_once_through_group_and_can_reattach(
     assert state == "/CognitionLifecycle/attached/behavior/ready/idle"
 
 
-def test_cognition_detach_cancels_active_intuition_through_group() -> None:
+def test_cognition_detach_cancels_active_decision_through_group() -> None:
     async def run() -> tuple[bool, list[hsm.Event[typing.Any]], str]:
-        processor = DelayedIntuitionProcessor(no_output("held"))
-        ability = make_cognition(intuition_processor=processor)
+        processor = DelayedDecisionProcessor(no_output("held"))
+        ability = make_cognition(decision_processor=processor)
         ctx = hsm.Context()
         owner = CognitionAttachmentOwner()
         _ = await mosfet.started(ctx, owner, owner.model)
@@ -1203,7 +1208,7 @@ def test_cognition_detach_cancels_active_intuition_through_group() -> None:
         owner.lifecycle.clear()
         _ = await hsm.dispatch(ctx, ability, ability.input_event.with_data(await started_cognition_input(ctx)))
         await wait_until(lambda: bool(processor.calls))
-        assert ability.state().endswith("/intuition")
+        assert ability.state().endswith("/decision")
         await ability.detach(
             ctx,
             attachment.DetachEvent.with_data_and_id(
@@ -1226,19 +1231,19 @@ def test_cognition_detach_cancels_active_intuition_through_group() -> None:
     assert state == "/CognitionLifecycle/detached"
 
 
-@pytest.mark.parametrize("child", ["intuition", "reasoning"])
+@pytest.mark.parametrize("child", ["decision", "reasoning"])
 def test_cognition_cancel_waits_for_correlated_active_child(child: str) -> None:
     async def run() -> tuple[bool, list[hsm.Event[typing.Any]], str]:
-        intuition_processor = DelayedIntuitionProcessor(no_output("held"))
+        decision_processor = DelayedDecisionProcessor(no_output("held"))
         reasoning_processor = DelayedReasoningProcessor()
         if child == "reasoning":
             ability = make_cognition(
-                intuition_processor=RecordingIntuitionProcessor(cognition.intuition.OutputData(reason="escalate")),
+                decision_processor=RecordingDecisionProcessor(cognition.decision.OutputData(reason="escalate")),
                 reasoning_processor=reasoning_processor,
             )
         else:
             ability = make_cognition(
-                intuition_processor=intuition_processor,
+                decision_processor=decision_processor,
                 reasoning_processor=reasoning_processor,
             )
         ctx = shared_hsm_context()
@@ -1271,7 +1276,7 @@ def test_cognition_cancel_waits_for_correlated_active_child(child: str) -> None:
         )
         await wait_until(lambda: any(event.name == cognition.CancelledEvent.name for event in owner.lifecycle))
 
-        cancelled = intuition_processor.cancelled if child == "intuition" else reasoning_processor.cancelled
+        cancelled = decision_processor.cancelled if child == "decision" else reasoning_processor.cancelled
         return cancelled, owner.lifecycle, ability.state()
 
     cancelled, lifecycle, state = asyncio.run(run())
@@ -1286,22 +1291,22 @@ def test_cognition_cancel_waits_for_correlated_active_child(child: str) -> None:
     assert state.endswith("/idle")
 
 
-@pytest.mark.parametrize("phase", ["autonomy", "intuition", "reasoning"])
+@pytest.mark.parametrize("phase", ["autonomy", "decision", "reasoning"])
 def test_cognition_direct_cancellation_acknowledges_active_child(
     phase: str,
 ) -> None:
     async def run() -> tuple[list[hsm.Event[typing.Any]], str, tuple[str, ...]]:
-        intuition_processor: processing.DecisionProcessor
+        decision_processor: processing.DecisionProcessor
         if phase == "reasoning":
-            intuition_processor = RecordingIntuitionProcessor(cognition.intuition.OutputData(reason="escalate"))
+            decision_processor = RecordingDecisionProcessor(cognition.decision.OutputData(reason="escalate"))
         else:
-            intuition_processor = DelayedIntuitionProcessor(no_output("held"))
-        intuition, reasoning = cognition_abilities(
-            intuition_processor=intuition_processor,
+            decision_processor = DelayedDecisionProcessor(no_output("held"))
+        decision, reasoning = cognition_abilities(
+            decision_processor=decision_processor,
             reasoning_processor=DelayedReasoningProcessor(),
         )
         ability = cognition.Cognition(
-            intuition=intuition,
+            decision=decision,
             reasoning=reasoning,
             reflection=cognition.Reflection(
                 processor=FixedProcessor(no_output("reflection")),
@@ -1358,9 +1363,9 @@ def test_cognition_direct_cancellation_acknowledges_active_child(
 def test_cognition_stubborn_child_cancel_timeout_requests_reboot(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    class StubbornIntuition(cognition.Intuition):
+    class StubbornDecision(cognition.Decision):
         @staticmethod
-        async def _hold(ctx: hsm.Context, instance: "StubbornIntuition", event: hsm.Event[typing.Any]) -> None:
+        async def _hold(ctx: hsm.Context, instance: "StubbornDecision", event: hsm.Event[typing.Any]) -> None:
             del ctx
             operation_id = event.id if event.id else hsm.id(instance)
             if processing.active_operation(instance, operation_id) is None:
@@ -1368,13 +1373,13 @@ def test_cognition_stubborn_child_cancel_timeout_requests_reboot(
             await asyncio.Event().wait()
 
         submodel = mosfet.define(
-            "StubbornIntuition",
-            hsm.initial(hsm.target("/StubbornIntuition/waiting")),
+            "StubbornDecision",
+            hsm.initial(hsm.target("/StubbornDecision/waiting")),
             hsm.state(
                 "waiting",
                 hsm.transition(
-                    hsm.on(cognition.Intuition.input_event),
-                    hsm.target("/StubbornIntuition/holding"),
+                    hsm.on(cognition.Decision.input_event),
+                    hsm.target("/StubbornDecision/holding"),
                 ),
             ),
             hsm.state(
@@ -1385,10 +1390,10 @@ def test_cognition_stubborn_child_cancel_timeout_requests_reboot(
 
     async def run() -> tuple[list[hsm.Event[typing.Any]], str, tuple[str, ...]]:
         monkeypatch.setattr(cognition_module, "_CANCEL_TEARDOWN_TIMEOUT", datetime.timedelta(milliseconds=10))
-        stubborn = StubbornIntuition(processor=RecordingIntuitionProcessor(no_output("unused")))
+        stubborn = StubbornDecision(processor=RecordingDecisionProcessor(no_output("unused")))
         _, reasoning = cognition_abilities()
         ability = cognition.Cognition(
-            intuition=stubborn,
+            decision=stubborn,
             reasoning=reasoning,
             reflection=cognition.Reflection(
                 processor=FixedProcessor(no_output("reflection")),
@@ -1410,7 +1415,7 @@ def test_cognition_stubborn_child_cancel_timeout_requests_reboot(
                 ability.input_event.with_data_and_id(await started_cognition_input(ctx), operation_id),
             ),
         )
-        await wait_until(lambda: ability.state().endswith("/intuition"))
+        await wait_until(lambda: ability.state().endswith("/decision"))
         _ = await hsm.dispatch(
             ctx,
             ability,
@@ -1497,23 +1502,23 @@ class _StepTimeoutBody(hsm.Instance):
     )
 
 
-@pytest.mark.parametrize("stage", ["intuition", "reasoning"])
+@pytest.mark.parametrize("stage", ["decision", "reasoning"])
 def test_a_step_that_outlasts_the_step_timeout_fails_its_turn_as_a_typed_failure_the_bot_perceives(
-    stage: typing.Literal["intuition", "reasoning"],
+    stage: typing.Literal["decision", "reasoning"],
 ) -> None:
-    """D-R-3 (live: a 31.8 s intuition rebooted the bot and destroyed its bench): a slow step fails
+    """D-R-3 (live: a 31.8 s decision rebooted the bot and destroyed its bench): a slow step fails
     only its turn. The step is stopped, the turn is remembered and reported as a typed failure, the
     bot perceives that failure as its next turn, and the same children serve the turn after it."""
 
     async def run() -> tuple[list[hsm.Event[typing.Any]], str, str, _SlowFirstStepProcessor, dict[str, memory.Episode]]:
         slow = _SlowFirstStepProcessor(hangs=True)
         store = memory.Memory()
-        intuition, reasoning = cognition_abilities(
-            intuition_processor=slow if stage == "intuition" else _SlowFirstStepProcessor(hangs=False),
+        decision, reasoning = cognition_abilities(
+            decision_processor=slow if stage == "decision" else _SlowFirstStepProcessor(hangs=False),
             reasoning_processor=slow if stage == "reasoning" else None,
         )
         ability = cognition.Cognition(
-            intuition=intuition,
+            decision=decision,
             reasoning=reasoning,
             reflection=cognition.Reflection(processor=FixedProcessor(no_output("reflection")), memory=store),
             memory=store,
@@ -1541,13 +1546,15 @@ def test_a_step_that_outlasts_the_step_timeout_fails_its_turn_as_a_typed_failure
     assert failed.id == "slow-turn"
     timed_out = failed.data
     assert isinstance(timed_out, cognition.StepTimedOutData)
+    # The decision layer is reflex's (D-R-52).
+    named = "reflex" if stage == "decision" else stage
     assert (timed_out.stage, timed_out.timeout_seconds, timed_out.turn_id, timed_out.stimulus) == (
-        stage,
+        named,
         0.5,
         "slow-turn",
         mosfet.InputEvent.name,
     )
-    assert timed_out.message == f"Cognition's {stage} step took longer than 0.5 seconds, so the turn failed."
+    assert timed_out.message == f"Cognition's {named} step took longer than 0.5 seconds, so the turn failed."
     (perceived,) = [event for event in told if event.name == cognition.InputEvent.name]
     assert perceived.source == cognition_id
     assert isinstance(perceived.data, cognition.InputData)
@@ -1584,20 +1591,20 @@ def test_a_step_that_fails_is_a_typed_failure_the_bot_perceives_but_failing_on_i
     """D-R-13 (live round 2, E3): after a reasoning step failed (not timed out), no turn ran until the
     person typed again, and the screen said "writing code…" indefinitely. A failed step is now handed
     back as a typed failure the bot perceives as its next turn, like a timed-out one; a step that fails
-    while the bot perceives that failure is not handed back again. (A failing intuition hands its turn
+    while the bot perceives that failure is not handed back again. (A failing decision hands its turn
     to reasoning instead, D-R-36.)"""
 
     stage = "reasoning"
 
     async def run() -> tuple[list[hsm.Event[typing.Any]], str]:
         failing = _FailingStepProcessor()
-        intuition, reasoning = cognition_abilities(
-            intuition_processor=RecordingIntuitionProcessor(cognition.intuition.OutputData(reason="needs thought")),
+        decision, reasoning = cognition_abilities(
+            decision_processor=RecordingDecisionProcessor(cognition.decision.OutputData(reason="needs thought")),
             reasoning_processor=failing,
         )
         store = memory.Memory()
         ability = cognition.Cognition(
-            intuition=intuition,
+            decision=decision,
             reasoning=reasoning,
             reflection=cognition.Reflection(processor=FixedProcessor(no_output("reflection")), memory=store),
             memory=store,
@@ -1643,7 +1650,7 @@ def test_a_step_that_fails_is_a_typed_failure_the_bot_perceives_but_failing_on_i
 
 
 class _UnreadableOnce(hsm.Instance):
-    """A live actor whose state, once armed, cannot be read the next time, so only intuition's frame fails."""
+    """A live actor whose state, once armed, cannot be read the next time, so only decision's frame fails."""
 
     effort: typing.ClassVar[abilities.ability.Effort] = abilities.ability.Effort.XS
     model: typing.ClassVar[hsm.Model | None] = mosfet.define(
@@ -1662,31 +1669,31 @@ class _UnreadableOnce(hsm.Instance):
 
 
 @pytest.mark.parametrize("failing", ["decider", "frame"])
-def test_a_failing_intuition_hands_its_turn_to_reasoning_in_the_same_turn(
+def test_a_failing_decision_hands_its_turn_to_reasoning_in_the_same_turn(
     failing: str, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """D-R-36 (Willy run 7, D-2): decide refused an over-long request, the turn failed at intuition, and reasoning
-    never saw what was said. An intuition whose decider fails, or whose frame cannot be built, now hands the same
+    """D-R-36 (Willy run 7, D-2): decide refused an over-long request, the turn failed at decision, and reasoning
+    never saw what was said. An decision whose decider fails, or whose frame cannot be built, now hands the same
     turn to reasoning: nothing is handed back, and the turn is remembered as reasoning settles it."""
 
     def cascaded(reader: metric_reader.Reader) -> float:
         return sum(
             point.value
             for point in reader.points("bot.cognition.step.failure.count")
-            if point.attributes.get("stage") == "intuition"
+            if point.attributes.get("stage") == "reflex"
             and point.attributes.get("kind") == "failed"
             and point.attributes.get("outcome") == "cascaded"
         )
 
     async def run() -> tuple[list[hsm.Event[typing.Any]], cognition.InputData, list[processing.InputData], str]:
         reasoning_processor = RecordingReasoningProcessor(no_output("reasoned"))
-        intuition, reasoning = cognition_abilities(
-            intuition_processor=_FailingStepProcessor() if failing == "decider" else None,
+        decision, reasoning = cognition_abilities(
+            decision_processor=_FailingStepProcessor() if failing == "decider" else None,
             reasoning_processor=reasoning_processor,
         )
         store = memory.Memory()
         ability = cognition.Cognition(
-            intuition=intuition,
+            decision=decision,
             reasoning=reasoning,
             reflection=cognition.Reflection(processor=FixedProcessor(no_output("reflection")), memory=store),
             memory=store,
@@ -1742,7 +1749,7 @@ def test_a_step_is_given_a_local_models_time_by_default(monkeypatch: pytest.Monk
         timeout: datetime.timedelta,
         on_terminal: collections.abc.Callable[[hsm.Event[typing.Any]], None] | None = None,
     ) -> hsm.Event[typing.Any]:
-        if isinstance(child, cognition.Intuition | cognition.Reasoning):
+        if isinstance(child, cognition.Decision | cognition.Reasoning):
             hops.append((type(child).__name__, timeout))
         return await run_terminal_operation(
             ctx, child=child, request=request, terminals=terminals, timeout=timeout, on_terminal=on_terminal
@@ -1751,8 +1758,8 @@ def test_a_step_is_given_a_local_models_time_by_default(monkeypatch: pytest.Monk
     monkeypatch.setattr(ability_module, "run_terminal_operation", recorded)
 
     async def run() -> None:
-        # Intuition leaves the turn to reasoning, so both steps are taken.
-        ability = make_cognition(intuition_processor=_SlowFirstStepProcessor(hangs=False))
+        # Decision leaves the turn to reasoning, so both steps are taken.
+        ability = make_cognition(decision_processor=_SlowFirstStepProcessor(hangs=False))
         ctx = shared_hsm_context()
         owner = CognitionAttachmentOwner()
         _ = await mosfet.started(ctx, owner, owner.model)
@@ -1765,15 +1772,71 @@ def test_a_step_is_given_a_local_models_time_by_default(monkeypatch: pytest.Monk
 
     asyncio.run(run())
 
-    assert [step for step, _ in hops] == ["Intuition", "Reasoning"]
+    assert [step for step, _ in hops] == ["Decision", "Reasoning"]
     assert all(timeout >= datetime.timedelta(seconds=120) for _, timeout in hops)
+
+
+def test_each_tier_is_bounded_by_its_own_timeout_or_else_the_step_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    """D-R-52: ``bot.timeouts(reflex=, intuition=, reasoning=)`` bound each tier's steps; one left unset is
+    bounded by the step timeout."""
+
+    hops: list[tuple[str, datetime.timedelta]] = []
+    run_terminal_operation = ability_module.run_terminal_operation
+
+    async def recorded(
+        ctx: hsm.Context,
+        *,
+        child: hsm.Instance,
+        request: hsm.Event[typing.Any] | collections.abc.Callable[[hsm.Instance], hsm.Event[typing.Any]],
+        terminals: tuple[hsm.Event[typing.Any], ...],
+        timeout: datetime.timedelta,
+        on_terminal: collections.abc.Callable[[hsm.Event[typing.Any]], None] | None = None,
+    ) -> hsm.Event[typing.Any]:
+        if isinstance(child, cognition.Decision | cognition.Intuition | cognition.Reasoning):
+            hops.append((type(child).__name__, timeout))
+        return await run_terminal_operation(
+            ctx, child=child, request=request, terminals=terminals, timeout=timeout, on_terminal=on_terminal
+        )
+
+    monkeypatch.setattr(ability_module, "run_terminal_operation", recorded)
+    handoff = cognition.types.EventData(target="cognition", event=cognition.Reasoning.input_event.name, data={})
+
+    async def run() -> None:
+        ability = cognition.Cognition(
+            decision=cognition.Decision(
+                processor=RecordingDecisionProcessor(cognition.decision.OutputData(result=None))
+            ),
+            intuition=cognition.Intuition(processor=RecordingReasoningProcessor((handoff,))),
+            reasoning=cognition.Reasoning(processor=RecordingReasoningProcessor(no_output("reasoned"))),
+            reflection=cognition.Reflection(processor=FixedProcessor(no_output("reflection")), memory=memory.Memory()),
+            child_operation_timeout=datetime.timedelta(seconds=150),
+            intuition_timeout=datetime.timedelta(seconds=20),
+            reasoning_timeout=datetime.timedelta(seconds=180),
+        )
+        ctx = shared_hsm_context()
+        owner = CognitionAttachmentOwner()
+        _ = await mosfet.started(ctx, owner, owner.model)
+        await ability.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)))
+        await wait_until(lambda: ability.state().endswith("/idle"))
+        _ = await hsm.dispatch(
+            ctx, ability, ability.input_event.with_data_and_id(await started_cognition_input(ctx), "turn")
+        )
+        await wait_until(lambda: len(hops) >= 3 and ability.state().endswith("/idle"))
+
+    asyncio.run(run())
+
+    assert hops == [
+        ("Decision", datetime.timedelta(seconds=150)),
+        ("Intuition", datetime.timedelta(seconds=20)),
+        ("Reasoning", datetime.timedelta(seconds=180)),
+    ]
 
 
 def test_cognition_settled_child_terminal_is_not_abandoned_by_parent_deadline() -> None:
     """An instant child hop completes through the one-shot; a settled hop is not rebooted."""
 
     async def run() -> tuple[list[hsm.Event[typing.Any]], str]:
-        ability = RecordingCognition(intuition_processor=RecordingOutputOperation(no_output("settled")))
+        ability = RecordingCognition(decision_processor=RecordingOutputOperation(no_output("settled")))
         ctx = shared_hsm_context()
         owner = CognitionAttachmentOwner()
         _ = await mosfet.started(ctx, owner, owner.model)
@@ -1851,7 +1914,7 @@ def test_cancelled_turn_cannot_cancel_the_next_turn(monkeypatch: pytest.MonkeyPa
     async def run() -> tuple[list[int], str]:
         monkeypatch.setattr(cognition_module.types, "STEP_TIMEOUT", datetime.timedelta(milliseconds=30))
         processor = TwoTurnHangingProcessor()
-        ability = make_cognition(intuition_processor=processor)
+        ability = make_cognition(decision_processor=processor)
         ctx = shared_hsm_context()
         owner = CognitionAttachmentOwner()
         _ = await mosfet.started(ctx, owner, owner.model)
@@ -1894,14 +1957,14 @@ def test_cancelled_turn_cannot_cancel_the_next_turn(monkeypatch: pytest.MonkeyPa
     cancelled_calls, state = asyncio.run(run())
 
     assert cancelled_calls == [0]
-    assert state.endswith("/intuition")
+    assert state.endswith("/decision")
 
 
 def test_cognition_ignores_stale_public_child_terminal() -> None:
     async def run() -> tuple[list[cognition.types.OutputData], str]:
-        processor = DelayedIntuitionProcessor(no_output("held"))
-        intuition, reasoning = cognition_abilities(intuition_processor=processor)
-        ability = RecordingCognition(intuition=intuition, reasoning=reasoning)
+        processor = DelayedDecisionProcessor(no_output("held"))
+        decision, reasoning = cognition_abilities(decision_processor=processor)
+        ability = RecordingCognition(decision=decision, reasoning=reasoning)
         ctx = shared_hsm_context()
         owner = CognitionAttachmentOwner()
         _ = await mosfet.started(ctx, owner, owner.model)
@@ -1913,11 +1976,11 @@ def test_cognition_ignores_stale_public_child_terminal() -> None:
             ability,
             ability.input_event.with_data_and_id(current_input, "current-turn"),
         )
-        await wait_until(lambda: ability.state().endswith("/intuition"))
+        await wait_until(lambda: ability.state().endswith("/decision"))
         stale = dataclasses.replace(
-            intuition.output_event.with_data(_as_events(focus_output("phone", "stale"))),
-            id="old-turn:intuition",
-            source=hsm.id(intuition),
+            decision.output_event.with_data(_as_events(focus_output("phone", "stale"))),
+            id="old-turn:decision",
+            source=hsm.id(decision),
             target=hsm.id(ability),
             metadata={"bot.cognition.input": current_input},
         )
@@ -1932,14 +1995,14 @@ def test_cognition_ignores_stale_public_child_terminal() -> None:
     outputs, state = asyncio.run(run())
 
     assert outputs == []
-    assert state.endswith("/intuition")
+    assert state.endswith("/decision")
 
 
 def test_cognition_rejects_terminal_from_inactive_sibling(monkeypatch: pytest.MonkeyPatch) -> None:
     ability = make_cognition(autonomy=cognition.Autonomy())
     autonomy_ability = cognition_autonomy(ability)
     assert autonomy_ability is not None
-    monkeypatch.setattr(ability, "state", lambda: "/Cognition/processing/intuition")
+    monkeypatch.setattr(ability, "state", lambda: "/Cognition/processing/decision")
     monkeypatch.setattr(
         hsm,
         "id",
@@ -1963,24 +2026,24 @@ def test_cognition_rejects_valid_terminal_from_prior_turn_in_same_leaf(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     ability = make_cognition()
-    intuition_ability = cognition_intuition(ability)
-    monkeypatch.setattr(ability, "state", lambda: "/Cognition/processing/intuition")
-    monkeypatch.setattr(hsm, "id", lambda actor: "cognition" if actor is ability else "intuition")
+    decision_ability = cognition_decision(ability)
+    monkeypatch.setattr(ability, "state", lambda: "/Cognition/processing/decision")
+    monkeypatch.setattr(hsm, "id", lambda actor: "cognition" if actor is ability else "decision")
     turn = cognition_turn(operation_id="prior-turn", generation="prior-operation-token")
     stale = dataclasses.replace(
-        intuition_ability.output_event.with_data(cognition.types.CompletionData(turn=turn, output=no_output("stale"))),
-        id="prior-turn:intuition",
-        source="intuition",
+        decision_ability.output_event.with_data(cognition.types.CompletionData(turn=turn, output=no_output("stale"))),
+        id="prior-turn:decision",
+        source="decision",
         target="cognition",
     )
 
-    assert not cognition_matches_intuition_output(hsm.Context(), ability, stale)
+    assert not cognition_matches_decision_output(hsm.Context(), ability, stale)
 
 
 def test_cognition_cancel_ack_requires_exact_parent_operation(monkeypatch: pytest.MonkeyPatch) -> None:
     ability = make_cognition()
-    monkeypatch.setattr(hsm, "id", lambda actor: "cognition" if actor is ability else "intuition")
-    request_id = "cancel-turn:intuition"
+    monkeypatch.setattr(hsm, "id", lambda actor: "cognition" if actor is ability else "decision")
+    request_id = "cancel-turn:decision"
     wrong_parent = dataclasses.replace(
         processing.CancelledEvent.with_data(
             processing.CancelledData(
@@ -1990,7 +2053,7 @@ def test_cognition_cancel_ack_requires_exact_parent_operation(monkeypatch: pytes
             )
         ),
         id=request_id,
-        source="intuition",
+        source="decision",
         target="cognition",
     )
 
@@ -2002,14 +2065,14 @@ def test_cognition_cancel_ack_requires_exact_token_and_child(monkeypatch: pytest
     identities = {
         id(ability): "cognition",
         id(cognition_autonomy(ability)): "autonomy",
-        id(cognition_intuition(ability)): "intuition",
+        id(cognition_decision(ability)): "decision",
         id(cognition_reasoning(ability)): "reasoning",
     }
     monkeypatch.setattr(hsm, "id", lambda actor: identities.get(id(actor), "unknown"))
     parent_id = "cancel-turn"
-    child_id = f"{parent_id}:intuition"
+    child_id = f"{parent_id}:decision"
     token = "exact-token"
-    cancellation_id = processing.cancellation_operation_id(parent_id, child_id, token, "intuition")
+    cancellation_id = processing.cancellation_operation_id(parent_id, child_id, token, "decision")
     live_operation = typing.cast(processing.Operation, object())
     monkeypatch.setattr(
         processing,
@@ -2032,10 +2095,10 @@ def test_cognition_cancel_ack_requires_exact_token_and_child(monkeypatch: pytest
         )
 
     assert cognition_matches_child_cancelled(
-        hsm.Context(), ability, acknowledgement(source="intuition", acknowledged_token=token)
+        hsm.Context(), ability, acknowledgement(source="decision", acknowledged_token=token)
     )
     assert not cognition_matches_child_cancelled(
-        hsm.Context(), ability, acknowledgement(source="intuition", acknowledged_token="wrong-token")
+        hsm.Context(), ability, acknowledgement(source="decision", acknowledged_token="wrong-token")
     )
     assert not cognition_matches_child_cancelled(
         hsm.Context(), ability, acknowledgement(source="reasoning", acknowledged_token=token)
@@ -2080,31 +2143,31 @@ def test_autonomy_cancellation_requires_attachment_owner_and_preserves_token() -
     assert terminals == []
 
 
-def test_intuition_and_reasoning_own_instructions_on_ability() -> None:
+def test_decision_and_reasoning_own_instructions_on_ability() -> None:
     """Instructions live on the ability ClassVar/constructor and stamp onto processor input at apply."""
 
     async def run() -> tuple[str | None, str | None, str | None]:
-        default_processor = RecordingIntuitionProcessor(no_output("ready"))
+        default_processor = RecordingDecisionProcessor(no_output("ready"))
         custom_processor = RecordingReasoningProcessor(no_output("ready"))
-        subclass_processor = RecordingIntuitionProcessor(no_output("ready"))
+        subclass_processor = RecordingDecisionProcessor(no_output("ready"))
 
-        class CustomIntuition(cognition.Intuition):
-            instructions = "subclass intuition prompt"
+        class CustomDecision(cognition.Decision):
+            instructions = "subclass decision prompt"
 
-        default_intuition = cognition.Intuition(processor=default_processor)
+        default_decision = cognition.Decision(processor=default_processor)
         custom_reasoning = cognition.Reasoning(processor=custom_processor, instructions="reason carefully")
-        subclassed = CustomIntuition(processor=subclass_processor)
+        subclassed = CustomDecision(processor=subclass_processor)
 
-        assert type(default_intuition).instructions == cognition.intuition.DEFAULT_INSTRUCTIONS
+        assert type(default_decision).instructions == cognition.decision.DEFAULT_INSTRUCTIONS
         assert type(custom_reasoning).instructions == cognition.reasoning.DEFAULT_INSTRUCTIONS
-        assert type(subclassed).instructions == "subclass intuition prompt"
+        assert type(subclassed).instructions == "subclass decision prompt"
 
-        default_ctx = await start_cognition_ability_for_test(default_intuition)
-        _ = await dispatch_ability_for_test(default_intuition, default_ctx, intuition_input())
+        default_ctx = await start_cognition_ability_for_test(default_decision)
+        _ = await dispatch_ability_for_test(default_decision, default_ctx, decision_input())
         custom_ctx = await start_cognition_ability_for_test(custom_reasoning)
         _ = await dispatch_ability_for_test(custom_reasoning, custom_ctx, reasoning_input())
         subclass_ctx = await start_cognition_ability_for_test(subclassed)
-        _ = await dispatch_ability_for_test(subclassed, subclass_ctx, intuition_input())
+        _ = await dispatch_ability_for_test(subclassed, subclass_ctx, decision_input())
 
         default_stamped = default_processor.calls[0].instructions if default_processor.calls else None
         custom_stamped = custom_processor.calls[0].instructions if custom_processor.calls else None
@@ -2113,20 +2176,20 @@ def test_intuition_and_reasoning_own_instructions_on_ability() -> None:
 
     default_stamped, custom_stamped, subclass_stamped = asyncio.run(run())
 
-    # Default intuition stamps no static prose; only per-turn world XML (when present) is system text.
-    assert default_stamped is None or default_stamped == cognition.intuition.DEFAULT_INSTRUCTIONS
+    # Default decision stamps no static prose; only per-turn world XML (when present) is system text.
+    assert default_stamped is None or default_stamped == cognition.decision.DEFAULT_INSTRUCTIONS
     assert custom_stamped == "reason carefully"
-    assert subclass_stamped == "subclass intuition prompt"
+    assert subclass_stamped == "subclass decision prompt"
 
 
-def test_intuition_output_may_leave_input_unhandled() -> None:
-    output = cognition.intuition.OutputData(result=no_output("fast"))
-    unhandled = cognition.intuition.OutputData(reason="uncertain")
+def test_decision_output_may_leave_input_unhandled() -> None:
+    output = cognition.decision.OutputData(result=no_output("fast"))
+    unhandled = cognition.decision.OutputData(reason="uncertain")
 
     assert output.result == no_output("fast")
     assert unhandled.result is None
     assert unhandled.reason == "uncertain"
-    assert "confidence" not in cognition.intuition.OutputData.model_fields
+    assert "confidence" not in cognition.decision.OutputData.model_fields
 
 
 def test_reasoning_and_reflection_payloads_carry_typed_decisions() -> None:
@@ -2181,7 +2244,7 @@ def test_cognition_dispatches_reflection_after_processing_completes() -> None:
     processor_input = calls[0].input
     assert isinstance(processor_input, cognition.reflection.ProcessorInput)
     assert processor_input.cognition_input.focus is None
-    # Default intuition handles with deliberate ignore; reflection still sees that result.
+    # Default decision handles with deliberate ignore; reflection still sees that result.
     assert processor_input.cognition_output == ignore_output("fast")
     assert processor_input.associations is None
     assert {event.name for event in calls[0].schemas} == {
@@ -2271,7 +2334,7 @@ def test_cognitive_outputs_reject_defer_until_resume_is_modeled() -> None:
     deferred = {"kind": "defer", "reason": "wait"}
 
     with pytest.raises(ValueError):
-        _ = cognition.intuition.OutputData.model_validate({"result": deferred})
+        _ = cognition.decision.OutputData.model_validate({"result": deferred})
     with pytest.raises(ValueError):
         _ = cognition.reasoning.OutputData.model_validate({"result": deferred})
     with pytest.raises(ValueError):
@@ -2296,9 +2359,9 @@ def test_cognitive_operation_output_rejects_legacy_payload_wrapper() -> None:
 
 def test_cognitive_rejects_output_for_unoffered_event() -> None:
     async def run() -> tuple[str, list[abilities.FailureData]]:
-        # Intuition leaves the turn to reasoning, whose selection is rejected (a rejected intuition would cascade).
+        # Decision leaves the turn to reasoning, whose selection is rejected (a rejected decision would cascade).
         ability = RecordingCognition(
-            intuition_processor=RecordingIntuitionProcessor(cognition.intuition.OutputData(reason="needs thought")),
+            decision_processor=RecordingDecisionProcessor(cognition.decision.OutputData(reason="needs thought")),
             reasoning_processor=RecordingOutputOperation(
                 cognition.types.EventData(event="nope.unavailable", reason="unoffered"),
             ),
@@ -2326,7 +2389,7 @@ def test_cognitive_rejects_output_data_that_does_not_match_offered_event_schema(
 
     async def run() -> tuple[str, list[abilities.FailureData]]:
         ability = RecordingCognition(
-            intuition_processor=RecordingOutputOperation(output),
+            decision_processor=RecordingOutputOperation(output),
             reasoning_processor=FailingReasoningProcessor(),
         )
         ctx = await start_cognition_ability_for_test(ability)
@@ -2358,7 +2421,7 @@ def test_cognitive_rejects_schema_only_operation_data_that_does_not_match_offere
 
     async def run() -> tuple[str, list[abilities.FailureData]]:
         ability = RecordingCognition(
-            intuition_processor=RecordingOutputOperation(output),
+            decision_processor=RecordingOutputOperation(output),
             reasoning_processor=FailingReasoningProcessor(),
         )
         ctx = await start_cognition_ability_for_test(ability)
@@ -2384,8 +2447,8 @@ def test_cognitive_rejects_schema_only_operation_data_that_does_not_match_offere
 def test_cognitive_ability_events_use_concrete_pydantic_schemas() -> None:
     assert cognition.Cognition.input_event is cognition.cognition.InputEvent
     assert cognition.Cognition.output_event is cognition.cognition.OutputEvent
-    assert cognition.Intuition.input_event is cognition.intuition.InputEvent
-    assert cognition.Intuition.output_event is cognition.intuition.OutputEvent
+    assert cognition.Decision.input_event is cognition.decision.InputEvent
+    assert cognition.Decision.output_event is cognition.decision.OutputEvent
     assert cognition.Reasoning.input_event is cognition.reasoning.InputEvent
     assert cognition.Reasoning.output_event is cognition.reasoning.OutputEvent
     assert cognition.Reflection.input_event is cognition.reflection.InputEvent
@@ -2396,8 +2459,8 @@ def test_cognitive_ability_events_use_concrete_pydantic_schemas() -> None:
         object_dict(cognition.Cognition.output_event.schema)
         == pydantic.TypeAdapter(cognition.types.OutputData).json_schema()
     )
-    assert object_dict(cognition.Intuition.input_event.schema) == cognition.intuition.InputData.model_json_schema()
-    assert object_dict(cognition.Intuition.output_event.schema) == cognition.types.CompletionData.model_json_schema()
+    assert object_dict(cognition.Decision.input_event.schema) == cognition.decision.InputData.model_json_schema()
+    assert object_dict(cognition.Decision.output_event.schema) == cognition.types.CompletionData.model_json_schema()
     # Reasoning CallEvent remains the model-facing schema; typed host frames ride event data.
     assert object_dict(cognition.Reasoning.input_event.schema) == cognition.reasoning.CallData.model_json_schema()
     assert object_dict(cognition.Reasoning.output_event.schema) == cognition.types.CompletionData.model_json_schema()
@@ -2430,7 +2493,7 @@ def test_cognitive_output_events_validate_through_typed_schema_contracts() -> No
         turn=cognition_turn(),
         output=(cognition.types.EventData.model_validate(operation_data),),
     )
-    assert validate_event_data(cognition.intuition.OutputEvent, completion) == completion
+    assert validate_event_data(cognition.decision.OutputEvent, completion) == completion
     with pytest.raises(pydantic.ValidationError):
         _ = validate_event_data(cognition.cognition.OutputEvent, {"kind": "missing"})
 
@@ -2449,8 +2512,10 @@ def test_cognitive_model_tracks_processing_lifecycle() -> None:
     assert "/CognitionLifecycle/attached/behavior/ready/idle" in view.members
     processing_path = "/CognitionLifecycle/attached/behavior/processing"
     assert processing_path in view.members
-    assert f"{processing_path}/autonomy" in view.members
-    assert f"{processing_path}/intuition" in view.members
+    assert f"{processing_path}/reflex" in view.members
+    assert f"{processing_path}/reflex/behaviors" in view.members
+    assert f"{processing_path}/reflex/decision" in view.members
+    assert f"{processing_path}/associating" in view.members
     assert f"{processing_path}/reasoning" in view.members
     assert f"{processing_path}/cancelling" in view.members
     assert "/CognitionLifecycle/attached/behavior/rebooting" in view.members
@@ -2463,7 +2528,7 @@ def test_cognitive_model_tracks_processing_lifecycle() -> None:
         "post_completion",
         "reflecting",
         "resolving_autonomy_cancel",
-        "resolving_intuition_cancel",
+        "resolving_decision_cancel",
         "resolving_reasoning_cancel",
         "degraded",
     ):
@@ -2473,8 +2538,8 @@ def test_cognitive_model_tracks_processing_lifecycle() -> None:
     assert "bot.ability.cognition.initializing.complete" not in initializing_events
     assert "bot.ability.cognition.input" in view.transition_map["/CognitionLifecycle/attached/behavior/ready/idle"]
     assert "bot.ability.cognition.input" in view.transition_map["/CognitionLifecycle/attached/behavior/ready/resting"]
-    assert "bot.ability.autonomy.output" in view.transition_map[f"{processing_path}/autonomy"]
-    assert "bot.ability.intuition.output" in view.transition_map[f"{processing_path}/intuition"]
+    assert "bot.ability.autonomy.output" in view.transition_map[f"{processing_path}/reflex/behaviors"]
+    assert "bot.ability.decision.output" in view.transition_map[f"{processing_path}/reflex/decision"]
     assert "bot.ability.reasoning.output" in view.transition_map[f"{processing_path}/reasoning"]
     assert "*" not in view.transition_map[processing_path]
     assert internals.deferred_map[processing_path]["bot.ability.cognition.input"] == processing_path
@@ -2491,7 +2556,7 @@ def test_cognitive_uses_injected_processing_plan() -> None:
 
     assert not hasattr(ability, "processing")
     assert not hasattr(ability, "reflection")
-    assert not hasattr(ability, "intuition")
+    assert not hasattr(ability, "decision")
     assert not hasattr(ability, "reasoning")
 
 
@@ -2535,9 +2600,7 @@ def test_cognitive_completes_when_trace_metadata_present() -> None:
     async def run() -> tuple[cognition.types.OutputData, list[cognition.types.OutputData]]:
         metadata = {"traceparent": "00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-01"}
         ability = RecordingCognition(
-            intuition_processor=RecordingIntuitionProcessor(
-                cognition.intuition.OutputData(result=no_output("metadata"))
-            )
+            decision_processor=RecordingDecisionProcessor(cognition.decision.OutputData(result=no_output("metadata")))
         )
         ctx = await start_cognition_ability_for_test(ability)
         operation_id = "metadata-operation"
@@ -2569,8 +2632,8 @@ def test_cognitive_completes_when_trace_metadata_present() -> None:
     assert outputs == [no_output("metadata")]
 
 
-def test_cognition_intuition_handles_without_reasoning() -> None:
-    """Intuition processor handling short-circuits reasoning."""
+def test_cognition_decision_handles_without_reasoning() -> None:
+    """Decision processor handling short-circuits reasoning."""
 
     async def run() -> tuple[
         cognition.types.OutputData,
@@ -2578,11 +2641,11 @@ def test_cognition_intuition_handles_without_reasoning() -> None:
         list[processing.InputData],
         list[processing.InputData],
     ]:
-        intuition = RecordingOutputOperation(focus_output("phone", "reflex"))
+        decision = RecordingOutputOperation(focus_output("phone", "reflex"))
         reasoning = FailingReasoningProcessor()
         reflection_processor = FixedProcessor(no_output("observed"))
         ability = RecordingCognition(
-            intuition=cognition.Intuition(processor=intuition),
+            decision=cognition.Decision(processor=decision),
             reasoning=cognition.Reasoning(processor=reasoning),
             reflection=cognition.Reflection(processor=reflection_processor, memory=memory.Memory()),
         )
@@ -2590,12 +2653,12 @@ def test_cognition_intuition_handles_without_reasoning() -> None:
 
         result = await dispatch_ability_for_test(ability, ctx, await started_cognition_input(ctx))
         await wait_until(lambda: bool(reflection_processor.step.calls))
-        return result, intuition.calls, reasoning.calls, reflection_processor.step.calls
+        return result, decision.calls, reasoning.calls, reflection_processor.step.calls
 
-    result, intuition_calls, reasoning_calls, reflection_calls = asyncio.run(run())
+    result, decision_calls, reasoning_calls, reflection_calls = asyncio.run(run())
 
     assert result == focus_output("phone", "reflex")
-    assert len(intuition_calls) == 1
+    assert len(decision_calls) == 1
     assert reasoning_calls == []
     assert len(reflection_calls) == 1
     reflection_input = reflection_calls[0].input
@@ -2603,20 +2666,20 @@ def test_cognition_intuition_handles_without_reasoning() -> None:
     assert reflection_input.cognition_output == result
 
 
-def test_cognition_continues_to_reasoning_when_intuition_does_not_handle() -> None:
+def test_cognition_continues_to_reasoning_when_decision_does_not_handle() -> None:
     async def run() -> tuple[
         cognition.types.OutputData,
         list[processing.InputData],
         list[processing.InputData],
         list[processing.InputData],
     ]:
-        intuition_processor = RecordingIntuitionProcessor(cognition.intuition.OutputData(reason="ambiguous interrupt"))
+        decision_processor = RecordingDecisionProcessor(cognition.decision.OutputData(reason="ambiguous interrupt"))
         reasoning_processor = RecordingReasoningProcessor(
             cognition.reasoning.OutputData(result=focus_output("phone", "reasoned focus"))
         )
         reflection_processor = FixedProcessor(no_output("observed"))
         ability = RecordingCognition(
-            intuition_processor=intuition_processor,
+            decision_processor=decision_processor,
             reasoning_processor=reasoning_processor,
             reflection=cognition.Reflection(processor=reflection_processor, memory=memory.Memory()),
         )
@@ -2624,12 +2687,12 @@ def test_cognition_continues_to_reasoning_when_intuition_does_not_handle() -> No
 
         result = await dispatch_ability_for_test(ability, ctx, await started_cognition_input(ctx))
         await wait_until(lambda: bool(reflection_processor.step.calls))
-        return result, intuition_processor.calls, reasoning_processor.calls, reflection_processor.step.calls
+        return result, decision_processor.calls, reasoning_processor.calls, reflection_processor.step.calls
 
-    result, intuition_calls, reasoning_calls, reflection_calls = asyncio.run(run())
+    result, decision_calls, reasoning_calls, reflection_calls = asyncio.run(run())
 
     assert result == focus_output("phone", "reasoned focus")
-    assert len(intuition_calls) == 1
+    assert len(decision_calls) == 1
     assert len(reasoning_calls) == 1
     assert mosfet.FocusDeviceEvent.name in {event.name for event in reasoning_calls[0].schemas}
     assert len(reflection_calls) == 1
@@ -2638,12 +2701,16 @@ def test_cognition_continues_to_reasoning_when_intuition_does_not_handle() -> No
     assert reflection_input.cognition_output == result
 
 
-def test_intuition_low_confidence_escalates_to_reasoning_after_environment_actions() -> None:
-    """Self-tuning confidence: low reported confidence → environment dispatch then System 2 cascade."""
+def test_decision_low_confidence_escalates_to_reasoning_after_environment_actions() -> None:
+    """Self-tuning confidence: low reported confidence → environment dispatch then System 2 cascade.
 
-    async def run() -> tuple[cognition.types.OutputData, int, float]:
+    D-R-52: what the decision layer dispatched before passing the turn on rides its ``acted``: reasoning is told
+    it as a fact of the turn, and the turn's output puts it first.
+    """
+
+    async def run() -> tuple[cognition.types.OutputData, list[processing.InputData], float]:
         # Pre-seed tuner so we are past warmup with a high baseline.
-        tuner = cognition.intuition.ConfidenceTuner(
+        tuner = cognition.decision.ConfidenceTuner(
             mean=85.0,
             var=100.0,
             n=20,
@@ -2652,27 +2719,28 @@ def test_intuition_low_confidence_escalates_to_reasoning_after_environment_actio
             k_sigma=1.0,
         )
         actions = focus_output("phone", "tentative")
-        intuition_processor = RecordingIntuitionProcessor(actions, confidence=20)
+        decision_processor = RecordingDecisionProcessor(actions, confidence=20)
         reasoning_processor = RecordingReasoningProcessor(
             cognition.reasoning.OutputData(result=focus_output("phone", "deliberate"))
         )
-        intuition = cognition.Intuition(processor=intuition_processor, confidence_tuner=tuner)
+        decision = cognition.Decision(processor=decision_processor, confidence_tuner=tuner)
         ability = RecordingCognition(
-            intuition=intuition,
+            decision=decision,
             reasoning=cognition.Reasoning(processor=reasoning_processor),
         )
         ctx = await start_cognition_ability_for_test(ability)
         result = await dispatch_ability_for_test(ability, ctx, await started_cognition_input(ctx))
-        return result, len(reasoning_processor.calls), tuner.threshold()
+        return result, reasoning_processor.calls, tuner.threshold()
 
     result, reasoning_calls, threshold = asyncio.run(run())
 
-    assert reasoning_calls == 1
-    assert result == focus_output("phone", "deliberate")
+    (frame,) = reasoning_calls
+    assert "tentative" in (frame.situation or "")
+    assert result == (*focus_output("phone", "tentative"), *focus_output("phone", "deliberate"))
     assert 20 < threshold  # low confidence was below adaptive threshold
 
 
-def test_intuition_reads_confidence_from_patched_event_selections() -> None:
+def test_decision_reads_confidence_from_patched_event_selections() -> None:
     """Tool-call path: confidence on each event payload is unpatched and drives the tuner."""
 
     class _PatchedEventsProcessor(processing.DecisionProcessor):
@@ -2689,7 +2757,7 @@ def test_intuition_reads_confidence_from_patched_event_selections() -> None:
             )
 
     async def run() -> tuple[cognition.types.OutputData, int, float, int]:
-        tuner = cognition.intuition.ConfidenceTuner(
+        tuner = cognition.decision.ConfidenceTuner(
             mean=85.0,
             var=100.0,
             n=20,
@@ -2700,9 +2768,9 @@ def test_intuition_reads_confidence_from_patched_event_selections() -> None:
         reasoning_processor = RecordingReasoningProcessor(
             cognition.reasoning.OutputData(result=focus_output("phone", "deliberate"))
         )
-        intuition = cognition.Intuition(processor=_PatchedEventsProcessor(), confidence_tuner=tuner)
+        decision = cognition.Decision(processor=_PatchedEventsProcessor(), confidence_tuner=tuner)
         ability = RecordingCognition(
-            intuition=intuition,
+            decision=decision,
             reasoning=cognition.Reasoning(processor=reasoning_processor),
         )
         ctx = await start_cognition_ability_for_test(ability)
@@ -2712,20 +2780,21 @@ def test_intuition_reads_confidence_from_patched_event_selections() -> None:
     result, reasoning_calls, threshold, n = asyncio.run(run())
     assert n >= 21  # observed patched confidence
     assert reasoning_calls == 1
-    assert result == focus_output("phone", "deliberate")
+    # The focus the decision layer dispatched before passing the turn on comes first (D-R-52).
+    assert [item.reason for item in result] == [None, "deliberate"]
     assert 22 < threshold
 
 
-def test_intuition_empty_dispatch_cascades_to_reasoning() -> None:
+def test_decision_empty_dispatch_cascades_to_reasoning() -> None:
     """events: [] / empty product is unhandled → System 2 (not a deliberate pass)."""
 
     async def run() -> tuple[cognition.types.OutputData, int]:
-        intuition_processor = RecordingIntuitionProcessor(empty_output())
+        decision_processor = RecordingDecisionProcessor(empty_output())
         reasoning_processor = RecordingReasoningProcessor(
             cognition.reasoning.OutputData(result=focus_output("phone", "from-reasoning"))
         )
         ability = RecordingCognition(
-            intuition=cognition.Intuition(processor=intuition_processor),
+            decision=cognition.Decision(processor=decision_processor),
             reasoning=cognition.Reasoning(processor=reasoning_processor),
         )
         ctx = await start_cognition_ability_for_test(ability)
@@ -2737,11 +2806,11 @@ def test_intuition_empty_dispatch_cascades_to_reasoning() -> None:
     assert result == focus_output("phone", "from-reasoning")
 
 
-def test_intuition_high_confidence_skips_reasoning_cascade() -> None:
+def test_decision_high_confidence_skips_reasoning_cascade() -> None:
     """High confidence relative to tuner baseline completes without System 2 cascade."""
 
     async def run() -> tuple[cognition.types.OutputData, int]:
-        tuner = cognition.intuition.ConfidenceTuner(
+        tuner = cognition.decision.ConfidenceTuner(
             mean=50.0,
             var=100.0,
             n=20,
@@ -2750,15 +2819,13 @@ def test_intuition_high_confidence_skips_reasoning_cascade() -> None:
             k_sigma=1.0,
         )
         actions = focus_output("phone", "sure focus")
-        intuition_processor = RecordingIntuitionProcessor(
-            cognition.intuition.OutputData(result=actions, reason="clear")
-        )
+        decision_processor = RecordingDecisionProcessor(cognition.decision.OutputData(result=actions, reason="clear"))
         reasoning_processor = RecordingReasoningProcessor(
             cognition.reasoning.OutputData(result=focus_output("phone", "should not run"))
         )
-        intuition = cognition.Intuition(processor=intuition_processor, confidence_tuner=tuner)
+        decision = cognition.Decision(processor=decision_processor, confidence_tuner=tuner)
         ability = RecordingCognition(
-            intuition=intuition,
+            decision=decision,
             reasoning=cognition.Reasoning(processor=reasoning_processor),
         )
         ctx = await start_cognition_ability_for_test(ability)
@@ -2771,14 +2838,14 @@ def test_intuition_high_confidence_skips_reasoning_cascade() -> None:
     assert reasoning_calls == 0
 
 
-def test_cognition_keeps_reasoning_off_intuition_actor_map() -> None:
-    """Cognition owns the intuition-to-reasoning edge."""
+def test_cognition_keeps_reasoning_off_decision_actor_map() -> None:
+    """Cognition owns the decision-to-reasoning edge."""
 
     async def run() -> set[str]:
-        # Handled ignore (not empty cascade) so we only inspect intuition's offered map.
-        processor = RecordingIntuitionProcessor(cognition.intuition.OutputData(result=ignore_output("map-only")))
+        # Handled ignore (not empty cascade) so we only inspect decision's offered map.
+        processor = RecordingDecisionProcessor(cognition.decision.OutputData(result=ignore_output("map-only")))
         ability = RecordingCognition(
-            intuition_processor=processor,
+            decision_processor=processor,
             reasoning_processor=RecordingReasoningProcessor(ignore_output("should not run")),
         )
         ctx = await start_cognition_ability_for_test(ability)
@@ -2792,7 +2859,7 @@ def test_cognition_keeps_reasoning_off_intuition_actor_map() -> None:
     assert cognition.Reasoning.input_event.name not in offered
 
 
-def test_intuition_reasoning_selection_cascades_through_cognition() -> None:
+def test_decision_reasoning_selection_cascades_through_cognition() -> None:
     """A reasoning selection becomes unhandled so Cognition owns and awaits the next stage."""
 
     async def run() -> tuple[cognition.types.OutputData, int, set[str]]:
@@ -2805,12 +2872,12 @@ def test_intuition_reasoning_selection_cascades_through_cognition() -> None:
                 reason="need deliberate follow-through",
             ),
         )
-        intuition_processor = RecordingIntuitionProcessor(cognition.intuition.OutputData(result=act_and_reason))
+        decision_processor = RecordingDecisionProcessor(cognition.decision.OutputData(result=act_and_reason))
         reasoning_processor = RecordingReasoningProcessor(
             cognition.reasoning.OutputData(result=focus_output("phone", "deliberate"))
         )
         ability = RecordingCognition(
-            intuition_processor=intuition_processor,
+            decision_processor=decision_processor,
             reasoning_processor=reasoning_processor,
         )
         ctx = await start_cognition_ability_for_test(ability)
@@ -2832,7 +2899,7 @@ _ShowEvent = hsm.Event[_ShowData](name="tests.cognition.desk.show", kind=event.E
 
 
 class _DeskActor(hsm.Instance):
-    """A display within intuition's ceiling that keeps what it was asked to show."""
+    """A display within decision's ceiling that keeps what it was asked to show."""
 
     shown: list[str]
 
@@ -2854,7 +2921,7 @@ class _DeskActor(hsm.Instance):
 
 
 class _BenchActor(hsm.Instance):
-    """An M-effort bench enabling the real sandbox run command, above intuition's ceiling (S)."""
+    """An M-effort bench enabling the real sandbox run command, above decision's ceiling (S)."""
 
     effort: typing.ClassVar[ability_module.Effort] = ability_module.Effort.M
     model: typing.ClassVar[hsm.Model | None] = mosfet.define(
@@ -2864,7 +2931,7 @@ class _BenchActor(hsm.Instance):
     )
 
 
-class _MenuBoundIntuitionProcessor(processing.DecisionProcessor):
+class _MenuBoundDecisionProcessor(processing.DecisionProcessor):
     """Selects events by name the way a provider's dispatch tool does: one not on the turn's menu is refused."""
 
     calls: list[processing.InputData]
@@ -2887,20 +2954,17 @@ class _MenuBoundIntuitionProcessor(processing.DecisionProcessor):
         )
 
 
-def test_intuition_can_choose_to_hand_a_turn_to_reasoning_when_reasoning_holds_what_it_lacks() -> None:
-    """Live check round 1 (D1): intuition was told the bench was held by reasoning, but offered no way to escalate.
+def test_the_decision_layer_is_never_offered_the_handoff_and_its_pass_hands_the_turn_on() -> None:
+    """D-R-52: the decision layer's pass is its hand-on, so it is never offered the deliberative handoff.
 
-    The model said so ("I can only pick events from the dispatch enum") and escalated by confidence 55 or 70,
-    which stayed above the warm-up floor. With a capacity held above its ceiling, intuition is now offered the
-    cognition host's deliberative handoff, named where the held capacities are listed, and a confident selection of
-    it with an acknowledgement reaches reasoning with the acknowledgement shown.
+    It is still told, in ``<held>``, what a later tier holds above its ceiling, reached by passing the turn on;
+    its pass reaches reasoning, which holds the bench and never offers the handoff into itself.
     """
 
-    async def run() -> tuple[processing.InputData, list[str], list[processing.InputData], list[abilities.FailureData]]:
-        handoff = cognition.Reasoning.input_event.name
-        intuition_processor = _MenuBoundIntuitionProcessor((_ShowEvent.name, {"text": "On it."}), (handoff, {}))
+    async def run() -> tuple[processing.InputData, list[processing.InputData], list[abilities.FailureData]]:
+        decision_processor = RecordingDecisionProcessor(cognition.decision.OutputData(result=None, reason="pass"))
         reasoning_processor = RecordingReasoningProcessor(ignore_output("deliberated"))
-        ability = RecordingCognition(intuition_processor=intuition_processor, reasoning_processor=reasoning_processor)
+        ability = RecordingCognition(decision_processor=decision_processor, reasoning_processor=reasoning_processor)
         ctx = await start_cognition_ability_for_test(ability)
         turn_input = await started_cognition_input(ctx)
         desk = _DeskActor()
@@ -2911,18 +2975,17 @@ def test_intuition_can_choose_to_hand_a_turn_to_reasoning_when_reasoning_holds_w
         turn_input = turn_input.model_copy(update={"actors": {**turn_input.actors, "desk": desk, "sandbox": bench}})
         _ = await dispatch_ability_for_test(ability, ctx, turn_input)
         await wait_until(lambda: ability.state().endswith("/idle"))
-        (frame,) = intuition_processor.calls
-        return frame, desk.shown, reasoning_processor.calls, ability.failures
+        (frame,) = decision_processor.calls
+        return frame, reasoning_processor.calls, ability.failures
 
-    frame, shown, reasoning_calls, failures = asyncio.run(run())
+    frame, reasoning_calls, failures = asyncio.run(run())
 
     handoff = cognition.Reasoning.input_event.name
     offered = {schema.name for schema in frame.schemas}
-    assert handoff in offered
+    assert handoff not in offered
     assert sandbox.RunEvent.name not in offered
-    assert f'<reasoning_only reached_by="{handoff}">' in (frame.instructions or "")
+    assert '<held reached_by="passing this turn on to a later tier of thinking">' in (frame.instructions or "")
     assert failures == []
-    assert shown == ["On it."]
     (deliberate,) = reasoning_calls
     reasoning_offers = {schema.name for schema in deliberate.schemas}
     # Reasoning holds the bench, and never offers the handoff into itself.
@@ -2930,28 +2993,206 @@ def test_intuition_can_choose_to_hand_a_turn_to_reasoning_when_reasoning_holds_w
     assert handoff not in reasoning_offers
 
 
-def test_intuition_is_offered_no_handoff_when_reasoning_holds_nothing_it_lacks() -> None:
+def test_the_decision_layer_is_offered_no_handoff_when_nothing_is_held() -> None:
     async def run() -> processing.InputData:
-        intuition_processor = _MenuBoundIntuitionProcessor((cognition.types.IgnoreEvent.name, {}))
-        ability = RecordingCognition(intuition_processor=intuition_processor)
+        decision_processor = _MenuBoundDecisionProcessor((cognition.types.IgnoreEvent.name, {}))
+        ability = RecordingCognition(decision_processor=decision_processor)
         ctx = await start_cognition_ability_for_test(ability)
         _ = await dispatch_ability_for_test(ability, ctx, await started_cognition_input(ctx))
-        (frame,) = intuition_processor.calls
+        (frame,) = decision_processor.calls
         return frame
 
     frame = asyncio.run(run())
 
     assert cognition.Reasoning.input_event.name not in {schema.name for schema in frame.schemas}
-    assert "<reasoning_only" not in (frame.instructions or "")
+    assert "<held" not in (frame.instructions or "")
 
 
-def test_intuition_processor_receives_input() -> None:
+def _intuited(
+    intuition_answer: cognition.types.OutputData,
+    *,
+    intuition_processor: processing.Processor | None = None,
+    decided: cognition.decision.OutputData | None = None,
+) -> tuple[
+    cognition.types.OutputData,
+    list[processing.InputData],
+    list[processing.InputData],
+    list[str],
+    list[abilities.FailureData],
+]:
+    """A turn the decision layer passes, taken up by intuition answering ``intuition_answer`` at a desk."""
+
+    async def run() -> tuple[
+        cognition.types.OutputData,
+        list[processing.InputData],
+        list[processing.InputData],
+        list[str],
+        list[abilities.FailureData],
+    ]:
+        intuition_processor_ = intuition_processor or RecordingReasoningProcessor(intuition_answer)
+        reasoning_processor = RecordingReasoningProcessor(ignore_output("deliberated"))
+        ability = RecordingCognition(
+            decision_processor=RecordingDecisionProcessor(decided or cognition.decision.OutputData(result=None)),
+            intuition=cognition.Intuition(processor=intuition_processor_),
+            reasoning_processor=reasoning_processor,
+        )
+        ctx = await start_cognition_ability_for_test(ability)
+        turn_input = await started_cognition_input(ctx)
+        desk = _DeskActor()
+        assert desk.model is not None
+        _ = await mosfet.started(ctx, desk, desk.model)
+        turn_input = turn_input.model_copy(update={"actors": {**turn_input.actors, "desk": desk}})
+        result = await dispatch_ability_for_test(ability, ctx, turn_input)
+        await wait_until(lambda: ability.state().endswith("/idle"))
+        calls = (
+            typing.cast(RecordingReasoningProcessor, intuition_processor_).calls if intuition_processor is None else []
+        )
+        return result, calls, reasoning_processor.calls, desk.shown, ability.failures
+
+    return asyncio.run(run())
+
+
+def _show(text: str) -> cognition.types.OutputData:
+    return (cognition.types.EventData(target="desk", event=_ShowEvent.name, data={"text": text}),)
+
+
+def test_a_decision_model_choosing_reasoning_lands_the_turn_in_reasoning_with_recall_and_skips_intuition() -> None:
+    """R-23: the fallback reflex chooses the tier its pass hands the turn to. Choosing reasoning, the turn is
+    associated first (recall runs before either tier) and reasoning takes it; intuition is never asked."""
+
+    async def run() -> tuple[
+        cognition.types.OutputData, list[processing.InputData], list[processing.InputData], list[processing.InputData]
+    ]:
+        store = memory.Memory()
+        decision_processor = RecordingDecisionProcessor(
+            cognition.decision.OutputData(result=None, hand_to="reasoning", reason="it needs thought")
+        )
+        intuition_processor = RecordingReasoningProcessor(no_output("intuited"))
+        reasoning_processor = RecordingReasoningProcessor(no_output("reasoned"))
+        ability = RecordingCognition(
+            decision_processor=decision_processor,
+            intuition=cognition.Intuition(processor=intuition_processor),
+            reasoning_processor=reasoning_processor,
+            store=store,
+            associative=memory.Associative(memory=store),
+        )
+        ctx = await start_cognition_ability_for_test(ability)
+        await wait_until(lambda: ability.state().endswith("/idle"))
+        await _remember_by_message(
+            ctx,
+            store,
+            memory.EpisodeData(
+                turn_id="earlier",
+                parts=(text.TextPart(text="Ada asked for a call at noon."),),
+                participants=(_ADA,),
+                outcome=memory.Outcome.COMPLETED,
+            ),
+        )
+        turn = (await started_cognition_input(ctx)).model_copy(update={"participants": (_ADA,)})
+        result = await dispatch_ability_for_test(ability, ctx, turn)
+        await wait_until(lambda: ability.state().endswith("/idle"))
+        return result, decision_processor.calls, intuition_processor.calls, reasoning_processor.calls
+
+    result, decision_calls, intuition_calls, reasoning_calls = asyncio.run(run())
+
+    assert result == no_output("reasoned")
+    (decided,) = decision_calls
+    assert decided.hand_ons == ("intuition", "reasoning")
+    assert intuition_calls == []
+    (reasoned,) = reasoning_calls
+    assert isinstance(reasoned.recalled, cognition.RecalledData)
+    assert isinstance(reasoned.recalled.associations, memory.AssociationsData)
+    assert [item.text for item in reasoned.recalled.associations.items] == ["Ada asked for a call at noon."]
+
+
+@pytest.mark.parametrize("chosen", ["intuition", None], ids=["chose-intuition", "no-choice-keeps-intuition"])
+def test_a_pass_to_intuition_or_without_a_choice_lands_the_turn_in_intuition(
+    chosen: typing.Literal["intuition"] | None,
+) -> None:
+    """R-23: choosing intuition, or a hand-on that names no tier (an empty product, low confidence), keeps intuition."""
+
+    result, intuition_calls, reasoning_calls, _, _ = _intuited(
+        _show("Hello."), decided=cognition.decision.OutputData(result=None, hand_to=chosen)
+    )
+
+    assert len(intuition_calls) == 1
+    assert reasoning_calls == []
+    assert result == _show("Hello.")
+
+
+def test_the_decision_layer_is_offered_reasoning_alone_when_no_intuition_is_composed() -> None:
+    async def run() -> list[processing.InputData]:
+        decision_processor = RecordingDecisionProcessor(cognition.decision.OutputData(result=None))
+        ability = RecordingCognition(decision_processor=decision_processor)
+        ctx = await start_cognition_ability_for_test(ability)
+        _ = await dispatch_ability_for_test(ability, ctx, await started_cognition_input(ctx))
+        await wait_until(lambda: ability.state().endswith("/idle"))
+        return decision_processor.calls
+
+    (decided,) = asyncio.run(run())
+
+    assert decided.hand_ons == ("reasoning",)
+
+
+def test_intuition_takes_up_what_reflex_hands_on_and_settles_the_turn_in_words() -> None:
+    """D-R-52: reflex → intuition → reasoning; intuition selecting anything but the handoff settles the turn."""
+
+    result, intuition_calls, reasoning_calls, shown, failures = _intuited(_show("Hello."))
+
+    assert failures == []
+    assert shown == ["Hello."]
+    assert result == _show("Hello.")
+    (frame,) = intuition_calls
+    assert cognition.Reasoning.input_event.name in {schema.name for schema in frame.schemas}
+    assert reasoning_calls == []
+
+
+def test_intuition_selecting_the_handoff_says_its_words_first_and_reasoning_knows_it_did() -> None:
+    """D-R-52: the handoff runs intuition's other selections first; they ride the turn's ``acted`` to reasoning,
+    and the turn's output puts them first."""
+
+    handoff = cognition.types.EventData(target="cognition", event=cognition.Reasoning.input_event.name, data={})
+    result, _, reasoning_calls, shown, failures = _intuited((*_show("Let me think."), handoff))
+
+    assert failures == []
+    assert shown == ["Let me think."]
+    (frame,) = reasoning_calls
+    assert "Let me think." in (frame.situation or "")
+    assert cognition.Reasoning.input_event.name not in {schema.name for schema in frame.schemas}
+    assert result == (*_show("Let me think."), *ignore_output("deliberated"))
+
+
+def test_a_failing_intuition_hands_its_turn_to_reasoning_in_the_same_turn(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D-R-52: an intuition that fails cascades to reasoning, counted as ``stage="intuition"`` cascaded."""
+
+    def cascaded(reader: metric_reader.Reader) -> float:
+        return sum(
+            point.value
+            for point in reader.points("bot.cognition.step.failure.count")
+            if point.attributes.get("stage") == "intuition" and point.attributes.get("outcome") == "cascaded"
+        )
+
+    with metric_reader.recording(tmp_path, monkeypatch) as reader:
+        before = cascaded(reader)
+        result, _, reasoning_calls, _, failures = _intuited((), intuition_processor=FailingReasoningProcessor())
+        after = cascaded(reader)
+
+    # Only intuition's own failure reached cognition; the turn did not fail.
+    assert [type(failure) for failure in failures] == [cognition.types.FailureData]
+    assert len(reasoning_calls) == 1
+    assert result == ignore_output("deliberated")
+    assert after - before == 1.0
+
+
+def test_decision_processor_receives_input() -> None:
     async def run() -> tuple[processing.CompletionData, list[processing.InputData]]:
-        processor = RecordingIntuitionProcessor(cognition.intuition.OutputData(result=ignore_output("seen")))
-        intuition = cognition.Intuition(processor=processor)
-        ctx = await start_cognition_ability_for_test(intuition)
+        processor = RecordingDecisionProcessor(cognition.decision.OutputData(result=ignore_output("seen")))
+        decision = cognition.Decision(processor=processor)
+        ctx = await start_cognition_ability_for_test(decision)
 
-        result = await dispatch_ability_for_test(intuition, ctx, intuition_input())
+        result = await dispatch_ability_for_test(decision, ctx, decision_input())
         return result, processor.calls
 
     result, calls = asyncio.run(run())
@@ -2978,9 +3219,7 @@ def test_reasoning_processor_receives_input() -> None:
 def test_cognitive_routes_processing_failure_to_failed_event() -> None:
     async def run() -> tuple[str, list[abilities.FailureData]]:
         ability = RecordingCognition(
-            intuition_processor=RecordingIntuitionProcessor(
-                cognition.intuition.OutputData(reason="ambiguous interrupt")
-            ),
+            decision_processor=RecordingDecisionProcessor(cognition.decision.OutputData(reason="ambiguous interrupt")),
             reasoning_processor=FailingReasoningProcessor(),
         )
         ctx = await start_cognition_ability_for_test(ability)
@@ -3000,9 +3239,7 @@ def test_cognitive_routes_processing_failure_to_failed_event() -> None:
 def test_cognitive_routes_invalid_output_to_failed_event() -> None:
     async def run() -> tuple[str, list[abilities.FailureData]]:
         ability = RecordingCognition(
-            intuition_processor=RecordingIntuitionProcessor(
-                cognition.intuition.OutputData(reason="ambiguous interrupt")
-            ),
+            decision_processor=RecordingDecisionProcessor(cognition.decision.OutputData(reason="ambiguous interrupt")),
             reasoning_processor=InvalidReasoningProcessor(),
         )
         ctx = await start_cognition_ability_for_test(ability)
@@ -3024,8 +3261,8 @@ def test_cognitive_defers_repeated_input_while_processing() -> None:
         list[cognition.types.OutputData],
         list[processing.InputData],
     ]:
-        intuition_processor = DelayedIntuitionProcessor(cognition.intuition.OutputData(result=no_output("intuition")))
-        ability = RecordingCognition(intuition_processor=intuition_processor)
+        decision_processor = DelayedDecisionProcessor(cognition.decision.OutputData(result=no_output("decision")))
+        ability = RecordingCognition(decision_processor=decision_processor)
         ctx = shared_hsm_context()
         ctx = await start_cognition_ability_for_test(ability, ctx)
 
@@ -3034,63 +3271,63 @@ def test_cognitive_defers_repeated_input_while_processing() -> None:
             await typing.cast(typing.Any, ability).apply(cognition_input(), ctx=ctx)
 
         first = asyncio.create_task(apply_input())
-        await wait_until(lambda: len(intuition_processor.calls) == 1)
+        await wait_until(lambda: len(decision_processor.calls) == 1)
         second = asyncio.create_task(apply_input())
         await asyncio.sleep(0)
 
-        assert len(intuition_processor.calls) == 1
-        intuition_processor.release_first.set()
+        assert len(decision_processor.calls) == 1
+        decision_processor.release_first.set()
         _ = await asyncio.gather(first, second)
         await wait_until(lambda: len(ability.outputs) == 2)
-        return ability.outputs, intuition_processor.calls
+        return ability.outputs, decision_processor.calls
 
-    outputs, intuition_calls = asyncio.run(run())
+    outputs, decision_calls = asyncio.run(run())
 
-    assert outputs == [no_output("intuition"), no_output("intuition")]
-    assert len(intuition_calls) == 2
+    assert outputs == [no_output("decision"), no_output("decision")]
+    assert len(decision_calls) == 2
 
 
-def test_intuition_no_operations_returns_to_idle_and_accepts_next_input() -> None:
+def test_decision_no_operations_returns_to_idle_and_accepts_next_input() -> None:
     async def run() -> tuple[str, processing.CompletionData, processing.CompletionData]:
-        intuition = cognition.Intuition(
-            processor=RecordingIntuitionProcessor(cognition.intuition.OutputData(result=None, reason="no ops"))
+        decision = cognition.Decision(
+            processor=RecordingDecisionProcessor(cognition.decision.OutputData(result=None, reason="no ops"))
         )
         ctx = shared_hsm_context()
-        ctx = await start_cognition_ability_for_test(intuition, ctx)
+        ctx = await start_cognition_ability_for_test(decision, ctx)
 
-        first = await dispatch_ability_for_test(intuition, ctx, intuition_input(operation_id="first"))
-        second = await dispatch_ability_for_test(intuition, ctx, intuition_input(operation_id="second"))
+        first = await dispatch_ability_for_test(decision, ctx, decision_input(operation_id="first"))
+        second = await dispatch_ability_for_test(decision, ctx, decision_input(operation_id="second"))
 
-        return intuition.state(), first, second
+        return decision.state(), first, second
 
     state, first, second = asyncio.run(run())
 
-    assert state == "/IntuitionLifecycle/attached/behavior/idle"
+    assert state == "/DecisionLifecycle/attached/behavior/idle"
     assert first.output is None
     assert second.output is None
 
 
-def test_intuition_defers_repeated_input_while_dispatching() -> None:
+def test_decision_defers_repeated_input_while_dispatching() -> None:
     async def run() -> tuple[str, list[processing.CompletionData], list[processing.InputData]]:
-        processor = DelayedIntuitionProcessor(cognition.intuition.OutputData(result=no_output("intuition")))
-        intuition = cognition.Intuition(processor=processor)
+        processor = DelayedDecisionProcessor(cognition.decision.OutputData(result=no_output("decision")))
+        decision = cognition.Decision(processor=processor)
         ctx = shared_hsm_context()
-        ctx = await start_cognition_ability_for_test(intuition, ctx)
+        ctx = await start_cognition_ability_for_test(decision, ctx)
 
-        first = asyncio.create_task(dispatch_ability_for_test(intuition, ctx, intuition_input(operation_id="first")))
+        first = asyncio.create_task(dispatch_ability_for_test(decision, ctx, decision_input(operation_id="first")))
         await wait_until(lambda: len(processor.calls) == 1)
-        second = asyncio.create_task(dispatch_ability_for_test(intuition, ctx, intuition_input(operation_id="second")))
+        second = asyncio.create_task(dispatch_ability_for_test(decision, ctx, decision_input(operation_id="second")))
         await asyncio.sleep(0)
 
         assert len(processor.calls) == 1
         processor.release_first.set()
         outputs = list(await asyncio.gather(first, second))
-        return intuition.state(), outputs, processor.calls
+        return decision.state(), outputs, processor.calls
 
     state, outputs, calls = asyncio.run(run())
 
-    assert state == "/IntuitionLifecycle/attached/behavior/idle"
-    assert [output.output for output in outputs] == [no_output("intuition"), no_output("intuition")]
+    assert state == "/DecisionLifecycle/attached/behavior/idle"
+    assert [output.output for output in outputs] == [no_output("decision"), no_output("decision")]
     assert len(calls) == 2
 
 
@@ -3753,7 +3990,7 @@ def _ring_stimulus() -> hsm.Event[object]:
     return SoundEvent.with_data(SoundData(audio=b"ring", kind="phone.ringing"))
 
 
-def test_autonomy_handles_matching_behavior_without_intuition_processor() -> None:
+def test_autonomy_handles_matching_behavior_without_decision_processor() -> None:
     """Stimulus → behavior Behavior → EventData selection without deliberative Processing."""
 
     async def run() -> tuple[list[cognition.types.OutputData], list[processing.InputData], list[processing.InputData]]:
@@ -3766,12 +4003,12 @@ def test_autonomy_handles_matching_behavior_without_intuition_processor() -> Non
             source=_FOCUS_RING_BEHAVIOR_SOURCE,
         )
         autonomy = cognition.Autonomy(memory=store)
-        intuition_processor = RecordingIntuitionProcessor(cognition.intuition.OutputData(reason="should not run"))
+        decision_processor = RecordingDecisionProcessor(cognition.decision.OutputData(reason="should not run"))
         reasoning_processor = RecordingReasoningProcessor(focus_output("phone", "should not run"))
         reflection_processor = FixedProcessor(no_output("observed"))
         ability = RecordingCognition(
             autonomy=autonomy,
-            intuition_processor=intuition_processor,
+            decision_processor=decision_processor,
             reasoning_processor=reasoning_processor,
             # One memory per bot: Cognition attaches it, Autonomy and Reflection reach it by message.
             reflection=cognition.Reflection(processor=reflection_processor, memory=store),
@@ -3797,9 +4034,9 @@ def test_autonomy_handles_matching_behavior_without_intuition_processor() -> Non
         )
         await wait_until(lambda: bool(ability.outputs))
         await wait_until(lambda: bool(reflection_processor.step.calls))
-        return ability.outputs, intuition_processor.calls, reflection_processor.step.calls
+        return ability.outputs, decision_processor.calls, reflection_processor.step.calls
 
-    outputs, intuition_calls, reflection_calls = asyncio.run(run())
+    outputs, decision_calls, reflection_calls = asyncio.run(run())
 
     assert len(outputs) == 1
     assert outputs[0] == (
@@ -3809,14 +4046,14 @@ def test_autonomy_handles_matching_behavior_without_intuition_processor() -> Non
             reason="ring behavior",
         ),
     )
-    assert intuition_calls == []
+    assert decision_calls == []
     assert len(reflection_calls) == 1
     reflection_input = reflection_calls[0].input
     assert isinstance(reflection_input, cognition.reflection.ProcessorInput)
     assert reflection_input.cognition_output == outputs[0]
 
 
-def test_autonomy_unhandled_falls_through_to_intuition() -> None:
+def test_autonomy_unhandled_falls_through_to_decision() -> None:
     async def run() -> tuple[list[cognition.types.OutputData], list[processing.InputData]]:
         engine = memory.store.open_sqlite_engine()
         store = memory.Memory(engine=engine)
@@ -3827,10 +4064,10 @@ def test_autonomy_unhandled_falls_through_to_intuition() -> None:
             source=_FOCUS_RING_BEHAVIOR_SOURCE,
         )
         autonomy = cognition.Autonomy(memory=store)
-        intuition_processor = RecordingIntuitionProcessor(no_output("intuition after autonomy"))
+        decision_processor = RecordingDecisionProcessor(no_output("decision after autonomy"))
         ability = RecordingCognition(
             autonomy=autonomy,
-            intuition_processor=intuition_processor,
+            decision_processor=decision_processor,
             reasoning_processor=FailingReasoningProcessor(),
             store=store,
         )
@@ -3838,12 +4075,69 @@ def test_autonomy_unhandled_falls_through_to_intuition() -> None:
         # bot.input stimulus does not match environment.sound trigger.
         _ = await dispatch_ability_for_test(ability, ctx, cognition_input())
         await wait_until(lambda: bool(ability.outputs))
-        return ability.outputs, intuition_processor.calls
+        return ability.outputs, decision_processor.calls
 
-    outputs, intuition_calls = asyncio.run(run())
+    outputs, decision_calls = asyncio.run(run())
 
-    assert outputs == [no_output("intuition after autonomy")]
-    assert len(intuition_calls) == 1
+    assert outputs == [no_output("decision after autonomy")]
+    assert len(decision_calls) == 1
+
+
+def test_a_cognition_without_reflex_takes_every_turn_up_with_reasoning() -> None:
+    """D-R-52: every tier but reasoning is optional; without reflex, the turn's input goes on to reasoning."""
+
+    async def run() -> tuple[cognition.types.OutputData, list[processing.InputData]]:
+        reasoning_processor = RecordingReasoningProcessor(no_output("reasoned"))
+        ability = cognition.Cognition(
+            reasoning=cognition.Reasoning(processor=reasoning_processor),
+            reflection=cognition.Reflection(processor=FixedProcessor(no_output("reflection")), memory=memory.Memory()),
+        )
+        ctx = await start_cognition_ability_for_test(ability)
+        result = await dispatch_ability_for_test(ability, ctx, await started_cognition_input(ctx))
+        return result, reasoning_processor.calls
+
+    result, reasoning_calls = asyncio.run(run())
+
+    assert result == no_output("reasoned")
+    assert len(reasoning_calls) == 1
+
+
+def test_reflex_is_one_stage_whose_layers_and_spans_say_which_settled_or_handed_on(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """D-R-52 OTEL: ``bot.cognition.stage`` names reflex once per layer (``bot.reflex.layer``), then the stages
+    after it; autonomy's and the decision layer's own spans are ``bot.reflex.*``."""
+
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    monkeypatch.setattr(span, "tracer_provider", lambda: provider)
+
+    async def run() -> None:
+        store = memory.Memory()
+        ability = RecordingCognition(
+            autonomy=cognition.Autonomy(memory=store),
+            decision_processor=RecordingDecisionProcessor(cognition.decision.OutputData(result=None)),
+            reasoning_processor=RecordingReasoningProcessor(no_output("reasoned")),
+            store=store,
+            associative=memory.Associative(memory=store),
+        )
+        ctx = await start_cognition_ability_for_test(ability)
+        _ = await dispatch_ability_for_test(ability, ctx, await started_cognition_input(ctx))
+        await wait_until(lambda: ability.state().endswith("/idle"))
+
+    asyncio.run(run())
+
+    finished = exporter.get_finished_spans()
+    stages = [
+        (str((recorded.attributes or {}).get("bot.stage")), (recorded.attributes or {}).get("bot.reflex.layer"))
+        for recorded in sorted(finished, key=lambda recorded: recorded.start_time or 0)
+        if recorded.name == "bot.cognition.stage"
+    ]
+    assert stages == [("reflex", "behaviors"), ("reflex", "decision"), ("associating", None), ("reasoning", None)]
+    names = {recorded.name for recorded in finished}
+    assert {"bot.reflex.match", "bot.reflex.invoke", "bot.reflex.classify"} <= names
+    assert not {name for name in names if name.startswith(("bot.autonomy.", "bot.intuition.", "bot.decision."))}
 
 
 def _speech_event_stimulus() -> hsm.Event[object]:
@@ -3889,11 +4183,11 @@ def test_autonomy_native_seed_preserves_acoustic_speech_for_conversation() -> No
         list[processing.InputData],
     ]:
         autonomy = cognition.Autonomy(seeded_behaviors=(behaviors.speech_heard_seed(),))
-        intuition_processor = RecordingIntuitionProcessor(no_output("should not run"))
+        decision_processor = RecordingDecisionProcessor(no_output("should not run"))
         reasoning_processor = FailingReasoningProcessor()
         ability = RecordingCognition(
             autonomy=autonomy,
-            intuition_processor=intuition_processor,
+            decision_processor=decision_processor,
             reasoning_processor=reasoning_processor,
             reflection=cognition.Reflection(processor=FixedProcessor(no_output("observed")), memory=memory.Memory()),
         )
@@ -3952,14 +4246,14 @@ def test_autonomy_native_seed_preserves_acoustic_speech_for_conversation() -> No
             ability.outputs,
             (listening.SpeechEvent.name,),
             ability.failures,
-            intuition_processor.calls,
+            decision_processor.calls,
             reasoning_processor.calls,
         )
 
-    outputs, triggers, failures, intuition_calls, reasoning_calls = asyncio.run(run())
+    outputs, triggers, failures, decision_calls, reasoning_calls = asyncio.run(run())
     assert triggers == (listening.SpeechEvent.name,)
     assert not failures
-    assert not intuition_calls
+    assert not decision_calls
     assert not reasoning_calls
     assert len(outputs) == 1
     selected = outputs[0]
@@ -4029,9 +4323,9 @@ def test_cognition_reconciles_routines_after_reflection_settles() -> None:
     async def run() -> tuple[list[datetime.timedelta], list[datetime.timedelta]]:
         store = memory.Memory()
         timers = ManualTimers()
-        intuition, reasoning = cognition_abilities()
+        decision, reasoning = cognition_abilities()
         ability = cognition.Cognition(
-            intuition=intuition,
+            decision=decision,
             reasoning=reasoning,
             reflection=cognition.Reflection(processor=FixedProcessor(empty_output()), memory=store),
             routines=cognition.Routines(memory=store, now=lambda: _ROUTINE_START, clock=timers),
@@ -4094,9 +4388,9 @@ def test_cognition_hands_routine_ticks_to_the_body_as_observed_input(tmp_path: p
     async def run() -> tuple[hsm.Event[typing.Any], str]:
         store = memory.Memory(database=database)
         timers = ManualTimers()
-        intuition, reasoning = cognition_abilities()
+        decision, reasoning = cognition_abilities()
         ability = cognition.Cognition(
-            intuition=intuition,
+            decision=decision,
             reasoning=reasoning,
             reflection=cognition.Reflection(processor=FixedProcessor(empty_output()), memory=store),
             routines=cognition.Routines(memory=store, now=lambda: _ROUTINE_START, clock=timers),
@@ -4169,11 +4463,11 @@ async def _remembered(ctx: hsm.Context, store: memory.Memory) -> tuple[memory.Ep
 
 
 def test_cognition_requires_memory_for_associative() -> None:
-    intuition, reasoning = cognition_abilities()
+    decision, reasoning = cognition_abilities()
     reflection = cognition.Reflection(processor=FixedProcessor(no_output("unused")), memory=memory.Memory())
     with pytest.raises(ValueError, match="associative requires memory"):
         _ = cognition.Cognition(
-            intuition=intuition,
+            decision=decision,
             reasoning=reasoning,
             reflection=reflection,
             associative=memory.Associative(memory=memory.Memory()),
@@ -4183,8 +4477,9 @@ def test_cognition_requires_memory_for_associative() -> None:
     assert "/CognitionLifecycle/attached/behavior/processing/cancelling/associating" in members
 
 
-def test_cognition_associates_before_intuition_and_remembers_the_completed_turn() -> None:
-    """What memory surfaced reaches intuition, reasoning (as recalled) and reflection; the turn is kept."""
+def test_cognition_associates_after_reflex_and_remembers_the_completed_turn() -> None:
+    """R-21: recall comes after reflex. What memory surfaced reaches reasoning (as recalled) and reflection,
+    never the decision layer, which chooses without it; the turn is kept."""
 
     async def run() -> tuple[
         cognition.types.OutputData,
@@ -4194,11 +4489,11 @@ def test_cognition_associates_before_intuition_and_remembers_the_completed_turn(
         tuple[memory.Episode, ...],
     ]:
         store = memory.Memory()
-        intuition_processor = RecordingIntuitionProcessor(cognition.intuition.OutputData(reason="think it over"))
+        decision_processor = RecordingDecisionProcessor(cognition.decision.OutputData(reason="think it over"))
         reasoning_processor = RecordingReasoningProcessor(focus_output("phone", "reasoned focus"))
         reflection_processor = FixedProcessor(no_output("observed"))
         ability = RecordingCognition(
-            intuition_processor=intuition_processor,
+            decision_processor=decision_processor,
             reasoning_processor=reasoning_processor,
             reflection=cognition.Reflection(processor=reflection_processor, memory=store),
             store=store,
@@ -4222,24 +4517,24 @@ def test_cognition_associates_before_intuition_and_remembers_the_completed_turn(
         episodes = await _remembered(ctx, store)
         return (
             result,
-            intuition_processor.calls,
+            decision_processor.calls,
             reasoning_processor.calls,
             reflection_processor.step.calls,
             episodes,
         )
 
-    result, intuition_calls, reasoning_calls, reflection_calls, episodes = asyncio.run(run())
+    result, decision_calls, reasoning_calls, reflection_calls, episodes = asyncio.run(run())
 
     assert result == focus_output("phone", "reasoned focus")
-    (intuition_frame,) = intuition_calls
-    assert isinstance(intuition_frame.recalled, cognition.RecalledData)
-    assert intuition_frame.recalled.recent == ()
-    surfaced = intuition_frame.recalled.associations
+    (decision_frame,) = decision_calls
+    assert decision_frame.recalled is None
+    (reasoning_frame,) = reasoning_calls
+    assert isinstance(reasoning_frame.recalled, cognition.RecalledData)
+    assert reasoning_frame.recalled.recent == ()
+    surfaced = reasoning_frame.recalled.associations
     assert isinstance(surfaced, memory.AssociationsData)
     assert [item.text for item in surfaced.items] == ["Ada asked for a call at noon."]
     assert surfaced.items[0].involves == (_ADA.ref,)
-    (reasoning_frame,) = reasoning_calls
-    assert reasoning_frame.recalled == intuition_frame.recalled
     select = reflection_calls[0].input
     assert isinstance(select, cognition.reflection.ProcessorInput)
     assert select.associations == surfaced
@@ -4260,9 +4555,10 @@ def test_cognition_remembers_what_it_did_alongside_what_it_perceived_and_recalls
 
     async def run() -> tuple[tuple[memory.Episode, ...], list[processing.InputData]]:
         store = memory.Memory()
-        intuition_processor = RecordingIntuitionProcessor(focus_output("phone", "the phone is ringing"))
+        reasoning_processor = RecordingReasoningProcessor(focus_output("phone", "the phone is ringing"))
         ability = RecordingCognition(
-            intuition_processor=intuition_processor,
+            decision_processor=RecordingDecisionProcessor(cognition.decision.OutputData(result=None)),
+            reasoning_processor=reasoning_processor,
             reflection=cognition.Reflection(processor=FixedProcessor(no_output("observed")), memory=store),
             store=store,
             associative=memory.Associative(memory=store),
@@ -4275,9 +4571,9 @@ def test_cognition_remembers_what_it_did_alongside_what_it_perceived_and_recalls
         episodes = await _remembered(ctx, store)
         _ = await dispatch_ability_for_test(ability, ctx, await started_cognition_input(ctx))
         await wait_until(lambda: ability.state().endswith("/idle"))
-        return episodes, intuition_processor.calls
+        return episodes, reasoning_processor.calls
 
-    episodes, intuition_calls = asyncio.run(run())
+    episodes, reasoning_calls = asyncio.run(run())
 
     (kept,) = episodes
     perceived = kept.text.index("<events:input_event")
@@ -4286,7 +4582,7 @@ def test_cognition_remembers_what_it_did_alongside_what_it_perceived_and_recalls
     assert mosfet.FocusDeviceEvent.name in kept.text[did:]
     assert "the phone is ringing" in kept.text[did:]
     assert [act.event for act in kept.acts] == [mosfet.FocusDeviceEvent.name]
-    _, later = intuition_calls
+    _, later = reasoning_calls
     assert isinstance(later.recalled, cognition.RecalledData)
     assert isinstance(later.recalled.associations, memory.AssociationsData)
     (recalled,) = later.recalled.associations.items
@@ -4296,9 +4592,9 @@ def test_cognition_remembers_what_it_did_alongside_what_it_perceived_and_recalls
 def test_an_association_that_fails_leaves_the_turn_without_associations_not_failed() -> None:
     async def run() -> tuple[cognition.types.OutputData, list[processing.InputData], str]:
         store = memory.Memory()
-        intuition_processor = RecordingIntuitionProcessor(focus_output("phone", "fast focus"))
+        decision_processor = RecordingDecisionProcessor(focus_output("phone", "fast focus"))
         ability = RecordingCognition(
-            intuition_processor=intuition_processor,
+            decision_processor=decision_processor,
             reflection=cognition.Reflection(processor=FixedProcessor(no_output("observed")), memory=store),
             store=store,
             # Its memory is never attached or started: every association fails, typed.
@@ -4307,13 +4603,13 @@ def test_an_association_that_fails_leaves_the_turn_without_associations_not_fail
         ctx = await start_cognition_ability_for_test(ability)
         result = await dispatch_ability_for_test(ability, ctx, await started_cognition_input(ctx))
         await wait_until(lambda: ability.state().endswith("/idle"))
-        return result, intuition_processor.calls, ability.state()
+        return result, decision_processor.calls, ability.state()
 
-    result, intuition_calls, state = asyncio.run(run())
+    result, decision_calls, state = asyncio.run(run())
 
     assert result == focus_output("phone", "fast focus")
-    assert len(intuition_calls) == 1
-    assert intuition_calls[0].recalled is None
+    assert len(decision_calls) == 1
+    assert decision_calls[0].recalled is None
     assert state.endswith("/idle")
 
 
@@ -4339,10 +4635,10 @@ def test_recent_turns_reach_reasoning_oldest_first_without_the_turn_being_answer
 
     async def run() -> tuple[list[processing.InputData], list[processing.InputData]]:
         register = memory.StmMemory()
-        intuition_processor = RecordingIntuitionProcessor(cognition.intuition.OutputData(reason="think it over"))
+        decision_processor = RecordingDecisionProcessor(cognition.decision.OutputData(reason="think it over"))
         reasoning_processor = RecordingReasoningProcessor(focus_output("phone", "reasoned focus"))
         ability = RecordingCognition(
-            intuition_processor=intuition_processor,
+            decision_processor=decision_processor,
             reasoning_processor=reasoning_processor,
             stm_memory=register,
         )
@@ -4368,16 +4664,18 @@ def test_recent_turns_reach_reasoning_oldest_first_without_the_turn_being_answer
             update={"stimulus": _heard_now("now"), "participants": (_MAYA,)}
         )
         _ = await dispatch_ability_for_test(ability, ctx, turn)
-        return intuition_processor.calls, reasoning_processor.calls
+        return decision_processor.calls, reasoning_processor.calls
 
-    intuition_calls, reasoning_calls = asyncio.run(run())
+    decision_calls, reasoning_calls = asyncio.run(run())
 
     (frame,) = reasoning_calls
     recalled = frame.recalled
     assert isinstance(recalled, cognition.RecalledData)
     assert [(turn.id, turn.direction) for turn in recalled.recent] == [("earlier", "heard"), ("reply", "said")]
     assert recalled.associations is None
-    assert intuition_calls[0].recalled == recalled
+    # Reflex chooses without recall (D-R-52): the recent turns are read after it, for the tiers that answer.
+    (decided,) = decision_calls
+    assert decided.recalled is None
     prompt = "".join(
         part.text for part in frame.model_facing_content(media.ImageCapacity()) if isinstance(part, text.TextPart)
     )
@@ -4390,6 +4688,53 @@ def test_recent_turns_reach_reasoning_oldest_first_without_the_turn_being_answer
     assert frame.situation is not None and frame.situation in prompt
     assert said < prompt.index(frame.situation) < prompt.index('stimulus:id="now"')
     assert "instructions=" not in prompt
+
+
+def test_recent_turns_reach_intuition_as_they_reach_reasoning() -> None:
+    """R-20 C3, D-R-52: the recent turns are read after reflex, so intuition, the tier that answers in words now,
+    is given them as reasoning is, without the turn being answered."""
+
+    async def run() -> list[processing.InputData]:
+        register = memory.StmMemory()
+        intuition_processor = RecordingReasoningProcessor(no_output("intuited"))
+        ability = RecordingCognition(
+            decision_processor=RecordingDecisionProcessor(cognition.decision.OutputData(result=None)),
+            intuition=cognition.Intuition(processor=intuition_processor),
+            reasoning_processor=RecordingReasoningProcessor(no_output("reasoned")),
+            stm_memory=register,
+        )
+        ctx = await start_cognition_ability_for_test(ability)
+        await start_abilities_for_test(ctx, register)
+        await wait_until(lambda: ability.state().endswith("/idle"))
+        for turn_id, direction, speaker, words in (
+            ("earlier", "heard", _MAYA, "Hi Willy, I'm Maya."),
+            ("reply", "said", _OWN, "Nice to meet you, Maya."),
+            ("now", "heard", _MAYA, "What did I just tell you?"),
+        ):
+            _ = await hsm.dispatch(
+                ctx,
+                register,
+                memory.stm.TurnEvent.with_data(
+                    memory.stm.TurnRecordData.of(
+                        id=turn_id,
+                        direction=typing.cast(memory.stm.TurnDirection, direction),
+                        speakers=(speaker,),
+                        words=words,
+                        conversation="talk",
+                    )
+                ),
+            )
+        turn = (await started_cognition_input(ctx)).model_copy(
+            update={"stimulus": _heard_now("now"), "participants": (_MAYA,)}
+        )
+        _ = await dispatch_ability_for_test(ability, ctx, turn)
+        await wait_until(lambda: ability.state().endswith("/idle"))
+        return intuition_processor.calls
+
+    (frame,) = asyncio.run(run())
+
+    assert isinstance(frame.recalled, cognition.RecalledData)
+    assert [(turn.id, turn.direction) for turn in frame.recalled.recent] == [("earlier", "heard"), ("reply", "said")]
 
 
 def _speech_now() -> hsm.Event[listening.SpeechData]:
@@ -4434,7 +4779,7 @@ def test_the_turn_listening_heard_for_this_stimulus_is_left_out_of_recent_while_
         register = memory.StmMemory()
         reasoning_processor = RecordingReasoningProcessor(focus_output("phone", "reasoned focus"))
         ability = RecordingCognition(
-            intuition_processor=RecordingIntuitionProcessor(cognition.intuition.OutputData(reason="think it over")),
+            decision_processor=RecordingDecisionProcessor(cognition.decision.OutputData(reason="think it over")),
             reasoning_processor=reasoning_processor,
             stm_memory=register,
         )
@@ -4482,7 +4827,7 @@ def test_an_episode_of_the_turn_being_answered_is_not_recalled_as_an_association
         store = memory.Memory()
         reasoning_processor = RecordingReasoningProcessor(focus_output("phone", "reasoned focus"))
         ability = RecordingCognition(
-            intuition_processor=RecordingIntuitionProcessor(cognition.intuition.OutputData(reason="think it over")),
+            decision_processor=RecordingDecisionProcessor(cognition.decision.OutputData(reason="think it over")),
             reasoning_processor=reasoning_processor,
             reflection=cognition.Reflection(processor=FixedProcessor(no_output("observed")), memory=store),
             store=store,
@@ -4520,7 +4865,7 @@ def test_cognition_remembers_a_failed_turn_with_its_stimulus_and_no_acts() -> No
     async def run() -> tuple[list[abilities.FailureData], tuple[memory.Episode, ...]]:
         store = memory.Memory()
         ability = RecordingCognition(
-            intuition_processor=RecordingIntuitionProcessor(cognition.intuition.OutputData(reason="escalate")),
+            decision_processor=RecordingDecisionProcessor(cognition.decision.OutputData(reason="escalate")),
             reasoning_processor=FailingReasoningProcessor(),
             store=store,
         )
@@ -4560,9 +4905,9 @@ def test_cognition_remembers_a_failed_turn_with_its_failure_after_what_it_percei
 
     async def run() -> tuple[memory.Episode, ...]:
         store = memory.Memory()
-        # Intuition leaves the turn to reasoning, whose step fails (a failing intuition would cascade, D-R-36).
+        # Decision leaves the turn to reasoning, whose step fails (a failing decision would cascade, D-R-36).
         ability = RecordingCognition(
-            intuition_processor=RecordingIntuitionProcessor(cognition.intuition.OutputData(reason="needs thought")),
+            decision_processor=RecordingDecisionProcessor(cognition.decision.OutputData(reason="needs thought")),
             reasoning_processor=_RefusingProcessor(),
             store=store,
         )
@@ -4600,13 +4945,13 @@ class _UnreadableActor(hsm.Instance):
         raise RuntimeError("actor state unavailable")
 
 
-class _BreaksAfterIntuition(hsm.Instance):
-    """Readable while intuition decides; unreadable once intuition escalates, so the reasoning frame fails."""
+class _BreaksAfterDecision(hsm.Instance):
+    """Readable while decision decides; unreadable once decision escalates, so the reasoning frame fails."""
 
     effort: typing.ClassVar[abilities.ability.Effort] = abilities.ability.Effort.XS
     model: typing.ClassVar[hsm.Model | None] = mosfet.define(
-        "BreaksAfterIntuition",
-        hsm.initial(hsm.target("/BreaksAfterIntuition/active")),
+        "BreaksAfterDecision",
+        hsm.initial(hsm.target("/BreaksAfterDecision/active")),
         hsm.state("active"),
     )
     broken: bool = False
@@ -4618,9 +4963,9 @@ class _BreaksAfterIntuition(hsm.Instance):
         return super().take_snapshot()
 
 
-class _EscalatingThenBreaking(RecordingIntuitionProcessor):
-    def __init__(self, actor: _BreaksAfterIntuition) -> None:
-        super().__init__(cognition.intuition.OutputData(reason="escalate"))
+class _EscalatingThenBreaking(RecordingDecisionProcessor):
+    def __init__(self, actor: _BreaksAfterDecision) -> None:
+        super().__init__(cognition.decision.OutputData(reason="escalate"))
         self.actor = actor
 
     @typing.override
@@ -4633,7 +4978,7 @@ class _EscalatingThenBreaking(RecordingIntuitionProcessor):
 
 
 async def _remembered_after_unframed_turn(
-    ability: RecordingCognition, store: memory.Memory, actor: _UnreadableActor | _BreaksAfterIntuition
+    ability: RecordingCognition, store: memory.Memory, actor: _UnreadableActor | _BreaksAfterDecision
 ) -> tuple[list[abilities.FailureData], tuple[memory.Episode, ...]]:
     """Run one turn whose frame offers ``actor``; return the failures and what memory kept."""
 
@@ -4648,7 +4993,7 @@ async def _remembered_after_unframed_turn(
     return ability.failures, await _remembered(ctx, store)
 
 
-def test_cognition_remembers_a_failed_turn_whose_intuition_frame_cannot_be_built() -> None:
+def test_cognition_remembers_a_failed_turn_whose_decision_frame_cannot_be_built() -> None:
     """The turn cascades to reasoning (D-R-36), whose frame offers the same unreadable actor, so it fails there,
     once, and is remembered once."""
 
@@ -4669,8 +5014,8 @@ def test_cognition_remembers_a_failed_turn_whose_intuition_frame_cannot_be_built
 def test_cognition_remembers_a_failed_turn_whose_reasoning_frame_cannot_be_built() -> None:
     async def run() -> tuple[list[abilities.FailureData], tuple[memory.Episode, ...]]:
         store = memory.Memory()
-        actor = _BreaksAfterIntuition()
-        ability = RecordingCognition(intuition_processor=_EscalatingThenBreaking(actor), store=store)
+        actor = _BreaksAfterDecision()
+        ability = RecordingCognition(decision_processor=_EscalatingThenBreaking(actor), store=store)
         return await _remembered_after_unframed_turn(ability, store, actor)
 
     failures, episodes = asyncio.run(run())
@@ -4682,11 +5027,11 @@ def test_cognition_remembers_a_failed_turn_whose_reasoning_frame_cannot_be_built
     assert kept.stimulus == mosfet.InputEvent.name
 
 
-class _HoldingIntuition(cognition.Intuition):
-    """Intuition that takes a turn and never answers or acknowledges a cancel."""
+class _HoldingDecision(cognition.Decision):
+    """Decision that takes a turn and never answers or acknowledges a cancel."""
 
     @staticmethod
-    async def _hold(ctx: hsm.Context, instance: "_HoldingIntuition", event: hsm.Event[typing.Any]) -> None:
+    async def _hold(ctx: hsm.Context, instance: "_HoldingDecision", event: hsm.Event[typing.Any]) -> None:
         del ctx
         operation_id = event.id if event.id else hsm.id(instance)
         if processing.active_operation(instance, operation_id) is None:
@@ -4694,11 +5039,11 @@ class _HoldingIntuition(cognition.Intuition):
         await asyncio.Event().wait()
 
     submodel = mosfet.define(
-        "HoldingIntuition",
-        hsm.initial(hsm.target("/HoldingIntuition/waiting")),
+        "HoldingDecision",
+        hsm.initial(hsm.target("/HoldingDecision/waiting")),
         hsm.state(
             "waiting",
-            hsm.transition(hsm.on(cognition.Intuition.input_event), hsm.target("/HoldingIntuition/holding")),
+            hsm.transition(hsm.on(cognition.Decision.input_event), hsm.target("/HoldingDecision/holding")),
         ),
         hsm.state("holding", hsm.activity(_hold.__get__(None, object))),
     )
@@ -4711,7 +5056,7 @@ async def _rebooted_turn(
     store = memory.Memory()
     _, reasoning = cognition_abilities()
     ability = cognition.Cognition(
-        intuition=_HoldingIntuition(processor=RecordingIntuitionProcessor(no_output("unused"))),
+        decision=_HoldingDecision(processor=RecordingDecisionProcessor(no_output("unused"))),
         reasoning=reasoning,
         reflection=cognition.Reflection(processor=FixedProcessor(no_output("reflection")), memory=store),
         memory=store,
@@ -4725,7 +5070,7 @@ async def _rebooted_turn(
     owner.lifecycle.clear()
     turn = (await started_cognition_input(ctx)).model_copy(update={"participants": (_ADA,)})
     _ = await hsm.dispatch(ctx, ability, ability.input_event.with_data_and_id(turn, "rebooted-turn"))
-    await wait_until(lambda: ability.state().endswith("/intuition"))
+    await wait_until(lambda: ability.state().endswith("/decision"))
     _ = await hsm.dispatch(
         ctx,
         ability,
@@ -4782,9 +5127,12 @@ def test_cancelling_an_association_acknowledges_at_once_and_remembers_the_cancel
             embed_timeout=datetime.timedelta(seconds=5),
             operation_timeout=datetime.timedelta(seconds=10),
         )
-        intuition, reasoning = cognition_abilities()
+        # The decision layer passes, so the turn goes on to associating after reflex.
+        decision, reasoning = cognition_abilities(
+            decision_processor=RecordingDecisionProcessor(cognition.decision.OutputData(result=None))
+        )
         ability = cognition.Cognition(
-            intuition=intuition,
+            decision=decision,
             reasoning=reasoning,
             reflection=cognition.Reflection(processor=FixedProcessor(no_output("reflection")), memory=store),
             memory=store,
@@ -4856,9 +5204,9 @@ def test_a_hung_embedder_does_not_reboot_the_next_turn() -> None:
             embed_timeout=datetime.timedelta(seconds=5),
             operation_timeout=datetime.timedelta(seconds=10),
         )
-        intuition, reasoning = cognition_abilities()
+        decision, reasoning = cognition_abilities()
         ability = cognition.Cognition(
-            intuition=intuition,
+            decision=decision,
             reasoning=reasoning,
             autonomy=cognition.Autonomy(memory=store),
             reflection=cognition.Reflection(processor=FixedProcessor(no_output("reflection")), memory=store),
@@ -4910,16 +5258,16 @@ async def _recalling_cognition(
     cognition.Cognition,
     hsm.Context,
     _RoutineTickBody,
-    RecordingIntuitionProcessor,
+    RecordingDecisionProcessor,
     RecordingReasoningProcessor,
 ]:
-    intuition_processor = RecordingIntuitionProcessor(cognition.intuition.OutputData(reason="think it over"))
+    decision_processor = RecordingDecisionProcessor(cognition.decision.OutputData(reason="think it over"))
     reasoning_processor = RecordingReasoningProcessor(no_output("placeholder"))
-    intuition, reasoning = cognition_abilities(
-        intuition_processor=intuition_processor, reasoning_processor=reasoning_processor
+    decision, reasoning = cognition_abilities(
+        decision_processor=decision_processor, reasoning_processor=reasoning_processor
     )
     ability = cognition.Cognition(
-        intuition=intuition,
+        decision=decision,
         reasoning=reasoning,
         reflection=cognition.Reflection(processor=FixedProcessor(no_output("reflection")), memory=store),
         memory=store,
@@ -4930,18 +5278,18 @@ async def _recalling_cognition(
     _ = await mosfet.started(ctx, body, body.model)
     await ability.attach(ctx, attachment.AttachEvent.with_data_and_id(attachment.AttachData(actor=body), "attach"))
     await wait_until(lambda: ability.state().endswith("/idle"))
-    return ability, ctx, body, intuition_processor, reasoning_processor
+    return ability, ctx, body, decision_processor, reasoning_processor
 
 
 def test_reasoning_may_recall_a_memory_and_the_recollection_becomes_an_observation() -> None:
-    """Recall is offered to reasoning (effort M) and not to intuition; what comes to mind is a new turn."""
+    """Recall is offered to reasoning (effort M) and not to decision; what comes to mind is a new turn."""
 
     async def run() -> tuple[
         list[processing.InputData], list[processing.InputData], hsm.Event[typing.Any], str, str, str, str
     ]:
         store = memory.Memory()
         associative = memory.Associative(memory=store)
-        ability, ctx, body, intuition_processor, reasoning_processor = await _recalling_cognition(associative, store)
+        ability, ctx, body, decision_processor, reasoning_processor = await _recalling_cognition(associative, store)
         try:
             await _remember_by_message(
                 ctx,
@@ -4962,7 +5310,7 @@ def test_reasoning_may_recall_a_memory_and_the_recollection_becomes_an_observati
             )
             await _until_routines(lambda: bool(body.handoffs), timeout=5.0)
             return (
-                intuition_processor.calls,
+                decision_processor.calls,
                 reasoning_processor.calls,
                 body.handoffs[0],
                 earlier.node_id,
@@ -4974,11 +5322,11 @@ def test_reasoning_may_recall_a_memory_and_the_recollection_becomes_an_observati
         finally:
             await ability.stop(ctx)
 
-    intuition_calls, reasoning_calls, handoff, node_id, cognition_id, associative_id, offered_memory_id = asyncio.run(
+    decision_calls, reasoning_calls, handoff, node_id, cognition_id, associative_id, offered_memory_id = asyncio.run(
         run()
     )
 
-    assert memory.RecallEvent.name not in {event.name for event in intuition_calls[0].schemas}
+    assert memory.RecallEvent.name not in {event.name for event in decision_calls[0].schemas}
     (reasoning_frame,) = reasoning_calls
     assert memory.RecallEvent.name in {event.name for event in reasoning_frame.schemas}
     assert offered_memory_id == associative_id
@@ -5034,7 +5382,7 @@ def test_reasoning_may_know_a_fact_about_a_person_and_what_memory_says_of_it_bec
     async def run() -> tuple[list[processing.InputData], list[processing.InputData], hsm.Event[typing.Any], str]:
         store = memory.Memory()
         associative = memory.Associative(memory=store)
-        ability, ctx, body, intuition_processor, reasoning_processor = await _recalling_cognition(associative, store)
+        ability, ctx, body, decision_processor, reasoning_processor = await _recalling_cognition(associative, store)
         try:
             await _remember_by_message(
                 ctx,
@@ -5058,15 +5406,15 @@ def test_reasoning_may_know_a_fact_about_a_person_and_what_memory_says_of_it_bec
                 ctx, ability, ability.input_event.with_data_and_id(await started_cognition_input(ctx), "turn-1")
             )
             await _until_routines(lambda: bool(body.handoffs), timeout=5.0)
-            return intuition_processor.calls, reasoning_processor.calls, body.handoffs[0], hsm.id(associative)
+            return decision_processor.calls, reasoning_processor.calls, body.handoffs[0], hsm.id(associative)
         finally:
             await ability.stop(ctx)
 
-    intuition_calls, reasoning_calls, handoff, associative_id = asyncio.run(run())
+    decision_calls, reasoning_calls, handoff, associative_id = asyncio.run(run())
 
     offered = {event.name for event in reasoning_calls[0].schemas}
     assert {memory.KnowEvent.name, memory.ForgetEvent.name} <= offered
-    assert not {memory.KnowEvent.name, memory.ForgetEvent.name} & {event.name for event in intuition_calls[0].schemas}
+    assert not {memory.KnowEvent.name, memory.ForgetEvent.name} & {event.name for event in decision_calls[0].schemas}
     data = handoff.data
     assert isinstance(data, cognition.InputData)
     stimulus = data.stimulus
@@ -5117,11 +5465,11 @@ async def _resting_cognition(
 ) -> tuple[cognition.Cognition, _RecordingConsolidation, hsm.Context, _RoutineTickBody]:
     store = memory.Memory()
     consolidation = _RecordingConsolidation(memory=store)
-    intuition, reasoning = cognition_abilities(
-        intuition_processor=RecordingIntuitionProcessor(cognition.intuition.OutputData(result=no_output("fast")))
+    decision, reasoning = cognition_abilities(
+        decision_processor=RecordingDecisionProcessor(cognition.decision.OutputData(result=no_output("fast")))
     )
     ability = cognition.Cognition(
-        intuition=intuition,
+        decision=decision,
         reasoning=reasoning,
         reflection=cognition.Reflection(processor=FixedProcessor(no_output("reflection")), memory=store),
         memory=store,
@@ -5138,18 +5486,18 @@ async def _resting_cognition(
 
 def test_cognition_rest_needs_memory_and_a_positive_rest_after() -> None:
     store = memory.Memory()
-    intuition, reasoning = cognition_abilities()
+    decision, reasoning = cognition_abilities()
     reflection = cognition.Reflection(processor=FixedProcessor(no_output("unused")), memory=store)
     with pytest.raises(ValueError, match="consolidation requires memory"):
         _ = cognition.Cognition(
-            intuition=intuition,
+            decision=decision,
             reasoning=reasoning,
             reflection=reflection,
             consolidation=memory.Consolidation(memory=store, processor=_LeaveAsIs()),
         )
     with pytest.raises(ValueError, match="rest_after must be positive"):
         _ = cognition.Cognition(
-            intuition=intuition, reasoning=reasoning, reflection=reflection, rest_after=datetime.timedelta(0)
+            decision=decision, reasoning=reasoning, reflection=reflection, rest_after=datetime.timedelta(0)
         )
     members = require_model(cognition.Cognition.model).members
     for state in ("ready", "ready/idle", "ready/awake", "ready/resting"):
@@ -5215,7 +5563,7 @@ _TRAITS = persona.Traits(traits=("curious", "patient with children"))
 
 
 def _self_block(frame: processing.InputData) -> xml.etree.ElementTree.Element | None:
-    """The self block a frame shows the model, which follows the world block, or None."""
+    """The self block a frame shows the model, its stable instructions, or None."""
 
     instructions = frame.instructions or ""
     start = instructions.find("<persona>")
@@ -5265,13 +5613,13 @@ def test_cognition_attaches_persona_and_shows_what_it_told_on_every_turn() -> No
 
     async def run() -> tuple[list[processing.InputData], list[processing.InputData], str]:
         self_ = persona.Persona(traits=_TRAITS)
-        intuition_processor = RecordingIntuitionProcessor(cognition.intuition.OutputData(reason="think it over"))
+        decision_processor = RecordingDecisionProcessor(cognition.decision.OutputData(reason="think it over"))
         reasoning_processor = RecordingReasoningProcessor(focus_output("phone", "reasoned focus"))
-        intuition, reasoning = cognition_abilities(
-            intuition_processor=intuition_processor, reasoning_processor=reasoning_processor
+        decision, reasoning = cognition_abilities(
+            decision_processor=decision_processor, reasoning_processor=reasoning_processor
         )
         ability = cognition.Cognition(
-            intuition=intuition,
+            decision=decision,
             reasoning=reasoning,
             reflection=cognition.Reflection(processor=FixedProcessor(no_output("reflection")), memory=memory.Memory()),
             persona=self_,
@@ -5289,21 +5637,21 @@ def test_cognition_attaches_persona_and_shows_what_it_told_on_every_turn() -> No
         # Cognition attached it: persona is a child, in its own attached behavior.
         attached = self_.state()
         await ability.stop(ctx)
-        return intuition_processor.calls, reasoning_processor.calls, attached
+        return decision_processor.calls, reasoning_processor.calls, attached
 
-    intuition_calls, reasoning_calls, attached = asyncio.run(run())
+    decision_calls, reasoning_calls, attached = asyncio.run(run())
 
     assert attached == "/PersonaLifecycle/attached/behavior/knowing"
-    assert len(intuition_calls) == len(reasoning_calls) == 2
-    for frame in (*intuition_calls, *reasoning_calls):
+    assert len(decision_calls) == len(reasoning_calls) == 2
+    for frame in (*decision_calls, *reasoning_calls):
         block = _self_block(frame)
         assert block is not None
         traits = block.find("traits")
         assert traits is not None and traits.get("given_by") == "owner"
         assert [trait.text for trait in traits.findall("trait")] == list(_TRAITS.traits)
     # Before any revision the bot knows it has written nothing; after one, it knows what it wrote.
-    assert [_description(frame) for frame in (intuition_calls[0], reasoning_calls[0])] == [None, None]
-    assert [_description(frame) for frame in (intuition_calls[1], reasoning_calls[1])] == [
+    assert [_description(frame) for frame in (decision_calls[0], reasoning_calls[0])] == [None, None]
+    assert [_description(frame) for frame in (decision_calls[1], reasoning_calls[1])] == [
         "I explain things slowly.",
         "I explain things slowly.",
     ]
@@ -5313,7 +5661,7 @@ def test_cognition_without_persona_shows_no_self_block() -> None:
     async def run() -> list[processing.InputData]:
         reasoning_processor = RecordingReasoningProcessor(focus_output("phone", "reasoned focus"))
         ability = make_cognition(
-            intuition_processor=RecordingIntuitionProcessor(cognition.intuition.OutputData(reason="think it over")),
+            decision_processor=RecordingDecisionProcessor(cognition.decision.OutputData(reason="think it over")),
             reasoning_processor=reasoning_processor,
         )
         ctx = await start_cognition_ability_for_test(ability)
@@ -5332,12 +5680,12 @@ def test_cognition_keeps_only_what_its_own_persona_told() -> None:
     async def run() -> list[processing.InputData]:
         self_ = persona.Persona(traits=_TRAITS)
         reasoning_processor = RecordingReasoningProcessor(focus_output("phone", "reasoned focus"))
-        intuition, reasoning = cognition_abilities(
-            intuition_processor=RecordingIntuitionProcessor(cognition.intuition.OutputData(reason="think it over")),
+        decision, reasoning = cognition_abilities(
+            decision_processor=RecordingDecisionProcessor(cognition.decision.OutputData(reason="think it over")),
             reasoning_processor=reasoning_processor,
         )
         ability = cognition.Cognition(
-            intuition=intuition,
+            decision=decision,
             reasoning=reasoning,
             reflection=cognition.Reflection(processor=FixedProcessor(no_output("reflection")), memory=memory.Memory()),
             persona=self_,
@@ -5386,12 +5734,12 @@ def test_a_revision_reflection_selects_is_known_on_the_next_turn() -> None:
         self_ = _TellingPersona()
         reasoning_processor = RecordingReasoningProcessor(focus_output("phone", "reasoned focus"))
         reflection_processor = FixedProcessor(revise)
-        intuition, reasoning = cognition_abilities(
-            intuition_processor=RecordingIntuitionProcessor(cognition.intuition.OutputData(reason="think it over")),
+        decision, reasoning = cognition_abilities(
+            decision_processor=RecordingDecisionProcessor(cognition.decision.OutputData(reason="think it over")),
             reasoning_processor=reasoning_processor,
         )
         ability = cognition.Cognition(
-            intuition=intuition,
+            decision=decision,
             reasoning=reasoning,
             reflection=cognition.Reflection(processor=reflection_processor, memory=memory.Memory(), persona=self_),
             persona=self_,
@@ -5485,12 +5833,12 @@ def test_cognition_attaches_inception_and_shows_the_voice_the_bot_was_given_on_e
         ctx = Environment(shared_hsm_context())
         inception = await _inception(ctx, _Catalog(_WARM))
         reasoning_processor = RecordingReasoningProcessor(focus_output("phone", "reasoned focus"))
-        intuition, reasoning = cognition_abilities(
-            intuition_processor=RecordingIntuitionProcessor(cognition.intuition.OutputData(reason="think it over")),
+        decision, reasoning = cognition_abilities(
+            decision_processor=RecordingDecisionProcessor(cognition.decision.OutputData(reason="think it over")),
             reasoning_processor=reasoning_processor,
         )
         ability = cognition.Cognition(
-            intuition=intuition,
+            decision=decision,
             reasoning=reasoning,
             reflection=cognition.Reflection(processor=FixedProcessor(no_output("reflection")), memory=memory.Memory()),
             voice=inception,
@@ -5528,12 +5876,12 @@ def test_cognition_keeps_only_the_voice_its_own_inception_told() -> None:
         # A catalog that holds no voice: this inception never makes one.
         inception = await _inception(ctx, _Catalog())
         reasoning_processor = RecordingReasoningProcessor(focus_output("phone", "reasoned focus"))
-        intuition, reasoning = cognition_abilities(
-            intuition_processor=RecordingIntuitionProcessor(cognition.intuition.OutputData(reason="think it over")),
+        decision, reasoning = cognition_abilities(
+            decision_processor=RecordingDecisionProcessor(cognition.decision.OutputData(reason="think it over")),
             reasoning_processor=reasoning_processor,
         )
         ability = cognition.Cognition(
-            intuition=intuition,
+            decision=decision,
             reasoning=reasoning,
             reflection=cognition.Reflection(processor=FixedProcessor(no_output("reflection")), memory=memory.Memory()),
             voice=inception,
@@ -5569,9 +5917,9 @@ def test_what_inception_fails_at_is_observed_by_the_body_never_silently_dropped(
         # Speaking's mouth is a device: it is started in an environment.
         ctx = Environment(shared_hsm_context())
         inception = await _inception(ctx, _Catalog())
-        intuition, reasoning = cognition_abilities()
+        decision, reasoning = cognition_abilities()
         ability = cognition.Cognition(
-            intuition=intuition,
+            decision=decision,
             reasoning=reasoning,
             reflection=cognition.Reflection(processor=FixedProcessor(no_output("reflection")), memory=memory.Memory()),
             voice=inception,
@@ -5625,7 +5973,7 @@ def _failed_percept(
     turn_id: str,
     *,
     timed_out: bool = False,
-    stage: typing.Literal["autonomy", "intuition", "reasoning"] = "intuition",
+    stage: typing.Literal["reflex", "intuition", "reasoning"] = "reflex",
 ) -> mosfet.PerceptData:
     """A failed step cognition handed back, as the body holds it."""
 
@@ -5668,7 +6016,7 @@ def test_a_batch_turn_is_remembered_as_one_episode_of_everything_it_perceived() 
     async def run() -> tuple[cognition.types.OutputData, tuple[memory.Episode, ...]]:
         store = memory.Memory()
         ability = RecordingCognition(
-            intuition_processor=RecordingIntuitionProcessor(cognition.intuition.OutputData(result=no_output("both"))),
+            decision_processor=RecordingDecisionProcessor(cognition.decision.OutputData(result=no_output("both"))),
             reflection=cognition.Reflection(processor=FixedProcessor(no_output("observed")), memory=store),
             store=store,
         )
@@ -5712,7 +6060,7 @@ def test_a_failed_batch_turn_is_handed_back_once_unless_it_perceived_only_failed
 ) -> None:
     """D-W12-6 (Q6): a batch whose turn fails is handed back once, so the next turn perceives that failure
     with whatever else queued; a batch that perceived nothing but failed steps is not handed back, so a
-    failing step cannot wake the bot more often than new stimuli arrive. A batch holding an intuition
+    failing step cannot wake the bot more often than new stimuli arrive. A batch holding an decision
     failure is decided by reasoning (D-R-30), so here it is reasoning's step that fails."""
 
     def outcomes(reader: metric_reader.Reader) -> dict[str, float]:
@@ -5723,12 +6071,12 @@ def test_a_failed_batch_turn_is_handed_back_once_unless_it_perceived_only_failed
         }
 
     async def run() -> list[hsm.Event[typing.Any]]:
-        intuition, reasoning = cognition_abilities(
-            intuition_processor=_FailingStepProcessor(), reasoning_processor=_FailingStepProcessor()
+        decision, reasoning = cognition_abilities(
+            decision_processor=_FailingStepProcessor(), reasoning_processor=_FailingStepProcessor()
         )
         store = memory.Memory()
         ability = cognition.Cognition(
-            intuition=intuition,
+            decision=decision,
             reasoning=reasoning,
             reflection=cognition.Reflection(processor=FixedProcessor(no_output("reflection")), memory=store),
             memory=store,
@@ -5771,10 +6119,10 @@ def test_a_failed_batch_turn_is_handed_back_once_unless_it_perceived_only_failed
 
 def test_a_batch_turn_whose_step_outlasts_its_timeout_names_bot_perceived_as_its_stimulus() -> None:
     async def run() -> list[hsm.Event[typing.Any]]:
-        intuition, reasoning = cognition_abilities(intuition_processor=_SlowFirstStepProcessor(hangs=True))
+        decision, reasoning = cognition_abilities(decision_processor=_SlowFirstStepProcessor(hangs=True))
         store = memory.Memory()
         ability = cognition.Cognition(
-            intuition=intuition,
+            decision=decision,
             reasoning=reasoning,
             reflection=cognition.Reflection(processor=FixedProcessor(no_output("reflection")), memory=store),
             memory=store,
@@ -5807,58 +6155,83 @@ def test_a_batch_turn_whose_step_outlasts_its_timeout_names_bot_perceived_as_its
 @pytest.mark.parametrize(
     ("perceived", "decider"),
     [
-        ("intuition-failed", "reasoning"),
-        ("intuition-timed-out", "reasoning"),
-        ("batch-holding-an-intuition-failure", "reasoning"),
-        ("reasoning-failed", "intuition"),
+        ("reflex-failed", "reasoning"),
+        ("reflex-timed-out", "reasoning"),
+        ("batch-holding-a-reflex-failure", "reasoning"),
+        ("reasoning-failed", "decision"),
     ],
 )
-def test_a_turn_perceiving_a_handed_back_intuition_failure_is_decided_by_reasoning(
-    perceived: str, decider: str
-) -> None:
-    """D-R-30 (live round 5, F-4): a handed-back intuition failure went back to intuition, which failed on it
-    again, and the bound stopped it, so reasoning never saw it. A turn that perceives one (as its stimulus or
-    as any percept of its batch) starts at reasoning; one that perceives another stage's failure does not."""
+def test_a_turn_perceiving_a_handed_back_reflex_failure_passes_the_decision_layer(perceived: str, decider: str) -> None:
+    """D-R-30, D-R-52: a handed-back reflex failure went back to the decision layer, which failed on it again,
+    and the bound stopped it, so a later stage never saw it. A turn that perceives one (as its stimulus or as
+    any percept of its batch) starts after reflex; one that perceives reasoning's failure does not."""
 
     async def run() -> tuple[
         cognition.types.OutputData, cognition.InputData, list[processing.InputData], list[processing.InputData]
     ]:
-        intuition_processor = RecordingIntuitionProcessor(cognition.intuition.OutputData(result=no_output("fast")))
+        decision_processor = RecordingDecisionProcessor(cognition.decision.OutputData(result=no_output("fast")))
         reasoning_processor = RecordingReasoningProcessor(no_output("reasoned"))
-        ability = RecordingCognition(intuition_processor=intuition_processor, reasoning_processor=reasoning_processor)
+        ability = RecordingCognition(decision_processor=decision_processor, reasoning_processor=reasoning_processor)
         ctx = await start_cognition_ability_for_test(ability)
         await wait_until(lambda: ability.state().endswith("/idle"))
         base = await started_cognition_input(ctx)
         turn = (
             _batch_turn(base, _typed_percept("are you there?", person=_ADA), _failed_percept("failed-1"))
-            if perceived == "batch-holding-an-intuition-failure"
+            if perceived == "batch-holding-a-reflex-failure"
             else base.model_copy(
                 update={
                     "stimulus": _failed_percept(
                         "failed-1",
-                        timed_out=perceived == "intuition-timed-out",
-                        stage="reasoning" if perceived == "reasoning-failed" else "intuition",
+                        timed_out=perceived == "reflex-timed-out",
+                        stage="reasoning" if perceived == "reasoning-failed" else "reflex",
                     ).stimulus
                 }
             )
         )
         result = await dispatch_ability_for_test(ability, ctx, turn)
         await wait_until(lambda: ability.state().endswith("/idle"))
-        return result, turn, intuition_processor.calls, reasoning_processor.calls
+        return result, turn, decision_processor.calls, reasoning_processor.calls
 
-    result, turn, intuition_calls, reasoning_calls = asyncio.run(run())
+    result, turn, decision_calls, reasoning_calls = asyncio.run(run())
 
     if decider == "reasoning":
         assert result == no_output("reasoned")
-        assert intuition_calls == []
+        assert decision_calls == []
         (frame,) = reasoning_calls
         assert isinstance(frame.input, cognition.reasoning.ProcessorInput)
         assert frame.input.host_input.input == turn.stimulus
     else:
         assert result == no_output("fast")
         assert reasoning_calls == []
-        (frame,) = intuition_calls
+        (frame,) = decision_calls
         assert frame.input == turn.stimulus
+
+
+@pytest.mark.parametrize(("stage", "decider"), [("reflex", "intuition"), ("intuition", "reasoning")])
+def test_a_turn_perceiving_a_handed_back_failure_starts_at_the_first_stage_after_it(stage: str, decider: str) -> None:
+    """D-R-52: a turn perceiving a handed-back failure of stage S starts at the first stage after S."""
+
+    async def run() -> tuple[list[processing.InputData], list[processing.InputData], list[processing.InputData]]:
+        decision_processor = RecordingDecisionProcessor(cognition.decision.OutputData(result=no_output("fast")))
+        intuition_processor = RecordingReasoningProcessor(no_output("intuited"))
+        reasoning_processor = RecordingReasoningProcessor(no_output("reasoned"))
+        ability = RecordingCognition(
+            decision_processor=decision_processor,
+            intuition=cognition.Intuition(processor=intuition_processor),
+            reasoning_processor=reasoning_processor,
+        )
+        ctx = await start_cognition_ability_for_test(ability)
+        await wait_until(lambda: ability.state().endswith("/idle"))
+        base = await started_cognition_input(ctx)
+        failed = _failed_percept("failed-1", timed_out=True, stage=typing.cast(typing.Any, stage))
+        _ = await dispatch_ability_for_test(ability, ctx, base.model_copy(update={"stimulus": failed.stimulus}))
+        await wait_until(lambda: ability.state().endswith("/idle"))
+        return decision_processor.calls, intuition_processor.calls, reasoning_processor.calls
+
+    decision_calls, intuition_calls, reasoning_calls = asyncio.run(run())
+
+    assert decision_calls == []
+    assert (len(intuition_calls), len(reasoning_calls)) == ((1, 0) if decider == "intuition" else (0, 1))
 
 
 def _record_admitted(ctx: hsm.Context, instance: "_Communication", event: hsm.Event[typing.Any]) -> None:
@@ -5884,9 +6257,9 @@ class _Communication(hsm.Instance):
 def test_a_partly_handled_batch_carries_its_behaviors_acts_first_into_the_turn_and_its_episode() -> None:
     """D-W12-9: what behaviors already did on their percepts is the turn's, ahead of deliberation's.
 
-    Speech and a typed line queue together. SpeechHeard admits the speech; the line is intuition's.
-    Intuition knows, as a fact of the turn, that a behavior already acted on the speech, and the
-    turn's output and its one episode carry that act first, then intuition's.
+    Speech and a typed line queue together. SpeechHeard admits the speech; the line is decision's.
+    Decision knows, as a fact of the turn, that a behavior already acted on the speech, and the
+    turn's output and its one episode carry that act first, then decision's.
     """
 
     from mosfet.abilities.communication import behaviors
@@ -5898,10 +6271,10 @@ def test_a_partly_handled_batch_carries_its_behaviors_acts_first_into_the_turn_a
         list[hsm.Event[typing.Any]],
     ]:
         store = memory.Memory()
-        intuition_processor = RecordingIntuitionProcessor(focus_output("phone", "answer the line"))
+        decision_processor = RecordingDecisionProcessor(focus_output("phone", "answer the line"))
         ability = RecordingCognition(
             autonomy=cognition.Autonomy(seeded_behaviors=(behaviors.speech_heard_seed(),)),
-            intuition_processor=intuition_processor,
+            decision_processor=decision_processor,
             reflection=cognition.Reflection(processor=FixedProcessor(no_output("observed")), memory=store),
             store=store,
         )
@@ -5918,15 +6291,15 @@ def test_a_partly_handled_batch_carries_its_behaviors_acts_first_into_the_turn_a
         _ = await dispatch_ability_for_test(ability, ctx, turn)
         await wait_until(lambda: bool(ability.outputs))
         await wait_until(lambda: ability.state().endswith("/idle"))
-        return ability.outputs, intuition_processor.calls, await _remembered(ctx, store), talk.admitted
+        return ability.outputs, decision_processor.calls, await _remembered(ctx, store), talk.admitted
 
-    outputs, intuition_calls, episodes, admitted = asyncio.run(run())
+    outputs, decision_calls, episodes, admitted = asyncio.run(run())
 
     assert [event.name for event in admitted] == [communication.InputEvent.name]
     (output,) = outputs
     assert [selection.event for selection in output] == [communication.InputEvent.name, mosfet.FocusDeviceEvent.name]
     assert output[1].reason == "answer the line"
-    (call,) = intuition_calls
+    (call,) = decision_calls
     assert call.situation is not None
     # The fact follows the world block in the turn's situation: which percepts behaviors handled, and what they did.
     acted = call.situation[call.situation.index("<cognition:acted>") :]

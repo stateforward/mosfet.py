@@ -1,27 +1,30 @@
 # mosfet-provider-decision
 
-Decision-model provider for stateforward.mosfet: the bot's intuition decides on any server that
+Decision-model provider for stateforward.mosfet: the bot's reflex decides on any server that
 speaks the decisions wire format, such as anygame's decide, or a hosted server that keeps to it.
 
 ```python
 from mosfet import bot
 from mosfet.providers import decision
 
-bot.cognition(processor, intuition=decision.Processor(base_url="http://127.0.0.1:8102"))
+bot.cognition(reasoning=processor, reflex=decision.Processor(base_url="http://127.0.0.1:8102"))
 ```
 
-- `Processor` is a decision processor (`processing.DecisionProcessor`), the kind intuition runs
-  on. It maps a cognition turn to one request. Its state is the turn as the model may see it: core's
+- `Processor` is a decision processor (`processing.DecisionProcessor`), the kind reflex's decision
+  layer runs on. It maps a cognition turn to one request. Its state is the turn as the model may see it: core's
   model-facing projection of the stimulus, the same text reasoning reads, with typed causal parents
   left out and media as a placeholder, never as bytes or base64; what someone said or typed is kept
   whole. It asks a choice question over the offered event menu
   (each event described by the first line of its schema's description) plus a reserved pass
-  criterion ("none of these"), and one choice question per required payload key whose criteria
+  criterion ("none of these") for each later tier the turn may go to (R-23), and one choice question per required payload key whose criteria
   are values taken mechanically from the turn's own evidence (the stimulus data, media left out, then the
   schema's enum options). The answer label *is* the value, so a payload can never leave the menu,
   and an event with a required key that has no grounded value is left unoffered, before any
   request. Only the option the question chose is returned, with its probability as the
-  confidence; the pass criterion leaves the turn unhandled, so reasoning takes it.
+  confidence. A pass leaves the turn unhandled and names the tier it hands the turn to (`hand_to`):
+  `__intuition__`, "answer it in words now, with intuition", offered only when the frame names intuition
+  (`processing.InputData.hand_ons`), or `__reasoning__`, "it needs thought, so think it through first, with
+  reasoning", always offered. `pass_wording=` rewords them, one wording per tier.
 - `Client` sends one request and returns the answer. It opens an `httpx.AsyncClient` per request,
   so cancelling a turn closes its request. Every failure is a `decision.Error` that names the HTTP
   status or the error type and never a body.
@@ -48,8 +51,8 @@ limit has the selection question's instructions cut: those are the turn's situat
 acted blocks), then its stable instructions (the self block) and any repair feedback, which are
 context assembly. They keep as many leading whole lines as fit (the world block comes first), and when not even one fits, the question's own default instructions are sent
 instead. The state (the turn's stimuli) and the menu are never cut, ranked or dropped. A request
-that still does not fit is sent as it is, and the server's refusal is intuition's failure, which
-cognition hands to reasoning in the same turn. `None` sends every request whole.
+that still does not fit is sent as it is, and the server's refusal is the decision layer's failure, which
+cognition hands on to the next tier in the same turn. `None` sends every request whole.
 
 ## Wire format
 
@@ -59,7 +62,8 @@ cognition hands to reasoning in the same turn. `None` sends every request whole.
 {"state": {"turn": "<environment:sound kind=\"phone.ringing\" stimulus:event=\"environment.sound\" />"},
  "questions": {"selection": {"type": "choice", "instructions": "...",
                              "criteria": {"phone.answer_call": "Answer the ringing call.",
-                                          "__unhandled__": "None of these fits: think the turn through first, with reasoning."}}}}
+                                          "__intuition__": "None of these fits: answer it in words now, with intuition.",
+                                          "__reasoning__": "None of these fits: it needs thought, so think it through first, with reasoning."}}}}
 ```
 
 answered by
@@ -67,7 +71,7 @@ answered by
 ```json
 {"model": "pplx-decider-flash",
  "answers": {"selection": {"type": "choice", "choice": "phone.answer_call", "confidence": 0.7,
-                           "probabilities": {"phone.answer_call": 0.8, "__unhandled__": 0.2}}},
+                           "probabilities": {"phone.answer_call": 0.8, "__intuition__": 0.15, "__reasoning__": 0.05}}},
  "usage": {"input_tokens": 10, "output_tokens": 0}}
 ```
 

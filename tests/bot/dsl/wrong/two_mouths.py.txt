@@ -10,7 +10,7 @@ model = bot.define(
     "greeter",
     bot.traits("warm", "patient"),
     bot.voice(support.Shelf()),
-    bot.cognition(support.Silent(), intuition=support.Undecided()),
+    bot.cognition(reasoning=support.Silent(), reflex=support.Undecided()),
     bot.output(speaking.Speaking(id="near", encoder=support.Voices())),
     bot.output(speaking.Speaking(id="far", encoder=support.Voices())),
     bot.attach(phone.Phone()),

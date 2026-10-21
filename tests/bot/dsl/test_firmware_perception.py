@@ -95,7 +95,7 @@ def test_the_firmware_is_a_second_holder_of_every_device_the_bot_holds() -> None
 
     kitchen = bot.define(
         "kitchen",
-        bot.cognition(testing.Scripted(), intuition=testing.Decider()),
+        bot.cognition(reasoning=testing.Scripted(), reflex=testing.Decider()),
         bot.attach(lamp),
         bot.attach(spare),
         bot.initial(bot.target("dark")),
@@ -118,7 +118,7 @@ def test_the_firmware_lets_go_of_the_devices_before_it_stops() -> None:
 
     kitchen = bot.define(
         "kitchen",
-        bot.cognition(testing.Scripted(), intuition=testing.Decider()),
+        bot.cognition(reasoning=testing.Scripted(), reflex=testing.Decider()),
         bot.attach(lamp),
         bot.initial(bot.target("dark")),
         bot.state("dark", bot.transition(bot.on(SwitchedEvent), bot.effect(_record), bot.target("../lit"))),
@@ -142,7 +142,7 @@ def test_a_device_event_reaches_the_firmware_as_the_devices_own_typed_event_in_i
 
     kitchen = bot.define(
         "kitchen",
-        bot.cognition(processor, intuition=testing.Decider()),
+        bot.cognition(reasoning=processor, reflex=testing.Decider()),
         bot.attach(lamp),
         bot.initial(bot.target("dark")),
         bot.state("dark", bot.transition(bot.on(SwitchedEvent), bot.effect(_record), bot.target("../lit"))),
@@ -174,7 +174,7 @@ def test_an_event_the_firmwares_model_does_not_name_is_ignored() -> None:
 
     kitchen = bot.define(
         "kitchen",
-        bot.cognition(processor, intuition=testing.Decider()),
+        bot.cognition(reasoning=processor, reflex=testing.Decider()),
         bot.attach(lamp),
         bot.initial(bot.target("dark")),
         bot.state("dark", bot.transition(bot.on(SwitchedEvent), bot.effect(_record), bot.target("../lit"))),
@@ -195,7 +195,9 @@ def test_an_event_the_firmwares_model_does_not_name_is_ignored() -> None:
 
 def test_a_bot_without_firmware_is_its_devices_one_holder() -> None:
     lamp = Lamp()
-    model = bot.define("kitchen", bot.cognition(testing.Scripted(), intuition=testing.Decider()), bot.attach(lamp))
+    model = bot.define(
+        "kitchen", bot.cognition(reasoning=testing.Scripted(), reflex=testing.Decider()), bot.attach(lamp)
+    )
 
     async def run() -> tuple[list[hsm.Instance], hsm.Instance]:
         async with testing.running(model) as running:
@@ -211,7 +213,7 @@ def test_a_device_that_allows_one_holder_fails_the_firmwares_start_and_so_the_ac
 
     kitchen = bot.define(
         "kitchen",
-        bot.cognition(testing.Scripted(), intuition=testing.Decider()),
+        bot.cognition(reasoning=testing.Scripted(), reflex=testing.Decider()),
         bot.attach(lamp),
         bot.initial(bot.target("dark")),
         bot.state("dark", bot.transition(bot.on(SwitchedEvent), bot.effect(_record), bot.target("../lit"))),

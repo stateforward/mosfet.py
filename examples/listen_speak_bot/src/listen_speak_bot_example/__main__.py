@@ -11,7 +11,7 @@ voice. The conversation, shared by communication and the mouth. The mouth, the o
 speaks through. And the MLX Audio workers the run closes when it ends: Whisper, and off the lab Silero.
 
 Then one ``bot.define`` constructs every other part inline: the bot's traits, on the lab the source of the voice it is
-born with, its cognition on Gemini with its intuition on a decision model (on the decision server
+born with, its cognition on Gemini with its reflex on a decision model (on the decision server
 ``DECISION_BASE_URL`` names) and the speech seed that takes heard speech into a conversation, its ear, its
 mouth and its conversations. :func:`~listen_speak_bot_example.hear` plays the recording and then half a second of
 silence to it, and the run's summary is printed: exit ``0`` when the bot said something, ``1`` otherwise.
@@ -183,13 +183,13 @@ if __name__ == "__main__":
             )
         ),
         bot.cognition(
-            gemini.Processor(
+            reasoning=gemini.Processor(
                 client=gemini.ChatClient(
                     model=settings.gemini_model, api_key=settings.gemini_api_key.get_secret_value()
                 ),
                 provider="gemini_reasoning",
             ),
-            intuition=decision.Processor(
+            reflex=decision.Processor(
                 base_url=settings.decision_base_url,
                 api_key=settings.decision_key(),
                 max_context_tokens=settings.decision_max_context_tokens,

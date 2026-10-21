@@ -1,7 +1,7 @@
 error[B0010]: these traits are not one to 24 words or short phrases
  --> greeter.py:8:31
   |
-8 | model = bot.define("…", bot.traits(), bot.cognition(support.Silent(), intuition=support.Undecided()), bot.attach(phone.Phone()))
+8 | model = bot.define("…", bot.traits(), bot.cognition(reasoning=support.Silent(), reflex=support.Undecided()), bot.attach(phone.Phone()))
   |                         ^^^^^^^^^^^^ the bot's traits
   |
   = note: ValidationError: traits: Tuple should have at least 1 item after validation, not 0

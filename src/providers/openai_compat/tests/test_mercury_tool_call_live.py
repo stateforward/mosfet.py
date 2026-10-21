@@ -1,7 +1,7 @@
-"""Live eval: does Mercury 2 emit valid ``dispatch`` tool calls for phone-bot intuition?
+"""Live eval: does Mercury 2 emit valid ``dispatch`` tool calls for phone-bot reflex decisions?
 
 Evidence suite against the real Inception API using the same OpenAI-compat Processor path
-phone_bot uses for intuition. Hypothesis: raw audio on the stimulus may help beyond ``kind``.
+phone_bot used for its reflex's decision layer. Hypothesis: raw audio on the stimulus may help beyond ``kind``.
 
 Required env (skipped otherwise)::
 
@@ -29,7 +29,7 @@ import hsm
 import pytest
 
 from mosfet.abilities import processing
-from mosfet.abilities.cognition import intuition
+from mosfet.abilities.cognition import decision
 from mosfet.abilities.cognition import types as cognition_types
 from mosfet.devices.phone import events as phone_events
 from mosfet.devices.phone.phone import RING_SOUND_WAV
@@ -79,8 +79,8 @@ def _mercury_processor() -> Processor:
     return Processor(client=client, provider="mercury2_tool_call_eval")
 
 
-def _phone_bot_intuition_schemas() -> tuple[hsm.Event[typing.Any], ...]:
-    """Event surface offered to phone_bot intuition (focus + call control + cognition ignore)."""
+def _phone_bot_decision_schemas() -> tuple[hsm.Event[typing.Any], ...]:
+    """Event surface offered to phone_bot's decision layer (focus + call control + cognition ignore)."""
 
     return (
         mosfet.FocusDeviceEvent,
@@ -138,17 +138,17 @@ def _ambient_stimulus() -> hsm.Event[SoundData]:
     )
 
 
-def _intuition_input(stimulus: object) -> processing.InputData:
-    """Same shape Cognition stamps for Intuition (world XML system + EventPatch confidence)."""
+def _decision_input(stimulus: object) -> processing.InputData:
+    """Same shape Cognition stamps for the decision layer (world XML system + EventPatch confidence)."""
 
     return processing.InputData(
         input=stimulus,
-        schemas=_phone_bot_intuition_schemas(),
+        schemas=_phone_bot_decision_schemas(),
         # Actors map is model-facing only here; we assert selections, not live dispatch.
         actors={"phone": hsm.Instance()},
         # System channel is the per-turn world block only (no static ability prose).
         instructions='<environment id="live-eval">\n  <self state="/PhoneBot/active"/>\n</environment>',
-        patch=intuition.EventPatch,
+        patch=decision.EventPatch,
     )
 
 
@@ -187,9 +187,9 @@ def test_mercury_dispatch_tool_call_returns_parseable_offered_events(mercury_pro
     """Smoke: Mercury returns parseable dispatch selections without transport/schema failure."""
 
     stimulus = _ring_stimulus()
-    events = asyncio.run(_process(mercury_processor, _intuition_input(stimulus)))
+    events = asyncio.run(_process(mercury_processor, _decision_input(stimulus)))
     _report("parseable_dispatch", events)
-    offered = {event.name for event in _phone_bot_intuition_schemas()}
+    offered = {event.name for event in _phone_bot_decision_schemas()}
     for item in events:
         assert item.event in offered, f"selected unoffered event {item.event!r}; offered={sorted(offered)}"
 
@@ -198,7 +198,7 @@ def test_mercury_does_not_answer_unrelated_ambient_kind(mercury_processor: Proce
     """Negative control: ambient should prefer cognition.ignore, never phone.answer_call."""
 
     stimulus = _ambient_stimulus()
-    events = asyncio.run(_process(mercury_processor, _intuition_input(stimulus)))
+    events = asyncio.run(_process(mercury_processor, _decision_input(stimulus)))
     _report("ambient_negative", events)
     answers = _answer_selections(events)
     assert not answers, f"ambient kind should not select phone.answer_call; got {_event_names(events)}"

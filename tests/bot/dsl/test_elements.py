@@ -35,7 +35,7 @@ def _written(location: hsm.Location) -> str:
         bot.output(memory.StmMemory()),
         bot.register(memory.StmMemory()),
         bot.traits("curious"),
-        bot.cognition(support.Silent(), intuition=support.Undecided()),
+        bot.cognition(reasoning=support.Silent(), reflex=support.Undecided()),
         bot.timeouts(),
         bot.voice(support.Shelf()),
     ],
@@ -62,7 +62,9 @@ def test_an_element_function_starts_nothing() -> None:
 def test_a_device_is_held_under_its_id() -> None:
     handset = phone.Phone(id="desk")
 
-    model = bot.define("greeter", bot.cognition(support.Silent(), intuition=support.Undecided()), bot.attach(handset))
+    model = bot.define(
+        "greeter", bot.cognition(reasoning=support.Silent(), reflex=support.Undecided()), bot.attach(handset)
+    )
 
     member = model.members["/greeter/desk"]
     assert isinstance(member, elements.AttachmentElement)
@@ -74,7 +76,10 @@ def test_an_ability_is_keyed_by_its_id_in_every_role() -> None:
     sense, voice = memory.Memory(id="recall"), memory.Memory(id="voice")
 
     model = bot.define(
-        "greeter", bot.cognition(support.Silent(), intuition=support.Undecided()), bot.input(sense), bot.output(voice)
+        "greeter",
+        bot.cognition(reasoning=support.Silent(), reflex=support.Undecided()),
+        bot.input(sense),
+        bot.output(voice),
     )
 
     assert _instance(model, "/greeter/recall") is sense
@@ -91,7 +96,10 @@ def test_one_ability_given_as_input_and_acquired_is_one_member_with_both_roles()
     sense = memory.Memory()
 
     model = bot.define(
-        "greeter", bot.cognition(support.Silent(), intuition=support.Undecided()), bot.input(sense), bot.attach(sense)
+        "greeter",
+        bot.cognition(reasoning=support.Silent(), reflex=support.Undecided()),
+        bot.input(sense),
+        bot.attach(sense),
     )
 
     member = model.members["/greeter/memory"]
@@ -105,7 +113,7 @@ def test_an_instance_passed_to_another_part_and_attached_is_the_same_object() ->
 
     model = bot.define(
         "greeter",
-        bot.cognition(support.Silent(), intuition=support.Undecided()),
+        bot.cognition(reasoning=support.Silent(), reflex=support.Undecided()),
         bot.attach(handset),
         bot.attach(speaker),
     )
@@ -119,7 +127,7 @@ def test_the_singular_elements_register_at_their_keys() -> None:
     model = bot.define(
         "greeter",
         bot.traits("curious", "patient"),
-        bot.cognition(support.Silent(), intuition=decider, memory=store, associative=True, autonomy=True),
+        bot.cognition(reasoning=support.Silent(), reflex=decider, memory=store, associative=True, autonomy=True),
         bot.timeouts(processing=datetime.timedelta(seconds=5), step=datetime.timedelta(minutes=3)),
         bot.register(register),
         bot.attach(phone.Phone()),
@@ -131,7 +139,7 @@ def test_the_singular_elements_register_at_their_keys() -> None:
     sensory = model.members["/greeter/.register"]
     assert isinstance(traits, elements.TraitsElement) and traits.traits == ("curious", "patient")
     assert isinstance(cognition, elements.CognitionElement)
-    assert cognition.intuition is decider
+    assert cognition.reflex is decider
     assert (cognition.memory, cognition.associative, cognition.consolidation, cognition.autonomy) == (
         store,
         True,
@@ -155,7 +163,7 @@ def test_the_voice_and_the_seeds_register_as_written() -> None:
         "greeter",
         bot.traits("warm"),
         bot.voice(shelf, languages=("en", "fr"), allowed=("warm",)),
-        bot.cognition(support.Silent(), intuition=support.Undecided(), autonomy=True, seeds=(heard,)),
+        bot.cognition(reasoning=support.Silent(), reflex=support.Undecided(), autonomy=True, seeds=(heard,)),
         bot.output(mouth),
         bot.attach(phone.Phone()),
     )
@@ -173,7 +181,7 @@ def test_a_voice_speaks_english_by_default_and_has_no_designer() -> None:
         "greeter",
         bot.traits("warm"),
         bot.voice(support.Shelf()),
-        bot.cognition(support.Silent(), intuition=support.Undecided()),
+        bot.cognition(reasoning=support.Silent(), reflex=support.Undecided()),
         bot.output(speaking.Speaking(encoder=support.Voices())),
         bot.attach(phone.Phone()),
     )
@@ -191,7 +199,7 @@ def test_a_bot_has_one_voice() -> None:
             bot.traits("warm"),
             bot.voice(support.Shelf()),
             bot.voice(support.Shelf()),
-            bot.cognition(support.Silent(), intuition=support.Undecided()),
+            bot.cognition(reasoning=support.Silent(), reflex=support.Undecided()),
             bot.output(speaking.Speaking(encoder=support.Voices())),
             bot.attach(phone.Phone()),
         )
@@ -227,7 +235,7 @@ def test_an_object_is_placed_not_given_to_the_bot(
     with pytest.raises(bot.DefinitionError) as caught:
         _ = bot.define(
             "greeter",
-            bot.cognition(support.Silent(), intuition=support.Undecided()),
+            bot.cognition(reasoning=support.Silent(), reflex=support.Undecided()),
             bot.attach(phone.Phone(placement=desk.surface())),
             element(desk),
         )
@@ -247,7 +255,9 @@ def test_a_part_on_an_object_is_held_with_its_placement() -> None:
     desk = environment.Object(id="desk")
     handset = phone.Phone(placement=desk.surface())
 
-    model = bot.define("greeter", bot.cognition(support.Silent(), intuition=support.Undecided()), bot.attach(handset))
+    model = bot.define(
+        "greeter", bot.cognition(reasoning=support.Silent(), reflex=support.Undecided()), bot.attach(handset)
+    )
 
     assert _instance(model, "/greeter/phone") is handset
 
@@ -272,7 +282,7 @@ def test_one_instance_given_twice_is_a_duplicate() -> None:
     with pytest.raises(bot.DefinitionError) as caught:
         _ = bot.define(
             "greeter",
-            bot.cognition(support.Silent(), intuition=support.Undecided()),
+            bot.cognition(reasoning=support.Silent(), reflex=support.Undecided()),
             bot.attach(handset),
             bot.attach(handset),
         )
@@ -285,7 +295,7 @@ def test_a_device_and_an_ability_share_one_namespace_of_ids() -> None:
     with pytest.raises(bot.DefinitionError) as caught:
         _ = bot.define(
             "greeter",
-            bot.cognition(support.Silent(), intuition=support.Undecided()),
+            bot.cognition(reasoning=support.Silent(), reflex=support.Undecided()),
             bot.attach(phone.Phone(id="desk")),
             bot.input(memory.Memory(id="desk")),
         )
@@ -303,7 +313,7 @@ def test_an_output_ability_shares_the_namespace_of_ids(first: bot.Element[hsm.El
     with pytest.raises(bot.DefinitionError) as caught:
         _ = bot.define(
             "greeter",
-            bot.cognition(support.Silent(), intuition=support.Undecided()),
+            bot.cognition(reasoning=support.Silent(), reflex=support.Undecided()),
             first,
             bot.output(memory.Memory(id="ear")),
         )
@@ -316,7 +326,7 @@ def test_an_output_ability_may_not_take_a_reserved_id() -> None:
     with pytest.raises(bot.DefinitionError) as caught:
         _ = bot.define(
             "greeter",
-            bot.cognition(support.Silent(), intuition=support.Undecided()),
+            bot.cognition(reasoning=support.Silent(), reflex=support.Undecided()),
             bot.output(memory.Memory(id="firmware")),
         )
 
@@ -327,7 +337,10 @@ def test_one_ability_given_as_output_and_input_is_one_member_with_both_roles() -
     voice = memory.Memory(id="voice")
 
     model = bot.define(
-        "greeter", bot.cognition(support.Silent(), intuition=support.Undecided()), bot.output(voice), bot.input(voice)
+        "greeter",
+        bot.cognition(reasoning=support.Silent(), reflex=support.Undecided()),
+        bot.output(voice),
+        bot.input(voice),
     )
 
     member = model.members["/greeter/voice"]
@@ -357,143 +370,149 @@ catalog = support.Shelf()
             'bot.define("greeter", bot.attach(processor), bot.attach(phone.Phone()))',
             "B0006",
             "`bot.attach` does not take a processor",
-            'bot.cognition(processor, intuition=decision.Processor(base_url="http://127.0.0.1:8102"))',
+            "bot.cognition(reasoning=processor)",
         ),
         (
-            'bot.define("greeter", bot.cognition(processor, intuition=decider), bot.attach(decider), '
+            'bot.define("greeter", bot.cognition(reasoning=processor, reflex=decider), bot.attach(decider), '
             + "bot.attach(phone.Phone()))",
             "B0006",
             "`bot.attach` does not take a decision processor",
             None,
         ),
         (
-            'bot.define("greeter", bot.cognition(processor, intuition=decider), bot.attach(phone.Phone()), bot.input(memory.StmMemory()))',
+            'bot.define("greeter", bot.cognition(reasoning=processor, reflex=decider), bot.attach(phone.Phone()), bot.input(memory.StmMemory()))',
             "B0006",
             "`bot.input` does not take a sensory register",
             "bot.register(memory.StmMemory())",
         ),
         (
-            'bot.define("greeter", bot.cognition(processor, intuition=decider), bot.attach(phone.Phone()), bot.register(memory.Memory()))',
+            'bot.define("greeter", bot.cognition(reasoning=processor, reflex=decider), bot.attach(phone.Phone()), bot.register(memory.Memory()))',
             "B0006",
             "`bot.register` does not take a memory",
             None,
         ),
         (
-            'bot.define("greeter", bot.cognition(processor, intuition=decider), bot.attach(phone.Phone()), bot.register(memory.StmMemory))',
+            'bot.define("greeter", bot.cognition(reasoning=processor, reflex=decider), bot.attach(phone.Phone()), bot.register(memory.StmMemory))',
             "B0004",
             "`bot.register` takes a constructed sensory register, not a class",
             "memory.StmMemory()",
         ),
         (
-            'bot.define("greeter", bot.cognition(processor, intuition=decider), bot.attach("desk"))',
+            'bot.define("greeter", bot.cognition(reasoning=processor, reflex=decider), bot.attach("desk"))',
             "B0006",
             "`bot.attach` does not take a string",
             None,
         ),
         (
-            'bot.define("greeter", bot.cognition(processor, intuition=decider), bot.attach(phone.Phone()), processor)',
+            'bot.define("greeter", bot.cognition(reasoning=processor, reflex=decider), bot.attach(phone.Phone()), processor)',
             "B0017",
             "`bot.define` does not take a processor",
-            'bot.cognition(processor, intuition=decision.Processor(base_url="http://127.0.0.1:8102"))',
+            "bot.cognition(reasoning=processor)",
         ),
         (
-            'bot.define("greeter", bot.cognition(processor, intuition=decider), bot.attach(phone.Phone()), bot.traits)',
+            'bot.define("greeter", bot.cognition(reasoning=processor, reflex=decider), bot.attach(phone.Phone()), bot.traits)',
             "B0017",
             "`bot.traits` is given, not called",
             None,
         ),
         (
-            'bot.define("greeter", bot.cognition(processor, intuition=decider), bot.attach(phone.Phone()), bot.state)',
+            'bot.define("greeter", bot.cognition(reasoning=processor, reflex=decider), bot.attach(phone.Phone()), bot.state)',
             "B0017",
             "`bot.state` is given, not called",
             None,
         ),
         (
-            'bot.define("greeter", bot.cognition(processor, intuition=decider), bot.attach(phone.Phone()), bot.after)',
+            'bot.define("greeter", bot.cognition(reasoning=processor, reflex=decider), bot.attach(phone.Phone()), bot.after)',
             "B0017",
             "`bot.after` is given, not called",
             None,
         ),
         (
-            'bot.define("greeter", bot.cognition(processor, intuition=decider), (bot.attach(phone.Phone()),))',
+            'bot.define("greeter", bot.cognition(reasoning=processor, reflex=decider), (bot.attach(phone.Phone()),))',
             "B0017",
             "`bot.define` takes elements one by one, not a `tuple` of them",
             "*(bot.attach(phone.Phone()),)",
         ),
         (
-            'bot.define("greeter", bot.cognition(processor, intuition=decider), bot.attach(phone.Phone()), datetime.date(2026, 1, 1))',
+            'bot.define("greeter", bot.cognition(reasoning=processor, reflex=decider), bot.attach(phone.Phone()), datetime.date(2026, 1, 1))',
             "B0017",
             "`bot.define` takes bot elements, not a `date`",
             None,
         ),
         (
-            'bot.define("greeter", bot.cognition(processor, "associative", intuition=decider), bot.attach(phone.Phone()))',
+            'bot.define("greeter", bot.cognition("associative", reasoning=processor, reflex=decider), bot.attach(phone.Phone()))',
             "B0017",
-            "`bot.cognition` takes a processor, then faculty elements; this is a `str`",
+            "`bot.cognition` takes faculty elements, and its processors by keyword; this is a `str`",
             None,
         ),
         (
-            'bot.define("greeter", bot.cognition(phone.Phone(), intuition=decider), bot.attach(phone.Phone(id="desk")))',
+            'bot.define("greeter", bot.cognition(processor, reasoning=processor), bot.attach(phone.Phone()))',
+            "B0017",
+            "`bot.cognition` takes faculty elements, and its processors by keyword; this is a `Silent`",
+            None,
+        ),
+        (
+            'bot.define("greeter", bot.cognition(reasoning=phone.Phone(), reflex=decider), bot.attach(phone.Phone(id="desk")))',
             "B0006",
-            "`bot.cognition` does not take a device",
+            "`bot.cognition(reasoning=)` does not take a device",
             None,
         ),
         (
-            'bot.define("greeter", bot.cognition(processor, intuition=decider, memory=memory.StmMemory()), bot.attach(phone.Phone()))',
+            'bot.define("greeter", bot.cognition(reasoning=processor, reflex=decider, memory=memory.StmMemory()), bot.attach(phone.Phone()))',
             "B0006",
             "`bot.cognition(memory=)` does not take a sensory register",
             None,
         ),
         (
-            'bot.define("greeter", bot.cognition(processor, intuition=decider, routines=3), bot.attach(phone.Phone()))',
+            'bot.define("greeter", bot.cognition(reasoning=processor, reflex=decider, routines=3), bot.attach(phone.Phone()))',
             "B0006",
             "`bot.cognition(routines=)` takes a wall clock, not `int`",
             None,
         ),
         (
-            'bot.define("greeter", bot.cognition(processor, intuition=decider, autonomy=True, seeds=(3,)), bot.attach(phone.Phone()))',
+            'bot.define("greeter", bot.cognition(reasoning=processor, reflex=decider, autonomy=True, seeds=(3,)), bot.attach(phone.Phone()))',
             "B0006",
             "`bot.cognition(seeds=)` takes `behavior.Seed`s, not `int`",
             None,
         ),
         (
-            'bot.define("greeter", bot.cognition(processor, intuition=decider), bot.attach(phone.Phone()), bot.attach(catalog))',
+            'bot.define("greeter", bot.cognition(reasoning=processor, reflex=decider), bot.attach(phone.Phone()), bot.attach(catalog))',
             "B0006",
             "`bot.attach` does not take a voice catalog",
             "bot.voice(catalog)",
         ),
         (
-            'bot.define("greeter", bot.cognition(processor, intuition=decider), bot.attach(phone.Phone()), bot.voice(processor))',
+            'bot.define("greeter", bot.cognition(reasoning=processor, reflex=decider), bot.attach(phone.Phone()), bot.voice(processor))',
             "B0006",
             "`bot.voice` does not take a processor",
             None,
         ),
         (
-            'bot.define("greeter", bot.cognition(processor, intuition=decider), bot.attach(phone.Phone()), bot.voice(catalog, designer=3))',
+            'bot.define("greeter", bot.cognition(reasoning=processor, reflex=decider), bot.attach(phone.Phone()), bot.voice(catalog, designer=3))',
             "B0006",
             "`bot.voice(designer=)` takes a `vocal.voice.Designer`, not `int`",
             None,
         ),
         (
-            'bot.define("greeter", bot.cognition(processor, intuition=decider), bot.attach(phone.Phone()), bot.voice(catalog, languages="en"))',
+            'bot.define("greeter", bot.cognition(reasoning=processor, reflex=decider), bot.attach(phone.Phone()), bot.voice(catalog, languages="en"))',
             "B0006",
             '`bot.voice(languages=)` takes language tags such as `("en",)`, not `str`',
             None,
         ),
         (
-            'bot.define("greeter", bot.cognition(processor, intuition=decider), bot.attach(phone.Phone()), bot.voice(catalog, allowed="warm"))',
+            'bot.define("greeter", bot.cognition(reasoning=processor, reflex=decider), bot.attach(phone.Phone()), bot.voice(catalog, allowed="warm"))',
             "B0006",
             '`bot.voice(allowed=)` takes the keys of the source\'s voices such as `("warm",)`, not `str`',
             None,
         ),
         (
-            'bot.define("greeter", bot.cognition(processor, intuition=decider), bot.attach(phone.Phone()), bot.voice(catalog, designer=support.Studio(), allowed=("warm",)))',
+            'bot.define("greeter", bot.cognition(reasoning=processor, reflex=decider), bot.attach(phone.Phone()), bot.voice(catalog, designer=support.Studio(), allowed=("warm",)))',
             "B0006",
             "`bot.voice(allowed=)` is given with a `designer`, which the bot is born only from",
             None,
         ),
         (
-            'bot.define("greeter", bot.cognition(processor, intuition=decider), bot.attach(phone.Phone()), communication.speech_heard_seed())',
+            'bot.define("greeter", bot.cognition(reasoning=processor, reflex=decider), bot.attach(phone.Phone()), communication.speech_heard_seed())',
             "B0017",
             "`bot.define` does not take a seed",
             None,
@@ -517,7 +536,7 @@ def test_a_part_given_to_the_wrong_place_names_the_element_that_takes_it(
 def test_a_stray_is_told_every_element_a_bot_is_defined_from_its_firmware_included(here: pathlib.Path) -> None:
     path = here / "greeter.py"
     _ = path.write_text(
-        f'{_PREAMBLE}\nmodel = bot.define("greeter", bot.cognition(processor, intuition=decider), datetime.date(2026, 1, 1))\n',
+        f'{_PREAMBLE}\nmodel = bot.define("greeter", bot.cognition(reasoning=processor, reflex=decider), datetime.date(2026, 1, 1))\n',
         encoding="utf-8",
     )
 

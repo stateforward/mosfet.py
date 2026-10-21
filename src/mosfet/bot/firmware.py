@@ -15,7 +15,7 @@ freely with ``bot.*`` elements, is part of the bot's **one** firmware:
 >>> SetEvent = hsm.Event[SetData](name="timer.set", kind=event.EventKind, schema=SetData)
 >>> model = bot.define(
 ...     "timer",
-...     bot.cognition(testing.Scripted(), intuition=testing.Decider()),
+...     bot.cognition(reasoning=testing.Scripted(), reflex=testing.Decider()),
 ...     bot.attribute("minutes", int, 0),
 ...     bot.initial(bot.target("idle")),
 ...     bot.state("idle", bot.transition(bot.on(SetEvent), bot.target("../running"))),

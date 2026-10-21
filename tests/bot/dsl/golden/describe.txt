@@ -7,7 +7,7 @@
         "patient"
       ],
       "faculties": [
-        "intuition",
+        "reflex",
         "reasoning",
         "reflection",
         "associative",

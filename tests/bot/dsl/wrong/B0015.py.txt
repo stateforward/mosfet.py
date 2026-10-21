@@ -12,4 +12,4 @@ def log(ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event) -> None:
     del ctx, instance, event
 
 
-model = bot.define("greeter", bot.cognition(support.Silent(), intuition=support.Undecided()), bot.attach(phone.Phone()), hsm.observe(log))
+model = bot.define("greeter", bot.cognition(reasoning=support.Silent(), reflex=support.Undecided()), bot.attach(phone.Phone()), hsm.observe(log))

@@ -1,7 +1,7 @@
-"""Decision-model processor: intuition's reflex selection as one decision request.
+"""Decision-model processor: reflex's decision-layer selection as one decision request.
 
 `Processor` is a `processing.DecisionProcessor`: a decision model chooses among the offered
-events with a calibrated probability for each, so it is a processor intuition runs on.
+events with a calibrated probability for each, so it is a processor reflex's decision layer runs on.
 
 The mapping is structural, not behavioral:
 
@@ -11,9 +11,11 @@ The mapping is structural, not behavioral:
   said or typed is kept whole (D-R-47). The state is JSON, so no image is attached to it.
 - The **event menu** is one choice question per turn (``selection``): its criteria are the offered
   event names, each described by the first line of its event schema's description, together with a
-  reserved pass criterion ("none of these") that maps to the typed explicit decline (an unhandled
-  intuition output), which the host cascades to deliberative reasoning, never a handled-empty
-  selection.
+  reserved pass criterion ("none of these") for each later tier the turn names (``hand_ons``; R-23):
+  one to answer it in words now, with intuition, offered only when intuition is composed, and one to
+  think it through first, with reasoning. Each maps to the typed explicit decline (an unhandled
+  decision output naming its tier, ``hand_to``), which the host hands to that tier, never a
+  handled-empty selection.
 - **Payload fields are filled by selection over supplied options**, never authored. For each
   offered event's required payload keys, candidate values come mechanically from the turn's own
   evidence (the stimulus data mapping, then the schema's own enum options); each key gets its own
@@ -22,7 +24,7 @@ The mapping is structural, not behavioral:
   is left unoffered: fail-closed at the menu, before any request.
 - **Only the chosen option is returned** (D-R-28): one single-choice question chooses one event,
   returned with the chosen probability as its confidence and its grounded payload. The other options'
-  probabilities are not selections. Intuition's confidence gate still applies to the one returned.
+  probabilities are not selections. The decision layer's confidence gate still applies to the one returned.
 - **The request fits the model's context** (D-R-36): with ``max_context_tokens``, the processor owns a
   ``processing.ContextFit``; a request whose JSON body is over its budget (3 UTF-8 bytes a token until
   the server's counted input tokens teach it fewer, D-R-45) has the selection's
@@ -30,13 +32,14 @@ The mapping is structural, not behavioral:
   instructions, the self block, and any repair feedback: context assembly) cut to their leading whole
   lines, down to the question's own default instructions. The state (the stimuli) and the menu are
   never cut, ranked or dropped; a request that still does not fit is sent, and the server's refusal is
-  intuition's failure.
+  the decision layer's failure.
 """
 
 from __future__ import annotations
 
 import collections.abc
 import time
+import types
 import typing
 
 import httpx
@@ -46,7 +49,7 @@ import mosfet.telemetry
 from mosfet import media
 from mosfet.abilities import processing
 from mosfet.abilities.cognition import event as cognition_event
-from mosfet.abilities.cognition import intuition as cognition_intuition
+from mosfet.abilities.cognition import decision as cognition_decision
 from mosfet.abilities.language import text
 
 from . import _json
@@ -54,8 +57,18 @@ from . import client
 
 _PROVIDER: typing.Final = "decision"
 _SELECTION: typing.Final = "selection"
-_RESERVED_PASS_CRITERION: typing.Final = "__unhandled__"
-_DEFAULT_PASS_WORDING: typing.Final = "None of these fits: think the turn through first, with reasoning."
+# The reserved pass criteria, one per later tier a pass may hand the turn to (R-23).
+_PASS_CRITERIA: typing.Final[dict[processing.HandOn, str]] = {
+    "intuition": "__intuition__",
+    "reasoning": "__reasoning__",
+}
+_DEFAULT_PASS_WORDING: typing.Final[collections.abc.Mapping[processing.HandOn, str]] = types.MappingProxyType(
+    {
+        "intuition": "None of these fits: answer it in words now, with intuition.",
+        "reasoning": "None of these fits: it needs thought, so think it through first, with reasoning.",
+    }
+)
+"""How each pass criterion says what passing to that tier does (D-R-42, R-23): never as leaving the turn unhandled."""
 _SELECTION_INSTRUCTIONS: typing.Final = (
     "Choose the single criterion that answers this turn from the bot's own peripheral "
     "transducers: the criterion text names the situation. Choose the pass criterion when "
@@ -184,14 +197,16 @@ class Processor(processing.DecisionProcessor):
     timeout bounds the turn regardless. ``max_context_tokens`` is the decision model's context, which
     each request is fitted to by cutting the turn's instructions (D-R-36), through a
     ``processing.ContextFit`` that learns bytes per token from the input tokens each answer reports
-    (D-R-45); None sends every request whole. ``pass_wording`` describes the pass criterion. ``transport`` replaces the network (tests).
+    (D-R-45); None sends every request whole. ``pass_wording`` describes each pass criterion, by the tier it
+    hands the turn to; a pass to intuition is offered only when the turn names intuition among its
+    ``hand_ons``. ``transport`` replaces the network (tests).
     Construction opens nothing: each turn is one request.
     """
 
     _client: client.Client
     _model: str | None
     _fit: processing.ContextFit | None
-    _pass_wording: str
+    _pass_wording: dict[processing.HandOn, str]
 
     def __init__(
         self,
@@ -201,12 +216,15 @@ class Processor(processing.DecisionProcessor):
         model: str | None = None,
         timeout: float | None = None,
         max_context_tokens: int | None = None,
-        pass_wording: str = _DEFAULT_PASS_WORDING,
+        pass_wording: collections.abc.Mapping[processing.HandOn, str] = _DEFAULT_PASS_WORDING,
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
-        """Raises ``ValueError`` as :class:`client.Client` does for its arguments, and for a
-        ``max_context_tokens`` that is not positive."""
+        """Raises ``ValueError`` as :class:`client.Client` does for its arguments, for a
+        ``max_context_tokens`` that is not positive, and for a ``pass_wording`` without a wording for each tier."""
 
+        missing = [tier for tier in _PASS_CRITERIA if not pass_wording.get(tier)]
+        if missing:
+            raise ValueError(f"pass_wording needs a wording for each tier; it has none for {', '.join(missing)}.")
         self._fit = (
             None
             if max_context_tokens is None
@@ -214,13 +232,13 @@ class Processor(processing.DecisionProcessor):
         )
         self._client = client.Client(base_url=base_url, api_key=api_key, timeout=timeout, transport=transport)
         self._model = model
-        self._pass_wording = pass_wording
+        self._pass_wording = {tier: pass_wording[tier] for tier in _PASS_CRITERIA}
 
     @typing.override
     async def process(
         self, input: processing.InputData, *, drafts: processing.DraftSink | None = None
     ) -> processing.Events:
-        """Decide this turn's one event, or decline it to reasoning.
+        """Decide this turn's one event, or pass it on to the next tier.
 
         Raises :class:`ProcessingError` when the server fails (its :class:`client.Error` is the
         cause) or answers outside the menu, and :class:`PayloadGroundingError` when a payload
@@ -249,7 +267,9 @@ class Processor(processing.DecisionProcessor):
             return ()
 
         criteria: dict[str, str | None] = {name: _event_wording(event) for name, event in groundable.items()}
-        criteria[_RESERVED_PASS_CRITERION] = self._pass_wording
+        # One pass per tier the turn may be handed to; a frame that names none hands a pass to reasoning (R-23).
+        passes = {_PASS_CRITERIA[tier]: tier for tier in input.hand_ons or ("reasoning",)}
+        criteria.update({criterion: self._pass_wording[tier] for criterion, tier in passes.items()})
         questions: dict[str, client.Choice] = {
             _SELECTION: client.Choice(
                 # The turn's situation leads, where the world block always was; then the stable instructions,
@@ -317,13 +337,14 @@ class Processor(processing.DecisionProcessor):
         if selection is None:
             raise ProcessingError("The decision server answered no selection.")
         chosen = selection.choice
-        if chosen == _RESERVED_PASS_CRITERION:
-            # Explicit unhandled, not a handled-empty selection: the pass criterion means "none offered
-            # fits". Intuition's own envelope for that is OutputData(result=None), which the host reads as
-            # unhandled and cascades to reasoning; an empty tuple would be a handled turn with no actions.
-            # The abstract Processor protocol declares Events only, so the double cast marks that
-            # runtime-declared shape as intentional at this one boundary.
-            envelope = cognition_intuition.OutputData(result=None, reason=self._pass_wording)
+        tier = passes.get(chosen)
+        if tier is not None:
+            # Explicit unhandled, not a handled-empty selection: a pass criterion means "none offered fits",
+            # and names the tier it hands the turn to. The decision layer's own envelope for that is
+            # OutputData(result=None, hand_to=tier), which the host reads as unhandled and hands to that tier;
+            # an empty tuple would be a handled turn with no actions. The abstract Processor protocol declares
+            # Events only, so the double cast marks that runtime-declared shape as intentional at this one boundary.
+            envelope = cognition_decision.OutputData(result=None, hand_to=tier, reason=self._pass_wording[tier])
             return typing.cast(processing.Events, typing.cast(object, envelope))
         event = groundable.get(chosen)
         if event is None:

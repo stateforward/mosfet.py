@@ -22,13 +22,17 @@ from mosfet import environment
 from mosfet.abilities import listening, processing
 from mosfet.abilities.communication import communication, conversation
 from mosfet.abilities.hearing import voice
-from mosfet.abilities.cognition import intuition
+from mosfet.abilities.cognition import decision as cognition_decision
 from mosfet.devices import phone as phone_device
 from mosfet.providers import decision
 from mosfet.telemetry.configure import logger_provider
 from tests import metric_reader
 
-_PASS = "__unhandled__"
+# The reserved pass criteria (R-23): to reasoning, always offered, and to intuition, offered when it is composed.
+_PASS = "__reasoning__"
+_TO_INTUITION = "__intuition__"
+_TO_REASONING_WORDING = "None of these fits: it needs thought, so think it through first, with reasoning."
+_TO_INTUITION_WORDING = "None of these fits: answer it in words now, with intuition."
 _DEFAULT_INSTRUCTIONS = (
     "Choose the single criterion that answers this turn from the bot's own peripheral "
     "transducers: the criterion text names the situation. Choose the pass criterion when "
@@ -100,6 +104,7 @@ def _run(
     input_payload: object,
     schemas: tuple[hsm.Event[typing.Any], ...],
     instructions: str | None = "Choose from the menu.",
+    hand_ons: tuple[processing.HandOn, ...] = (),
 ) -> processing.Events:
     return asyncio.run(
         processor.process(
@@ -109,6 +114,7 @@ def _run(
                 actors={},
                 authority=None,
                 instructions=instructions,
+                hand_ons=hand_ons,
             )
         )
     )
@@ -123,7 +129,7 @@ def _probe_event() -> tuple[hsm.Event[typing.Any], ...]:
 
 
 def test_the_processor_is_a_decision_processor_and_construction_opens_nothing() -> None:
-    """A decision model decides among the offered events: it is the processor intuition runs on (R-6)."""
+    """A decision model decides among the offered events: it is the processor reflex's decision layer runs on (R-6)."""
 
     server = _Decide({})
 
@@ -134,13 +140,13 @@ def test_the_processor_is_a_decision_processor_and_construction_opens_nothing() 
 
 
 def test_the_pass_criterion_declines_unhandled_not_handled_empty() -> None:
-    """Pass is the explicit decline the host cascades on to reasoning, never a handled-empty selection."""
+    """Pass is the explicit decline the host hands on to a later tier, never a handled-empty selection."""
 
     server = _Decide({"selection": (_PASS, {_PASS: 0.6, "phone.answer_call": 0.4})})
 
     output = _run(_processor(server), input_payload="ring turn", schemas=_answer_call_offered())
 
-    assert isinstance(output, intuition.OutputData)
+    assert isinstance(output, cognition_decision.OutputData)
     assert output.result is None
     assert len(server.requests) == 1
 
@@ -278,22 +284,57 @@ def test_a_criterion_is_the_first_line_of_its_event_schemas_description_or_its_n
     assert sent["questions"]["selection"]["criteria"] == {
         "phone.answer_call": described.strip().splitlines()[0],
         "probe.undescribed": "probe.undescribed",
-        _PASS: "None of these fits: think the turn through first, with reasoning.",
+        _PASS: _TO_REASONING_WORDING,
     }
 
 
-def test_the_default_pass_criterion_says_the_turn_goes_on_to_reasoning() -> None:
-    """D-R-42 (Willy live check): worded "leave the turn unhandled", passing read like ignoring, so the decision
-    model ignored a stranger's greeting rather than hand it on. Passing is how a turn reaches deliberation."""
+@pytest.mark.parametrize(
+    ("hand_ons", "criteria"),
+    [
+        (("intuition", "reasoning"), {_TO_INTUITION: _TO_INTUITION_WORDING, _PASS: _TO_REASONING_WORDING}),
+        (("reasoning",), {_PASS: _TO_REASONING_WORDING}),
+        ((), {_PASS: _TO_REASONING_WORDING}),
+    ],
+    ids=["intuition-composed", "reasoning-only", "unstated"],
+)
+def test_the_pass_criteria_are_the_tiers_the_turn_may_be_handed_on_to(
+    hand_ons: tuple[processing.HandOn, ...], criteria: dict[str, str]
+) -> None:
+    """R-23: the decision model chooses the tier a pass hands the turn to, each named by what it does; intuition is
+    offered only when it is composed, and a frame that names no tier hands on to reasoning, which every cognition
+    has. D-R-42: never worded as leaving the turn unhandled, which read like ignoring."""
 
     server = _Decide({"selection": (_PASS, {_PASS: 1.0})})
 
-    _ = _run(_processor(server), input_payload="ring turn", schemas=(phone_device.AnswerCallEvent,))
+    _ = _run(_processor(server), input_payload="ring turn", schemas=(phone_device.AnswerCallEvent,), hand_ons=hand_ons)
 
     (sent,) = server.requests
-    wording = sent["questions"]["selection"]["criteria"][_PASS]
-    assert "reason" in wording
-    assert "unhandled" not in wording
+    offered = sent["questions"]["selection"]["criteria"]
+    assert {name: wording for name, wording in offered.items() if name.startswith("__")} == criteria
+    assert all("unhandled" not in wording for wording in criteria.values())
+
+
+@pytest.mark.parametrize(("chosen", "tier"), [(_TO_INTUITION, "intuition"), (_PASS, "reasoning")])
+def test_a_pass_hands_the_turn_to_the_tier_its_criterion_names(chosen: str, tier: str) -> None:
+    """R-23: the pass answers the decision layer's typed envelope with the chosen tier and nothing selected."""
+
+    server = _Decide({"selection": (chosen, {chosen: 1.0})})
+
+    output = _run(
+        _processor(server),
+        input_payload="ring turn",
+        schemas=_answer_call_offered(),
+        hand_ons=("intuition", "reasoning"),
+    )
+
+    assert isinstance(output, cognition_decision.OutputData)
+    assert (output.result, output.hand_to) == (None, tier)
+    assert output.reason == (_TO_INTUITION_WORDING if tier == "intuition" else _TO_REASONING_WORDING)
+
+
+def test_a_wording_is_given_for_each_tier() -> None:
+    with pytest.raises(ValueError, match="intuition"):
+        _ = decision.Processor(base_url="http://decide.test:8102", pass_wording={"reasoning": "Think it through."})
 
 
 def test_the_request_and_response_logs_carry_the_answering_model_and_the_answer_as_json(
@@ -411,7 +452,7 @@ def test_a_request_over_max_context_tokens_cuts_its_turn_instructions_to_their_l
 
 def test_what_someone_said_or_typed_reaches_the_decision_whole() -> None:
     """D-R-47 (Willy browser UI): the state dropped every string over 40 characters as prose, so a typed line or a
-    transcript reached decide as null and intuition judged a turn whose words it never saw. Text is the turn."""
+    transcript reached decide as null and the decision layer judged a turn whose words it never saw. Text is the turn."""
 
     line = "Hi Willy, this is a test from the browser. Can you hear me?"
     server = _Decide({"selection": (_PASS, {_PASS: 1.0})})
@@ -542,7 +583,7 @@ def test_a_request_that_cannot_fit_is_still_sent_and_its_refusal_is_the_processi
     tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """D-R-36: nothing is dropped to make a request fit. One that still overflows is sent as small as it can be,
-    and the server's refusal is intuition's failure, which cognition cascades to reasoning in the same turn."""
+    and the server's refusal is the decision layer's failure, which cognition cascades to reasoning in the same turn."""
 
     sent: list[dict[str, typing.Any]] = []
 

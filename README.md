@@ -39,9 +39,9 @@ greeter = bot.define(
     "greeter",
     bot.traits("warm", "curious"),
     bot.cognition(
-        openai_compat.Processor(client=openai_compat.ChatClient(model="qwen3-coder")),
-        # Intuition is never a chat model: it decides on a server that speaks the decisions wire format.
-        intuition=decision.Processor(base_url="http://127.0.0.1:8102"),
+        reasoning=openai_compat.Processor(client=openai_compat.ChatClient(model="qwen3-coder")),
+        # Reflex's decision layer is never a chat model: it decides on a server that speaks the decisions wire format.
+        reflex=decision.Processor(base_url="http://127.0.0.1:8102"),
     ),
     bot.attach(computer.Computer(id="desk")),
 )
@@ -49,7 +49,7 @@ greeter = bot.define(
 
 `bot.define` returns the bot as data. `bot.start` (or `bot.run`, for a process) builds its body,
 `mosfet.Bot`, around the very parts the file constructed: the devices it holds, the abilities it
-composes, and one cognition, whose intuition decides on a decision model while it reasons on a language
+composes, and one cognition, whose reflex decides on a decision model while it reasons on a language
 model. The hsm states and transitions given beside them are the bot's
 firmware, the machinery its owner wrote for it. [`docs/bot.md`](docs/bot.md) is the guide to the
 DSL. See [`examples/`](examples/README.md) for complete programs, including a phone bot that answers
@@ -88,8 +88,8 @@ if __name__ == "__main__":
         "builder",
         bot.traits(*settings.traits.traits),
         bot.cognition(
-            openai_compat.Processor(client=openai_compat.ChatClient(model=settings.model, base_url=settings.base_url)),
-            intuition=decision.Processor(base_url=settings.decision_base_url, api_key=...),
+            reasoning=openai_compat.Processor(client=openai_compat.ChatClient(model=settings.model, base_url=settings.base_url)),
+            reflex=decision.Processor(base_url=settings.decision_base_url, api_key=...),
             memory=memory.Memory(database=str(process.data_dir / "memory.sqlite3")),
             associative=True,
             consolidation=True,

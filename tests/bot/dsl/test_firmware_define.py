@@ -82,7 +82,7 @@ def _firmware(model: bot.Model) -> firmware.FirmwareElement:
 TIMER = bot.define(
     "timer",
     bot.traits("attentive"),
-    bot.cognition(support.Silent(), intuition=support.Undecided()),
+    bot.cognition(reasoning=support.Silent(), reflex=support.Undecided()),
     bot.attribute("minutes", int, 0),
     bot.initial(bot.target("idle")),
     bot.state("idle", bot.transition(bot.on(SetEvent), bot.target("../running"))),
@@ -125,7 +125,7 @@ def test_the_firmware_offers_only_its_tool_events_as_commands() -> None:
 
 def test_a_bot_with_no_partials_has_no_firmware() -> None:
     model = bot.define(
-        "greeter", bot.cognition(support.Silent(), intuition=support.Undecided()), bot.attach(phone.Phone())
+        "greeter", bot.cognition(reasoning=support.Silent(), reflex=support.Undecided()), bot.attach(phone.Phone())
     )
 
     assert not any(isinstance(member, firmware.FirmwareElement) for member in model.members.values())
@@ -153,7 +153,7 @@ def test_the_bodys_own_model_is_never_touched() -> None:
 
     _ = bot.define(
         "timer",
-        bot.cognition(support.Silent(), intuition=support.Undecided()),
+        bot.cognition(reasoning=support.Silent(), reflex=support.Undecided()),
         bot.initial(bot.target("idle")),
         bot.state("idle", bot.transition(bot.on(SetEvent), bot.target("../idle"))),
     )
@@ -184,7 +184,10 @@ def test_compiling_leaves_the_partials_where_hsm_put_them() -> None:
     before = idle.location
 
     _ = bot.define(
-        "timer", bot.cognition(support.Silent(), intuition=support.Undecided()), bot.initial(bot.target("idle")), idle
+        "timer",
+        bot.cognition(reasoning=support.Silent(), reflex=support.Undecided()),
+        bot.initial(bot.target("idle")),
+        idle,
     )
 
     assert idle.location is before
@@ -221,7 +224,7 @@ def test_a_firmware_error_is_one_diagnostic_among_the_others(here: pathlib.Path)
 
             model = bot.define(
                 "greeter",
-                bot.cognition(support.Silent(), intuition=support.Undecided()),
+                bot.cognition(reasoning=support.Silent(), reflex=support.Undecided()),
                 bot.attach(phone.Phone(id="desk")),
                 bot.attach(phone.Phone(id="desk")),
                 bot.state("idle"),
@@ -249,7 +252,7 @@ def test_hsms_error_keeps_hsms_message_and_points_at_the_written_partial(here: p
 
             model = bot.define(
                 "greeter",
-                bot.cognition(support.Silent(), intuition=support.Undecided()),
+                bot.cognition(reasoning=support.Silent(), reflex=support.Undecided()),
                 bot.initial(bot.target("idle")),
                 bot.state("idle", bot.transition(bot.on("go"), bot.target("../nowhere"))),
             )

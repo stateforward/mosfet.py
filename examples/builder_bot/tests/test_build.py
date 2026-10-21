@@ -32,7 +32,7 @@ _REQUIRED = {
     "OPENAI_BASE_URL": "http://127.0.0.1:9/v1",
     "OPENAI_MODEL": "local-model",
     "BUILDER_SANDBOX_SOCKET": "/nonexistent/podman.sock",
-    # The decision server intuition decides on: a closed port, since nothing reaches the bot in these tests.
+    # The decision server reflex decides on: a closed port, since nothing reaches the bot in these tests.
     "DECISION_BASE_URL": "http://127.0.0.1:9",
 }
 _SECRETS = {"OPENAI_API_KEY": "key-5d1a", "DECISION_API_KEY": "key-9b07", "COMPUTER_TOKEN_SECRET": "secret-8e3f"}

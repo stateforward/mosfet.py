@@ -1,11 +1,11 @@
-error[B0025]: `bot.cognition(intuition=)` is given a chat processor, not a decision processor
- --> greeter.py:8:73
+error[B0025]: `bot.cognition(reflex=)` is given a chat processor, not a decision processor
+ --> greeter.py:8:80
   |
-8 | model = bot.define("…", bot.cognition(support.Silent(), intuition=support.Silent()), bot.attach(phone.Phone()))
-  |                                                                   ^^^^^^^^^^^^^^^^ this is a `Silent`
+8 | model = bot.define("…", bot.cognition(reasoning=support.Silent(), reflex=support.Silent()), bot.attach(phone.Phone()))
+  |                                                                          ^^^^^^^^^^^^^^^^ this is a `Silent`
   |
-  = note: a chat model writes and calls tools; intuition chooses among the offered events, each with its confidence, so it decides on a decision model, never a chat model
-help: give `intuition=` a `processing.DecisionProcessor`: `decision.Processor(...)` (`from mosfet.providers import decision`), on any server that speaks the decisions wire format; in a test, the offline one is `testing.Decider()` (`from mosfet.bot import testing`)
+  = note: a chat model writes and calls tools; reflex chooses among the offered events, each with its confidence, so it decides on a decision model, never a chat model
+help: give `reflex=` a `processing.DecisionProcessor`: `decision.Processor(...)` (`from mosfet.providers import decision`), on any server that speaks the decisions wire format; in a test, the offline one is `testing.Decider()` (`from mosfet.bot import testing`)
   = explain: bot.explain("B0025")
 
 error: could not define bot `greeter`: 1 error

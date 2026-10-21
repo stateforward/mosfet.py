@@ -11,4 +11,4 @@ class Lamp(mosfet.device.Device):
         pass
 
 
-model = bot.define("greeter", bot.cognition(support.Silent(), intuition=support.Undecided()), bot.attach(Lamp()))
+model = bot.define("greeter", bot.cognition(reasoning=support.Silent(), reflex=support.Undecided()), bot.attach(Lamp()))

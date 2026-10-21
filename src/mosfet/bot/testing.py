@@ -4,9 +4,8 @@
   makes each :class:`Choice` once, only on a turn woken by that choice's stimulus that offers its
   event, and otherwise selects nothing. A test pins what the bot was *offered* and what *woke* it;
   what the bot chooses is scripted only to prove a capacity, never to stand in for its judgment.
-* :class:`Decider` is :class:`Scripted` as a decision model, the kind intuition runs on. It makes its
-  choices the same way, and records the same; when it selects nothing, intuition hands the turn on to
-  reasoning.
+* :class:`Decider` is :class:`Scripted` as a decision model, the kind reflex's decision layer runs on. It
+  makes its choices the same way, and records the same; when it selects nothing, reflex hands the turn on.
 * :func:`running` starts a bot for the length of an ``async with`` block, with the shared actors its
   parts need, in an environment keeping time on the test's clock when it gives one, and stops it and
   them when the block ends, even when it raised.
@@ -22,7 +21,7 @@ its doubles constructed inline:
 >>> from mosfet.devices import computer
 >>> model = testing.Scripted()
 >>> greeter = bot.define(
-...     "greeter", bot.cognition(model, intuition=testing.Decider()), bot.attach(computer.Computer(id="desk"))
+...     "greeter", bot.cognition(reasoning=model, reflex=testing.Decider()), bot.attach(computer.Computer(id="desk"))
 ... )
 >>> async def run() -> str:
 ...     async with testing.running(greeter) as running:
@@ -118,7 +117,7 @@ class Scripted(processing.Processor):
 
 
 class Decider(Scripted, processing.DecisionProcessor):
-    """A decision model, scripted: intuition's offline double, with :class:`Scripted`'s choices and record."""
+    """A decision model, scripted: reflex's offline double, with :class:`Scripted`'s choices and record."""
 
 
 def _stimulus(call: processing.InputData) -> str | None:

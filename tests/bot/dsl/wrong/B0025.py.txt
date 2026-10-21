@@ -1,8 +1,8 @@
-"""B0025: a chat processor given to intuition."""
+"""B0025: a chat processor given to reflex."""
 
 from mosfet import bot
 from mosfet.devices import phone
 
 from tests.bot.dsl import support
 
-model = bot.define("greeter", bot.cognition(support.Silent(), intuition=support.Silent()), bot.attach(phone.Phone()))
+model = bot.define("greeter", bot.cognition(reasoning=support.Silent(), reflex=support.Silent()), bot.attach(phone.Phone()))

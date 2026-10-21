@@ -174,7 +174,7 @@ def is_deliberative_handoff_schema(schema: object | None) -> bool:
     """True when a model-facing schema marks deliberate (System-2) handoff.
 
     Schemas opt in with ``__deliberative_handoff__ = True`` (for example reasoning
-    ``CallData``). Intuition and other stages detect handoff via this marker so they
+    ``CallData``). Earlier stages detect handoff via this marker so they
     never hard-import the reasoning module.
     """
 
@@ -1138,6 +1138,10 @@ def dispatch_child_cancel(
     )
 
 
+HandOn: typing.TypeAlias = typing.Literal["intuition", "reasoning"]
+"""A later tier of cognition a decision processor's pass may hand a turn to (R-23)."""
+
+
 class InputData(pydantic.BaseModel):
     """Processing input: stimulus plus selectable event schemas.
 
@@ -1248,9 +1252,19 @@ class InputData(pydantic.BaseModel):
         description=(
             "Optional model-facing BaseModel type whose fields are overlaid on every offered "
             "event schema for this input only (create_model patch). None means pure domain "
-            "schemas. Different processing abilities stamp different patches (e.g. intuition "
-            "adds confidence; reasoning may leave this None)."
+            "schemas. Different processing abilities stamp different patches (e.g. the decision "
+            "layer adds confidence; reasoning may leave this None)."
         ),
+    )
+    hand_ons: SkipJsonSchema[tuple[HandOn, ...]] = pydantic.Field(
+        default=(),
+        exclude=True,
+        description=(
+            "The later tiers a decision processor's pass may hand this turn to, in the order a turn takes them up: "
+            "the host names the ones it composes (R-23). Empty for every other processor; a decision processor "
+            "given none hands a pass to reasoning, which every cognition has."
+        ),
+        examples=[("intuition", "reasoning")],
     )
 
     @pydantic.field_serializer("input", when_used="json")
@@ -1447,7 +1461,7 @@ def coerce_event_selections(
         if not output.is_handled or payload is None:
             return None
         return coerce_event_selections(payload, patch=patch)
-    # Ability envelopes (intuition/reasoning OutputData) carry events on ``result``.
+    # Ability envelopes (decision/reasoning OutputData) carry events on ``result``.
     result = getattr(output, "result", _MISSING)
     if result is not _MISSING and result is not output:
         return coerce_event_selections(result, patch=patch)
@@ -2398,7 +2412,7 @@ class DecisionProcessor(Processor, abc.ABC):
     """A processor whose model decides: it chooses among the offered events, each with its confidence.
 
     A decision model is not a chat model. It writes no prose and calls no tool; it answers which offered
-    event to fire, or none. Intuition, the bot's fast first decision, runs on one. A processor that
+    event to fire, or none. Reflex's decision layer, the bot's fallback reflex, runs on one. A processor that
     chooses nothing hands the turn on, as any processor's empty selection does. The kind adds no members;
     it is what a decision model's processor subclasses, so a chat processor is never taken for one.
     """
@@ -2863,6 +2877,7 @@ __all__ = [
     "OutputEvent",
     "OutputData",
     "Operation",
+    "HandOn",
     "InputData",
     "DecisionProcessor",
     "Processor",

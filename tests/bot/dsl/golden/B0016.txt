@@ -1,8 +1,8 @@
 error[B0016]: `Lamp` has no id
-  --> greeter.py:14:95
+  --> greeter.py:14:102
    |
-14 | model = bot.define("…", bot.cognition(support.Silent(), intuition=support.Undecided()), bot.attach(Lamp()))
-   |                                                                                         ^^^^^^^^^^^^^^^^^^ given here
+14 | model = bot.define("…", bot.cognition(reasoning=support.Silent(), reflex=support.Undecided()), bot.attach(Lamp()))
+   |                                                                                                ^^^^^^^^^^^^^^^^^^ given here
    |
    = note: `Lamp.__init__` never called its base's `__init__`, which sets the id
 help: call `super().__init__(id=id)` in `Lamp.__init__`

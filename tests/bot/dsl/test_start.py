@@ -152,7 +152,7 @@ def test_start_returns_the_activated_body_holding_the_models_devices_by_id_in_or
     store = memory.Memory()
     model = bot.define(
         "greeter",
-        bot.cognition(support.Silent(), intuition=support.Undecided(), memory=store),
+        bot.cognition(reasoning=support.Silent(), reflex=support.Undecided(), memory=store),
         bot.attach(phone.Phone(id="desk")),
         bot.attach(audio.Speaker()),
     )
@@ -188,7 +188,7 @@ def test_the_body_takes_each_part_in_the_role_it_was_given(recording: type[Recor
     )
     model = bot.define(
         "greeter",
-        bot.cognition(support.Silent(), intuition=support.Undecided()),
+        bot.cognition(reasoning=support.Silent(), reflex=support.Undecided()),
         bot.attach(desk),
         bot.attach(bench),
         bot.input(senses),
@@ -238,7 +238,10 @@ def test_the_step_timeout_bounds_each_step_of_the_bots_cognition(
     monkeypatch.setattr(cognition, "Cognition", _recorded(cognition.Cognition, found))
     monkeypatch.setattr(cognition, "Reflection", _recorded(cognition.Reflection, found))
     model = bot.define(
-        "greeter", bot.cognition(support.Silent(), intuition=support.Undecided()), bot.attach(phone.Phone()), *timeouts
+        "greeter",
+        bot.cognition(reasoning=support.Silent(), reflex=support.Undecided()),
+        bot.attach(phone.Phone()),
+        *timeouts,
     )
 
     async def run() -> None:
@@ -253,12 +256,42 @@ def test_the_step_timeout_bounds_each_step_of_the_bots_cognition(
     ]
 
 
+def test_each_tiers_timeout_bounds_its_steps_in_the_bots_cognition(monkeypatch: pytest.MonkeyPatch) -> None:
+    """D-R-52: ``bot.timeouts(reflex=, intuition=, reasoning=)`` reach cognition; one left unset is ``None``,
+    so cognition bounds that tier by the step timeout."""
+
+    found: Built = []
+    monkeypatch.setattr(cognition, "Cognition", _recorded(cognition.Cognition, found))
+    model = bot.define(
+        "greeter",
+        bot.cognition(reasoning=support.Silent(), reflex=support.Undecided()),
+        bot.attach(phone.Phone()),
+        bot.timeouts(reflex=datetime.timedelta(seconds=5), reasoning=datetime.timedelta(seconds=180)),
+    )
+
+    async def run() -> None:
+        started, _ = await _started(model)
+        await bot.stop(started)
+
+    asyncio.run(run())
+
+    ((_, given),) = found
+    assert (given["reflex_timeout"], given["intuition_timeout"], given["reasoning_timeout"]) == (
+        datetime.timedelta(seconds=5),
+        None,
+        datetime.timedelta(seconds=180),
+    )
+
+
 def test_one_ability_given_as_input_and_acquired_is_given_to_the_body_in_both_roles(
     recording: type[Recording],
 ) -> None:
     senses = memory.Memory(id="senses")
     model = bot.define(
-        "greeter", bot.cognition(support.Silent(), intuition=support.Undecided()), bot.attach(senses), bot.input(senses)
+        "greeter",
+        bot.cognition(reasoning=support.Silent(), reflex=support.Undecided()),
+        bot.attach(senses),
+        bot.input(senses),
     )
 
     async def run() -> None:
@@ -274,7 +307,7 @@ def test_one_ability_given_as_input_and_acquired_is_given_to_the_body_in_both_ro
 
 def test_start_gives_data_to_the_bodys_start(recording: type[Recording]) -> None:
     model = bot.define(
-        "greeter", bot.cognition(support.Silent(), intuition=support.Undecided()), bot.attach(phone.Phone())
+        "greeter", bot.cognition(reasoning=support.Silent(), reflex=support.Undecided()), bot.attach(phone.Phone())
     )
     data = object()
 
@@ -310,8 +343,8 @@ def test_each_cognition_flag_builds_exactly_its_faculty_on_the_one_store(
     model = bot.define(
         "greeter",
         bot.cognition(
-            support.Silent(),
-            intuition=support.Undecided(),
+            reasoning=support.Silent(),
+            reflex=support.Undecided(),
             memory=store,
             associative=associative,
             consolidation=consolidation,
@@ -333,17 +366,52 @@ def test_each_cognition_flag_builds_exactly_its_faculty_on_the_one_store(
     assert all(given["memory"] is store for _, given in built)
 
 
-def test_intuition_decides_on_its_decision_processor_and_every_other_faculty_thinks_on_the_cognitions(
+def test_reflex_decides_on_its_decision_processor_and_every_other_faculty_thinks_on_reasonings(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """R-6: intuition is never a chat model; reasoning, reflection and consolidation keep cognition's processor."""
+    """R-6: reflex is never a chat model; reasoning, reflection and consolidation think on reasoning's processor."""
 
     thinking, deciding = support.Silent(), support.Undecided()
     model = bot.define(
-        "greeter", bot.cognition(thinking, intuition=deciding, consolidation=True), bot.attach(phone.Phone())
+        "greeter", bot.cognition(reasoning=thinking, reflex=deciding, consolidation=True), bot.attach(phone.Phone())
     )
     found: Built = []
     for owner, cls in (
+        (cognition, cognition.Decision),
+        (cognition, cognition.Reasoning),
+        (cognition, cognition.Reflection),
+        (memory, memory.Consolidation),
+    ):
+        monkeypatch.setattr(owner, cls.__name__, _recorded(cls, found))
+
+    async def run() -> None:
+        started, _ = await _started(model)
+        await bot.stop(started)
+
+    asyncio.run(run())
+
+    assert {name: given["processor"] for name, given in found} == {
+        "Decision": deciding,
+        "Reasoning": thinking,
+        "Reflection": thinking,
+        "Consolidation": thinking,
+    }
+
+
+def test_each_tier_thinks_on_its_own_processor_and_reflection_on_the_one_it_is_given(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """D-R-52: intuition thinks on ``intuition=``; reflection and consolidation on ``reflection=`` when given."""
+
+    thinking, fast, reflecting, deciding = support.Silent(), support.Silent(), support.Silent(), support.Undecided()
+    model = bot.define(
+        "greeter",
+        bot.cognition(reasoning=thinking, intuition=fast, reflex=deciding, reflection=reflecting, consolidation=True),
+        bot.attach(phone.Phone()),
+    )
+    found: Built = []
+    for owner, cls in (
+        (cognition, cognition.Decision),
         (cognition, cognition.Intuition),
         (cognition, cognition.Reasoning),
         (cognition, cognition.Reflection),
@@ -358,17 +426,35 @@ def test_intuition_decides_on_its_decision_processor_and_every_other_faculty_thi
     asyncio.run(run())
 
     assert {name: given["processor"] for name, given in found} == {
-        "Intuition": deciding,
+        "Decision": deciding,
+        "Intuition": fast,
         "Reasoning": thinking,
-        "Reflection": thinking,
-        "Consolidation": thinking,
+        "Reflection": reflecting,
+        "Consolidation": reflecting,
     }
+
+
+def test_a_cognition_given_only_reasoning_starts_with_no_other_tier(monkeypatch: pytest.MonkeyPatch) -> None:
+    """D-R-52: each tier is built only when given; reasoning is the one a cognition always has."""
+
+    model = bot.define("greeter", bot.cognition(reasoning=support.Silent()), bot.attach(phone.Phone()))
+    found: Built = []
+    for cls in (cognition.Decision, cognition.Intuition, cognition.Reasoning):
+        monkeypatch.setattr(cognition, cls.__name__, _recorded(cls, found))
+
+    async def run() -> None:
+        started, _ = await _started(model)
+        await bot.stop(started)
+
+    asyncio.run(run())
+
+    assert [name for name, _ in found] == ["Reasoning"]
 
 
 def test_routines_run_on_the_wall_clock_cognition_was_given(built: Built) -> None:
     model = bot.define(
         "greeter",
-        bot.cognition(support.Silent(), intuition=support.Undecided(), routines=_clock),
+        bot.cognition(reasoning=support.Silent(), reflex=support.Undecided(), routines=_clock),
         bot.attach(phone.Phone()),
     )
     built.clear()
@@ -385,7 +471,7 @@ def test_routines_run_on_the_wall_clock_cognition_was_given(built: Built) -> Non
 
 def test_without_memory_the_bot_gets_a_fresh_in_memory_store(built: Built) -> None:
     model = bot.define(
-        "greeter", bot.cognition(support.Silent(), intuition=support.Undecided()), bot.attach(phone.Phone())
+        "greeter", bot.cognition(reasoning=support.Silent(), reflex=support.Undecided()), bot.attach(phone.Phone())
     )
     built.clear()
 
@@ -409,7 +495,7 @@ def test_with_traits_the_persona_carries_them_to_reflection_and_shares_the_store
     model = bot.define(
         "greeter",
         bot.traits("curious", "patient"),
-        bot.cognition(support.Silent(), intuition=support.Undecided(), memory=store),
+        bot.cognition(reasoning=support.Silent(), reflex=support.Undecided(), memory=store),
         bot.attach(phone.Phone()),
     )
     built.clear()
@@ -429,7 +515,7 @@ def test_with_traits_the_persona_carries_them_to_reflection_and_shares_the_store
 
 def test_without_traits_there_is_no_persona(built: Built) -> None:
     model = bot.define(
-        "greeter", bot.cognition(support.Silent(), intuition=support.Undecided()), bot.attach(phone.Phone())
+        "greeter", bot.cognition(reasoning=support.Silent(), reflex=support.Undecided()), bot.attach(phone.Phone())
     )
     built.clear()
 
@@ -459,7 +545,7 @@ def test_the_seeds_reach_autonomy_as_given(built: Built) -> None:
     heard = communication.speech_heard_seed()
     model = bot.define(
         "greeter",
-        bot.cognition(support.Silent(), intuition=support.Undecided(), autonomy=True, seeds=(heard,)),
+        bot.cognition(reasoning=support.Silent(), reflex=support.Undecided(), autonomy=True, seeds=(heard,)),
         bot.attach(phone.Phone()),
     )
     built.clear()
@@ -479,7 +565,7 @@ def test_the_seeds_reach_autonomy_as_given(built: Built) -> None:
 def test_without_seeds_autonomy_runs_only_what_it_learns(built: Built) -> None:
     model = bot.define(
         "greeter",
-        bot.cognition(support.Silent(), intuition=support.Undecided(), autonomy=True),
+        bot.cognition(reasoning=support.Silent(), reflex=support.Undecided(), autonomy=True),
         bot.attach(phone.Phone()),
     )
     built.clear()
@@ -507,8 +593,8 @@ def test_the_speech_seed_takes_a_heard_turn_into_the_conversation(seeded: bool) 
     greeter = bot.define(
         "greeter",
         bot.cognition(
-            model,
-            intuition=testing.Decider(),
+            reasoning=model,
+            reflex=testing.Decider(),
             autonomy=seeded,
             seeds=(communication.speech_heard_seed(),) if seeded else (),
         ),
@@ -556,7 +642,7 @@ def test_a_voice_is_given_once_at_inception_from_the_traits_and_the_bot_is_born(
         "greeter",
         bot.traits("warm", "patient"),
         bot.voice(shelf, languages=("en",), allowed=("warm",)),
-        bot.cognition(conceiving, intuition=support.Undecided(), memory=store),
+        bot.cognition(reasoning=conceiving, reflex=support.Undecided(), memory=store),
         bot.output(mouth),
         bot.attach(phone.Phone()),
     )
@@ -593,7 +679,7 @@ def test_without_a_voice_there_is_no_inception(built: Built) -> None:
     model = bot.define(
         "greeter",
         bot.traits("warm"),
-        bot.cognition(support.Silent(), intuition=support.Undecided()),
+        bot.cognition(reasoning=support.Silent(), reflex=support.Undecided()),
         bot.output(speaking.Speaking(encoder=support.Voices())),
         bot.attach(phone.Phone()),
     )
@@ -629,7 +715,9 @@ def test_start_runs_its_observers_on_this_bots_body_and_only_for_this_start() ->
     """The observers watch the body ``bot.start`` started, under the bot's name; a later start has none."""
 
     model = bot.define(
-        "greeter", bot.cognition(support.Silent(), intuition=support.Undecided()), bot.attach(phone.Phone(id="desk"))
+        "greeter",
+        bot.cognition(reasoning=support.Silent(), reflex=support.Undecided()),
+        bot.attach(phone.Phone(id="desk")),
     )
     seen: list[str] = []
 
@@ -651,7 +739,7 @@ def test_start_runs_its_observers_on_this_bots_body_and_only_for_this_start() ->
 
 def test_start_gives_its_observers_to_the_body(recording: type[Recording]) -> None:
     model = bot.define(
-        "greeter", bot.cognition(support.Silent(), intuition=support.Undecided()), bot.attach(phone.Phone())
+        "greeter", bot.cognition(reasoning=support.Silent(), reflex=support.Undecided()), bot.attach(phone.Phone())
     )
     observer = _watching([])
 
@@ -667,7 +755,7 @@ def test_start_gives_its_observers_to_the_body(recording: type[Recording]) -> No
 
 def test_start_observes_with_observers_only() -> None:
     model = bot.define(
-        "greeter", bot.cognition(support.Silent(), intuition=support.Undecided()), bot.attach(phone.Phone())
+        "greeter", bot.cognition(reasoning=support.Silent(), reflex=support.Undecided()), bot.attach(phone.Phone())
     )
 
     async def run() -> None:
@@ -698,7 +786,7 @@ def test_stop_stops_the_body_and_every_part_it_started() -> None:
     store, desk, register = memory.Memory(), phone.Phone(), memory.StmMemory()
     model = bot.define(
         "greeter",
-        bot.cognition(support.Silent(), intuition=support.Undecided(), memory=store),
+        bot.cognition(reasoning=support.Silent(), reflex=support.Undecided(), memory=store),
         bot.attach(desk),
         bot.register(register),
     )
@@ -718,7 +806,11 @@ def test_a_stopped_model_starts_again_and_leaves_nothing_open() -> None:
         model = bot.define(
             "greeter",
             bot.cognition(
-                support.Silent(), intuition=support.Undecided(), associative=True, consolidation=True, autonomy=True
+                reasoning=support.Silent(),
+                reflex=support.Undecided(),
+                associative=True,
+                consolidation=True,
+                autonomy=True,
             ),
             bot.attach(phone.Phone(id="desk")),
             bot.register(memory.StmMemory()),
@@ -747,7 +839,9 @@ def test_a_stopped_model_redefines_and_its_stopped_parts_define_another_bot() ->
     """D-W7-9, W7-19: once bot.stop has stopped its parts, the model redefines like hsm's, and its parts are free."""
 
     desk = phone.Phone(id="desk")
-    model = bot.define("greeter", bot.cognition(support.Silent(), intuition=support.Undecided()), bot.attach(desk))
+    model = bot.define(
+        "greeter", bot.cognition(reasoning=support.Silent(), reflex=support.Undecided()), bot.attach(desk)
+    )
 
     async def run() -> None:
         started, _ = await _started(model)
@@ -755,7 +849,7 @@ def test_a_stopped_model_redefines_and_its_stopped_parts_define_another_bot() ->
 
     asyncio.run(run())
     again = bot.redefine(model)
-    other = bot.define("other", bot.cognition(support.Silent(), intuition=support.Undecided()), bot.attach(desk))
+    other = bot.define("other", bot.cognition(reasoning=support.Silent(), reflex=support.Undecided()), bot.attach(desk))
 
     assert list(again.members) == list(model.members)
     assert list(other.members) == ["/other", "/other/.cognition", "/other/desk"]
@@ -763,7 +857,7 @@ def test_a_stopped_model_redefines_and_its_stopped_parts_define_another_bot() ->
 
 def test_stopping_a_stopped_bot_does_nothing() -> None:
     model = bot.define(
-        "greeter", bot.cognition(support.Silent(), intuition=support.Undecided()), bot.attach(phone.Phone())
+        "greeter", bot.cognition(reasoning=support.Silent(), reflex=support.Undecided()), bot.attach(phone.Phone())
     )
 
     async def run() -> bool:
@@ -815,12 +909,12 @@ def test_a_part_shared_with_a_running_bot_is_b0101() -> None:
     store = memory.Memory()
     first = bot.define(
         "greeter",
-        bot.cognition(support.Silent(), intuition=support.Undecided(), memory=store),
+        bot.cognition(reasoning=support.Silent(), reflex=support.Undecided(), memory=store),
         bot.attach(phone.Phone()),
     )
     second = bot.define(
         "helper",
-        bot.cognition(support.Silent(), intuition=support.Undecided(), memory=store),
+        bot.cognition(reasoning=support.Silent(), reflex=support.Undecided(), memory=store),
         bot.attach(phone.Phone()),
     )
 
@@ -843,7 +937,7 @@ def test_two_parts_with_one_id_are_never_both_the_firmwares_peer() -> None:
 
     model = bot.define(
         "greeter",
-        bot.cognition(support.Silent(), intuition=support.Undecided()),
+        bot.cognition(reasoning=support.Silent(), reflex=support.Undecided()),
         bot.attach(phone.Phone(id="ear")),
         bot.initial(bot.target("idle")),
         bot.state("idle"),
@@ -940,7 +1034,9 @@ def test_each_start_is_one_span_and_one_count_on_closed_attributes(
     tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     model = bot.define(
-        "greeter", bot.cognition(support.Silent(), intuition=support.Undecided()), bot.attach(phone.Phone(id="desk"))
+        "greeter",
+        bot.cognition(reasoning=support.Silent(), reflex=support.Undecided()),
+        bot.attach(phone.Phone(id="desk")),
     )
 
     async def run() -> None:

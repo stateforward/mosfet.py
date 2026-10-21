@@ -403,7 +403,7 @@ def test_reasoning_models_selection_repair_as_a_bounded_choice() -> None:
 def test_reasoning_asks_again_when_its_selection_is_rejected_and_dispatches_the_repair() -> None:
     """Live check round 2 (E2): a dispatch that did not decode failed reasoning's turn, with no repair.
 
-    Only intuition had the bounded selection repair. Reasoning now asks its model again with the diagnostic.
+    Only the decision layer had the bounded selection repair. Reasoning now asks its model again with the diagnostic.
     """
 
     processor = _AnsweringProcessor(_UNDECODABLE, _RECEIVE)
@@ -431,6 +431,28 @@ def test_reasoning_asks_again_when_dispatch_rejects_its_selection() -> None:
     assert "Input should be a valid string" in (processor.calls[1].feedback or "")
     assert [received.data for received in receiver.received] == [_ReceivedData(value="fixed")]
     assert output.output is not None
+
+
+def test_reasoning_never_offered_the_handoff_has_selecting_it_rejected_and_repaired() -> None:
+    """D-R-52: reasoning is the handoff's recipient, never offered it; a selection of it is rejected like any other
+    event the turn does not offer, and repaired, never taken as a hand-on or recorded as acted."""
+
+    handoff = (
+        processing.SelectedEvent(event=cognition.reasoning.InputEvent.name, target="cognition", data={}),
+        *_RECEIVE,
+    )
+    processor = _AnsweringProcessor(handoff, _RECEIVE)
+
+    output, receiver = _reason_with(processor)
+
+    assert len(processor.calls) == 2
+    assert "The previous event selection was rejected" in (processor.calls[1].feedback or "")
+    assert cognition.reasoning.InputEvent.name in (processor.calls[1].feedback or "")
+    assert output.output == (
+        cognition.types.EventData(event=_ReceivedEvent.name, target="receiver", data={"value": "fixed"}),
+    )
+    assert output.turn.acted is None
+    assert [received.data for received in receiver.received] == [_ReceivedData(value="fixed")]
 
 
 def test_reasoning_stops_on_the_same_selection_rejection_twice() -> None:

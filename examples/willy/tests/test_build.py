@@ -28,8 +28,10 @@ from mosfet.providers import openai_compat
 
 _CLOSED = "127.0.0.1:9"
 _REQUIRED = {
-    "WILLY_LLM_URL": f"http://{_CLOSED}/v1",
-    "WILLY_MODEL": "local-model",
+    "WILLY_INTUITION_URL": f"http://{_CLOSED}/v1",
+    "WILLY_INTUITION_MODEL": "fast-model",
+    "WILLY_REASONING_URL": f"http://{_CLOSED}/v1",
+    "WILLY_REASONING_MODEL": "local-model",
     "WILLY_EMBED_URL": f"http://{_CLOSED}/v1",
     "WILLY_EMBED_MODEL": "embeddinggemma-2",
     "WILLY_STT_URL": f"ws://{_CLOSED}",
@@ -52,12 +54,13 @@ _STOP_BOUND = 10.5
 def test_the_required_settings_alone_take_every_default() -> None:
     settings = willy_example.Settings.model_validate(_REQUIRED)
 
-    assert (settings.llm_url, settings.model, settings.embed_url, settings.embed_model) == (
+    assert (settings.intuition_url, settings.intuition_model, settings.reasoning_url, settings.reasoning_model) == (
+        f"http://{_CLOSED}/v1",
+        "fast-model",
         f"http://{_CLOSED}/v1",
         "local-model",
-        f"http://{_CLOSED}/v1",
-        "embeddinggemma-2",
     )
+    assert (settings.embed_url, settings.embed_model) == (f"http://{_CLOSED}/v1", "embeddinggemma-2")
     assert (settings.host, settings.port, settings.camera, settings.face_models) == ("127.0.0.1", 8765, False, None)
     assert (settings.decision_base_url, settings.decision_max_context_tokens) == (f"http://{_CLOSED}", None)
     assert settings.max_context_tokens is None
@@ -134,17 +137,18 @@ class _Recorder:
 @pytest.mark.parametrize(
     ("given", "body"),
     [
-        ({}, {"chat_template_kwargs": {"enable_thinking": True}, "thinking_token_budget": 256}),
+        ({}, {"chat_template_kwargs": {"enable_thinking": True}, "thinking_token_budget": 1024}),
         (
-            {"WILLY_THINKING_TOKENS": "1024"},
-            {"chat_template_kwargs": {"enable_thinking": True}, "thinking_token_budget": 1024},
+            {"WILLY_THINKING_TOKENS": "256"},
+            {"chat_template_kwargs": {"enable_thinking": True}, "thinking_token_budget": 256},
         ),
         ({"WILLY_THINKING_TOKENS": "0"}, {"chat_template_kwargs": {"enable_thinking": False}}),
     ],
     ids=["default", "owner-budget", "off"],
 )
 def test_willy_reasons_after_thinking_within_the_owners_budget(given: dict[str, str], body: dict[str, object]) -> None:
-    """R-18: a reasoning turn thinks first, within WILLY_THINKING_TOKENS; 0 turns thinking off and sends no budget."""
+    """R-18, D-R-52: reasoning thinks first, within WILLY_THINKING_TOKENS (1024 by default); 0 turns its thinking
+    off and sends no budget."""
 
     settings = willy_example.Settings.model_validate({**_REQUIRED, **given})
     endpoint = _Recorder()
@@ -155,21 +159,37 @@ def test_willy_reasons_after_thinking_within_the_owners_budget(given: dict[str, 
     assert endpoint.bodies == [body]
 
 
+@pytest.mark.parametrize("budget", ["0", "1024"])
+def test_willy_intuits_with_thinking_off_whatever_the_reasoning_budget(budget: str) -> None:
+    """D-R-52: thinking off is what intuition is, so its body is fixed, never a setting."""
+
+    _ = willy_example.Settings.model_validate({**_REQUIRED, "WILLY_THINKING_TOKENS": budget})
+    endpoint = _Recorder()
+    intuition = openai_compat.Processor(client=endpoint, provider="willy", extra_body=willy_example.INTUITION_BODY)
+
+    _ = asyncio.run(intuition.process(processing.InputData(input="hello", instructions="Select events.")))
+
+    assert endpoint.bodies == [{"chat_template_kwargs": {"enable_thinking": False}}]
+
+
+def test_the_bot_file_thinks_in_the_shared_tiers() -> None:
+    """D-R-52: the bot file builds its cognition from ``willy_example.tiers``, as the live check does."""
+
+    main = (_PROJECT / "src" / "willy_example" / "__main__.py").read_text(encoding="utf-8")
+
+    assert main.count("Tiers.of(settings, api_key=api_key, decision_key=decision_key)") == 1
+    assert "reasoning=tiers.reasoning" in main
+    assert "intuition=tiers.intuition" in main
+    assert "reflex=tiers.reflex" in main
+    assert main.count("Tiers.timeouts()") == 1
+
+
 @pytest.mark.parametrize("value", ["-1", "lots"])
 def test_a_thinking_budget_is_a_count_of_tokens(value: str) -> None:
     message = _refused({**_REQUIRED, "WILLY_THINKING_TOKENS": value})
 
     assert "WILLY_THINKING_TOKENS" in message
     assert value not in message
-
-
-def test_willys_reasoning_prompt_is_fitted_to_the_owners_context() -> None:
-    """R-20 C6: the bot file gives its reasoning processor the owner's WILLY_MAX_CONTEXT_TOKENS."""
-
-    main = (_PROJECT / "src" / "willy_example" / "__main__.py").read_text(encoding="utf-8")
-    reasoning = main[main.index("openai_compat.Processor(") : main.index("intuition=decision.Processor(")]
-
-    assert "max_context_tokens=settings.max_context_tokens" in reasoning
 
 
 def test_the_owner_lists_nobody_willy_learns_who_people_are_itself() -> None:
@@ -252,14 +272,17 @@ def test_the_env_example_is_the_lab_and_every_setting_in_it_is_valid() -> None:
     # nothing in it is a secret but the lab's keyless placeholder, and the local decision server takes no key.
     assert set(_REQUIRED) <= set(given)
     assert all("192.168.2.2:" in given[name] for name in _REQUIRED if name.endswith("_URL"))
-    assert (settings.model, settings.embed_model) == ("gemma-4-26b-a4b", "embeddinggemma-2")
+    # D-R-52: intuition and reasoning both run on Gemma for now, intuition with thinking off.
+    assert (settings.intuition_url, settings.intuition_model) == ("http://192.168.2.2:8100/v1", "gemma-4-26b-a4b")
+    assert (settings.reasoning_url, settings.reasoning_model) == ("http://192.168.2.2:8100/v1", "gemma-4-26b-a4b")
+    assert settings.embed_model == "embeddinggemma-2"
     assert [room.id for room in settings.rooms] == ["living-room"]
     assert given["OPENAI_API_KEY"] == "local"
     # D-R-36: decide's context is 2048 tokens, and each decision request is fitted to it.
     assert (settings.decision_base_url, settings.decision_max_context_tokens) == ("http://192.168.2.2:8102", 2048)
-    # R-18: the lab's reasoning turns think within 256 tokens, 4-7 s on a full Willy turn.
-    assert settings.thinking_tokens == 256
-    # R-20 C6: the lab's chat server serves a 32k context, and each reasoning prompt is fitted to it.
+    # R-18, D-R-52: the lab's reasoning turns think within 1024 tokens.
+    assert settings.thinking_tokens == 1024
+    # R-20 C6: the lab's chat server serves a 32k context, and each intuition and reasoning prompt is fitted to it.
     assert settings.max_context_tokens == 32768
     secrets = {"COMPUTER_TOKEN_SECRET", "OPENAI_API_KEY_FILE", "DECISION_API_KEY", "DECISION_API_KEY_FILE"}
     assert not secrets & set(given)

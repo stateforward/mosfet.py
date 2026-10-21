@@ -14,8 +14,8 @@ if __name__ == "__main__":
     greeter = bot.define(
         "greeter",
         bot.cognition(
-            openai_compat.Processor(client=openai_compat.ChatClient(model="qwen3-coder")),
-            intuition=decision.Processor(base_url="http://127.0.0.1:8102"),
+            reasoning=openai_compat.Processor(client=openai_compat.ChatClient(model="qwen3-coder")),
+            reflex=decision.Processor(base_url="http://127.0.0.1:8102"),
         ),
         bot.attach(computer.Computer(id="desk", transport=server)),
     )

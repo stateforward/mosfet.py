@@ -1,8 +1,8 @@
 error[B0102]: bot `greeter` could not be built: building its cognition raised `ValueError`
   --> greeter.py:9:31
    |
- 9 | model = bot.define("…", bot.cognition(support.Silent(), intuition=support.Undecided()), bot.attach(phone.Phone()))
-   |                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `ValueError` raised building what this declares
+ 9 | model = bot.define("…", bot.cognition(reasoning=support.Silent(), reflex=support.Undecided()), bot.attach(phone.Phone()))
+   |                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `ValueError` raised building what this declares
 ...
 13 |     _ = await bot.start(environment, model)
    |               ----------------------------- started here

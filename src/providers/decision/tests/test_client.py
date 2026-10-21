@@ -17,7 +17,7 @@ def _request() -> decision.Request:
         questions={
             "selection": decision.Choice(
                 instructions="Choose from the menu.",
-                criteria={"phone.answer_call": "Answer the ringing call.", "__unhandled__": None},
+                criteria={"phone.answer_call": "Answer the ringing call.", "__reasoning__": None},
             )
         },
     )
@@ -31,7 +31,7 @@ def _answer(choice: str = "phone.answer_call") -> dict[str, object]:
                 "type": "choice",
                 "choice": choice,
                 "confidence": 0.7,
-                "probabilities": {"phone.answer_call": 0.8, "__unhandled__": 0.2},
+                "probabilities": {"phone.answer_call": 0.8, "__reasoning__": 0.2},
             }
         },
         "usage": {"input_tokens": 10, "output_tokens": 0},
@@ -71,7 +71,7 @@ def test_a_decision_is_one_post_of_the_wire_format_to_v1_systemone() -> None:
             "selection": {
                 "type": "choice",
                 "instructions": "Choose from the menu.",
-                "criteria": {"phone.answer_call": "Answer the ringing call.", "__unhandled__": None},
+                "criteria": {"phone.answer_call": "Answer the ringing call.", "__reasoning__": None},
             }
         },
     }
@@ -80,7 +80,7 @@ def test_a_decision_is_one_post_of_the_wire_format_to_v1_systemone() -> None:
     assert (answer.choice, answer.confidence, answer.probabilities) == (
         "phone.answer_call",
         0.7,
-        {"phone.answer_call": 0.8, "__unhandled__": 0.2},
+        {"phone.answer_call": 0.8, "__reasoning__": 0.2},
     )
 
 

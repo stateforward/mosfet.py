@@ -166,6 +166,12 @@ def test_learning_event_names_and_types() -> None:
     assert learning.GenerateEvent.name == "bot.ability.learning.generate"
 
 
+def test_learning_is_reasonings_alone_above_intuitions_ceiling() -> None:
+    """D-R-52: authoring behaviors takes deliberation; intuition's ceiling is M, so learning is rated L."""
+
+    assert Learning.effort is abilities.ability.Effort.L
+
+
 def test_select_input_grounds_in_remembered_episodes() -> None:
     """prior_turns are memory.Episode: the model sees stimulus, text, images, participants, and acts."""
 

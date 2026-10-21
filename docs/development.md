@@ -134,23 +134,27 @@ stimulus unchanged, the source it arrived on and its producer's participants. Th
 the first percept's, and its participants are the union.
 
 Cognition takes the batch as one turn. Attention is biased percept by percept: the focus first,
-then each percept's device in arrival order, once each. Autonomy matches each percept by its own
+then each percept's device in arrival order, once each. Reflex's behaviors match each percept by its own
 name, and a matched behavior meets that percept alone, with its own participants; the turn is
-handled only when every percept was, and otherwise intuition perceives the whole batch after the
-behaviors' selections were dispatched. Those selections ride the turn on into deliberation
+handled only when every percept was, and otherwise reflex's decision layer perceives the whole batch after the
+behaviors' selections were dispatched. Those selections ride the turn on into the stages after
 (`cognition.types.TurnData.acted`, an `ActedData` of the percepts behaviors handled and what they
-selected): intuition and reasoning are told them as a fact of the turn, after the world and self
-blocks, and the turn's output and its episode carry them first, ahead of deliberation's. The
+selected), and so does what a later stage dispatched before it handed the turn on (the decision
+layer's actions, intuition's words before its handoff): each stage after is told them as a fact of
+the turn, in its situation after the world block, and the turn's output and its episode carry them first,
+ahead of the stage that settles it. The
 prompt renders the batch with each percept as a child element in order. Images across percepts
 share the model's `media.ImageCapacity`, which admits newest in document order first, as within
 any one stimulus. The turn is remembered as one episode of `bot.perceived`, every percept kept,
 under the participants' union. A failed or timed-out step of a batch names `bot.perceived` as its
 stimulus and is handed back once, unless every percept was itself a failed step. A turn that
-perceives a handed-back intuition failure, as its stimulus or as any percept of its batch, passes
-intuition, so reasoning, a stage that can perceive that failure, decides it. An intuition that
-fails, or whose frame cannot be built, hands the same turn to reasoning: nothing is handed back
-(`bot.cognition.step.failure.count{outcome="cascaded"}`), so only an intuition step that outlasts
-its timeout is perceived as a failure.
+perceives a handed-back reflex failure, as its stimulus or as any percept of its batch, passes
+the decision layer (its behaviors still run first), and one perceiving a handed-back intuition
+failure passes intuition too, so a later stage, one that can perceive that failure, decides it. A
+decision layer or an intuition that fails, or whose frame cannot be built, hands the same turn on
+to the next stage: nothing is handed back
+(`bot.cognition.step.failure.count{outcome="cascaded"}`), so only a decision or intuition step
+that outlasts its timeout is perceived as a failure.
 
 Leaving `active` (deactivation, reboot, the cancel bound that degrades the body, or stopping)
 releases whatever is still held: never replayed, counted in
@@ -215,24 +219,34 @@ Cognition owns the bot's memory: it attaches `memory.Memory` and remembers every
 (completed, failed, or cancelled) with one `RememberEvent` it does not wait on, rendering the
 stimulus through `cognition.event.memory_content` (a payload's `__memory_fields__` choose what is
 kept; `conversation.Exchange` keeps its causal turn). With `memory.Associative` composed, a turn
-autonomy leaves unhandled first asks it what memory associates with the stimulus: candidates from
-every search lane, scored by injected `memory.Weights` and fit to a token budget. The associations
-ride the turn to intuition and reasoning (their frame's `processing.InputData.recalled`, rendered
-after the turn's situation and before the stimulus, trimmed, never a failure) and to reflection; a failed association leaves
-the turn without them. Reasoning, Reflection, and Conversation never read or write episodes.
+reflex hands on (what its behaviors leave unhandled, then the decision model's pass) first asks it
+what memory associates with the stimulus: candidates from every search lane, scored by injected
+`memory.Weights` and fit to a token budget. Recall comes after reflex, so the decision model
+chooses without associations. They ride the turn to intuition and reasoning (their frames'
+`processing.InputData.recalled`, rendered after the turn's situation and before the stimulus,
+trimmed, never a failure) and to reflection; a failed association leaves the turn without them.
+Reasoning, Reflection, and Conversation never read or write episodes.
 
 Reasoning can also recall a memory deliberately. Cognition adds `memory.Associative` to every
-frame it builds, and its effort (`M`) keeps it out of Intuition's frames, so only Reasoning is
-offered the model-callable `bot.ability.memory.recall` (`memory.RecallData`: `about` something in
-plain words, or one association's `node` ref). Intuition is still told it exists: every
+frame it builds, and its effort (`M`) keeps it out of the decision layer's frames, so only intuition
+(ceiling `M`) and reasoning are offered the model-callable `bot.ability.memory.recall` (`memory.RecallData`: `about` something in
+plain words, or one association's `node` ref). The decision layer is still told it exists: every
 capacity its effort ceiling keeps off its dispatch tool (recall, the sandbox bench, any other
 actor rated above it) is named in its frame's instructions after the self block, in one
-`<reasoning_only>` element with the opening paragraph of the event's own description, so
-escalating the turn to reasoning is the model's informed choice. While intuition decides, the
-Cognition host offers the deliberative handoff `bot.ability.reasoning.input` (`reasoning.CallData`)
-as a call surface, like ignore; intuition keeps it on its dispatch tool only when its ceiling held
-something, names it in the block's `reached_by`, and a selection of it leaves the turn unhandled
-for reasoning after the environment actions selected with it run. Associative reads the chosen memories in full,
+`<held>` element with the opening paragraph of the event's own description, reached by passing the
+turn on, so passing it on is the model's informed choice. The Cognition host offers the deliberative
+handoff `bot.ability.reasoning.input` (`reasoning.CallData`) as a call surface, like ignore, but the
+decision layer is never offered it: its pass is its hand-on, and reasoning never offers it to itself.
+The decision layer's pass names the tier it hands the turn to (R-23): its frame lists the tiers
+composed (`processing.InputData.hand_ons`), the decision provider offers one pass criterion per
+tier ("answer it in words now, with intuition"; "it needs thought, so think it through first,
+with reasoning"), and the choice rides the turn (`TurnData.hand_to`) through associating to the
+guard that picks intuition or reasoning. A hand-on that names no tier (a decision failure or
+timeout, low confidence, an empty selection, a confidence gate that dropped everything) goes on
+to intuition. The reflex classify span says where a turn went (`bot.reflex.handed_to`).
+Intuition is offered it on every turn, with what reasoning holds above intuition's ceiling named in
+its own `<held>` block, reached by the handoff; a selection of it hands the turn on to reasoning
+after intuition's other selections (what it says first) run. Associative reads the chosen memories in full,
 images included and reinforced, and tells its owner with `memory.RecollectedEvent`
 (`memory.RecollectionData`), or with a typed `ability.FailedEvent` when memory cannot serve it.
 Cognition hands either to the body as a `cognition.InputEvent` observing it, the way it hands a
@@ -286,9 +300,9 @@ spans; routine names are never attributes.
 `persona.Persona` (owner-given `persona.Traits`, optional memory peer; compose it as
 `Cognition(persona=...)`) is attached by Cognition and tells it what the bot knows of itself
 with `persona.OutputEvent`: on waking, with the description it remembered or none, and after
-every revision it wrote down. Cognition keeps the latest one and shows it on every intuition and
-reasoning frame as the self block (`cognition.SelfData`), the frame's stable `instructions` (the system
-prompt), while the world block is the turn's `situation`: `<persona>`
+every revision it wrote down. Cognition keeps the latest one and shows it on every decision,
+intuition and reasoning frame as the self block (`cognition.SelfData`), the frame's stable `instructions`
+(the system prompt), while the world block is the turn's `situation`: `<persona>`
 holding `<traits given_by="owner">` and `<description written_by="you">`, escaped and never
 filtered. Cognition never revises the persona itself: it hands what it knows of the bot to
 Reflection with the turn (`reflection.InputData.persona`). Composed with the same persona,
@@ -350,7 +364,7 @@ studio (publishes topology into the `web/` studio for inspection) with `BOT_MODE
 | Devices | `bot.devices.phone` (basic phone: ringing, dialing, call lifecycle, busy/reorder tones), `bot.devices.smart_phone` (a phone that also texts: incoming texts, notification ding, lock screen, sending texts, a bounded thread per correspondent the holder reads back with `phone.read_thread`), `bot.devices.audio` (microphone, speaker with placement, binary PCM stream codec), `bot.devices.hid` (remote keyboard and pointer ports), `bot.devices.computer` (a person's computer reached through a transport, each remote port owning one stream of its link: text/field/button display driven by `computer.show`, remote camera and microphone put into the room, a mouthpiece that carries the bot's voice to the remote speaker) |
 | Environment | broadcast scope, typed stimuli (`environment.sound`, …), world snapshots, `bot.environment.space` propagation law |
 | Abilities | Listening (VAD · STT · sensitivity/self-sound), Hearing (voice identity), Seeing (measured visual change · look · objects, faces, face identity, description), Vision, Reading, Language, Memory (one durable `memory.Memory`: relational transactions plus an episodic graph of episodes, persons and concepts with a vector per node; `StmMemory` register), Communication (Conversation + turn detection), Speaking, Identity (name, recognition, values), Classifying, Decoding/Encoding |
-| Cognition | Autonomy, Intuition, Reasoning, Reflection, Learning, Routines — all typed |
+| Cognition | Reflex (Autonomy's behaviors, then Decision), Intuition, Reasoning, Reflection, Learning, Routines — all typed |
 | Behavior | Starlark → HSM compiler, verified seed/native behaviors, persistent routines, durable storage, diagnostics |
 | Telemetry | HSM observation → OpenTelemetry metrics + spans, low-cardinality by contract |
 
@@ -370,4 +384,4 @@ studio (publishes topology into the `web/` studio for inspection) with `BOT_MODE
 | `mosfet-provider-pyannote` | voice diarization & speaker identification |
 | `mosfet-provider-speech-server` | speech-server clients for `listening.Listening`: `Transcription` (streaming `/v1/audio/stream` session), `Diarizer` (`/v1/diarize`), `VoiceEmbedder` (`/v1/embed`) and `AffectClassifier` (`/v1/emotion`), with stdlib 16 kHz mono resampling |
 | `mosfet-provider-sqlite-memory` | SQLite + sqlite-vec for `memory.Memory`: `open_engine` (vec0 loaded), the `Database` handle opened on first use, the `VecIndex` vector index and the `IdentityStore` |
-| `mosfet-provider-decision` | decision-model selection on any server that speaks the decisions wire format (`POST /v1/systemone`, such as anygame's decide): `Processor`, a `processing.DecisionProcessor` for intuition, over `Client` (httpx, `base_url` and an optional `api_key`) |
+| `mosfet-provider-decision` | decision-model selection on any server that speaks the decisions wire format (`POST /v1/systemone`, such as anygame's decide): `Processor`, a `processing.DecisionProcessor` for reflex's decision layer, over `Client` (httpx, `base_url` and an optional `api_key`) |

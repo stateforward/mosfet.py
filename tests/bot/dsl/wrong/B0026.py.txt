@@ -1,0 +1,8 @@
+"""B0026: a decision processor given to intuition."""
+
+from mosfet import bot
+from mosfet.devices import phone
+
+from tests.bot.dsl import support
+
+model = bot.define("greeter", bot.cognition(reasoning=support.Silent(), intuition=support.Undecided()), bot.attach(phone.Phone()))

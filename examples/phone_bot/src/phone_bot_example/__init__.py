@@ -126,7 +126,7 @@ class Settings(pydantic.BaseModel):
     """The owner's settings for the phone bot, read from the process environment by ``__main__``.
 
     Each field is read from the first of its variables that is set; a variable set to the empty string is unset.
-    The OpenAI and Gemini keys are required, and so is the decision server the bot's intuition decides on, whose
+    The OpenAI and Gemini keys are required, and so is the decision server the bot's reflex decides on, whose
     key is optional (a local decide takes none). The LiveKit line is optional: with no URL the phone has no line, and
     the bot can still be talked to in its room. With a URL, the token is ``BOT_LIVEKIT_TOKEN``, or one minted
     from the API key and secret for the line's identity and room. A value is never shown in an error: the error
@@ -159,7 +159,7 @@ class Settings(pydantic.BaseModel):
         min_length=1,
         validation_alias=pydantic.AliasChoices("DECISION_BASE_URL"),
         description=(
-            "The decision server the bot's intuition decides on, which speaks the decisions wire format: anygame's"
+            "The decision server the bot's reflex decides on, which speaks the decisions wire format: anygame's"
             " decide, or a hosted server with the same format."
         ),
         examples=["http://127.0.0.1:8102"],
@@ -336,7 +336,7 @@ class Settings(pydantic.BaseModel):
         return self
 
     def decision_key(self) -> str | None:
-        """The key intuition's decision server is asked with: ``DECISION_API_KEY`` when given, else none at all."""
+        """The key reflex's decision server is asked with: ``DECISION_API_KEY`` when given, else none at all."""
 
         return None if self.decision_api_key is None else self.decision_api_key.get_secret_value()
 

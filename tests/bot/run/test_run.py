@@ -69,7 +69,9 @@ def _raising_reasoning(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_a_model_passed_twice_is_b0105_and_exits_78(here: pathlib.Path, capsys: pytest.CaptureFixture[str]) -> None:
-    model = bot.define("quiet", bot.cognition(testing.Scripted(), intuition=testing.Decider()), bot.allow("no_devices"))
+    model = bot.define(
+        "quiet", bot.cognition(reasoning=testing.Scripted(), reflex=testing.Decider()), bot.allow("no_devices")
+    )
 
     assert _exit(lambda: bot.run(model, model, process=_process(here))) == 78
 
@@ -84,8 +86,12 @@ def test_a_model_passed_twice_is_b0105_and_exits_78(here: pathlib.Path, capsys: 
 
 def test_two_models_with_one_name_are_b0104(here: pathlib.Path, capsys: pytest.CaptureFixture[str]) -> None:
     first, second = (
-        bot.define("quiet", bot.cognition(testing.Scripted(), intuition=testing.Decider()), bot.allow("no_devices")),
-        bot.define("quiet", bot.cognition(testing.Scripted(), intuition=testing.Decider()), bot.allow("no_devices")),
+        bot.define(
+            "quiet", bot.cognition(reasoning=testing.Scripted(), reflex=testing.Decider()), bot.allow("no_devices")
+        ),
+        bot.define(
+            "quiet", bot.cognition(reasoning=testing.Scripted(), reflex=testing.Decider()), bot.allow("no_devices")
+        ),
     )
 
     assert _exit(lambda: bot.run(first, second, process=_process(here))) == 78
@@ -97,7 +103,9 @@ def test_two_models_with_one_name_are_b0104(here: pathlib.Path, capsys: pytest.C
 
 
 def test_an_actor_that_is_not_one_is_b0106(here: pathlib.Path, capsys: pytest.CaptureFixture[str]) -> None:
-    model = bot.define("quiet", bot.cognition(testing.Scripted(), intuition=testing.Decider()), bot.allow("no_devices"))
+    model = bot.define(
+        "quiet", bot.cognition(reasoning=testing.Scripted(), reflex=testing.Decider()), bot.allow("no_devices")
+    )
     processor = testing.Scripted()
 
     assert (
@@ -115,7 +123,9 @@ def test_an_actor_that_is_not_one_is_b0106(here: pathlib.Path, capsys: pytest.Ca
 
 
 def test_every_mistake_is_reported_at_once(here: pathlib.Path, capsys: pytest.CaptureFixture[str]) -> None:
-    model = bot.define("quiet", bot.cognition(testing.Scripted(), intuition=testing.Decider()), bot.allow("no_devices"))
+    model = bot.define(
+        "quiet", bot.cognition(reasoning=testing.Scripted(), reflex=testing.Decider()), bot.allow("no_devices")
+    )
 
     code = _exit(lambda: bot.run(model, model, actors=(typing.cast(hsm.Instance, object()),), process=_process(here)))
 
@@ -129,7 +139,9 @@ def test_every_mistake_is_reported_at_once(here: pathlib.Path, capsys: pytest.Ca
 def test_a_process_runs_one_to_32_bots(here: pathlib.Path, capsys: pytest.CaptureFixture[str], count: int) -> None:
     models = [
         bot.define(
-            f"bot_{index}", bot.cognition(testing.Scripted(), intuition=testing.Decider()), bot.allow("no_devices")
+            f"bot_{index}",
+            bot.cognition(reasoning=testing.Scripted(), reflex=testing.Decider()),
+            bot.allow("no_devices"),
         )
         for index in range(count)
     ]
@@ -148,7 +160,9 @@ def test_something_that_is_not_a_model_is_a_type_error(here: pathlib.Path) -> No
 def test_a_bot_that_cannot_be_built_is_b0102_and_exits_78_after_making_the_data_dir_private(
     here: pathlib.Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    model = bot.define("quiet", bot.cognition(testing.Scripted(), intuition=testing.Decider()), bot.allow("no_devices"))
+    model = bot.define(
+        "quiet", bot.cognition(reasoning=testing.Scripted(), reflex=testing.Decider()), bot.allow("no_devices")
+    )
     _raising_reasoning(monkeypatch)
 
     assert _exit(lambda: bot.run(model, process=_process(here))) == 78
@@ -164,7 +178,9 @@ def test_a_bot_that_cannot_be_built_is_b0102_and_exits_78_after_making_the_data_
 def test_mosfet_traceback_shows_the_cause(
     here: pathlib.Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    model = bot.define("quiet", bot.cognition(testing.Scripted(), intuition=testing.Decider()), bot.allow("no_devices"))
+    model = bot.define(
+        "quiet", bot.cognition(reasoning=testing.Scripted(), reflex=testing.Decider()), bot.allow("no_devices")
+    )
     _raising_reasoning(monkeypatch)
     process = bot.process(argv=["--data-dir", str(here / "data")], environ={"MOSFET_TRACEBACK": "1"})
 
@@ -184,7 +200,9 @@ def test_a_data_dir_that_cannot_be_created_exits_78(here: pathlib.Path, capsys: 
         _exit(
             lambda: bot.run(
                 bot.define(
-                    "quiet", bot.cognition(testing.Scripted(), intuition=testing.Decider()), bot.allow("no_devices")
+                    "quiet",
+                    bot.cognition(reasoning=testing.Scripted(), reflex=testing.Decider()),
+                    bot.allow("no_devices"),
                 ),
                 process=process,
             )
@@ -204,7 +222,9 @@ def test_without_a_process_bot_run_reads_this_ones_flags(
         _exit(
             lambda: bot.run(
                 bot.define(
-                    "quiet", bot.cognition(testing.Scripted(), intuition=testing.Decider()), bot.allow("no_devices")
+                    "quiet",
+                    bot.cognition(reasoning=testing.Scripted(), reflex=testing.Decider()),
+                    bot.allow("no_devices"),
                 )
             )
         )

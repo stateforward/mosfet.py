@@ -1,7 +1,7 @@
 """One bot turn is one trace, end to end.
 
 A smart phone text drives the whole stack with fake model processors: phone ingress -> holder
-(``bot.input``) -> cognition tiers (autonomy, intuition, reasoning, reflection) ->
+(``bot.input``) -> cognition tiers (reflex, reasoning, reflection) ->
 ``phone.send_text_message`` -> firmware -> messaging service -> the service's verdict. Every span
 and every log record emitted while that turn runs must carry the same trace id, every span's
 parent must be a span of that trace (one root: the phone ingress), no observed event may be
@@ -157,7 +157,7 @@ async def _verdict(event_name: str, limit: float = 10.0) -> dict[str, typing.Any
 
 
 class _Unhandled(processing.DecisionProcessor):
-    """Intuition that recognizes nothing, so the turn cascades to reasoning."""
+    """Decision that recognizes nothing, so the turn cascades to reasoning."""
 
     @typing.override
     async def process(
@@ -223,7 +223,7 @@ def _run_turn() -> tuple[str, list[dict[str, typing.Any]], list[dict[str, typing
         store = memory.Memory()
         ability = cognition.Cognition(
             autonomy=cognition.Autonomy(memory=store),
-            intuition=cognition.Intuition(processor=_Unhandled()),
+            decision=cognition.Decision(processor=_Unhandled()),
             reasoning=cognition.Reasoning(processor=_Reply()),
             reflection=cognition.Reflection(processor=_NoChange(), memory=store),
             memory=store,

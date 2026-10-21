@@ -100,11 +100,13 @@ class TraitsElement(Member, kind=TraitsKind):
 
 @dataclasses.dataclass(kw_only=True)
 class CognitionElement(Member, hsm.NamespaceElement, kind=CognitionKind):
-    """The bot's cognition: its processor, its intuition's decision processor, its memory, and its faculties."""
+    """The bot's cognition: its reasoning processor, its reflex's decision processor, its memory, and its faculties."""
 
     function: typing.ClassVar[str] = "bot.cognition"
-    processor: object = None
+    reasoning: object = None
     intuition: object = None
+    reflex: object = None
+    reflection: object = None
     memory: object = None
     registries: object = ()
     associative: bool = False
@@ -114,7 +116,8 @@ class CognitionElement(Member, hsm.NamespaceElement, kind=CognitionKind):
     routines: object = None
 
     def faculties(self) -> tuple[str, ...]:
-        """The faculties this cognition has, in a fixed order: the three it always has, then each flag's."""
+        """The faculties this cognition has, in a fixed order: its tiers in the order a turn takes them up (reflex
+        and intuition when given, then reasoning), reflection, then each flag's."""
 
         flags = (
             ("associative", self.associative),
@@ -122,7 +125,8 @@ class CognitionElement(Member, hsm.NamespaceElement, kind=CognitionKind):
             ("autonomy", self.autonomy),
             ("routines", self.routines is not None),
         )
-        return ("intuition", "reasoning", "reflection", *(name for name, given in flags if given))
+        tiers = (name for name, given in (("reflex", self.reflex), ("intuition", self.intuition)) if given is not None)
+        return (*tiers, "reasoning", "reflection", *(name for name, given in flags if given))
 
 
 @dataclasses.dataclass(kw_only=True)
@@ -145,6 +149,22 @@ class TimeoutsElement(Member, kind=TimeoutsKind):
     deactivation: datetime.timedelta | None = None
     attachment: datetime.timedelta | None = None
     step: datetime.timedelta | None = None
+    reflex: datetime.timedelta | None = None
+    intuition: datetime.timedelta | None = None
+    reasoning: datetime.timedelta | None = None
+
+    def given(self) -> tuple[tuple[str, object], ...]:
+        """Every timeout by name, as written (``None`` keeps its default), in ``bot.timeouts``' order."""
+
+        return (
+            ("processing", self.processing),
+            ("deactivation", self.deactivation),
+            ("attachment", self.attachment),
+            ("step", self.step),
+            ("reflex", self.reflex),
+            ("intuition", self.intuition),
+            ("reasoning", self.reasoning),
+        )
 
 
 @dataclasses.dataclass(kw_only=True)
@@ -349,9 +369,8 @@ def misplaced(
     of ``primary`` into that element, machine-applicable only when applying it with every other rewrite
     of the pass defines clean: a part keeps its id when no other part has it, and is given a free one
     when ``node``, the expression written, is its constructor call; a second ``bot.cognition`` or
-    ``bot.register`` is never certain, and nor is a processor's ``bot.cognition``, which also needs the
-    decision processor its intuition decides on. ``None`` when no element takes it, so the caller says what
-    ``where`` takes instead.
+    ``bot.register`` is never certain. ``None`` when no element takes it, so the caller says what ``where``
+    takes instead.
     """
 
     def found(name: str, element: str, suggestion: diagnostics.Suggestion | None) -> diagnostics.Diagnostic:
@@ -370,15 +389,15 @@ def misplaced(
             applicability="machine-applicable" if certain else "maybe-incorrect",
         )
 
-    def single(element: type[Element[typing.Any]], function: str, more: str = "") -> diagnostics.Suggestion | None:
-        # ``more`` is a further argument the element needs, which the bot file may not import: never certain.
+    def single(element: type[Element[typing.Any]], function: str, keyword: str = "") -> diagnostics.Suggestion | None:
+        # ``keyword`` names the argument the element takes the value as (``reasoning=``), when it is no positional.
         if model is None or written == "...":
             return None
         taken = function in model.suggested_elements or any(
             isinstance(given, element) for given in model.owned_elements
         )
         model.suggested_elements.add(function)
-        return rewrite(f"{function}({written}{more})", not taken and not more)
+        return rewrite(f"{function}({keyword}{written})", not taken)
 
     def attached() -> diagnostics.Suggestion | None:
         if model is None or written == "...":
@@ -396,18 +415,17 @@ def misplaced(
     if isinstance(value, mosfet.device.Device):
         return found("a device", "bot.attach", attached())
     if isinstance(value, processing.DecisionProcessor):
-        return found("a decision processor", "bot.cognition(processor, intuition=...)", None)
+        return found("a decision processor", "bot.cognition(reasoning=..., reflex=...)", None)
     if isinstance(value, processing.Processor):
-        intuition = ', intuition=decision.Processor(base_url="http://127.0.0.1:8102")'
-        return found("a processor", "bot.cognition", single(RedefinableCognition, "bot.cognition", intuition))
+        return found("a processor", "bot.cognition", single(RedefinableCognition, "bot.cognition", "reasoning="))
     if isinstance(value, memory.StmMemory):
         return found("a sensory register", "bot.register", single(RedefinableRegister, "bot.register"))
     if isinstance(value, memory.Memory):
-        return found("a memory", "bot.cognition(processor, memory=...)", None)
+        return found("a memory", "bot.cognition(reasoning=..., memory=...)", None)
     if isinstance(value, vocal.voice.Catalog):
         return found("a voice catalog", "bot.voice", single(RedefinableVoice, "bot.voice"))
     if isinstance(value, behavior.Seed):
-        return found("a seed", "bot.cognition(processor, autonomy=True, seeds=(...))", None)
+        return found("a seed", "bot.cognition(reasoning=..., autonomy=True, seeds=(...))", None)
     if isinstance(value, abilities.Ability):
         return found("an ability", "bot.attach", attached())
     if isinstance(value, str):
@@ -625,11 +643,13 @@ class RedefinableTraits(_Single[TraitsElement]):
 
 @dataclasses.dataclass(kw_only=True)
 class RedefinableCognition(_Single[CognitionElement]):
-    """``bot.cognition``: the processor, intuition's decision processor, the memory, the faculty flags and markers."""
+    """``bot.cognition``: its tiers' processors, the memory, the faculty flags and markers."""
 
     function: typing.ClassVar[str] = "bot.cognition"
-    processor: object = None
+    reasoning: object = None
     intuition: object = None
+    reflex: object = None
+    reflection: object = None
     memory: object = None
     registries: object = ()
     associative: bool = False
@@ -642,8 +662,10 @@ class RedefinableCognition(_Single[CognitionElement]):
     def _redefine(self, model: Model, stack: list[hsm.Element]) -> CognitionElement | None:
         member = CognitionElement(
             qualified_name=posixpath.join(model.qualified_name, ".cognition"),
-            processor=self.processor,
+            reasoning=self.reasoning,
             intuition=self.intuition,
+            reflex=self.reflex,
+            reflection=self.reflection,
             memory=self.memory,
             registries=self.registries,
             associative=self.associative,
@@ -656,7 +678,7 @@ class RedefinableCognition(_Single[CognitionElement]):
         registered = self._register(model, member)
         span = diagnostics.Span.of(self.location) if self.owned_elements else None
         node = diagnostics.call(span) if span is not None else None
-        arguments = node.args[1:] if node is not None and not any(isinstance(a, ast.Starred) for a in node.args) else []
+        arguments = node.args if node is not None and not any(isinstance(a, ast.Starred) for a in node.args) else []
         for index, faculty in enumerate(self.owned_elements):
             if isinstance(faculty, Element):
                 _ = typing.cast(Element[hsm.Element], faculty).redefine(model, [*stack, member])
@@ -666,16 +688,26 @@ class RedefinableCognition(_Single[CognitionElement]):
                 if span is not None and index < len(arguments)
                 else diagnostics.Span.of(self.location)
             )
+            processor = (
+                ("reflex=" if isinstance(faculty, processing.DecisionProcessor) else "reasoning=")
+                if isinstance(faculty, processing.Processor)
+                else None
+            )
             model.findings.append(
                 diagnostics.Diagnostic(
                     code="B0017",
                     level="error",
-                    message=f"`bot.cognition` takes a processor, then faculty elements; this is a `{type(faculty).__name__}`",
+                    message="`bot.cognition` takes faculty elements, and its processors by keyword; this is a "
+                    + f"`{type(faculty).__name__}`",
                     primary=primary.model_copy(update={"label": "not a faculty"}),
                     notes=(
                         "its faculties are keyword flags: `associative=`, `consolidation=`, `autonomy=`, `routines=`",
                     ),
-                    help=diagnostics.Help(message="remove it, or give it to the element that takes it"),
+                    help=diagnostics.Help(
+                        message="remove it, or give it to the element that takes it"
+                        if processor is None
+                        else f"a processor is given by the tier it serves: `{processor}`"
+                    ),
                 )
             )
         return registered
@@ -713,6 +745,9 @@ class RedefinableTimeouts(_Single[TimeoutsElement]):
     deactivation: datetime.timedelta | None = None
     attachment: datetime.timedelta | None = None
     step: datetime.timedelta | None = None
+    reflex: datetime.timedelta | None = None
+    intuition: datetime.timedelta | None = None
+    reasoning: datetime.timedelta | None = None
 
     @typing.override
     def _redefine(self, model: Model, stack: list[hsm.Element]) -> TimeoutsElement | None:
@@ -722,6 +757,9 @@ class RedefinableTimeouts(_Single[TimeoutsElement]):
             deactivation=self.deactivation,
             attachment=self.attachment,
             step=self.step,
+            reflex=self.reflex,
+            intuition=self.intuition,
+            reasoning=self.reasoning,
             location=self.location,
         )
         return self._register(model, member)
@@ -907,10 +945,11 @@ def traits(*traits: persona.Trait) -> RedefinableTraits:
 
 
 def cognition(
-    processor: processing.Processor,
-    /,
     *faculties: Element[hsm.Element],
-    intuition: processing.DecisionProcessor | None = None,
+    reasoning: processing.Processor,
+    intuition: processing.Processor | None = None,
+    reflex: processing.DecisionProcessor | None = None,
+    reflection: processing.Processor | None = None,
     memory: memory.Memory | None = None,
     registries: collections.abc.Sequence[identification.Registry] = (),
     associative: bool = False,
@@ -919,23 +958,32 @@ def cognition(
     seeds: collections.abc.Sequence[behavior.Seed] = (),
     routines: schedule.WallClock | None = None,
 ) -> RedefinableCognition:
-    """The bot's cognition, thinking with ``processor`` (``bot.cognition(processor, intuition=decider)``).
+    """The bot's cognition, its tiers each named by the processor it thinks on (``bot.cognition(reasoning=model)``).
+
+    A turn takes the tiers up in order: reflex (the behaviors autonomy runs, then the decision model on what they
+    leave unhandled), intuition (a chat model answering without thinking first), then reasoning (thinking first).
+    Each tier is expected to take longer than the one before; every hand-on is the bot's own choice.
 
     Args:
-        processor: What reasons, reflects and consolidates: the model that selects the bot's events on a
-            turn its intuition hands on.
         faculties: Faculty elements that take their own sub-elements; none exists yet.
-        intuition: The decision processor (a ``processing.DecisionProcessor``) intuition decides on, the
-            bot's fast first decision on every turn: never a chat model. It is required; ``bot.define``
-            reports a cognition without one (B0024), or given a chat processor (B0025).
+        reasoning: What reasons: the model that selects the bot's events on a turn the faster tiers hand on,
+            thinking it through, and reflects and consolidates unless ``reflection`` is given. It is required;
+            ``bot.define`` reports a cognition without one (B0024).
+        intuition: The chat model intuition answers on, without thinking first: offered what memory and the
+            bot's abilities up to effort M allow, and the handoff to reasoning. Without it, what reflex hands
+            on goes to reasoning.
+        reflex: The decision processor (a ``processing.DecisionProcessor``) reflex falls back on for what no
+            behavior handled: the bot's fast reflex choice, never a chat model; ``bot.define`` reports a chat
+            processor given here (B0025). Without it, what behaviors leave goes on to the next tier.
+        reflection: The chat model reflection and consolidation think on; reasoning's when omitted.
         memory: The memory every faculty shares; a fresh in-memory one when omitted.
         registries: The voice and face registries its ears and eyes own, at most one of each kind. What the
             bot remembers about who people are keeps their prints (a named person's) or erases them (a
             forgotten one's); without them, memory alone knows who is who.
-        associative: Whether it recalls associations before it decides, and remembers who people are: who
+        associative: Whether it recalls associations before it deliberates, and remembers who people are: who
             is speaking and who is present reach it with every turn, and it may know or forget a person.
         consolidation: Whether it consolidates what it remembers.
-        autonomy: Whether it can wake itself, and run the behaviors it has before it deliberates.
+        autonomy: Whether it can wake itself, and run the behaviors it has first, as its reflex.
         seeds: Native behaviors its autonomy runs beside the ones it learns, such as
             ``communication.speech_heard_seed()``, which takes heard speech into a conversation; they need
             ``autonomy=True``.
@@ -943,8 +991,10 @@ def cognition(
     """
 
     return RedefinableCognition(
-        processor=processor,
+        reasoning=reasoning,
         intuition=intuition,
+        reflex=reflex,
+        reflection=reflection,
         memory=memory,
         registries=registries,
         associative=associative,
@@ -963,12 +1013,17 @@ def timeouts(
     deactivation: datetime.timedelta | None = None,
     attachment: datetime.timedelta | None = None,
     step: datetime.timedelta | None = None,
+    reflex: datetime.timedelta | None = None,
+    intuition: datetime.timedelta | None = None,
+    reasoning: datetime.timedelta | None = None,
 ) -> RedefinableTimeouts:
     """The bot's timeout overrides (``bot.timeouts(processing=datetime.timedelta(seconds=30))``); each positive.
 
     ``processing``, ``deactivation`` and ``attachment`` are the body's own bounds. ``step`` bounds each step
-    of a turn in cognition (intuition, reasoning, ...; two minutes by default) and each step of its
-    reflection; a step that outlasts it fails only its turn, which the bot then perceives.
+    of a turn in cognition (each reflex layer, intuition, reasoning, ...; two minutes by default) and each step of its
+    reflection; a step that outlasts it fails only its turn, which the bot then perceives. ``reflex``,
+    ``intuition`` and ``reasoning`` bound each step of that tier instead (``reflex`` each of its layers), as a
+    tier is defined by how long it is expected to take; one left unset is bounded by ``step``.
     """
 
     return RedefinableTimeouts(
@@ -976,6 +1031,9 @@ def timeouts(
         deactivation=deactivation,
         attachment=attachment,
         step=step,
+        reflex=reflex,
+        intuition=intuition,
+        reasoning=reasoning,
         location=diagnostics.Location.capture(),
     )
 

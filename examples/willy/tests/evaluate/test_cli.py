@@ -14,8 +14,8 @@ from willy_example.evaluate import cli
 
 _CLOSED = "127.0.0.1:9"
 _SETTINGS = {
-    "WILLY_LLM_URL": f"http://{_CLOSED}/v1",
-    "WILLY_MODEL": "gemma-4-26b-a4b",
+    "WILLY_REASONING_URL": f"http://{_CLOSED}/v1",
+    "WILLY_REASONING_MODEL": "gemma-4-26b-a4b",
     "WILLY_TTS_URL": f"http://{_CLOSED}",
     "WILLY_TRANSCRIBE_URL": f"http://{_CLOSED}/v1",
 }
@@ -60,6 +60,12 @@ def test_a_missing_secret_or_setting_exits_78_naming_it(
     assert "computer_token_secret" in capsys.readouterr().err
 
     environ.setenv("COMPUTER_TOKEN_SECRET", "secret-8e3f")
+    for missing in ("WILLY_REASONING_URL", "WILLY_REASONING_MODEL"):
+        given = os.environ[missing]
+        environ.delenv(missing)
+        assert cli.main(["--out", out]) == 78
+        assert missing in capsys.readouterr().err
+        environ.setenv(missing, given)
     environ.delenv("WILLY_TTS_URL")
     assert cli.main(["--out", out]) == 78
     captured = capsys.readouterr()

@@ -1,7 +1,7 @@
 """The minimal bot file: ``python -m minimal_bot_example`` runs it on an OpenAI-compatible endpoint.
 
 Reads ``OPENAI_BASE_URL``, ``OPENAI_MODEL`` and the ``openai_api_key`` secret (the Docker secret, the file named
-by ``OPENAI_API_KEY_FILE``, or ``OPENAI_API_KEY``). Its intuition decides on a decision model, never a chat
+by ``OPENAI_API_KEY_FILE``, or ``OPENAI_API_KEY``). Its reflex decides on a decision model, never a chat
 model: the decision server ``DECISION_BASE_URL`` names, which speaks the decisions wire format (anygame's decide,
 or a hosted server with the same format). The optional ``decision_api_key`` secret, read the same way, is its key;
 without it no key is sent. The optional ``DECISION_MAX_CONTEXT_TOKENS`` is that model's context, which each
@@ -26,7 +26,7 @@ if __name__ == "__main__":
         raise SystemExit("set OPENAI_BASE_URL and OPENAI_MODEL to the OpenAI-compatible endpoint and its model")
     decider_url = os.environ.get("DECISION_BASE_URL")
     if not decider_url:
-        raise SystemExit("set DECISION_BASE_URL to the decision server intuition decides on")
+        raise SystemExit("set DECISION_BASE_URL to the decision server reflex decides on")
     context = os.environ.get("DECISION_MAX_CONTEXT_TOKENS") or None
     if context is not None and (not context.isdecimal() or int(context) == 0):
         raise SystemExit("set DECISION_MAX_CONTEXT_TOKENS to the decision model's context, a positive whole number")
@@ -38,7 +38,7 @@ if __name__ == "__main__":
     minimal = bot.define(
         "minimal",
         bot.cognition(
-            openai_compat.Processor(
+            reasoning=openai_compat.Processor(
                 client=openai_compat.ChatClient(
                     model=model,
                     base_url=base_url,
@@ -46,7 +46,7 @@ if __name__ == "__main__":
                 ),
                 provider="minimal_bot",
             ),
-            intuition=decision.Processor(
+            reflex=decision.Processor(
                 base_url=decider_url,
                 api_key=decider_key,
                 max_context_tokens=None if context is None else int(context),

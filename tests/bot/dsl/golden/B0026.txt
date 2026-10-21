@@ -1,0 +1,11 @@
+error[B0026]: `bot.cognition(intuition=)` is given a decision processor, which cannot write words
+ --> greeter.py:8:83
+  |
+8 | model = bot.define("…", bot.cognition(reasoning=support.Silent(), intuition=support.Undecided()), bot.attach(phone.Phone()))
+  |                                                                             ^^^^^^^^^^^^^^^^^^^ this is a `Undecided`
+  |
+  = note: intuition writes the bot's words and selects its tools; a decision model only chooses among the offered events, so it serves reflex alone: give it to `reflex=`
+help: give `intuition=` a `processing.Processor` (`from mosfet.abilities import processing`); in a test, the offline one is `testing.Scripted()` (`from mosfet.bot import testing`)
+  = explain: bot.explain("B0026")
+
+error: could not define bot `greeter`: 1 error

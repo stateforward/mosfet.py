@@ -608,7 +608,7 @@ class MemoryOwningCognition(cognition.Cognition):
     def __init__(self, store: memory.Memory) -> None:
         self.turns = []
         super().__init__(
-            intuition=cognition.Intuition(processor=_DecidesNothing()),
+            decision=cognition.Decision(processor=_DecidesNothing()),
             reasoning=cognition.Reasoning(processor=_DecidesNothing()),
             reflection=cognition.Reflection(processor=_DecidesNothing(), memory=store),
             memory=store,

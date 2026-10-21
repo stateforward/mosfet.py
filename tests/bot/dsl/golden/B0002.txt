@@ -5,10 +5,10 @@ error[B0002]: bot `greeter` has no `bot.cognition`
   |         ^^^^^^^^^^ no cognition
   |
   = note: cognition is what perceives and decides; a bot without one is a body with no mind
-help: give it a cognition that thinks with a `processing.Processor` (`from mosfet.abilities import processing`); in a test, the offline one is `testing.Scripted()` (`from mosfet.bot import testing`). Its intuition decides with a `processing.DecisionProcessor`: `decision.Processor(...)` (`from mosfet.providers import decision`), on any server that speaks the decisions wire format; in a test, the offline one is `testing.Decider()` (`from mosfet.bot import testing`)
+help: give it a cognition whose reasoning thinks with a `processing.Processor` (`from mosfet.abilities import processing`); in a test, the offline one is `testing.Scripted()` (`from mosfet.bot import testing`)
   |
-6 | model = bot.define("…", bot.attach(phone.Phone()), bot.cognition(processor, intuition=decision.Processor(base_url="http://127.0.0.1:8102")))
-  |                                                  ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+6 | model = bot.define("…", bot.attach(phone.Phone()), bot.cognition(reasoning=processor))
+  |                                                  ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
   = explain: bot.explain("B0002")
 
 error: could not define bot `greeter`: 1 error

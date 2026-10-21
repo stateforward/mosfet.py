@@ -4,14 +4,14 @@ Reads the owner's :class:`~builder_bot_example.Settings` from the environment (`
 ``OPENAI_MODEL``, ``BUILDER_SANDBOX_SOCKET``, ``DECISION_BASE_URL`` and the optional ``OPENAI_STREAM``,
 ``OPENAI_TOOL_CHOICE``, ``DECISION_MAX_CONTEXT_TOKENS`` and ``BUILDER_*`` variables) and its secrets:
 ``openai_api_key`` (a placeholder for a keyless local server), the optional ``decision_api_key`` (the key of the
-decision server intuition decides on; without it none is sent, as a local decide expects) and
+decision server reflex decides on; without it none is sent, as a local decide expects) and
 ``computer_token_secret``, the key the terminal's token is signed with. Each is the Docker secret, the file named by ``<NAME>_FILE``, or
 ``<NAME>``. The process options (``MOSFET_*`` or flags) are ``bot.process``'s; memory is kept in
 ``<data dir>/memory.sqlite3``. A missing or malformed setting or secret ends the process with exit ``1``,
 naming it, before anything starts. So does a bench image that was not built for the mosfet commit this host
 runs (``check_bench``), naming both commits and the rebuild.
 
-Then one ``bot.define`` constructs every part of the bot inline: its model, its intuition's decision model, its
+Then one ``bot.define`` constructs every part of the bot inline: its model, its reflex's decision model, its
 memory, the person's computer
 ``computer`` and its bench. The bench is the owner's: the settings' image on the default limits (one CPU,
 1 GiB without swap, 256 pids and a 512 MiB workspace at ``/workspace``, which is ``HOME``, since the machine's
@@ -66,7 +66,7 @@ if __name__ == "__main__":
         "builder",
         bot.traits(*settings.traits.traits),
         bot.cognition(
-            openai_compat.Processor(
+            reasoning=openai_compat.Processor(
                 client=openai_compat.ChatClient(
                     model=settings.model,
                     base_url=settings.base_url,
@@ -76,7 +76,7 @@ if __name__ == "__main__":
                 stream=settings.stream,
                 tool_choice=settings.tool_choice,
             ),
-            intuition=decision.Processor(
+            reflex=decision.Processor(
                 base_url=settings.decision_base_url,
                 api_key=decision_key,
                 max_context_tokens=settings.decision_max_context_tokens,

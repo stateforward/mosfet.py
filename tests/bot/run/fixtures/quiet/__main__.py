@@ -5,5 +5,7 @@ from mosfet.bot import testing
 
 if __name__ == "__main__":
     bot.run(
-        bot.define("quiet", bot.cognition(testing.Scripted(), intuition=testing.Decider()), bot.allow("no_devices"))
+        bot.define(
+            "quiet", bot.cognition(reasoning=testing.Scripted(), reflex=testing.Decider()), bot.allow("no_devices")
+        )
     )

@@ -1,13 +1,13 @@
 error[B0001]: bot name `Greeter Bot` is not lower snake case of at most 64 characters
  --> greeter.py:8:20
   |
-8 | model = bot.define("Greeter Bot", bot.cognition(support.Silent(), intuition=support.Undecided()), bot.attach(phone.Phone()))
+8 | model = bot.define("Greeter Bot", bot.cognition(reasoning=support.Silent(), reflex=support.Undecided()), bot.attach(phone.Phone()))
   |                    ^^^^^^^^^^^^^ the bot's name
   |
   = note: a bot's name is a telemetry attribute and a topology name, so it is bounded
 help: name it in lower snake case
   |
-8 | model = bot.define("greeter_bot", bot.cognition(support.Silent(), intuition=support.Undecided()), bot.attach(phone.Phone()))
+8 | model = bot.define("greeter_bot", bot.cognition(reasoning=support.Silent(), reflex=support.Undecided()), bot.attach(phone.Phone()))
   |                    ~~~~~~~~~~~~~
   = explain: bot.explain("B0001")
 

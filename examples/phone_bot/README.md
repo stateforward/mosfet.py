@@ -31,7 +31,7 @@ with `BOT_VERBOSE=1`.
 - Docker, or `livekit-server --dev`, for the local SFU
 - `uv` + Python 3.13
 - `BOT_OPENAI_API_KEY` (or `OPENAI_API_KEY`) and `BOT_GEMINI_API_KEY` (or `GEMINI_API_KEY` / `GOOGLE_API_KEY`)
-- `DECISION_BASE_URL`, the decision server the bot's intuition decides on, which speaks the decisions wire
+- `DECISION_BASE_URL`, the decision server the bot's reflex decides on, which speaks the decisions wire
   format (anygame's decide, for example `http://127.0.0.1:8102`), with `DECISION_API_KEY` only for a server that
   takes a key, and the optional `DECISION_MAX_CONTEXT_TOKENS`, the decision model's context, which each decision
   request is fitted to (2048 for decide)

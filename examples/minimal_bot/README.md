@@ -1,8 +1,8 @@
 # minimal_bot
 
-The smallest bot: one bot, `minimal`, with no devices and a cognition (intuition, reasoning, reflection,
+The smallest bot: one bot, `minimal`, with no devices and a cognition (reflex, reasoning, reflection,
 recall and consolidation on one memory): reasoning, reflection and consolidation on any OpenAI-compatible
-endpoint, and intuition on a decision model, on any server that speaks the decisions wire format. Its bot file is
+endpoint, and its reflex on a decision model, on any server that speaks the decisions wire format. Its bot file is
 `minimal_bot_example/__main__.py`: it reads the endpoint and the secret, then has one `bot.define` that
 constructs every part inline, and `python -m minimal_bot_example` runs it with `bot.run`:
 
@@ -10,11 +10,11 @@ constructs every part inline, and `python -m minimal_bot_example` runs it with `
 minimal = bot.define(
     "minimal",
     bot.cognition(
-        openai_compat.Processor(
+        reasoning=openai_compat.Processor(
             client=openai_compat.ChatClient(model=model, base_url=base_url, api_key=...),
             provider="minimal_bot",
         ),
-        intuition=decision.Processor(base_url=decider_url, api_key=decider_key, max_context_tokens=...),
+        reflex=decision.Processor(base_url=decider_url, api_key=decider_key, max_context_tokens=...),
         memory=memory.Memory(database=str(process.data_dir / "memory.sqlite3")),
         associative=True,
         consolidation=True,
@@ -33,7 +33,7 @@ The bot file reads:
 * `OPENAI_MODEL`: the model that endpoint serves;
 * the `openai_api_key` secret: the Docker secret `/run/secrets/openai_api_key`, the file named by
   `OPENAI_API_KEY_FILE`, or `OPENAI_API_KEY`;
-* `DECISION_BASE_URL`: the decision server intuition decides on, for example anygame's decide at
+* `DECISION_BASE_URL`: the decision server reflex decides on, for example anygame's decide at
   `http://127.0.0.1:8102`, or a hosted server that speaks the same decisions wire format;
 * the `decision_api_key` secret, optional and read the same way: that server's key. Without it no key is sent,
   which is what a local decide expects;
@@ -53,7 +53,7 @@ before anything starts. Memory is kept in `<data dir>/memory.sqlite3`.
 [`docs/runtime.md`](../../docs/runtime.md) has every `bot.process` option and exit code.
 
 Test it, including the command above run as a child process. The tests write their own `bot.define` of a bot of
-the same shape on scripted models (`testing.Scripted`, and `testing.Decider` for its intuition):
+the same shape on scripted models (`testing.Scripted`, and `testing.Decider` for its reflex):
 
 ```bash
 uv run --project examples/minimal_bot python -m pytest examples/minimal_bot/tests -q
