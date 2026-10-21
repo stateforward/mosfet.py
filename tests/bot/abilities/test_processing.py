@@ -4,9 +4,11 @@ from mosfet.abilities import ability
 from mosfet.abilities import listening
 from mosfet.abilities import processing
 from mosfet.abilities.cognition import intuition
+from mosfet.abilities.cognition import types as cognition_types
 from mosfet.abilities.communication import communication, conversation
 from mosfet.abilities.hearing import voice
 from mosfet.abilities.language import text
+from mosfet.abilities.memory import stm
 from mosfet.devices import computer, phone
 from mosfet.environment import Environment, SoundEvent
 from mosfet.protocols import attachment
@@ -479,7 +481,12 @@ def test_processing_input_models_host_decision_input() -> None:
     assert input.input == "incoming phone speech"
     assert input.schemas == (event,)
     # Normal Pydantic serialization excludes runtime-only fields; offered events reach the model as tools.
-    assert input.model_dump(mode="python") == {"input": "incoming phone speech", "instructions": None}
+    assert input.model_dump(mode="python") == {
+        "input": "incoming phone speech",
+        "instructions": None,
+        "situation": None,
+        "feedback": None,
+    }
     assert event.name in json.dumps(processing.dispatch_tool(input.schemas))
     assert "operation_sources" not in processing.InputData.model_json_schema()["properties"]
     assert processing.Event is hsm.Event
@@ -1796,7 +1803,7 @@ def test_recalled_context_is_trimmed_after_instructions_and_tools() -> None:
         processing.dispatch_tool(input.schemas), allow_nan=False, ensure_ascii=False, separators=(",", ":")
     )
     assert sum(len(value.encode("utf-8")) for value in ("i" * 60_000, rendered, tool)) <= 262_144
-    assert rendered.index("incoming speech") < rendered.index("association-0-")
+    assert rendered.index("association-0-") < rendered.index("incoming speech")
     kept = [index for index in range(40) if f"association-{index}-" in rendered]
     # Associations are ranked best first: trimming keeps the head.
     assert kept == list(range(len(kept)))
@@ -1872,6 +1879,102 @@ def test_a_stimulus_over_the_fitted_budget_still_renders_whole_without_recalled_
     rendered = "".join(part.text for part in parts if isinstance(part, text.TextPart))
     assert said in rendered
     assert "association-" not in rendered
+
+
+def _recent(count: int, *, size: int = 400) -> tuple[stm.Turn, ...]:
+    speaker = mosfet.Participant(ref="voice:maya", role=mosfet.ParticipantRole.SOURCE)
+    return tuple(
+        stm.Turn(
+            id=f"turn-{index}",
+            at=datetime.datetime(2026, 10, 14, 12, 0, index, tzinfo=datetime.UTC),
+            direction="heard",
+            speakers=(speaker,),
+            text=f"turn-{index}-" + "t" * size,
+            conversation="talk",
+        )
+        for index in range(count)
+    )
+
+
+def test_user_content_is_recalled_then_situation_then_stimulus_then_feedback() -> None:
+    """R-20 C5: stable first, per-turn last. The system channel holds only ``instructions``; the user content
+    holds what is recalled (recent turns, then associations), the situation, the stimulus, then repair feedback."""
+
+    input = processing.InputData(
+        input="incoming speech",
+        instructions="Policy. <persona/>",
+        situation='<environment id="world"/>',
+        feedback="Selection rejected: try again.",
+        recalled=cognition_types.RecalledData(recent=_recent(2, size=5), associations=_associations(1, size=5)),
+    )
+
+    rendered = "".join(
+        part.text for part in input.model_facing_content(media.ImageCapacity()) if isinstance(part, text.TextPart)
+    )
+
+    order = [
+        rendered.index(marker)
+        for marker in (
+            "turn-0-",
+            "turn-1-",
+            "association-0-",
+            '<environment id="world"/>',
+            "incoming speech",
+            "Selection rejected: try again.",
+        )
+    ]
+    assert order == sorted(order)
+    assert "Policy." not in rendered
+    assert rendered.endswith("Selection rejected: try again.")
+
+
+def test_processing_input_never_repeats_instructions_or_situation_in_its_projection() -> None:
+    """R-20 C5: a stage that nests the host frame (reasoning's ProcessorInput) does not send the system
+    message a second time as an escaped ``instructions=`` attribute, nor the situation."""
+
+    class _Nested(pydantic.BaseModel):
+        model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(arbitrary_types_allowed=True)
+
+        host_input: processing.InputData
+
+    host = processing.InputData(
+        input="incoming speech", instructions="Policy.", situation="<environment/>", feedback="Rejected."
+    )
+
+    rendered = "".join(
+        part.text
+        for part in processing.InputData(input=_Nested(host_input=host)).model_facing_content(media.ImageCapacity())
+        if isinstance(part, text.TextPart)
+    )
+
+    assert "incoming speech" in rendered
+    assert "instructions=" not in rendered and "Policy." not in rendered
+    assert "situation=" not in rendered and "environment" not in rendered
+    assert "feedback=" not in rendered and "Rejected." not in rendered
+
+
+def test_a_fitted_budget_keeps_the_newest_turns_and_never_cuts_the_situation_or_stimulus() -> None:
+    """R-20 C5/C6: under a small budget only recalled trims, recent turns keeping their tail."""
+
+    said = "incoming speech " + "s" * 1_000
+    situation = "<environment>" + "w" * 1_000 + "</environment>"
+    bare = processing.InputData(input=said, situation=situation)
+    input = bare.model_copy(
+        update={"recalled": cognition_types.RecalledData(recent=_recent(20), associations=_associations(5, size=200))}
+    )
+    floor = _text_bytes(bare.model_facing_content(media.ImageCapacity()))
+
+    parts = input.model_facing_content(media.ImageCapacity(), budget_bytes=floor + 3_000)
+
+    rendered = "".join(part.text for part in parts if isinstance(part, text.TextPart))
+    assert said in rendered and situation in rendered
+    assert _text_bytes(parts) <= floor + 3_000
+    kept = [index for index in range(20) if f"turn-{index}-" in rendered]
+    assert 0 < len(kept) < 20
+    assert kept == list(range(20 - len(kept), 20))
+    tiny = input.model_facing_content(media.ImageCapacity(), budget_bytes=10)
+    assert said in "".join(part.text for part in tiny if isinstance(part, text.TextPart))
+    assert situation in "".join(part.text for part in tiny if isinstance(part, text.TextPart))
 
 
 def test_context_fit_budgets_bytes_at_three_a_token_less_the_reserve() -> None:

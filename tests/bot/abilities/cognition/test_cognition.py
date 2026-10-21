@@ -4384,6 +4384,10 @@ def test_recent_turns_reach_reasoning_oldest_first_without_the_turn_being_answer
     assert heard < said
     assert prompt.count("What did I just tell you?") == 0
     assert 'id="earlier"' not in prompt and "conversation=" not in prompt and "cut=" not in prompt
+    # R-20 C5: recalled, then the situation (the world block), then the stimulus; the system message is not repeated.
+    assert frame.situation is not None and frame.situation in prompt
+    assert said < prompt.index(frame.situation) < prompt.index('stimulus:id="now"')
+    assert "instructions=" not in prompt
 
 
 def test_cognition_remembers_a_failed_turn_with_its_stimulus_and_no_acts() -> None:
@@ -5797,9 +5801,10 @@ def test_a_partly_handled_batch_carries_its_behaviors_acts_first_into_the_turn_a
     assert [selection.event for selection in output] == [communication.InputEvent.name, mosfet.FocusDeviceEvent.name]
     assert output[1].reason == "answer the line"
     (call,) = intuition_calls
-    assert call.instructions is not None
-    # The fact follows the world and self blocks: which percepts behaviors handled, and what they did.
-    acted = call.instructions[call.instructions.index("<cognition:acted>") :]
+    assert call.situation is not None
+    # The fact follows the world block in the turn's situation: which percepts behaviors handled, and what they did.
+    acted = call.situation[call.situation.index("<cognition:acted>") :]
+    assert "<cognition:acted>" not in (call.instructions or "")
     assert acted.endswith("</cognition:acted>")
     assert '<percepts count="1">\n    <item>0</item>\n  </percepts>' in acted
     assert f'event="{communication.InputEvent.name}"' in acted

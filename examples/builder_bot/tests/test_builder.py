@@ -289,7 +289,7 @@ def test_the_link_up_turn_offers_the_computer_and_the_bench_and_a_silent_bot_doe
     assert any(TOOLS <= offered(call) for call in link_up_calls)
     # The desk is an object: the bot sees it only through the computer that sits on it.
     assert all(
-        re.search(r'<device ref="computer" id="[^"]+" state="[^"]+" on="desk"', call.instructions or "")
+        re.search(r'<device ref="computer" id="[^"]+" state="[^"]+" on="desk"', call.situation or "")
         for call in link_up_calls
     )
     # Live (builder check round 2, E4): each bench request describes what the owner's bench holds.

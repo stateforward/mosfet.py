@@ -524,8 +524,8 @@ class Cognition(ability.Ability[InputData, OutputData]):
         recent: tuple[memory.stm.Turn, ...] = (),
         acted: types.ActedData | None = None,
     ) -> processing.InputData:
-        """Deliberation's frame for the turn: offered events, the world and self blocks, then what
-        behaviors already did on its percepts (``acted``), as a fact of the turn after those blocks.
+        """Deliberation's frame for the turn: offered events, the self block (``instructions``), and the
+        world block then what behaviors already did on its percepts (``acted``), as the turn's ``situation``.
 
         What the bot has in mind beside the stimulus rides as ``recalled``: the ``recent`` turns
         short-term memory holds, then what long-term memory ``associations`` surfaced; none when neither."""
@@ -547,7 +547,7 @@ class Cognition(ability.Ability[InputData, OutputData]):
                 if isinstance(part, text.TextPart)
             )
             frame = frame.model_copy(
-                update={"instructions": "\n".join(block for block in (frame.instructions, fact) if block)}
+                update={"situation": "\n".join(block for block in (frame.situation, fact) if block)}
             )
         if not recent and associations is None:
             return frame

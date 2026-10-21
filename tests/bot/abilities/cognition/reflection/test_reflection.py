@@ -1625,10 +1625,12 @@ def test_reflection_asks_again_when_its_selection_is_rejected() -> None:
 
     assert [event.name for event in lifecycle] == [cognition.Reflection.output_event.name]
     assert len(processor.inputs) == 2
-    first, second = (frame.instructions or "" for frame in processor.inputs)
-    assert "The previous event selection was rejected" not in first
-    assert "Processing selected unavailable event: action:speech.say." in second
-    assert second.startswith(reflection_impl.SELECT_INSTRUCTIONS.strip())
+    first, second = processor.inputs
+    assert first.feedback is None
+    assert "Processing selected unavailable event: action:speech.say." in (second.feedback or "")
+    # R-20 C5: the system prompt is the same across the repair.
+    assert second.instructions == first.instructions
+    assert (second.instructions or "").startswith(reflection_impl.SELECT_INSTRUCTIONS.strip())
 
 
 def test_reflection_stops_on_the_same_selection_rejection_twice() -> None:

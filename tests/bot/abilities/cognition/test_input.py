@@ -251,8 +251,8 @@ class _OwnerBotActor(hsm.Instance):
     )
 
 
-def test_build_processing_input_composes_live_device_state_instructions() -> None:
-    """Per-turn instructions carry the world snapshot: self, owned devices nested inside it."""
+def test_build_processing_input_composes_live_device_state_situation() -> None:
+    """The per-turn situation carries the world snapshot: self, owned devices nested inside it."""
 
     async def run() -> tuple[processing.InputData, str]:
         device = _SnapshotAttributeDevice()
@@ -273,7 +273,7 @@ def test_build_processing_input_composes_live_device_state_instructions() -> Non
         return built, hsm.id(device)
 
     built, runtime_id = asyncio.run(run())
-    instructions = built.instructions
+    instructions = built.situation
     assert instructions is not None
     # Well-formed XML, no header text around the block.
     assert "Devices you own" not in instructions
@@ -363,7 +363,7 @@ def test_build_processing_input_renders_a_ringing_phones_display_caller_id() -> 
         )
 
     built = asyncio.run(run())
-    instructions = built.instructions
+    instructions = built.situation
     assert instructions is not None
     root = xml.etree.ElementTree.fromstring(instructions)
     device_element = root.find("self/owned_devices/device")
@@ -374,13 +374,14 @@ def test_build_processing_input_renders_a_ringing_phones_display_caller_id() -> 
     assert caller_id is not None and caller_id.text == "Front desk"
 
 
-def test_build_processing_input_without_devices_leaves_instructions_unset() -> None:
-    """No device actors → no device block, and no instructions invented."""
+def test_build_processing_input_without_devices_leaves_instructions_and_situation_unset() -> None:
+    """No device actors → no device block, and no instructions or situation invented."""
 
     built = cognition_input.build_processing_input(
         cognition_input.InputData(stimulus=mosfet.InputEventData(target_device="phone", priority=0))
     )
     assert built.instructions is None
+    assert built.situation is None
 
 
 _KNOWN = cognition_input.SelfData(
@@ -444,7 +445,7 @@ def test_self_data_renders_the_voice_given_at_inception_after_the_persona() -> N
     assert cognition_input.SelfData(voice=_VOICE).__model_repr__() == f"<persona>{voice_block}</persona>"
 
 
-def test_build_processing_input_shows_what_the_bot_knows_of_itself_after_the_world_block() -> None:
+def test_build_processing_input_shows_what_the_bot_knows_of_itself_as_its_instructions() -> None:
     async def run() -> tuple[processing.InputData, processing.InputData]:
         environment = Environment()
         owner = _OwnerBotActor({})
@@ -460,13 +461,14 @@ def test_build_processing_input_shows_what_the_bot_knows_of_itself_after_the_wor
 
     known, unknown = asyncio.run(run())
 
-    instructions = known.instructions
-    assert instructions is not None
-    world = unknown.instructions
+    world = known.situation
+    # The world block is the turn's situation, unchanged by what the bot knows of itself; the self block is
+    # the instructions, and without it there are none.
     assert world is not None and xml.etree.ElementTree.fromstring(world).tag == "environment"
-    # The world block comes first, unchanged; the self block follows it.
-    assert instructions.startswith(f"{world}\n")
-    self_block = instructions.removeprefix(f"{world}\n")
+    assert world == unknown.situation
+    assert unknown.instructions is None
+    self_block = known.instructions
+    assert self_block is not None
     persona_element = xml.etree.ElementTree.fromstring(self_block)
     assert persona_element.tag == "persona"
     traits = persona_element.find("traits")
@@ -477,6 +479,39 @@ def test_build_processing_input_shows_what_the_bot_knows_of_itself_after_the_wor
     assert description.text == "I like explaining things slowly & simply."
 
 
+def test_the_self_block_is_the_stable_instructions_and_the_world_block_the_turns_situation() -> None:
+    """R-20 C5: the system message is byte-identical across turns whose world differs; the world is per turn."""
+
+    async def run() -> tuple[processing.InputData, processing.InputData]:
+        environment = Environment()
+        device = _SnapshotAttributeDevice()
+        _ = await mosfet.started(environment, device, typing.cast(hsm.Model, device.model))
+        alone = _OwnerBotActor({})
+        holding = _OwnerBotActor({"phone": hsm.id(device)})
+        for owner in (alone, holding):
+            _ = await mosfet.started(environment, owner, typing.cast(hsm.Model, owner.model))
+        frames = tuple(
+            cognition_input.build_processing_input(
+                cognition_input.InputData(
+                    stimulus=mosfet.InputEventData(target_device="phone", priority=0),
+                    actors={"bot": owner, "phone": device},
+                ),
+                known=_KNOWN,
+            )
+            for owner in (alone, holding)
+        )
+        return frames[0], frames[1]
+
+    first, second = asyncio.run(run())
+
+    assert first.instructions is not None
+    assert first.instructions == second.instructions
+    assert xml.etree.ElementTree.fromstring(first.instructions).tag == "persona"
+    assert first.situation is not None and second.situation is not None
+    assert first.situation != second.situation
+    assert xml.etree.ElementTree.fromstring(first.situation).tag == "environment"
+
+
 def test_build_processing_input_without_a_bot_actor_shows_no_self_block() -> None:
     """The self block is the bot's perspective, like the world block: no bot actor, no instructions."""
 
@@ -485,6 +520,7 @@ def test_build_processing_input_without_a_bot_actor_shows_no_self_block() -> Non
         known=_KNOWN,
     )
     assert built.instructions is None
+    assert built.situation is None
 
 
 def test_within_effort_narrows_a_frame_to_a_stage_ceiling() -> None:

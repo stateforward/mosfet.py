@@ -226,7 +226,7 @@ frame it builds, and its effort (`M`) keeps it out of Intuition's frames, so onl
 offered the model-callable `bot.ability.memory.recall` (`memory.RecallData`: `about` something in
 plain words, or one association's `node` ref). Intuition is still told it exists: every
 capacity its effort ceiling keeps off its dispatch tool (recall, the sandbox bench, any other
-actor rated above it) is named on its frame after the world and self blocks, in one
+actor rated above it) is named in its frame's instructions after the self block, in one
 `<reasoning_only>` element with the opening paragraph of the event's own description, so
 escalating the turn to reasoning is the model's informed choice. While intuition decides, the
 Cognition host offers the deliberative handoff `bot.ability.reasoning.input` (`reasoning.CallData`)
@@ -287,7 +287,8 @@ spans; routine names are never attributes.
 `Cognition(persona=...)`) is attached by Cognition and tells it what the bot knows of itself
 with `persona.OutputEvent`: on waking, with the description it remembered or none, and after
 every revision it wrote down. Cognition keeps the latest one and shows it on every intuition and
-reasoning frame as the self block (`cognition.SelfData`), after the world block: `<persona>`
+reasoning frame as the self block (`cognition.SelfData`), the frame's stable `instructions` (the system
+prompt), while the world block is the turn's `situation`: `<persona>`
 holding `<traits given_by="owner">` and `<description written_by="you">`, escaped and never
 filtered. Cognition never revises the persona itself: it hands what it knows of the bot to
 Reflection with the turn (`reflection.InputData.persona`). Composed with the same persona,

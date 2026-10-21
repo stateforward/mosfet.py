@@ -411,7 +411,7 @@ def test_reasoning_asks_again_when_its_selection_is_rejected_and_dispatches_the_
     output, receiver = _reason_with(processor)
 
     assert len(processor.calls) == 2
-    first, second = (call.instructions or "" for call in processor.calls)
+    first, second = (call.feedback or "" for call in processor.calls)
     assert "The previous event selection was rejected" not in first
     assert "The previous event selection was rejected" in second
     assert "Processing selected events that did not decode: JSONDecodeError" in second
@@ -428,7 +428,7 @@ def test_reasoning_asks_again_when_dispatch_rejects_its_selection() -> None:
     output, receiver = _reason_with(processor)
 
     assert len(processor.calls) == 2
-    assert "Input should be a valid string" in (processor.calls[1].instructions or "")
+    assert "Input should be a valid string" in (processor.calls[1].feedback or "")
     assert [received.data for received in receiver.received] == [_ReceivedData(value="fixed")]
     assert output.output is not None
 

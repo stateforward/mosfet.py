@@ -96,11 +96,15 @@ def test_a_rejected_selection_is_repaired_from_its_redacted_key_appended_to_the_
     request = processing.InputData(input="x", instructions="World.")
 
     repaired = types.with_selection_feedback(request, types.selection_rejection_message(key))
+    again = types.with_selection_feedback(repaired, "Selection rejected: again")
 
     assert key == "Processing selected invalid event data: value: string_type"
-    instructions = repaired.instructions or ""
-    assert instructions.startswith("World.\n\nThe previous event selection was rejected during dispatch.")
-    assert f"Selection rejected: {key}\n----- END UNTRUSTED VALIDATOR DIAGNOSTIC -----" in instructions
+    # R-20 C5: the system prompt is the same across a repair; the feedback renders after the stimulus.
+    assert repaired.instructions == "World."
+    feedback = repaired.feedback or ""
+    assert feedback.startswith("The previous event selection was rejected during dispatch.")
+    assert f"Selection rejected: {key}\n----- END UNTRUSTED VALIDATOR DIAGNOSTIC -----" in feedback
+    assert (again.feedback or "").startswith(f"{feedback}\n\n")
     assert types.MAX_SELECTION_REPAIRS == 2
 
 

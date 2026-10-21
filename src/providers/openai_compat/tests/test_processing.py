@@ -788,6 +788,29 @@ def _fits(reader: metric_reader.Reader) -> dict[str, float]:
     }
 
 
+def test_processor_sends_the_stable_instructions_as_system_and_the_situation_before_the_stimulus() -> None:
+    """R-20 C5: the system message carries only the stable instructions, byte-identical across turns whose world
+    differs; the user message is recalled, then the situation, then the stimulus, then any repair feedback."""
+
+    client = _answering_client()
+    processor = Processor(client=client, stream=False)
+    for world in ('<environment state="a"/>', '<environment state="b"/>'):
+        _ = asyncio.run(
+            process_for_test(
+                processor,
+                _recalled_input().model_copy(update={"situation": world, "feedback": "Selection rejected."}),
+            )
+        )
+
+    systems = [typing.cast(list[dict[str, object]], call["messages"])[0] for call in client.calls]
+    assert [system["role"] for system in systems] == ["system", "system"]
+    assert systems[0]["content"] == systems[1]["content"] == "Select events."
+    sent = _sent_user_text(client, 1)
+    order = [sent.index(marker) for marker in ("memory-0-", '<environment state="b"/>', _SAID, "Selection rejected.")]
+    assert order == sorted(order)
+    assert 'state="a"' not in sent
+
+
 def test_processor_fits_recalled_memory_to_max_context_tokens_and_never_cuts_the_stimulus(
     tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

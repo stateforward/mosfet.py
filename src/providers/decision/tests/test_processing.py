@@ -580,3 +580,28 @@ def test_without_max_context_tokens_nothing_is_cut() -> None:
 def test_max_context_tokens_must_be_positive() -> None:
     with pytest.raises(ValueError, match="max_context_tokens"):
         _ = decision.Processor(base_url="http://decide.test", max_context_tokens=0)
+
+
+def test_the_turns_situation_leads_the_selection_instructions_and_repair_feedback_ends_them() -> None:
+    """R-20 C5: cognition splits its frame into a stable ``instructions`` and a per-turn ``situation`` (the world
+    block and what was acted); the decision model reads both where its turn instructions always were, the world
+    first so a fitted cut keeps its leading lines, and a repair's feedback after them."""
+
+    server = _Decide({"selection": (_PASS, {_PASS: 1.0})})
+
+    _ = asyncio.run(
+        _processor(server).process(
+            processing.InputData(
+                input="ring turn",
+                schemas=_answer_call_offered(),
+                instructions="<persona/>",
+                situation="<environment/>",
+                feedback="Selection rejected: try again.",
+            )
+        )
+    )
+
+    (sent,) = server.requests
+    assert sent["questions"]["selection"]["instructions"] == (
+        "<environment/>\n<persona/>\nSelection rejected: try again."
+    )

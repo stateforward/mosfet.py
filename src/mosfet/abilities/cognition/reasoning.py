@@ -595,8 +595,8 @@ class Reasoning(processing.Processing):
                 host_input = cognition_input.without_handoff(
                     cognition_input.within_effort(request.processing_input, instance._max_effort)
                 )
-                # Keep host tools/actors, the host's live instructions (device-state block), and what
-                # memory surfaced for this turn; nest the reasoning payload as the process input.
+                # Keep host tools/actors, the host's instructions (self block), its situation (device-state
+                # block), and what was recalled for this turn; nest the reasoning payload as the process input.
                 child_input = processing.Processing._input_for_processor(
                     instance,
                     processing.InputData(
@@ -604,6 +604,7 @@ class Reasoning(processing.Processing):
                         schemas=host_input.schemas,
                         actors=host_input.actors,
                         instructions=host_input.instructions,
+                        situation=host_input.situation,
                         recalled=host_input.recalled,
                     ),
                 )

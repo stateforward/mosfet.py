@@ -102,7 +102,7 @@ class InputData(pydantic.BaseModel):
 
 
 class SelfData(pydantic.BaseModel):
-    """What the bot knows of itself on a turn, shown to the model after the world block (P-7).
+    """What the bot knows of itself on a turn, shown to the model in the system prompt (P-7).
 
     Cognition builds it from what its own children last told it, by event; nothing here reads a
     peer's state. The traits are its owner's, the description is the bot's own and is shown as it
@@ -152,26 +152,26 @@ def is_input(value: object) -> typing.TypeGuard[InputData]:
     return isinstance(value, InputData)
 
 
-def _turn_instructions(actors: collections.abc.Mapping[str, hsm.Instance], known: SelfData | None) -> str | None:
-    """Compose one turn's world block, then the self block after it.
+def _turn_blocks(
+    actors: collections.abc.Mapping[str, hsm.Instance], known: SelfData | None
+) -> tuple[str | None, str | None]:
+    """One turn's world block (its situation) and the self block (stable instructions), in that order.
 
     The environment the bot is in takes the snapshot (see ``Environment.model_snapshot``):
     it owns the world's own identity, its addressing scope, and how a referenced device's
     snapshot folds into the block — cognition invents none of that. This function finds the live
     bot actor for this turn and hands it to its own environment as the perspective the block is
-    taken from, then follows it with what the bot knows of itself (``known``). Both blocks are
-    the bot's perspective: when there is no live ``bot`` actor this turn, there is no perspective
-    to render from and no instructions to invent.
+    taken from; what the bot knows of itself (``known``) is the self block. Both blocks are the
+    bot's perspective: when there is no live ``bot`` actor this turn, there is no perspective to
+    render from and neither block is invented. The world changes turn by turn and the self block
+    seldom does, so the world is the turn's situation and the self block joins the system prompt.
     """
 
     owner = actors.get("bot")
     if owner is None:
-        return None
-    blocks = (
-        Environment.from_context(owner.context()).model_snapshot(owner),
-        None if known is None else known.__model_repr__(),
-    )
-    return "\n".join(block for block in blocks if block) or None
+        return None, None
+    world = Environment.from_context(owner.context()).model_snapshot(owner) or None
+    return world, None if known is None else known.__model_repr__()
 
 
 def build_processing_input(
@@ -190,9 +190,11 @@ def build_processing_input(
     live Cognition instance so host model-offerable events such as
     ``bot.ability.cognition.ignore`` appear only when that topology enables them.
 
-    The per-turn instructions open a live device-state block (same snapshots), followed by the
-    self block from ``known`` (what the bot knows of itself), which the provider sends as the
-    system message; any static Processing policy is stamped ahead of it at apply time.
+    The self block from ``known`` (what the bot knows of itself) is the frame's ``instructions``,
+    which the provider sends as the system message; any static Processing policy is stamped ahead
+    of it at apply time. The live device-state block (same snapshots) is the frame's ``situation``,
+    which renders in the user content before the stimulus, so the system message stays the same
+    from turn to turn while the world changes (R-20 C5).
 
     The frame offers every actor; each stage narrows it to its own capacity with
     ``within_effort`` when the frame reaches it.
@@ -205,13 +207,15 @@ def build_processing_input(
         # Host call surface (ignore, …) comes from Cognition's snapshot, not a schema allowlist.
         actors = {**actors, "cognition": authority}
     schemas, actor_events = processing.collect_offered_events(actors)
+    situation, instructions = _turn_blocks(actors, known)
     return processing.InputData(
         input=cognition_input.stimulus,
         schemas=schemas,
         actors=actors,
         actor_events=actor_events,
         authority=authority,
-        instructions=_turn_instructions(actors, known),
+        instructions=instructions,
+        situation=situation,
     )
 
 
@@ -241,6 +245,7 @@ def within_effort(frame: processing.InputData, ceiling: Effort | None) -> proces
             "schemas": schemas,
             "actor_events": actor_events,
             "instructions": frame.instructions if "bot" in actors else None,
+            "situation": frame.situation if "bot" in actors else None,
         }
     )
 

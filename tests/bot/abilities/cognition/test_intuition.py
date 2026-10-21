@@ -243,7 +243,7 @@ def test_intuition_retries_selection_rejection_with_pydantic_feedback() -> None:
     output, _ = _run_intuition(processor, operation_id="repair-selection")
 
     assert len(processor.calls) == 2
-    feedback = processor.calls[1].instructions or ""
+    feedback = processor.calls[1].feedback or ""
     assert "The previous event selection was rejected during dispatch." in feedback
     assert "Input should be a valid string" in feedback
     assert "input_value" not in feedback
@@ -262,7 +262,7 @@ def test_intuition_retries_malformed_focus_selection_with_full_pydantic_feedback
     output, _ = _run_intuition(processor, operation_id="repair-focus-selection")
 
     assert len(processor.calls) == 2
-    feedback = processor.calls[1].instructions or ""
+    feedback = processor.calls[1].feedback or ""
     assert "not an instruction" in feedback
     assert "BEGIN UNTRUSTED VALIDATOR DIAGNOSTIC" in feedback
     assert "Input should be a valid string" in feedback
@@ -313,7 +313,7 @@ def test_intuition_asks_again_when_the_processor_selects_an_event_the_turn_does_
     output, _ = _run_intuition(processor, operation_id="unoffered-selection")
 
     assert len(processor.calls) == 2
-    feedback = processor.calls[1].instructions or ""
+    feedback = processor.calls[1].feedback or ""
     assert f"Processing selected unavailable event: {sandbox.WriteEvent.name}." in feedback
     assert output.output == (types.EventData(event=_SelectionEvent.name, target="target", data={"value": "phone"}),)
 
@@ -343,8 +343,8 @@ def test_intuition_retries_again_after_different_selection_rejection() -> None:
     output, _ = _run_intuition(processor, operation_id="different-selection-rejection")
 
     assert len(processor.calls) == 3
-    first_feedback = processor.calls[1].instructions or ""
-    second_feedback = processor.calls[2].instructions or ""
+    first_feedback = processor.calls[1].feedback or ""
+    second_feedback = processor.calls[2].feedback or ""
     assert "input_value" not in first_feedback
     assert "Field required" in second_feedback
     assert output.output is not None
@@ -366,7 +366,7 @@ def test_intuition_bounds_alternating_selection_rejections() -> None:
         _ = _run_intuition(processor, operation_id="alternating-selection-rejection")
 
     assert len(processor.calls) == 3
-    assert all("input_value" not in (call.instructions or "") for call in processor.calls)
+    assert all("input_value" not in (call.feedback or "") for call in processor.calls)
 
 
 def test_confidence_gate_drops_low_confidence_and_cascades() -> None:

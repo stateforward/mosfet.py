@@ -327,7 +327,11 @@ def selection_rejection_message(normalized: str) -> str:
 
 
 def with_selection_feedback(input: processing.InputData, message: str) -> processing.InputData:
-    """Append bounded, redacted rejection feedback (:func:`selection_rejection_message`) to the next model request."""
+    """Give the next model request bounded, redacted rejection feedback (:func:`selection_rejection_message`).
+
+    It rides as ``feedback``, which renders after the stimulus, so the system prompt (``instructions``) is the
+    same across a repair.
+    """
 
     feedback = (
         "The previous event selection was rejected during dispatch. Repair the selection and try again. "
@@ -337,9 +341,9 @@ def with_selection_feedback(input: processing.InputData, message: str) -> proces
         f"{message}\n"
         "----- END UNTRUSTED VALIDATOR DIAGNOSTIC -----"
     )
-    instructions = input.instructions
-    combined = f"{instructions}\n\n{feedback}" if instructions else feedback
-    return input.model_copy(update={"instructions": combined})
+    given = input.feedback
+    combined = f"{given}\n\n{feedback}" if given else feedback
+    return input.model_copy(update={"feedback": combined})
 
 
 OUTPUT_SCHEMA_CONTRACT = pydantic.TypeAdapter(OutputData)

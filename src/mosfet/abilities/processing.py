@@ -1139,7 +1139,19 @@ def dispatch_child_cancel(
 
 
 class InputData(pydantic.BaseModel):
-    """Processing input: stimulus plus selectable event schemas."""
+    """Processing input: stimulus plus selectable event schemas.
+
+    What a model is shown is laid out stable first, per turn last (R-20 C5): ``instructions`` is the
+    system channel (static policy and the bot's persona, byte-identical across turns while they do not
+    change, so a server's prefix cache holds), and the user content is ``recalled``, then the
+    ``situation`` (the world as it is this turn), then the stimulus, then any repair ``feedback``. A
+    stage that nests this frame in its own stimulus does not show ``instructions``, ``situation`` or
+    ``feedback`` again (``__model_facing_excluded_fields__``): they reach the model once, where they belong.
+    """
+
+    __model_facing_excluded_fields__: typing.ClassVar[frozenset[str]] = frozenset(
+        {"instructions", "situation", "feedback"}
+    )
 
     model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
         arbitrary_types_allowed=True,
@@ -1191,10 +1203,30 @@ class InputData(pydantic.BaseModel):
         default=None,
         min_length=1,
         description=(
-            "Optional system policy stamped by Processing for model-facing processors. "
-            "Not part of the stimulus; providers use this as the system prompt when present."
+            "Optional system policy stamped by Processing for model-facing processors, with what the bot knows of "
+            "itself: content stable across turns. Not part of the stimulus; providers use this as the system "
+            "prompt when present."
         ),
         examples=["Return an immediate typed result only when the input is already unambiguous."],
+    )
+    situation: str | None = pydantic.Field(
+        default=None,
+        min_length=1,
+        description=(
+            "The turn's situation: the world as the bot finds it this turn (its devices' live state) and what its "
+            "behaviors already did on the turn. Per turn, so it renders in the user content after what is recalled "
+            "and before the stimulus, never in the system prompt; never trimmed."
+        ),
+        examples=['<environment id="home"><self state="/Bot/active"/></environment>'],
+    )
+    feedback: str | None = pydantic.Field(
+        default=None,
+        min_length=1,
+        description=(
+            "Repair feedback for this request: why the previous selection was rejected. Renders last in the user "
+            "content, after the stimulus, so the system prompt stays the same across a repair; never trimmed."
+        ),
+        examples=["Selection rejected: Processing selected events that are not event selections."],
     )
     recalled: SkipJsonSchema[pydantic.BaseModel | None] = pydantic.Field(
         default=None,
@@ -1226,13 +1258,15 @@ class InputData(pydantic.BaseModel):
     def model_facing_content(
         self, capacity: media.ImageCapacity, *, budget_bytes: int | None = None
     ) -> tuple[text.ContentPart, ...]:
-        """Project this turn exactly as a model may see it: the stimulus as content parts.
+        """Project this turn exactly as a model may see it: recalled, situation, stimulus, feedback, as content parts.
 
-        The text parts carry the stimulus as one pseudo-XML element. The terminal stimulus is the
-        root element — nothing wraps it. Typed causal parents are retained in runtime and
-        canonical event data but omitted from this prompt projection. Its envelope (event name,
-        and the ``id`` / ``source`` / ``target`` it was stamped with) rides on that same root
-        under the ``stimulus:`` prefix.
+        The text parts carry, in order, ``recalled`` (its own element), the ``situation`` block, the
+        stimulus as one pseudo-XML element, and the repair ``feedback``, joined by newlines; each is
+        left out when absent. The stimulus is the root element of its own block — nothing wraps it.
+        Typed causal parents are retained in runtime and canonical event data but omitted from this
+        prompt projection. Its envelope (event name, and the ``id`` / ``source`` / ``target`` it was
+        stamped with) rides on that same root under the ``stimulus:`` prefix. Instructions are the
+        system channel for the provider, not part of this content.
 
         Images the stimulus carries as ``media.Image`` render as ``<media:image …/>``
         placeholders, and the ones ``capacity`` admits follow their placeholder as image parts.
@@ -1244,8 +1278,7 @@ class InputData(pydantic.BaseModel):
         This is an explicit presentation projection for processors that render a prompt. The
         canonical Pydantic serialization of this model remains ``model_dump``; this helper is
         intentionally separate from that contract. The cognition renderer uses the shared
-        canonical event/Data tree and escapes every value it renders. Instructions are system
-        policy for the provider, not part of this content.
+        canonical event/Data tree and escapes every value it renders.
 
         ``schemas`` are deliberately absent. The offered events of a turn reach the model through
         the provider's own tool API — ``dispatch_tool`` projects exactly these schemas as the
@@ -1253,29 +1286,29 @@ class InputData(pydantic.BaseModel):
         menu, competing with the authoritative one for the same context window. The stimulus is
         what this content is for; the tool menu is what the tool channel is for.
 
-        Instructions and the dispatch tool are reserved first; the stimulus renders into the bytes
-        they leave of the provider-neutral prompt budget. Recalled context a stimulus carries in
-        budgeted fields (``__model_facing_budgeted_fields__``) is trimmed to fit rather than
-        failing the turn.
+        Instructions, the dispatch tool, the situation and the feedback are reserved first and are
+        never trimmed; the stimulus renders into the bytes they leave of the provider-neutral prompt
+        budget. Recalled context a stimulus carries in budgeted fields
+        (``__model_facing_budgeted_fields__``) is trimmed to fit rather than failing the turn.
 
-        ``recalled`` renders last, as its own element after the stimulus, into the bytes the
-        instructions, the tool menu, and the stimulus leave; its budgeted fields trim to fit, and
-        when not even its frame fits it is left out. Images it carries render as placeholders only:
-        the stimulus's images are the ones this pass attaches.
+        ``recalled`` renders first, as its own element, into the bytes everything else leaves; its
+        budgeted fields trim to fit, and when not even its frame fits it is left out. Images it
+        carries render as placeholders only: the stimulus's images are the ones this pass attaches.
 
         ``budget_bytes`` is the receiving model's fitted budget for this content's text (a
         :class:`ContextFit` budget, less what the provider sends beside it). When given and smaller,
-        it replaces the provider-neutral budget for ``recalled`` only: the stimulus is never cut to
-        fit it, and a stimulus over it still renders whole, without ``recalled`` (the request goes and
-        the server's refusal is the failure, as D-R-36).
+        it replaces the provider-neutral budget for ``recalled`` only: the situation, the stimulus
+        and the feedback are never cut to fit it, and when they are over it they still render whole,
+        without ``recalled`` (the request goes and the server's refusal is the failure, as D-R-36).
 
-        Raises ``ValueError`` when the instructions are over the scalar budget, or when the
-        instructions, the dispatch tool, and the stimulus without its budgeted items together
+        Raises ``ValueError`` when the instructions, situation or feedback are over the scalar
+        budget, or when they, the dispatch tool, and the stimulus without its budgeted items together
         exceed the provider-neutral prompt budgets. Recalled memory never raises.
         """
 
         instructions = self.instructions or ""
-        if len(instructions) > _MAX_MODEL_PROMPT_SCALAR_CHARACTERS:
+        around = tuple(block for block in (self.situation, self.feedback) if block)
+        if any(len(block) > _MAX_MODEL_PROMPT_SCALAR_CHARACTERS for block in (instructions, *around)):
             raise ValueError("prompt projection scalar length budget exceeded")
         tool = json.dumps(
             dispatch_tool(self.schemas),
@@ -1284,24 +1317,43 @@ class InputData(pydantic.BaseModel):
             separators=(",", ":"),
         )
         reserved = len(instructions.encode("utf-8")) + len(tool.encode("utf-8"))
-        parts = model_facing_content(self.input, capacity=capacity, budget_bytes=_MAX_MODEL_PROMPT_BYTES - reserved)
-        if self.recalled is None:
-            return parts
-        stimulus = sum(len(part.text.encode("utf-8")) for part in parts if isinstance(part, text.TextPart))
-        available = _MAX_MODEL_PROMPT_BYTES - reserved
-        if budget_bytes is not None:
-            available = min(available, budget_bytes)
-        # A newline joins the recalled element to the stimulus text that precedes it.
-        remaining = available - stimulus - len("\n")
-        try:
-            recalled = model_facing_content(self.recalled, capacity=media.ImageCapacity(), budget_bytes=remaining)
-        except ValueError:
-            return parts
-        rendered = "".join(part.text for part in recalled if isinstance(part, text.TextPart))
-        last = parts[-1] if parts else None
-        if isinstance(last, text.TextPart):
-            return (*parts[:-1], text.TextPart(text=f"{last.text}\n{rendered}"))
-        return (*parts, text.TextPart(text=rendered))
+        # The situation and the feedback each join the stimulus with a newline.
+        beside = sum(len(block.encode("utf-8")) + len("\n") for block in around)
+        parts = model_facing_content(
+            self.input, capacity=capacity, budget_bytes=_MAX_MODEL_PROMPT_BYTES - reserved - beside
+        )
+        before: list[str] = []
+        if self.recalled is not None:
+            stimulus = sum(len(part.text.encode("utf-8")) for part in parts if isinstance(part, text.TextPart))
+            available = _MAX_MODEL_PROMPT_BYTES - reserved
+            if budget_bytes is not None:
+                available = min(available, budget_bytes)
+            # A newline joins the recalled element to what follows it.
+            remaining = available - stimulus - beside - len("\n")
+            try:
+                recalled = model_facing_content(self.recalled, capacity=media.ImageCapacity(), budget_bytes=remaining)
+            except ValueError:
+                recalled = ()
+            if recalled:
+                before.append("".join(part.text for part in recalled if isinstance(part, text.TextPart)))
+        if self.situation:
+            before.append(self.situation)
+        if before:
+            prefix = "\n".join(before) + "\n"
+            first = parts[0] if parts else None
+            parts = (
+                (text.TextPart(text=f"{prefix}{first.text}"), *parts[1:])
+                if isinstance(first, text.TextPart)
+                else (text.TextPart(text=prefix.removesuffix("\n")), *parts)
+            )
+        if self.feedback:
+            last = parts[-1] if parts else None
+            parts = (
+                (*parts[:-1], text.TextPart(text=f"{last.text}\n{self.feedback}"))
+                if isinstance(last, text.TextPart)
+                else (*parts, text.TextPart(text=self.feedback))
+            )
+        return parts
 
 
 class CompletionData(pydantic.BaseModel):

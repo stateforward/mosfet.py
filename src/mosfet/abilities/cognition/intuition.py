@@ -28,10 +28,10 @@ _DEFAULT_TUNER_WARMUP = 8
 # Variance floor on 0–100 scale (~std 10 when expressed as variance 100).
 _DEFAULT_TUNER_VAR_FLOOR = 100.0
 _DEFAULT_TUNER_MEAN = 70.0
-# No static system prose: the model-facing system channel is only the per-turn world and self
-# blocks (``Environment.model_snapshot`` XML stamped on ``InputData.instructions``), followed by
-# the per-turn ``<reasoning_only>`` capacities above this stage's ceiling when there are any.
-# Tool schemas and the stimulus carry the rest of the contract.
+# No static system prose: the model-facing system channel is only the self block (stamped on
+# ``InputData.instructions``), followed by the ``<reasoning_only>`` capacities above this stage's
+# ceiling when there are any. The world block (``Environment.model_snapshot`` XML) is the turn's
+# ``situation``. Tool schemas and the stimulus carry the rest of the contract.
 DEFAULT_INSTRUCTIONS = ""
 # How the turn reaches what only reasoning holds when no handoff event is offered: cascading.
 _ESCALATION = "escalating this turn to deliberate reasoning"
@@ -604,7 +604,7 @@ class Intuition(processing.Processing):
     ) -> processing.InputData:
         """Stamp instructions, what only reasoning holds, and the EventPatch on the narrowed frame.
 
-        ``held`` (see :func:`_reasoning_only`) renders after the world and self blocks as one
+        ``held`` (see :func:`_reasoning_only`) renders after the self block as one
         ``<reasoning_only>`` element: each capacity's event name and the opening paragraph of its own
         schema description. It is what the model knows of those capacities; their tools stay off
         this turn's dispatch, and escalating the turn is how it reaches them. ``reached_by`` names

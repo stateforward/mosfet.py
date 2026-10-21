@@ -26,7 +26,8 @@ The mapping is structural, not behavioral:
 - **The request fits the model's context** (D-R-36): with ``max_context_tokens``, the processor owns a
   ``processing.ContextFit``; a request whose JSON body is over its budget (3 UTF-8 bytes a token until
   the server's counted input tokens teach it fewer, D-R-45) has the selection's
-  instructions (the turn's world, self and acted blocks: context assembly) cut to their leading whole
+  instructions (the turn's situation, its world block then what was acted, followed by its stable
+  instructions, the self block, and any repair feedback: context assembly) cut to their leading whole
   lines, down to the question's own default instructions. The state (the stimuli) and the menu are
   never cut, ranked or dropped; a request that still does not fit is sent, and the server's refusal is
   intuition's failure.
@@ -250,7 +251,15 @@ class Processor(processing.DecisionProcessor):
         criteria: dict[str, str | None] = {name: _event_wording(event) for name, event in groundable.items()}
         criteria[_RESERVED_PASS_CRITERION] = self._pass_wording
         questions: dict[str, client.Choice] = {
-            _SELECTION: client.Choice(instructions=input.instructions or _SELECTION_INSTRUCTIONS, criteria=criteria)
+            _SELECTION: client.Choice(
+                # The turn's situation leads, where the world block always was; then the stable instructions,
+                # then a repair's feedback. A fitted cut keeps leading whole lines (D-R-36).
+                instructions="\n".join(
+                    block for block in (input.situation, input.instructions, input.feedback) if block
+                )
+                or _SELECTION_INSTRUCTIONS,
+                criteria=criteria,
+            )
         }
         for (name, key), values in candidates.items():
             wording = _payload_key_wording(name, key)
