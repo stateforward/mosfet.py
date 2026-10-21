@@ -312,7 +312,8 @@ class Sandbox(ability.Ability[command.RunData, cognition.InputData]):
     input_event: typing.ClassVar[hsm.Event[command.RunData]] = RunEvent
     output_event: typing.ClassVar[hsm.Event[cognition.InputData]] = cognition.InputEvent
     failed_event: typing.ClassVar[hsm.Event[FailureData]] = FailedEvent
-    effort: typing.ClassVar[ability.Effort] = ability.Effort.M
+    # The bench is reasoning's alone, above intuition's ceiling (M) (D-R-52).
+    effort: typing.ClassVar[ability.Effort] = ability.Effort.L
     detached_requests: typing.ClassVar[tuple[hsm.Event[typing.Any], ...]] = _REQUEST_EVENTS
     # The composite form gives the bench its own detaching state, so it can destroy its machine and stop its host
     # before the owner is told it is detached.

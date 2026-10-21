@@ -371,7 +371,8 @@ def test_sandbox_exports_its_contract() -> None:
         hsm.kind.Is(observation.kind, event_contract.EventKind) for observation in (*observations, sandbox.FailedEvent)
     )
     assert issubclass(sandbox.FailureData, ability.FailureData)
-    assert sandbox.Sandbox.effort is ability.Effort.M
+    # D-R-52: the bench is reasoning's alone, above intuition's ceiling (M).
+    assert sandbox.Sandbox.effort is ability.Effort.L
     assert sandbox.Sandbox.output_event is cognition.InputEvent
     assert sandbox.Sandbox.failed_event is sandbox.FailedEvent
     failure = sandbox.FailureData(kind=host.FailureKind.BUSY, message="The queue is full.", request="run")

@@ -767,8 +767,8 @@ def _require_runtime_input_grounding(
 
 
 class Learning(ability.Ability[InputData, OutputData]):
-    # Authoring standing behavior is deliberate-tier work: never offered on the reflex arc.
-    effort: typing.ClassVar[Effort] = Effort.M
+    # Authoring standing behavior is deliberate-tier work: reasoning's alone, above intuition's ceiling (M).
+    effort: typing.ClassVar[Effort] = Effort.L
     _attachment_group: attachment.Group | None
     """Decode lesson material, ground runtime input in memory, revise into inventory."""
 

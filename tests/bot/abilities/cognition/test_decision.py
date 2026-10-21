@@ -475,7 +475,7 @@ def test_decision_offers_only_what_its_own_effort_ceiling_admits() -> None:
 
 
 class _BenchActor(hsm.Instance):
-    """An M-effort actor enabling the real sandbox run command, as the builder's bench does."""
+    """An M-effort actor enabling the real sandbox run command, above the decision layer's ceiling."""
 
     effort: typing.ClassVar[ability_module.Effort] = ability_module.Effort.M
     model: typing.ClassVar[hsm.Model | None] = mosfet.define(
