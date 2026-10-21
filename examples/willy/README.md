@@ -196,6 +196,7 @@ person is an attribute.
 |---|---|---|
 | `WILLY_LLM_URL`, `WILLY_MODEL` | required | Willy's language model, an OpenAI-compatible `/v1` root, and its name |
 | `WILLY_THINKING_TOKENS` | `256` | how many tokens the language model may think for on a reasoning turn before it chooses what to do (the chat template's thinking channel, capped by vLLM's `thinking_token_budget`); `0` turns thinking off |
+| `WILLY_MAX_CONTEXT_TOKENS` | unset | the language model's context in tokens; set it to the chat server's own `--max-model-len` (the lab serves 32768). Each reasoning prompt is fitted to it, less the reply and thinking budget, by trimming only what Willy recalls (the recent turns keep the newest, the memories the strongest), never the turn itself; unset, prompts are sent whole |
 | `WILLY_EMBED_URL`, `WILLY_EMBED_MODEL` | required | memory's embeddings, an OpenAI-compatible `/v1` root, and the model's name |
 | `WILLY_STT_URL` | required | streaming speech to text, a `ws://` root |
 | `WILLY_TRANSCRIBE_URL` | required | batch transcription, which Willy hears its own name through, a `/v1` root |

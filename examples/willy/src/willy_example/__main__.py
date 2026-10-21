@@ -2,7 +2,7 @@
 
 Reads the owner's :class:`~willy_example.Settings` from the environment (the lab model server's ``WILLY_*_URL``
 addresses and models, ``DECISION_BASE_URL``, and the optional ``DECISION_MAX_CONTEXT_TOKENS``,
-``WILLY_THINKING_TOKENS``, room, camera and trait variables) and its secrets: ``openai_api_key`` (a placeholder for
+``WILLY_THINKING_TOKENS``, ``WILLY_MAX_CONTEXT_TOKENS``, room, camera and trait variables) and its secrets: ``openai_api_key`` (a placeholder for
 the lab's keyless servers),
 the optional ``decision_api_key`` (the key of the decision server Willy's intuition decides on; without it none is
 sent, as the local decide expects) and ``computer_token_secret``, the key every
@@ -167,6 +167,7 @@ if __name__ == "__main__":
                 client=openai_compat.ChatClient(model=settings.model, base_url=settings.llm_url, api_key=api_key),
                 provider="willy",
                 extra_body=settings.thinking,
+                max_context_tokens=settings.max_context_tokens,
             ),
             intuition=decision.Processor(
                 base_url=settings.decision_base_url,

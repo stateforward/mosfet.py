@@ -159,6 +159,20 @@ class Settings(pydantic.BaseModel):
         ),
         examples=[256],
     )
+    max_context_tokens: int | None = pydantic.Field(
+        default=None,
+        alias="WILLY_MAX_CONTEXT_TOKENS",
+        gt=0,
+        description=(
+            "The context of Willy's language model in tokens (the chat server's max-model-len): what a reasoning"
+            + " request's prompt and everything the model may write and think together must fit. Each reasoning"
+            + " prompt is fitted to it, less the reply and thinking budget, by trimming only what Willy recalls (the"
+            + " recent turns keep the newest, the memories the strongest), never the turn itself; it learns the server's"
+            + " bytes per token from each answer. Unset, prompts are sent whole and an oversized one is the server's"
+            + " to refuse. Owner-configured: set it to the server's own limit."
+        ),
+        examples=[32768],
+    )
     embed_url: str = pydantic.Field(
         alias="WILLY_EMBED_URL",
         min_length=1,

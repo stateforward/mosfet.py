@@ -60,6 +60,7 @@ def test_the_required_settings_alone_take_every_default() -> None:
     )
     assert (settings.host, settings.port, settings.camera, settings.face_models) == ("127.0.0.1", 8765, False, None)
     assert (settings.decision_base_url, settings.decision_max_context_tokens) == (f"http://{_CLOSED}", None)
+    assert settings.max_context_tokens is None
     # One room, its computer on a shelf.
     assert settings.rooms == (
         willy_example.Room(id="living-room", on="shelf", placement=space.Placement(position=space.Position(0.0, 0.0))),
@@ -82,11 +83,13 @@ def test_every_owner_setting_has_a_working_value(tmp_path: pathlib.Path) -> None
             "WILLY_FACE_MODELS": str(tmp_path),
             "WILLY_TRAITS": "patient, exact",
             "DECISION_MAX_CONTEXT_TOKENS": "2048",
+            "WILLY_MAX_CONTEXT_TOKENS": "32768",
         }
     )
 
     assert (settings.host, settings.port, settings.camera, settings.face_models) == ("0.0.0.0", 9000, True, tmp_path)
     assert settings.decision_max_context_tokens == 2048
+    assert settings.max_context_tokens == 32768
     # Each room is placed ROOM_SPACING_M further along, in the order the owner lists them.
     assert [(room.id, room.on, room.placement.position.x) for room in settings.rooms] == [
         ("kitchen", "counter", 0.0),
@@ -160,6 +163,15 @@ def test_a_thinking_budget_is_a_count_of_tokens(value: str) -> None:
     assert value not in message
 
 
+def test_willys_reasoning_prompt_is_fitted_to_the_owners_context() -> None:
+    """R-20 C6: the bot file gives its reasoning processor the owner's WILLY_MAX_CONTEXT_TOKENS."""
+
+    main = (_PROJECT / "src" / "willy_example" / "__main__.py").read_text(encoding="utf-8")
+    reasoning = main[main.index("openai_compat.Processor(") : main.index("intuition=decision.Processor(")]
+
+    assert "max_context_tokens=settings.max_context_tokens" in reasoning
+
+
 def test_the_owner_lists_nobody_willy_learns_who_people_are_itself() -> None:
     """R-11: there is no household to declare; who lives here is something Willy learns and remembers."""
 
@@ -212,6 +224,8 @@ def test_each_endpoint_is_required_and_named_when_it_is_missing(unset: str) -> N
         ("WILLY_TRAITS", "warm,,honest"),
         ("DECISION_MAX_CONTEXT_TOKENS", "-2048"),
         ("DECISION_MAX_CONTEXT_TOKENS", "many"),
+        ("WILLY_MAX_CONTEXT_TOKENS", "-32768"),
+        ("WILLY_MAX_CONTEXT_TOKENS", "many"),
     ],
 )
 def test_a_bad_setting_is_refused_and_named_without_its_value(variable: str, value: str) -> None:
@@ -245,6 +259,8 @@ def test_the_env_example_is_the_lab_and_every_setting_in_it_is_valid() -> None:
     assert (settings.decision_base_url, settings.decision_max_context_tokens) == ("http://192.168.2.2:8102", 2048)
     # R-18: the lab's reasoning turns think within 256 tokens, 4-7 s on a full Willy turn.
     assert settings.thinking_tokens == 256
+    # R-20 C6: the lab's chat server serves a 32k context, and each reasoning prompt is fitted to it.
+    assert settings.max_context_tokens == 32768
     secrets = {"COMPUTER_TOKEN_SECRET", "OPENAI_API_KEY_FILE", "DECISION_API_KEY", "DECISION_API_KEY_FILE"}
     assert not secrets & set(given)
 
