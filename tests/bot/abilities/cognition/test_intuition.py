@@ -261,3 +261,65 @@ def test_intuition_reports_its_steps_under_its_own_span(monkeypatch: pytest.Monk
     ]
     assert (reasoned.attributes or {}).get("bot.intuition.held.count") == 1
     assert (reasoned.attributes or {}).get("bot.cognition.escalated") is False
+
+
+class _Targeting(processing.Processor):
+    """A chat model that says ``text`` to the last actor its ``dispatch`` tool lets it name, as a provider would."""
+
+    calls: list[processing.InputData]
+    _text: str
+
+    def __init__(self, text: str) -> None:
+        self.calls = []
+        self._text = text
+
+    @typing.override
+    async def process(
+        self, input: processing.InputData, *, drafts: processing.DraftSink | None = None
+    ) -> processing.Events:
+        del drafts
+        self.calls.append(input)
+        tool = processing.dispatch_tool(input.schemas, patch=input.patch, targets_by_event=input.actor_events)
+        function = typing.cast(dict[str, object], tool["function"])
+        parameters = typing.cast(dict[str, dict[str, dict[str, object]]], function["parameters"])
+        items = typing.cast(
+            dict[str, list[dict[str, dict[str, dict[str, list[str]]]]]], parameters["properties"]["events"]["items"]
+        )
+        (branch,) = [item for item in items["anyOf"] if item["properties"]["event"]["enum"] == [_SayEvent.name]]
+        targets = branch["properties"].get("target", {}).get("enum", [])
+        target = targets[-1] if targets else None
+        return (processing.SelectedEvent(event=_SayEvent.name, target=target, data={"text": self._text}),)
+
+
+def test_an_event_two_actors_offer_is_dispatched_to_the_one_the_model_names() -> None:
+    """Offered ⇒ dispatchable: the frame the model sees carries the targets dispatch resolves by (eval-5)."""
+
+    async def run() -> tuple[cognition.types.CompletionData, _Mouth, _Mouth]:
+        ctx = shared_hsm_context()
+        left, right, host = _Mouth(), _Mouth(), _Host()
+        for actor in (left, right, host):
+            assert actor.model is not None
+            _ = await mosfet.started(ctx, actor, actor.model)
+        stimulus = SoundEvent.with_data(SoundData(audio=b"hello", kind="speech"))
+        turn_input = cognition.InputData(stimulus=stimulus, actors={"left": left, "right": right, "cognition": host})
+        intuition = cognition.Intuition(processor=processor)
+        await start_abilities_for_test(ctx, intuition)
+        output = await dispatch_ability_for_test(
+            intuition,
+            ctx,
+            cognition.intuition.InputData(
+                turn=cognition.types.TurnData(input=turn_input, operation_id="two-mouths", generation="token"),
+                processing_input=cognition.input.build_processing_input(turn_input),
+            ),
+            timeout=1.0,
+        )
+        return typing.cast(cognition.types.CompletionData, typing.cast(object, output)), left, right
+
+    processor = _Targeting("Here is the recipe.")
+    completion, left, right = asyncio.run(run())
+
+    (frame,) = processor.calls
+    assert frame.actor_events[_SayEvent.name] == ("left", "right")
+    assert (left.said, right.said) == ([], ["Here is the recipe."])
+    assert completion.output is not None
+    assert [(item.event, item.target) for item in completion.output] == [(_SayEvent.name, "right")]

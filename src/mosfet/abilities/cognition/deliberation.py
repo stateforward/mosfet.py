@@ -509,13 +509,15 @@ class Deliberation(processing.Processing):
                     host_input = cognition_input.without_handoff(narrowed)
                 # Keep host tools/actors, the host's instructions (self block, then ``<held>``), its situation
                 # (device-state block), and what was recalled for this turn; nest the stage's payload as the
-                # process input.
+                # process input. The offered events keep the actors that enable each one, so the model is
+                # offered the same receivers dispatch resolves its selections by.
                 child_input = processing.Processing._input_for_processor(
                     instance,
                     processing.InputData(
                         input=tier._processor_input(host_input=host_input),
                         schemas=host_input.schemas,
                         actors=host_input.actors,
+                        actor_events=host_input.actor_events,
                         instructions=host_input.instructions,
                         situation=host_input.situation,
                         recalled=host_input.recalled,
