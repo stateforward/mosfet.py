@@ -1928,6 +1928,27 @@ def test_user_content_is_recalled_then_situation_then_stimulus_then_feedback() -
     assert rendered.endswith("Selection rejected: try again.")
 
 
+def test_the_next_turn_extends_the_recent_turns_so_the_prefix_cache_holds() -> None:
+    """R-20 C5: when short-term memory gains one turn, the next prompt's user content begins with the whole
+    previous run of recent turns, so a server's prefix cache holds through them; nothing that varies per
+    turn (a turn count, an id, the situation or stimulus) renders before them."""
+
+    def user_content(turns: int, said: str) -> str:
+        input = processing.InputData(
+            input=said,
+            situation=f'<environment at="{said}"/>',
+            recalled=cognition_types.RecalledData(recent=_recent(turns, size=5), associations=_associations(2, size=5)),
+        )
+        parts = input.model_facing_content(media.ImageCapacity())
+        return "".join(part.text for part in parts if isinstance(part, text.TextPart))
+
+    first = user_content(3, "first speech")
+    second = user_content(4, "second speech")
+
+    through = first.index("</memory:turn>", first.index("turn-2-")) + len("</memory:turn>")
+    assert second.startswith(first[:through])
+
+
 def test_processing_input_never_repeats_instructions_or_situation_in_its_projection() -> None:
     """R-20 C5: a stage that nests the host frame (reasoning's ProcessorInput) does not send the system
     message a second time as an escaped ``instructions=`` attribute, nor the situation."""

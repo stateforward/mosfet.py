@@ -90,6 +90,7 @@ class _BudgetedField:
     keep: typing.Literal["head", "tail"]
     items: tuple[object, ...]
     serialized: tuple[object, ...]
+    counted: bool
 
 
 @dataclasses.dataclass(frozen=True)
@@ -366,6 +367,7 @@ def _model_element(
     )
     if any(keep not in ("head", "tail") for keep in budgeted.values()):
         raise TypeError("__model_facing_budgeted_fields__ maps field names to 'head' or 'tail'")
+    uncounted = _field_names(type(model), "__model_facing_uncounted_fields__") or frozenset()
     root: ElementTree.Element | None = None
     current: ElementTree.Element | None = None
     rendered: set[str] = set()
@@ -398,6 +400,7 @@ def _model_element(
                 serialized_model[name],
                 budget,
                 keep=typing.cast(typing.Literal["head", "tail"] | None, budgeted.get(name)),
+                counted=name not in uncounted,
             )
     if root is None:
         root = _element(_payload_tag(type(model)), budget)
@@ -416,11 +419,13 @@ def _fill_field(
     budget: _ProjectionBudget,
     *,
     keep: typing.Literal["head", "tail"] | None = None,
+    counted: bool = True,
 ) -> None:
     """Place one canonical JSON field on ``element`` as a presentation detail.
 
     A sequence field with ``keep`` set is budgeted: its element is placed now and its items are
-    deferred to ``_render_budgeted``.
+    deferred to ``_render_budgeted``. A sequence field renders ``count="<n>"`` unless ``counted``
+    is false.
     """
 
     if serialized is None:
@@ -473,15 +478,24 @@ def _fill_field(
         if keep is not None and budget.defer and items:
             container = _subelement(element, name, budget)
             # Upper bounds for the final count and omission, settled once the items render.
-            _set_attribute(container, "count", str(len(items)), budget)
+            if counted:
+                _set_attribute(container, "count", str(len(items)), budget)
             _set_attribute(container, "omitted", str(len(items)), budget)
             budget.deferred.append(
-                _BudgetedField(element=container, name=name, keep=keep, items=items, serialized=serialized_items)
+                _BudgetedField(
+                    element=container,
+                    name=name,
+                    keep=keep,
+                    items=items,
+                    serialized=serialized_items,
+                    counted=counted,
+                )
             )
             return
         budget.consume_collection(len(serialized_items))
         child = _subelement(element, name, budget)
-        _set_attribute(child, "count", str(len(serialized_items)), budget)
+        if counted:
+            _set_attribute(child, "count", str(len(serialized_items)), budget)
         for index, item in enumerate(items):
             serialized_item = serialized_items[index]
             if isinstance(item, pydantic.BaseModel):
@@ -560,7 +574,8 @@ def _render_budgeted(root: ElementTree.Element, budget: _ProjectionBudget) -> No
         for index in sorted(kept):
             field.element.append(kept[index])
         omitted = len(field.items) - len(kept) - skipped
-        field.element.set("count", str(len(kept)))
+        if field.counted:
+            field.element.set("count", str(len(kept)))
         if omitted:
             field.element.set("omitted", str(omitted))
             _RECALLED_OMITTED.add(omitted, attributes={"bot.processing.recalled.field": field.name})
@@ -616,6 +631,11 @@ def model_facing_content(
     an item that would exceed any budget dimension is left out and counted in the field's
     ``omitted="<n>"`` attribute, so a budgeted field never makes the projection fail. Items of a
     budgeted field render whole (a budgeted field inside one is not trimmed again).
+
+    Every sequence field renders ``count="<n>"`` unless its payload class names it in
+    ``__model_facing_uncounted_fields__``, a set of field names: a field that grows turn over
+    turn (the recent conversation) then opens the same way each turn, so a server's prefix cache
+    holds through the items it already rendered.
 
     Raises ``TypeError`` for raw bytes outside a ``media.Image`` or a malformed
     ``__model_facing_budgeted_fields__``, and ``ValueError`` when the payload without its
