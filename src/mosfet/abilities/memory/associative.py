@@ -676,6 +676,17 @@ class Associative(ability.Ability[payload.CueData, payload.AssociationsData]):
                 memory.FoundEvent,
             )
             if isinstance(found, payload.FoundData):
+                # The turn being answered is already shown: its episodes are not earlier memories.
+                excluded = frozenset(data.exclude)
+                found = found.model_copy(
+                    update={
+                        "candidates": tuple(
+                            candidate
+                            for candidate in found.candidates
+                            if candidate.node.episode is None or candidate.node.episode.turn_id not in excluded
+                        )
+                    }
+                )
                 surfaced = _associations(
                     found,
                     weights=instance._weights,

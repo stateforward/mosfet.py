@@ -1057,8 +1057,10 @@ class Cognition(ability.Ability[InputData, OutputData]):
 
         Associative (long-term memory) and the short-term register answer in parallel, each within the
         step timeout. Either one absent, failing or late leaves the turn without what it would have
-        given; neither fails the turn. The recent turns leave out every turn whose id is this turn's
-        stimulus (or one of the percepts of its ``bot.perceived`` batch), which the turn already shows.
+        given; neither fails the turn. Both leave out the turns this turn already shows: every turn
+        whose id is this turn's stimulus's (or one of the percepts' of its ``bot.perceived`` batch) or
+        one of the causal parents' each carries. Associative leaves out their episodes
+        (``CueData.exclude``); the recent turns are filtered here.
         """
 
         with span.operation(
@@ -1083,6 +1085,30 @@ class Cognition(ability.Ability[InputData, OutputData]):
             child_timeout = instance._child_operation_timeout
             timeout = child_timeout if child_timeout is not None else types.STEP_TIMEOUT
             metadata = _public_metadata(dict(event.metadata))
+            stimulus = cognition_input.stimulus
+            stimuli = (
+                tuple(percept.stimulus for percept in stimulus.data.percepts)
+                if isinstance(stimulus, hsm.Event) and isinstance(stimulus.data, mosfet.PerceivedData)
+                else ()
+            )
+            # The ids this turn already shows: its stimulus's, or each percept's of its batch, and
+            # the causal parents each carries (``parent``, stamped by its producer). Speech admitted
+            # through Conversation carries the heard speech two parents up: Listening wrote its heard
+            # turn under that speech's id, and cognition remembered the turn that admitted it there.
+            shown: set[str] = set()
+            for given in (stimulus, *stimuli):
+                observed = given if isinstance(given, hsm.Event) else given.observation
+                if observed is not None and observed.id:
+                    shown.add(observed.id)
+                carried: object = None if observed is None else observed.data
+                for _ in range(_MAX_SHOWN_PARENTS):
+                    parent: object = getattr(carried, "parent", None)
+                    if not isinstance(parent, mosfet.StimulusData):
+                        break
+                    cause = typing.cast(mosfet.StimulusData[object], parent)
+                    if cause.id:
+                        shown.add(cause.id)
+                    carried = cause.data
 
             async def associate() -> memory.AssociationsData | None:
                 associative = instance._associative
@@ -1101,6 +1127,7 @@ class Cognition(ability.Ability[InputData, OutputData]):
                                         budget_bytes=memory.MAX_EPISODE_TEXT_BYTES,
                                     ),
                                     participants=cognition_input.participants,
+                                    exclude=tuple(sorted(shown)),
                                 ),
                                 f"{operation_id}{_ASSOCIATE_ID_SUFFIX}",
                             ),
@@ -1134,30 +1161,6 @@ class Cognition(ability.Ability[InputData, OutputData]):
                     return ()
                 if not isinstance(terminal.data, memory.stm.RecentTurnsOutputData):
                     return ()
-                stimulus = cognition_input.stimulus
-                stimuli = (
-                    tuple(percept.stimulus for percept in stimulus.data.percepts)
-                    if isinstance(stimulus, hsm.Event) and isinstance(stimulus.data, mosfet.PerceivedData)
-                    else ()
-                )
-                # The ids this turn already shows: its stimulus's, or each percept's of its batch, and
-                # the causal parents each carries (``parent``, stamped by its producer). Speech admitted
-                # through Conversation carries the heard speech two parents up, and Listening wrote
-                # its heard turn under that speech's id.
-                shown: set[str] = set()
-                for given in (stimulus, *stimuli):
-                    observed = given if isinstance(given, hsm.Event) else given.observation
-                    if observed is not None and observed.id:
-                        shown.add(observed.id)
-                    data: object = None if observed is None else observed.data
-                    for _ in range(_MAX_SHOWN_PARENTS):
-                        parent: object = getattr(data, "parent", None)
-                        if not isinstance(parent, mosfet.StimulusData):
-                            break
-                        cause = typing.cast(mosfet.StimulusData[object], parent)
-                        if cause.id:
-                            shown.add(cause.id)
-                        data = cause.data
                 return tuple(turn for turn in terminal.data.turns if turn.id not in shown)
 
             associations, recent = await asyncio.gather(associate(), recall_recent())

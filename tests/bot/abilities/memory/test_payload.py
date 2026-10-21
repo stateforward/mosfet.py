@@ -124,6 +124,16 @@ def test_a_cue_keeps_the_episode_bounds() -> None:
         _ = memory.CueData(cue=(text.TextPart(text="x" * (memory.MAX_EPISODE_TEXT_BYTES + 1)),))
 
 
+def test_a_cue_excludes_a_bounded_set_of_turn_ids() -> None:
+    assert memory.CueData().exclude == ()
+    assert len(memory.CueData(exclude=("t",) * memory.MAX_EXCLUDED_TURNS).exclude) == memory.MAX_EXCLUDED_TURNS
+    with pytest.raises(pydantic.ValidationError):
+        _ = memory.CueData(exclude=("t",) * (memory.MAX_EXCLUDED_TURNS + 1))
+    with pytest.raises(pydantic.ValidationError):
+        _ = memory.CueData(exclude=("",))
+    assert "already shows" in str(memory.CueData.model_json_schema()["properties"]["exclude"]["description"])
+
+
 def test_associations_are_ranked_head_budgeted_and_carry_placeholders_only() -> None:
     at = datetime.datetime(2026, 10, 14, tzinfo=datetime.UTC)
     released = media.ReleasedImage.of(media.Image(content=_PNG, media_type="image/png"), reason="memory")

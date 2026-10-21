@@ -1215,8 +1215,12 @@ def approximate_tokens(text: str) -> int:
     return -(-len(text.encode("utf-8")) // 4)
 
 
+MAX_EXCLUDED_TURNS: typing.Final = 128
+"""Most turn ids one cue leaves out: a turn's stimulus, or each percept of its batch, and their causal parents."""
+
+
 class CueData(pydantic.BaseModel):
-    """What to associate from: the memory rendering of a stimulus and who is present."""
+    """What to associate from: the memory rendering of a stimulus, who is present, and the turns already shown."""
 
     model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
         frozen=True,
@@ -1226,6 +1230,7 @@ class CueData(pydantic.BaseModel):
                 {
                     "cue": [{"kind": "text", "text": "Ada: can you call me back at noon?"}],
                     "participants": [{"ref": "+15555550100", "role": "source"}],
+                    "exclude": ["5e5b95c437364ad5a1763d96a735b673", "5e5b95c437364ad5a1763d96a735b673:autonomy"],
                 }
             ]
         },
@@ -1242,6 +1247,20 @@ class CueData(pydantic.BaseModel):
         max_length=MAX_PARTICIPANTS,
         description="Who is present now, as the stimulus producer stamped them.",
         examples=[[{"ref": "+15555550100", "role": "source"}]],
+    )
+    exclude: tuple[typing.Annotated[str, pydantic.StringConstraints(min_length=1, max_length=200)], ...] = (
+        pydantic.Field(
+            default=(),
+            max_length=MAX_EXCLUDED_TURNS,
+            description=(
+                "Turn ids (an episode's turn_id) of the turn being answered: its stimulus's id, or each percept's of "
+                "its batch, and the ids of the causal parents each carries. Their episodes are what the turn already "
+                "shows, not earlier memories, so they never surface and are not counted as omitted. Speech admitted "
+                "through a conversation is first a turn of its own, kept under the speech's id, and then the exchange "
+                "that carries that speech as a parent."
+            ),
+            examples=[["5e5b95c437364ad5a1763d96a735b673", "5e5b95c437364ad5a1763d96a735b673:autonomy"]],
+        )
     )
 
     @pydantic.model_validator(mode="after")

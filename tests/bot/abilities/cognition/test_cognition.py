@@ -4466,6 +4466,56 @@ def test_the_turn_listening_heard_for_this_stimulus_is_left_out_of_recent_while_
     assert [(turn.id, turn.direction) for turn in frame.recalled.recent] == [("earlier", "heard"), ("reply", "said")]
 
 
+@pytest.mark.parametrize("stimulus", [_speech_now, _exchange_now], ids=["raw-speech", "conversation-exchange"])
+def test_an_episode_of_the_turn_being_answered_is_not_recalled_as_an_association_while_earlier_ones_are(
+    stimulus: collections.abc.Callable[[], hsm.Event[typing.Any]],
+) -> None:
+    """R-20 C3: the turn being answered is not shown again as a memory of an earlier one.
+
+    Speech admitted through Conversation is two turns: cognition first takes the heard speech (and
+    remembers that turn under the speech's id), then answers the exchange that carries the speech as a
+    causal parent. Associating for the exchange must not surface the speech turn's episode, nor one
+    kept under the stimulus's own id, as if it were an earlier memory; an earlier episode still surfaces.
+    """
+
+    async def run() -> list[processing.InputData]:
+        store = memory.Memory()
+        reasoning_processor = RecordingReasoningProcessor(focus_output("phone", "reasoned focus"))
+        ability = RecordingCognition(
+            intuition_processor=RecordingIntuitionProcessor(cognition.intuition.OutputData(reason="think it over")),
+            reasoning_processor=reasoning_processor,
+            reflection=cognition.Reflection(processor=FixedProcessor(no_output("observed")), memory=store),
+            store=store,
+            associative=memory.Associative(memory=store),
+        )
+        ctx = await start_cognition_ability_for_test(ability)
+        await wait_until(lambda: ability.state().endswith("/idle"))
+        given = stimulus()
+        for turn_id, words in (
+            ("earlier", "Hi Willy, I'm Maya."),
+            ("now", "What did I just tell you?"),
+            (given.id, "What did I just tell you?"),
+        ):
+            await _remember_by_message(
+                ctx,
+                store,
+                memory.EpisodeData(
+                    turn_id=turn_id, parts=(text.TextPart(text=words),), outcome=memory.Outcome.COMPLETED
+                ),
+            )
+        turn = (await started_cognition_input(ctx)).model_copy(update={"stimulus": given})
+        _ = await dispatch_ability_for_test(ability, ctx, turn)
+        return reasoning_processor.calls
+
+    (frame,) = asyncio.run(run())
+
+    assert isinstance(frame.recalled, cognition.RecalledData)
+    surfaced = frame.recalled.associations
+    assert isinstance(surfaced, memory.AssociationsData)
+    assert [item.text for item in surfaced.items] == ["Hi Willy, I'm Maya."]
+    assert surfaced.omitted == 0
+
+
 def test_cognition_remembers_a_failed_turn_with_its_stimulus_and_no_acts() -> None:
     async def run() -> tuple[list[abilities.FailureData], tuple[memory.Episode, ...]]:
         store = memory.Memory()

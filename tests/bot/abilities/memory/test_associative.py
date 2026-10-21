@@ -297,6 +297,28 @@ def test_the_token_budget_admits_best_first_and_counts_what_it_left_out() -> Non
     assert surfaced.omitted == 1
 
 
+def test_episodes_of_the_turns_the_cue_excludes_never_surface_nor_count_as_omitted() -> None:
+    """The turn being answered is not an earlier memory: its episodes are left out before ranking."""
+
+    async def scenario() -> memory.AssociationsData:
+        harness = await _harness()
+        await harness.attach_memory()
+        await harness.remember(_episode("Ada asked about noon.", "earlier"))
+        await harness.remember(_episode("Where is the blue blanket?", "speech-1"))
+        await harness.remember(_episode("Where is the blue blanket?", "speech-1:autonomy"))
+        await harness.attach()
+        cue = memory.CueData(cue=(text.TextPart(text="blue blanket"),), exclude=("speech-1", "speech-1:autonomy"))
+        await harness.send(cue, "a-1")
+        reply = await harness.reply("a-1")
+        assert isinstance(reply.data, memory.AssociationsData)
+        return reply.data
+
+    surfaced = asyncio.run(scenario())
+
+    assert [item.text for item in surfaced.items] == ["Ada asked about noon."]
+    assert surfaced.omitted == 0
+
+
 def test_a_surfaced_image_is_a_memory_placeholder_never_bytes() -> None:
     async def scenario() -> memory.AssociationsData:
         harness = await _harness()
