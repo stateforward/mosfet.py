@@ -379,7 +379,7 @@ def test_a_cancelled_chat_completion_cancels_its_http_request() -> None:
 
 
 def test_a_keyless_sdk_client_asks_without_an_authorization_header(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Willy live check (D-W8-21 D3, run3): on openai 2.54 a keyless client raised "Could not resolve
+    """Companion live check (D-W8-21 D3, run3): on openai 2.54 a keyless client raised "Could not resolve
     authentication method" before sending anything, so the keyless speech servers were never asked. A client
     built without a key sends its requests, whole and streamed, sync and async, with no Authorization header."""
 

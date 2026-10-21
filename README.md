@@ -152,13 +152,13 @@ OPENAI_BASE_URL=http://127.0.0.1:8080/v1 OPENAI_MODEL=... OPENAI_API_KEY=... DEC
   examples/minimal_bot/.venv/bin/python -m minimal_bot_example --ready-file /tmp/ready
 ```
 
-[`examples/willy`](examples/willy/README.md) is one bot for a whole house, on local models: a computer in
-each room, and the capacity to learn who people are, by itself:
+[`examples/companion`](examples/companion/README.md) is one bot for a whole house, on local models: a computer in
+each room, no given name, and the capacity to learn who people are, and what they call it, by itself:
 
 ```bash
-uv sync --project examples/willy
-set -a; . examples/willy/.env; set +a
-examples/willy/.venv/bin/python -m willy_example --secrets-dir examples/willy/secrets
+uv sync --project examples/companion
+set -a; . examples/companion/.env; set +a
+examples/companion/.venv/bin/python -m companion_example --secrets-dir examples/companion/secrets
 ```
 
 [`docs/runtime.md`](docs/runtime.md) has every `bot.process` option, the stop bound and the

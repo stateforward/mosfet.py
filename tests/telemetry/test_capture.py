@@ -243,7 +243,7 @@ _PCM = bytes(range(256)) * 8
 
 
 def test_jsonable_redacts_raw_audio_bytes_to_their_media_kind_and_length() -> None:
-    """D-W8-22 (Willy live check): full capture wrote every heard sound's PCM into the log as base64, a model's
+    """D-W8-22 (companion live check): full capture wrote every heard sound's PCM into the log as base64, a model's
     bytes field dumped as text. Raw audio, like an image, is written as its media kind and length only."""
 
     sound = environment.SoundData(audio=_PCM, media_type="audio/pcm", sample_rate_hz=16_000, channels=1)

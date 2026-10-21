@@ -451,8 +451,9 @@ def test_a_request_over_max_context_tokens_cuts_its_turn_instructions_to_their_l
 
 
 def test_what_someone_said_or_typed_reaches_the_decision_whole() -> None:
-    """D-R-47 (Willy browser UI): the state dropped every string over 40 characters as prose, so a typed line or a
-    transcript reached decide as null and the decision layer judged a turn whose words it never saw. Text is the turn."""
+    """D-R-47 (companion browser UI): the state dropped every string over 40 characters as prose, so a typed line or a
+    transcript reached decide as null and the decision layer judged a turn whose words it never saw. Text is the
+    turn."""
 
     line = "Hi Willy, this is a test from the browser. Can you hear me?"
     server = _Decide({"selection": (_PASS, {_PASS: 1.0})})
@@ -470,7 +471,7 @@ class _SaidPayload(pydantic.BaseModel):
 
 
 def test_the_state_is_the_turn_as_the_model_may_see_it_without_causal_parents_or_audio() -> None:
-    """D-R-50 (Willy evaluator): the state dumped the stimulus data whole, so a heard turn carried its typed causal
+    """D-R-50 (companion evaluator): the state dumped the stimulus data whole, so a heard turn carried its typed causal
     parents down to environment.sound and that sound's audio as base64. Requests were 10-27 KB against a 2048-token
     decide context and 98 of ~120 were refused (422). The state is the turn as the model may see it: the words whole,
     no causal parents, no audio; grounding still reads the live stimulus data."""
@@ -535,7 +536,7 @@ def test_audio_bytes_never_become_a_payload_candidate() -> None:
 
 
 def test_the_token_estimate_learns_from_what_the_server_counted() -> None:
-    """D-R-45 (Willy live check): decide counts tokens with its own tokenizer and prompt template, so requests
+    """D-R-45 (companion live check): decide counts tokens with its own tokenizer and prompt template, so requests
     fitted at a guessed 3 bytes a token still overran its context and were refused (422). The processor learns
     bytes per token from the input tokens each answer reports, and fits later requests to what it learned."""
 

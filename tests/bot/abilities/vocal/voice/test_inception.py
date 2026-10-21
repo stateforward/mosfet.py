@@ -302,7 +302,7 @@ def _conceive_schema(offered: hsm.Event[typing.Any]) -> dict[str, typing.Any]:
 
 
 def test_a_designing_sources_frame_bounds_the_described_voice_by_the_designers_limit() -> None:
-    """D-R-35 (Willy run 7, D-1): the schema let a description run to 1000 characters while the designer takes 300,
+    """D-R-35 (companion run 7, D-1): the schema let a description run to 1000 characters while the designer takes 300,
     so the model wrote past the bound it was only told as a number, and every conception was refused. The frame's
     conceive schema now carries the designer's limit itself; nothing else in it changes."""
 
@@ -645,8 +645,8 @@ def test_a_conception_outside_what_was_asked_is_refused_and_conceived_again(
 
 
 def test_a_refused_conception_is_conceived_again_at_once_with_the_refusal_fed_back() -> None:
-    """D-R-35 (Willy run 7, D-1): a refused conception was conceived afresh after ``retry_after``, never told why, so
-    the model wrote the same too-long voice again. It is now asked again at once, shown why it was refused."""
+    """D-R-35 (companion run 7, D-1): a refused conception was conceived afresh after ``retry_after``, never told why,
+    so the model wrote the same too-long voice again. It is now asked again at once, shown why it was refused."""
 
     async def run() -> tuple[Bot, Maker, Studio]:
         shelf = Shelf()

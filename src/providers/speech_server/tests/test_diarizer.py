@@ -111,7 +111,7 @@ def test_server_segments_become_ordered_clips_of_the_original_audio_without_spea
 
 
 def test_a_speakers_spans_with_nobody_between_are_one_clip_across_the_pause() -> None:
-    """Willy live check: one speaker who paused mid-sentence came back as two spans, each identified on its own,
+    """Companion live check: one speaker who paused mid-sentence came back as two spans, each identified on its own,
     so one stranger became two new voices. Spans of one speaker with nobody else between are one segment."""
 
     data = _input(seconds=4.0)

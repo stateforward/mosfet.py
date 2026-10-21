@@ -18,18 +18,18 @@ examples/builder_bot/.venv/bin/python -m builder_bot_example --secrets-dir examp
 examples/builder_bot/.venv/bin/builder-terminal --secret-file examples/builder_bot/secrets/computer_token_secret
 ```
 
-`willy` is one bot for the whole house, that learns who people are: a voice nobody has named is a fact it is
+`companion` is one bot for the whole house, with no given name, that learns who people are and what they call it: a voice nobody has named is a fact it is
 shown, and whom a voice belongs to, what to call someone and whether to ask are its own choices. Its bot file,
-`willy_example/__main__.py`, has one `bot.define`: a `computer.Computer` per room, each set on an
+`companion_example/__main__.py`, has one `bot.define`: a `computer.Computer` per room, each set on an
 `environment.Object` and served by one `websocket.Server`, an ear and a mouth on the lab's streaming speech
 server, a voice it is given when it is born, and a memory that remembers who people are. Nobody lists the
-household for it: it learns who everyone is itself. Every model runs on the local lab server. See [`willy/README.md`](willy/README.md) for
+household for it: it learns who everyone is itself. Every model runs on the local lab server. See [`companion/README.md`](companion/README.md) for
 the settings and where safety sits:
 
 ```bash
-uv sync --project examples/willy
-set -a; . examples/willy/.env; set +a
-examples/willy/.venv/bin/python -m willy_example --secrets-dir examples/willy/secrets
+uv sync --project examples/companion
+set -a; . examples/companion/.env; set +a
+examples/companion/.venv/bin/python -m companion_example --secrets-dir examples/companion/secrets
 ```
 
 `minimal_bot` is the smallest bot: one device-free bot with a cognition on any OpenAI-compatible endpoint, run

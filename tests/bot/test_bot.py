@@ -6635,7 +6635,7 @@ def _undelivered_count(metrics: metric_reader.Reader, terminal: str) -> float:
 def test_a_reboot_after_its_activator_stopped_reactivates_and_counts_the_answer_nobody_heard(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """Willy live check (D2): ``bot.start`` waits for activation with a one-shot reply target that stops once
+    """Companion live check (D2): ``bot.start`` waits for activation with a one-shot reply target that stops once
     answered. A cognition reboot later re-entered activation, and answering that stopped target raised, so the
     body never became active again. A reply target hears the answer only while it runs: the body is active
     again, still answers what it is asked next, and the answer nobody heard is counted."""

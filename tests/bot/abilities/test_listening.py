@@ -2528,7 +2528,7 @@ def test_a_known_overlapping_voice_is_stamped_on_the_fact() -> None:
 
 
 def test_an_overlapping_voice_nobody_knows_is_not_named_and_makes_no_new_voice() -> None:
-    """Willy live check (D-W8-21 D5, run6): an overlap is heard while the bot speaks, so its audio is the bot's
+    """Companion live check (D-W8-21 D5, run6): an overlap is heard while the bot speaks, so its audio is the bot's
     voice and another's at once, and identifying it minted a phantom voice that later took a real voice's place.
     Overlap identification is match-only: a voice nobody knows is not named on the fact, and no voice is made."""
 
@@ -2578,7 +2578,7 @@ def test_an_overlapping_voice_nobody_knows_is_not_named_and_makes_no_new_voice()
 def test_a_voice_nobody_knows_heard_while_the_bot_speaks_or_just_after_makes_no_new_voice(
     while_producing: bool, after_tenths: int, made: bool, diarized: bool
 ) -> None:
-    """D-R-37 (Willy run 7, D-4) on the local ear: an utterance heard while the bot speaks, or that begins within
+    """D-R-37 (companion run 7, D-4) on the local ear: an utterance heard while the bot speaks, or that begins within
     ``recognition.ECHO_SECONDS`` of heard audio after it last did, is identified match-only, whether its voice is
     identified from its opening span or after it ends (diarized). Time is the audio the ear heard."""
 

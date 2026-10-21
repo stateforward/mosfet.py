@@ -240,8 +240,8 @@ def test_processor_maps_dispatch_tool_to_events() -> None:
 
 @pytest.mark.parametrize("instructions", [None, "  \n"])
 def test_processor_sends_no_system_message_for_blank_instructions(instructions: str | None) -> None:
-    """Willy live check (D-W8-21 D1): inception's Processing stamps no instructions, and the processor
-    refused the call, so Willy could not be born. Blank instructions send the user message alone."""
+    """Companion live check (D-W8-21 D1): inception's Processing stamps no instructions, and the processor
+    refused the call, so the companion could not be born. Blank instructions send the user message alone."""
 
     generator = RecordingGenerator(content="[]")
     processor = Processor(generator=generator)

@@ -1672,7 +1672,7 @@ class _UnreadableOnce(hsm.Instance):
 def test_a_failing_decision_hands_its_turn_to_reasoning_in_the_same_turn(
     failing: str, tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """D-R-36 (Willy run 7, D-2): decide refused an over-long request, the turn failed at decision, and reasoning
+    """D-R-36 (companion run 7, D-2): decide refused an over-long request, the turn failed at decision, and reasoning
     never saw what was said. An decision whose decider fails, or whose frame cannot be built, now hands the same
     turn to reasoning: nothing is handed back, and the turn is remembered as reasoning settles it."""
 

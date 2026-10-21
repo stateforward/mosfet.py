@@ -501,8 +501,8 @@ def test_a_new_voice_is_made_only_from_at_least_a_second_of_it(tenths: int, know
 def test_a_voice_nobody_knows_heard_while_the_bot_speaks_or_just_after_makes_no_new_voice(
     while_producing: bool, quiet: bool, after_tenths: int, made: bool
 ) -> None:
-    """D-R-37 (Willy run 7, D-4): Willy's own sentence, heard back in its own voice and not matched to its own print,
-    made a phantom stranger that Willy then linked as a person. While the bot speaks, and for
+    """D-R-37 (companion run 7, D-4): the companion's own sentence, heard back in its own voice and not matched to its
+    own print, made a phantom stranger that the companion then linked as a person. While the bot speaks, and for
     ``recognition.ECHO_SECONDS`` of heard audio after, a voice nobody knows is identified match-only: a voice already
     known is still named, and no new one is made. Time is the audio the ear heard, never a wall clock."""
 
@@ -705,7 +705,7 @@ def test_an_overlap_while_producing_is_a_fact_carrying_the_words_so_far(
 
 @pytest.mark.parametrize("known", [True, False])
 def test_an_overlap_names_only_a_voice_already_known_and_never_makes_a_new_one(known: bool) -> None:
-    """Willy live check (D-W8-21 D5, run6): an overlap is heard while the bot speaks, so its audio is the bot's
+    """Companion live check (D-W8-21 D5, run6): an overlap is heard while the bot speaks, so its audio is the bot's
     voice and another's at once, and identifying it minted a phantom voice that later took a real voice's place.
     Overlap identification is match-only: a voice already known is named on the fact, one nobody knows is not,
     and no voice is made from it."""
@@ -942,8 +942,8 @@ class SplitAt(voice.diarization.VoiceDiarizer):
 
 
 def test_a_voice_nobody_knows_after_the_echo_window_of_the_same_turn_is_a_new_voice() -> None:
-    """Willy live check (D-R-44): the echo guard held a whole turn match-only when the bot had spoken anywhere in it,
-    so a stranger who spoke well after Willy went quiet, in the same turn, was never heard as anyone. Only a
+    """Companion live check (D-R-44): the echo guard held a whole turn match-only when the bot had spoken anywhere in
+    it, so a stranger who spoke well after the companion went quiet, in the same turn, was never heard as anyone. Only a
     diarized segment that overlaps the bot producing, or ``recognition.ECHO_SECONDS`` after, is match-only."""
 
     async def run() -> StreamingListening:

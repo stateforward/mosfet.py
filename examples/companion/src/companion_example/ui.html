@@ -1,0 +1,396 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>the companion</title>
+<style>
+:root {
+  --bg: #f6f5f1; --panel: #ffffff; --ink: #1d1d1b; --muted: #6b6a65; --line: #dedcd5;
+  --accent: #2f6f5e; --accent-ink: #ffffff; --warn: #a2542b; --companion: #2f6f5e; --you: #3b4f8a;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #161715; --panel: #1f201e; --ink: #ecebe6; --muted: #9a9890; --line: #33342f;
+    --accent: #5fae96; --accent-ink: #0d1a16; --warn: #e08a5c; --companion: #7cc7ae; --you: #9db0ec;
+    color-scheme: dark;
+  }
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; background: var(--bg); color: var(--ink);
+  font: 15px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+main { max-width: 760px; margin: 0 auto; padding: 16px; display: grid; gap: 14px; }
+header { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+h1 { margin: 0; font-size: 22px; letter-spacing: 0.01em; }
+.state { font-size: 13px; color: var(--muted); display: flex; align-items: center; gap: 8px; }
+.dot { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); }
+.state[data-state="linked"] .dot { background: var(--accent); }
+.state[data-state="closed"] .dot, .state[data-state="away"] .dot { background: var(--warn); }
+.panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px; }
+.controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+button {
+  font: inherit; border: 1px solid var(--line); background: var(--panel); color: var(--ink);
+  border-radius: 8px; padding: 7px 12px; cursor: pointer;
+}
+button.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+button:disabled { opacity: 0.5; cursor: default; }
+button[aria-pressed="true"] { outline: 2px solid var(--accent); }
+label { display: inline-flex; gap: 6px; align-items: center; color: var(--muted); font-size: 14px; }
+.meter { flex: 1 1 120px; min-width: 80px; height: 8px; background: var(--line); border-radius: 4px; overflow: hidden; }
+.meter > span { display: block; height: 100%; width: 0; background: var(--accent); transition: width 80ms linear; }
+.speaking { font-size: 13px; color: var(--companion); min-height: 1.2em; }
+form { display: flex; gap: 8px; }
+input[type="text"] {
+  flex: 1; min-width: 0; font: inherit; padding: 8px 10px; border-radius: 8px;
+  border: 1px solid var(--line); background: var(--bg); color: var(--ink);
+}
+video { width: 160px; border-radius: 8px; background: #000; }
+ol { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; max-height: 50vh; overflow-y: auto; }
+li { display: grid; grid-template-columns: 72px 1fr; gap: 8px; font-size: 14px; overflow-wrap: anywhere; }
+li time { color: var(--muted); font-variant-numeric: tabular-nums; }
+li.you span { color: var(--you); }
+li.companion span { color: var(--companion); }
+li.notice span { color: var(--muted); }
+li.problem span { color: var(--warn); }
+.hint { color: var(--muted); font-size: 13px; margin: 0; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>the companion</h1>
+    <div class="state" id="state" data-state="connecting"><span class="dot"></span><span id="state-text">connecting to the bridge</span></div>
+  </header>
+
+  <section class="panel controls" aria-label="Microphone and speaker">
+    <button class="primary" id="start" type="button">Start microphone and sound</button>
+    <button id="mute" type="button" aria-pressed="false" disabled>Mute</button>
+    <label><input type="checkbox" id="ptt" disabled> Push to talk</label>
+    <button id="talk" type="button" disabled hidden>Hold to talk</button>
+    <div class="meter" title="Microphone level"><span id="level"></span></div>
+    <video id="camera" muted playsinline hidden></video>
+  </section>
+  <div class="speaking" id="speaking" aria-live="polite"></div>
+
+  <form class="panel" id="say" autocomplete="off">
+    <input type="text" id="line" placeholder="Type to the companion, Enter to send" aria-label="Type to the companion">
+    <button class="primary" type="submit">Send</button>
+  </form>
+
+  <section class="panel" aria-label="Log">
+    <ol id="log"></ol>
+  </section>
+  <p class="hint">Start asks for your microphone (and camera) and turns sound on. With push to talk, hold the
+    button or the space bar to talk. The page decides nothing: it carries what you say and type to the companion and
+    plays what the companion says.</p>
+</main>
+<script>
+"use strict";
+const SETTINGS = /*SETTINGS*/null;
+const $ = (id) => document.getElementById(id);
+const RATE = SETTINGS.microphone_rate_hz;
+const BLOCK = SETTINGS.microphone_block_samples;
+const MAX_LOG = 500;
+
+let socket = null;
+let linked = false;
+let replaced = false;
+let context = null;
+let muted = false;
+let pushToTalk = false;
+let talking = false;
+let playAt = 0;
+let playing = new Set();
+let spokeFor = 0;
+let spokeAt = null;
+let warnedSilent = false;
+
+// --- the log -------------------------------------------------------------------------------------
+function log(kind, text) {
+  const item = document.createElement("li");
+  item.className = kind;
+  const at = document.createElement("time");
+  at.textContent = new Date().toLocaleTimeString();
+  const said = document.createElement("span");
+  said.textContent = text;
+  item.append(at, said);
+  const list = $("log");
+  list.append(item);
+  while (list.children.length > MAX_LOG) list.firstElementChild.remove();
+  list.scrollTop = list.scrollHeight;
+}
+
+function showState(state, text) {
+  $("state").dataset.state = state;
+  $("state-text").textContent = text;
+}
+
+// --- the bridge's socket --------------------------------------------------------------------------
+function connect() {
+  socket = new WebSocket(`ws://${location.host}/ws`);
+  socket.binaryType = "arraybuffer";
+  socket.onopen = () => showState("connecting", "bridge open, waiting for the companion's computer");
+  socket.onmessage = (event) => {
+    if (typeof event.data === "string") told(JSON.parse(event.data));
+    else heard(event.data);
+  };
+  socket.onclose = (event) => {
+    socket = null;
+    linked = false;
+    if (event.code === 4000) {
+      replaced = true;
+      showState("away", "opened in another tab");
+      log("notice", "Another page took over the bridge.");
+      return;
+    }
+    showState("away", "bridge gone, retrying");
+    setTimeout(connect, 2000);
+  };
+}
+
+function told(message) {
+  if (message.type === "state") {
+    linked = message.state === "linked";
+    if (message.state === "linked") {
+      showState("linked", "linked to the companion's computer");
+      log("notice", "Linked to the companion's computer.");
+    } else if (message.state === "unlinked") {
+      showState("connecting", "unlinked");
+      log("notice", "The room let go of its devices.");
+    } else if (message.state === "closed") {
+      const code = message.code === null ? "" : ` (${message.code})`;
+      showState("closed", `session ended: ${message.reason}${code}`);
+      log("problem", `The session ended: ${message.reason}${code}.`);
+    } else {
+      showState("connecting", "connecting to the companion's computer");
+    }
+  } else if (message.type === "dropped") {
+    log("problem", `Not sent (${message.what}): ${message.why.replace("_", " ")}.`);
+  } else if (message.type === "silence") {
+    silence();
+  }
+}
+
+function send(message) {
+  if (socket === null || socket.readyState !== WebSocket.OPEN) return false;
+  socket.send(message);
+  return true;
+}
+
+// --- the companion's voice: played in order, without gaps -------------------------------------------------
+function heard(buffer) {
+  const header = new DataView(buffer, 0, 5);
+  const rate = header.getUint32(0, true);
+  const channels = header.getUint8(4);
+  const samples = new Int16Array(buffer.slice(5));
+  const frames = Math.floor(samples.length / channels);
+  if (context === null) {
+    if (!warnedSilent) log("notice", "the companion is speaking: press Start to hear it.");
+    warnedSilent = true;
+    return;
+  }
+  if (frames === 0) return;
+  const sound = context.createBuffer(channels, frames, rate);
+  for (let channel = 0; channel < channels; channel++) {
+    const out = sound.getChannelData(channel);
+    for (let frame = 0; frame < frames; frame++) out[frame] = samples[frame * channels + channel] / 32768;
+  }
+  const source = context.createBufferSource();
+  source.buffer = sound;
+  source.connect(context.destination);
+  const now = context.currentTime;
+  if (playAt < now + 0.03) {
+    playAt = now + 0.05;
+    if (playing.size === 0) {
+      spokeFor = 0;
+      spokeAt = new Date();
+      log("companion", "the companion started speaking.");
+      $("speaking").textContent = "the companion is speaking…";
+    }
+  }
+  source.start(playAt);
+  playAt += sound.duration;
+  spokeFor += sound.duration;
+  playing.add(source);
+  source.onended = () => {
+    playing.delete(source);
+    if (playing.size === 0) finishedSpeaking();
+  };
+}
+
+function finishedSpeaking() {
+  $("speaking").textContent = "";
+  if (spokeAt !== null) log("companion", `the companion finished speaking (${spokeFor.toFixed(1)} s).`);
+  spokeAt = null;
+}
+
+function silence() {
+  for (const source of playing) {
+    source.onended = null;
+    try { source.stop(); } catch (error) { /* already stopped */ }
+  }
+  playing = new Set();
+  if (context !== null) playAt = context.currentTime;
+  finishedSpeaking();
+}
+
+// --- the microphone: downsampled to 16 kHz mono s16le, sent in blocks -------------------------------
+const TAP = `
+class Tap extends AudioWorkletProcessor {
+  process(inputs) {
+    const channel = inputs[0] && inputs[0][0];
+    if (channel) this.port.postMessage(channel.slice(0));
+    return true;
+  }
+}
+registerProcessor("tap", Tap);
+`;
+
+let block = new Int16Array(BLOCK);
+let filled = 0;
+let sum = 0;
+let count = 0;
+let phase = 0;
+
+function capturing() {
+  return linked && !muted && (!pushToTalk || talking);
+}
+
+function captured(input) {
+  let energy = 0;
+  for (const value of input) energy += value * value;
+  const rms = Math.sqrt(energy / Math.max(1, input.length));
+  $("level").style.width = `${Math.min(100, Math.round(rms * 400))}%`;
+  if (!capturing()) {
+    sum = 0; count = 0; phase = 0; filled = 0;
+    return;
+  }
+  // Average each window of input samples into one 16 kHz sample: a box filter, then decimation.
+  const step = context.sampleRate / RATE;
+  for (const value of input) {
+    sum += value;
+    count += 1;
+    phase += 1;
+    if (phase >= step) {
+      phase -= step;
+      const sample = Math.max(-1, Math.min(1, sum / count));
+      block[filled++] = sample < 0 ? sample * 32768 : sample * 32767;
+      sum = 0;
+      count = 0;
+      if (filled === BLOCK) {
+        const message = new Uint8Array(1 + BLOCK * 2);
+        message[0] = SETTINGS.microphone_tag;
+        message.set(new Uint8Array(block.buffer), 1);
+        send(message.buffer);
+        block = new Int16Array(BLOCK);
+        filled = 0;
+      }
+    }
+  }
+}
+
+async function start() {
+  $("start").disabled = true;
+  try {
+    context = new AudioContext({ latencyHint: "interactive" });
+    await context.resume();
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+    });
+    const module = URL.createObjectURL(new Blob([TAP], { type: "text/javascript" }));
+    await context.audioWorklet.addModule(module);
+    URL.revokeObjectURL(module);
+    const tap = new AudioWorkletNode(context, "tap");
+    tap.port.onmessage = (event) => captured(event.data);
+    const quiet = context.createGain();
+    quiet.gain.value = 0;
+    context.createMediaStreamSource(stream).connect(tap);
+    tap.connect(quiet).connect(context.destination);
+    $("mute").disabled = false;
+    $("ptt").disabled = false;
+    $("start").textContent = "Microphone on";
+    log("notice", `Microphone on (${context.sampleRate} Hz, sent at ${RATE} Hz).`);
+    if (SETTINGS.camera) await startCamera();
+  } catch (error) {
+    $("start").disabled = false;
+    log("problem", `Could not start: ${error.message || error}.`);
+  }
+}
+
+async function startCamera() {
+  const video = $("camera");
+  video.srcObject = await navigator.mediaDevices.getUserMedia({ video: true });
+  video.hidden = false;
+  await video.play();
+  const canvas = document.createElement("canvas");
+  log("notice", `Camera on: a still every ${SETTINGS.camera_every_seconds} s.`);
+  setInterval(() => {
+    if (!linked || video.videoWidth === 0) return;
+    const scale = Math.min(1, SETTINGS.camera_long_edge / Math.max(video.videoWidth, video.videoHeight));
+    canvas.width = Math.round(video.videoWidth * scale);
+    canvas.height = Math.round(video.videoHeight * scale);
+    canvas.getContext("2d").drawImage(video, 0, 0, canvas.width, canvas.height);
+    canvas.toBlob(async (still) => {
+      if (still === null) return;
+      const jpeg = new Uint8Array(await still.arrayBuffer());
+      const message = new Uint8Array(1 + jpeg.length);
+      message[0] = SETTINGS.camera_tag;
+      message.set(jpeg, 1);
+      send(message.buffer);
+    }, "image/jpeg", 0.8);
+  }, SETTINGS.camera_every_seconds * 1000);
+}
+
+// --- the controls ---------------------------------------------------------------------------------
+$("start").addEventListener("click", start);
+$("mute").addEventListener("click", () => {
+  muted = !muted;
+  $("mute").setAttribute("aria-pressed", String(muted));
+  $("mute").textContent = muted ? "Unmute" : "Mute";
+  log("notice", muted ? "Microphone muted." : "Microphone unmuted.");
+});
+$("ptt").addEventListener("change", (event) => {
+  pushToTalk = event.target.checked;
+  $("talk").hidden = !pushToTalk;
+  $("talk").disabled = !pushToTalk;
+  talking = false;
+});
+function talk(on) {
+  if (!pushToTalk || talking === on) return;
+  talking = on;
+  $("talk").setAttribute("aria-pressed", String(on));
+}
+$("talk").addEventListener("pointerdown", () => talk(true));
+$("talk").addEventListener("pointerup", () => talk(false));
+$("talk").addEventListener("pointerleave", () => talk(false));
+document.addEventListener("keydown", (event) => {
+  if (event.code === "Space" && event.target === document.body) { event.preventDefault(); talk(true); }
+});
+document.addEventListener("keyup", (event) => {
+  if (event.code === "Space" && event.target === document.body) { event.preventDefault(); talk(false); }
+});
+
+$("line").maxLength = SETTINGS.max_line;
+$("say").addEventListener("submit", (event) => {
+  event.preventDefault();
+  const text = $("line").value.replace(/[\u0000-\u001f\u007f]/g, " ");
+  if (text.trim() === "") return;
+  if (!linked) {
+    log("problem", "Not sent: not linked to the companion's computer yet.");
+    return;
+  }
+  if (!send(JSON.stringify({ type: "line", text }))) {
+    log("problem", "Not sent: the bridge is not open.");
+    return;
+  }
+  log("you", text);
+  $("line").value = "";
+});
+
+connect();
+</script>
+</body>
+</html>
