@@ -14,7 +14,7 @@ import pydantic
 
 
 from .client import ChatCompletionClient
-from .text_generator import TextGenerator as ProviderTextGenerator
+from . import text_generator
 
 
 class ProcessingError(RuntimeError):
@@ -733,6 +733,20 @@ _ToolChoice: typing.TypeAlias = typing.Literal[
 ]
 """The tool choices an owner may give a :class:`Processor`: a required ``dispatch`` call, or the model's choice."""
 
+_PROVIDER: typing.Final = "openai_compat"
+# Request-body keys whose tokens the model may write (the larger is the completion cap) and think (vLLM's budget).
+_COMPLETION_KEYS: typing.Final = ("max_tokens", "max_completion_tokens")
+_THINKING_KEY: typing.Final = "thinking_token_budget"
+
+
+def _count(body: collections.abc.Mapping[str, object], key: str) -> int:
+    value = body.get(key)
+    return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else 0
+
+
+def _text_bytes(parts: collections.abc.Sequence[text.ContentPart]) -> int:
+    return sum(len(part.text.encode("utf-8")) for part in parts if isinstance(part, text.TextPart))
+
 
 class Processor(processing.Processor):
     """OpenAI-compatible transport: input (+ stamped instructions, a system message when not blank) → events array.
@@ -744,11 +758,23 @@ class Processor(processing.Processor):
     default) makes the endpoint call ``dispatch``; ``AUTO`` lets the model answer in content as well, for an
     endpoint whose guided decoding of a required call degrades what the model writes (one that drops the
     line breaks in code). An answer in content is read as the same events array.
+
+    ``max_context_tokens`` is the chat model's context (C6). With it, the processor owns a
+    ``processing.ContextFit`` and fits each prompt to it: the budget reserves the tokens the request lets
+    the model write and think (the larger of ``max_tokens`` / ``max_completion_tokens`` plus
+    ``thinking_token_budget``, from the provider generator's extra body), less the system instructions and
+    the ``dispatch`` tool's JSON, and only the turn's recalled memory is trimmed or left out to fit it; the
+    stimulus is never cut, and a prompt still over is sent and the server's refusal is the failure. After
+    each answer, the request's bytes and the prompt tokens its usage reports teach the fit bytes per token
+    (D-R-45). An injected generator that is not this package's chat ``TextGenerator`` reserves nothing and
+    reports no usage, so its fit stays at the 3-bytes-a-token guess. None (the default) fits nothing.
     """
 
     _generator: text.generation.TextGenerator
     _stream: bool
     _tool_choice: _ToolChoice
+    _fit: processing.ContextFit | None
+    _reserve_tokens: int
     image_capacity: mosfet.media.ImageCapacity
 
     def __init__(
@@ -760,13 +786,17 @@ class Processor(processing.Processor):
         extra_body: collections.abc.Mapping[str, object] | None = None,
         stream: bool = True,
         tool_choice: _ToolChoice = text.generation.ToolSelectionPolicy.REQUIRED,
+        max_context_tokens: int | None = None,
     ) -> None:
+        """Raises ``ValueError`` for both or neither of ``generator`` and ``client``, and for a
+        ``max_context_tokens`` that is not positive."""
+
         if generator is not None and client is not None:
             raise ValueError("Provide either generator or client, not both.")
         if generator is None:
             if client is None:
                 raise ValueError("Processing requires either a generator or a client.")
-            generator = ProviderTextGenerator(
+            generator = text_generator.TextGenerator(
                 client=client,
                 provider=provider,
                 extra_body=extra_body or {},
@@ -774,6 +804,13 @@ class Processor(processing.Processor):
         self._generator = generator
         self._stream = stream
         self._tool_choice = tool_choice
+        self._fit = (
+            None
+            if max_context_tokens is None
+            else processing.ContextFit(max_context_tokens=max_context_tokens, processor=_PROVIDER)
+        )
+        body = generator.extra_body if isinstance(generator, text_generator.TextGenerator) else {}
+        self._reserve_tokens = max(_count(body, key) for key in _COMPLETION_KEYS) + _count(body, _THINKING_KEY)
         self.image_capacity = generator.image_capacity
 
     @typing.override
@@ -799,6 +836,20 @@ class Processor(processing.Processor):
                     targets_by_event=input.actor_events,
                 ),
             )
+        content = input.model_facing_content(self.image_capacity)
+        if self._fit is not None:
+            tool = json.dumps(operation_tools[0], ensure_ascii=False, separators=(",", ":")) if operation_tools else ""
+            budget = (
+                self._fit.budget_bytes(self._reserve_tokens)
+                - len(instructions.encode("utf-8"))
+                - len(tool.encode("utf-8"))
+            )
+            outcome: processing.ContextFitOutcome = "fit"
+            if _text_bytes(content) > budget:
+                # Over: render again within the budget, which trims or leaves out only the recalled memory.
+                content = input.model_facing_content(self.image_capacity, budget_bytes=budget)
+                outcome = "cut" if _text_bytes(content) <= budget else "overflow"
+            self._fit.record(outcome)
         generation_input = text.generation.InputData(
             messages=(
                 *(
@@ -808,7 +859,7 @@ class Processor(processing.Processor):
                 ),
                 text.generation.TextMessage(
                     role=text.generation.TextRole.USER,
-                    content=input.model_facing_content(self.image_capacity),
+                    content=content,
                 ),
             ),
             tools=operation_tools,
@@ -825,6 +876,13 @@ class Processor(processing.Processor):
         output = await self._generator.generate(
             generation_input, deltas=draft if self._stream and drafts is not None and operation_tools else None
         )
+        if (
+            self._fit is not None
+            and isinstance(output, text_generator.OutputData)
+            and output.usage is not None
+            and output.usage.input_tokens is not None
+        ):
+            self._fit.observe(output.request_bytes, output.usage.input_tokens)
         try:
             if output.tool_calls:
                 return _events_from_dispatch_tool_calls(

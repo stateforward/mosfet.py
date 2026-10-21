@@ -71,6 +71,20 @@ every line break in the code it wrote). Their owner makes the processor with
 with the `dispatch` call or with the same events array in content. Without offered events the call offers no tool
 and sends no tool choice.
 
+`Processor(..., max_context_tokens=...)` fits each prompt to the chat model's context (C6) through core's
+`processing.ContextFit`. The budget is the context at 3 bytes of request body a token, less the tokens the request
+lets the model write and think (the larger of `max_tokens` / `max_completion_tokens`, plus vLLM's
+`thinking_token_budget`, read from the provider generator's `extra_body`), less the system instructions and the
+`dispatch` tool's JSON. A prompt over it is rendered again within it (`InputData.model_facing_content(budget_bytes=)`),
+which trims or leaves out only the turn's recalled memory: the stimulus is never cut, and a prompt still over is sent
+and the server's refusal is the failure. The chat `TextGenerator` returns `openai_compat.OutputData`, a `text.OutputData`
+with the request's `request_bytes` (its body as compact JSON, less streaming options and a client's default body) and
+the `Usage` its server reported, and each answer's `usage.input_tokens` teaches the fit the fewest bytes a token any
+answer showed (as the decision provider's D-R-45). `bot.processing.context.fit.count{processor="openai_compat",
+outcome=fit|cut|overflow}` counts each fitted request. An over-budget prompt renders twice, so its images are counted
+twice on `bot.processing.prompt.image.*`. An injected generator other than this package's chat `TextGenerator`
+reserves nothing and reports no usage; `ResponsesTextGenerator` returns plain `text.OutputData`.
+
 Local models often send a nested array or object as a JSON string, for example `{"events": "[{...}]"}`. Tool call
 arguments, and every `dispatch` value whose schema takes only an array or object (the `events` array, its items, and
 each event's data down through nested fields), are decoded from such a string once; a string field stays as sent.

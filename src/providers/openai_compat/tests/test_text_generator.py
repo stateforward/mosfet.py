@@ -27,6 +27,18 @@ class ChatCompletionCall:
     extra_body: dict[str, object]
 
 
+def _request_bytes(call: ChatCompletionCall) -> int:
+    """``OutputData.request_bytes`` for a call to a client that names no model: its body as compact JSON."""
+
+    body: dict[str, object] = {"messages": call.messages}
+    if call.tools:
+        body["tools"] = call.tools
+    if call.response_format is not None:
+        body["response_format"] = call.response_format
+    body.update(call.extra_body)
+    return len(json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+
+
 @dataclasses.dataclass
 class FakeChatClient:
     response: dict[str, object]
@@ -109,12 +121,13 @@ def test_text_generator_maps_bot_text_generation_contract() -> None:
         )
     )
 
-    assert output == text.OutputData(
+    assert output == openai_compat.OutputData(
         content="9am is available.",
         reasoning="The tool returned one slot.",
         provider="litellm",
         model="compatible-model",
         tool_calls=(text.TextToolCall(id="call_2", name="book_appointment", args={"slot": "9am"}),),
+        request_bytes=_request_bytes(client.calls[0]),
     )
     assert client.calls == [
         ChatCompletionCall(
@@ -153,7 +166,9 @@ def test_text_generator_is_awaitable() -> None:
     )
 
     assert isinstance(generated, collections.abc.Coroutine)
-    assert asyncio.run(generated) == text.OutputData(content="hello", provider="openai_compat")
+    assert asyncio.run(generated) == openai_compat.OutputData(
+        content="hello", provider="openai_compat", request_bytes=_request_bytes(client.calls[0])
+    )
 
 
 def test_text_generator_maps_string_tools_to_openai_function_tools() -> None:
@@ -169,7 +184,9 @@ def test_text_generator_maps_string_tools_to_openai_function_tools() -> None:
         )
     )
 
-    assert output == text.OutputData(content="available", provider="openai_compat")
+    assert output == openai_compat.OutputData(
+        content="available", provider="openai_compat", request_bytes=_request_bytes(client.calls[0])
+    )
     assert client.calls == [
         ChatCompletionCall(
             messages=[{"role": "user", "content": "Check availability."}],
@@ -1196,7 +1213,11 @@ def test_text_generator_streams_deltas_over_sse_and_returns_the_same_whole_outpu
     assert [delta.arguments for delta in deltas if delta.tool_call == 0 and delta.arguments] == list(
         _STREAMED_ARGUMENTS
     )
-    assert output == text.OutputData(
+    # The body as sent, less the streaming options, is the request's size.
+    unstreamed = {key: value for key, value in sent.items() if key not in {"stream", "stream_options"}}
+    assert output == openai_compat.OutputData(
+        request_bytes=len(json.dumps(unstreamed, ensure_ascii=False, separators=(",", ":")).encode("utf-8")),
+        usage=openai_compat.Usage(input_tokens=7, output_tokens=5, total_tokens=12),
         content="",
         reasoning="Greet them.",
         provider="openai_compat",

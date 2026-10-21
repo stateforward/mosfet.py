@@ -12,7 +12,7 @@ from .client import (
 from .embedder import Embedder
 from .processing import Processor, ProcessingError
 from .speech import ANGLE_TAGS, Markup, SpeechDecoder, SpeechDecodingError, SpeechEncoder
-from .text_generator import TextGenerationError, TextGenerator
+from .text_generator import OutputData, TextGenerationError, TextGenerator, Usage
 from .client import ReasoningEffort, ResponsesClient
 from .text_generator import ResponsesTextGenerator, UnsupportedReasoningEffortError
 
@@ -29,6 +29,7 @@ __all__ = [
     "EmbeddingsClient",
     "Markup",
     "OpenAIEmbeddingsSDK",
+    "OutputData",
     "Processor",
     "ProcessingError",
     "ReasoningEffort",
@@ -41,6 +42,7 @@ __all__ = [
     "TextGenerationError",
     "TextGenerator",
     "UnsupportedReasoningEffortError",
+    "Usage",
     "OpenAIClient",
     "__version__",
 ]

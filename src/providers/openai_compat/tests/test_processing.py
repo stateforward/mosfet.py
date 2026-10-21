@@ -23,6 +23,7 @@ import pytest
 from opentelemetry import _logs
 
 from mosfet.telemetry.configure import logger_provider
+from tests import metric_reader
 
 
 class _AnswerCallData(pydantic.BaseModel):
@@ -722,3 +723,149 @@ def test_processor_rejects_items_that_are_not_event_selections_as_a_selection() 
 
     assert rejected.value.normalized.startswith("Processing selected events that are not event selections: ")
     assert "secret-c1" not in str(rejected.value)
+
+
+class _Recalled(pydantic.BaseModel):
+    """Recalled memory a host attaches to a pass: ranked best first, trimmed from the tail to fit."""
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(frozen=True)
+    __model_facing_budgeted_fields__: typing.ClassVar[dict[str, typing.Literal["head", "tail"]]] = {"items": "head"}
+
+    items: tuple[str, ...]
+
+
+_SAID = "Alice asks Bob about the weather " + "w" * 600
+_RECALLED = _Recalled(items=tuple(f"memory-{index}-" + "m" * 200 for index in range(20)))
+
+
+def _answering_client(*, prompt_tokens: int | None = None) -> _FakeChatClient:
+    response: dict[str, object] = {
+        "model": "compat-model",
+        "choices": [
+            {
+                "finish_reason": "tool_calls",
+                "message": {
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": "tc1",
+                            "type": "function",
+                            "function": {"name": processing.DISPATCH_TOOL_NAME, "arguments": '{"events": []}'},
+                        }
+                    ],
+                },
+            }
+        ],
+    }
+    if prompt_tokens is not None:
+        response["usage"] = {"prompt_tokens": prompt_tokens, "completion_tokens": 1, "total_tokens": prompt_tokens + 1}
+    return _FakeChatClient(response=response)
+
+
+def _recalled_input() -> processing.InputData:
+    return processing.InputData(
+        input=_SAID, schemas=(_AnswerCallEvent,), instructions="Select events.", recalled=_RECALLED
+    )
+
+
+def _sent_user_text(client: _FakeChatClient, call: int) -> str:
+    messages = typing.cast(list[dict[str, object]], client.calls[call]["messages"])
+    content = messages[-1]["content"]
+    if isinstance(content, str):
+        return content
+    return "".join(str(part["text"]) for part in typing.cast(list[dict[str, object]], content) if "text" in part)
+
+
+def _kept(sent: str) -> list[int]:
+    return [index for index in range(20) if f"memory-{index}-" in sent]
+
+
+def _fits(reader: metric_reader.Reader) -> dict[str, float]:
+    return {
+        str(point.attributes["outcome"]): point.value
+        for point in reader.points("bot.processing.context.fit.count")
+        if point.attributes["processor"] == "openai_compat"
+    }
+
+
+def test_processor_fits_recalled_memory_to_max_context_tokens_and_never_cuts_the_stimulus(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """C6: the reasoning prompt fits the chat model's context; only what was recalled is trimmed, never the turn."""
+
+    whole = _answering_client()
+    _ = asyncio.run(process_for_test(Processor(client=whole, stream=False), _recalled_input()))
+    assert _kept(_sent_user_text(whole, 0)) == list(range(20))
+    fitted = _answering_client()
+
+    with metric_reader.recording(tmp_path, monkeypatch) as reader:
+        before = _fits(reader)
+        _ = asyncio.run(
+            process_for_test(Processor(client=fitted, stream=False, max_context_tokens=1_500), _recalled_input())
+        )
+        tiny = _answering_client()
+        _ = asyncio.run(
+            process_for_test(Processor(client=tiny, stream=False, max_context_tokens=10), _recalled_input())
+        )
+        roomy = _answering_client()
+        _ = asyncio.run(
+            process_for_test(Processor(client=roomy, stream=False, max_context_tokens=100_000), _recalled_input())
+        )
+        after = _fits(reader)
+
+    sent = _sent_user_text(fitted, 0)
+    assert _SAID in sent
+    kept = _kept(sent)
+    assert kept == list(range(len(kept)))
+    assert 0 < len(kept) < 20
+    assert _SAID in _sent_user_text(tiny, 0)
+    assert _kept(_sent_user_text(tiny, 0)) == []
+    assert _kept(_sent_user_text(roomy, 0)) == list(range(20))
+    assert {outcome: value - before.get(outcome, 0.0) for outcome, value in after.items()} == {
+        "cut": 1.0,
+        "overflow": 1.0,
+        "fit": 1.0,
+    }
+
+
+def test_processor_reserves_the_tokens_the_model_may_write_and_think() -> None:
+    """C6: max_tokens and the thinking budget the request asks for are context the prompt may not take."""
+
+    plain = _answering_client()
+    _ = asyncio.run(
+        process_for_test(Processor(client=plain, stream=False, max_context_tokens=3_000), _recalled_input())
+    )
+    reserved = _answering_client()
+    _ = asyncio.run(
+        process_for_test(
+            Processor(
+                client=reserved,
+                stream=False,
+                max_context_tokens=3_000,
+                extra_body={"max_tokens": 600, "thinking_token_budget": 600},
+            ),
+            _recalled_input(),
+        )
+    )
+
+    assert _kept(_sent_user_text(plain, 0)) == list(range(20))
+    assert 0 < len(_kept(_sent_user_text(reserved, 0))) < 20
+
+
+def test_processor_learns_bytes_per_token_from_the_usage_its_server_reports() -> None:
+    """D-R-45, for reasoning: a server that counts more tokens than the guess tightens every later fit."""
+
+    client = _answering_client(prompt_tokens=60_000)
+    processor = Processor(client=client, stream=False, max_context_tokens=5_000)
+
+    _ = asyncio.run(process_for_test(processor, _recalled_input()))
+    _ = asyncio.run(process_for_test(processor, _recalled_input()))
+
+    assert _kept(_sent_user_text(client, 0)) == list(range(20))
+    assert _kept(_sent_user_text(client, 1)) == []
+    assert _SAID in _sent_user_text(client, 1)
+
+
+def test_processor_max_context_tokens_must_be_positive() -> None:
+    with pytest.raises(ValueError, match="max_context_tokens"):
+        _ = Processor(client=_answering_client(), max_context_tokens=0)

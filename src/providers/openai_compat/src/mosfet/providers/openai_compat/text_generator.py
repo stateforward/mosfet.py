@@ -10,6 +10,8 @@ import dataclasses
 import json
 import typing
 
+import pydantic
+
 from .client import ChatCompletionClient, data_url, jsonable
 import time
 from .client import ReasoningEffort, ResponsesClient
@@ -24,6 +26,52 @@ class UnsupportedReasoningEffortError(TextGenerationError):
 
 
 _SUCCESS_FINISH_REASONS = frozenset({"stop", "tool_calls"})
+
+
+class Usage(pydantic.BaseModel):
+    """The tokens a chat completion's server said it counted; a count its usage left out is None."""
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
+        frozen=True,
+        extra="forbid",
+        json_schema_extra={"examples": [{"input_tokens": 812, "output_tokens": 40, "total_tokens": 852}]},
+    )
+
+    input_tokens: int | None = pydantic.Field(
+        default=None, ge=0, description="Prompt tokens the server read (usage.prompt_tokens).", examples=[812]
+    )
+    output_tokens: int | None = pydantic.Field(
+        default=None, ge=0, description="Tokens the model wrote (usage.completion_tokens).", examples=[40]
+    )
+    reasoning_tokens: int | None = pydantic.Field(
+        default=None,
+        ge=0,
+        description="Of those, the tokens it thought in (usage.completion_tokens_details.reasoning_tokens).",
+        examples=[24],
+    )
+    total_tokens: int | None = pydantic.Field(
+        default=None, ge=0, description="Prompt and written tokens together (usage.total_tokens).", examples=[852]
+    )
+
+
+class OutputData(text.OutputData):
+    """A chat completion's output with what its request cost: the bytes sent and the tokens the server counted.
+
+    A caller that fits its prompts to the model's context (``processing.ContextFit``) learns from the two.
+    """
+
+    request_bytes: int = pydantic.Field(
+        ge=0,
+        description=(
+            "UTF-8 bytes of the request body as this generator sent it to its client: the model (when the client "
+            "names one), messages, tools, response format and extra body, as compact JSON. Streaming options and "
+            "a client's own default body are not counted."
+        ),
+        examples=[2_048],
+    )
+    usage: Usage | None = pydantic.Field(
+        default=None, description="The tokens the server said it counted, when its response carried usage."
+    )
 
 
 def _empty_body() -> dict[str, object]:
@@ -260,7 +308,9 @@ def _record_usage(
     provider: str | None,
     response: collections.abc.Mapping[str, object],
     fields: collections.abc.Mapping[str, tuple[str, ...]],
-) -> None:
+) -> dict[str, int]:
+    """Record the response's usage counts through telemetry, and return them."""
+
     counts = _usage_counts(response.get("usage"), fields)
     model = response.get("model")
     if counts:
@@ -269,6 +319,7 @@ def _record_usage(
             model=model if isinstance(model, str) else None,
             usage=counts,
         )
+    return counts
 
 
 def _record_response(
@@ -328,10 +379,11 @@ class TextGenerator(text.TextGenerator):
     @typing.override
     async def generate(
         self, input: text.InputData, *, deltas: collections.abc.Callable[[text.Delta], None] | None = None
-    ) -> text.OutputData:
+    ) -> OutputData:
         """Generate the whole output; with ``deltas``, stream it and hand out each piece as it arrives.
 
         Either way the request runs on the event loop, so cancelling the awaiting task cancels the call in flight.
+        The output is :class:`OutputData`: what the request cost rides beside the generation.
         """
 
         if deltas is None:
@@ -340,8 +392,9 @@ class TextGenerator(text.TextGenerator):
 
     def _request(
         self, input: text.InputData
-    ) -> tuple[list[dict[str, object]], tuple[dict[str, object], ...], dict[str, object], object]:
-        """The wire request for ``input``, recorded as sent: messages, tools, extra body, and the client's model."""
+    ) -> tuple[list[dict[str, object]], tuple[dict[str, object], ...], dict[str, object], object, int]:
+        """The wire request for ``input``, recorded as sent: messages, tools, extra body, the client's model, and
+        the body's size (``OutputData.request_bytes``)."""
 
         images = _admitted_images(input.messages, self.image_capacity)
         messages = [_message_to_openai(message) for message in input.messages]
@@ -356,10 +409,21 @@ class TextGenerator(text.TextGenerator):
             tools=tools,
             image_count=len(images),
         )
-        return messages, tools, _extra_body_for_input(input, self.extra_body, self.reasoning_effort), model
+        extra_body = _extra_body_for_input(input, self.extra_body, self.reasoning_effort)
+        body: dict[str, object] = {"model": model} if isinstance(model, str) else {}
+        body["messages"] = messages
+        if tools:
+            body["tools"] = list(tools)
+        if self.response_format is not None:
+            body["response_format"] = self.response_format
+        body.update(extra_body)
+        sent = json.dumps(jsonable(body), ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        return messages, tools, extra_body, model, len(sent)
 
-    def _output(self, input: text.InputData, response: collections.abc.Mapping[str, object]) -> text.OutputData:
-        _record_usage(self.provider, response, _CHAT_USAGE_FIELDS)
+    def _output(
+        self, input: text.InputData, response: collections.abc.Mapping[str, object], request_bytes: int
+    ) -> OutputData:
+        counts = _record_usage(self.provider, response, _CHAT_USAGE_FIELDS)
         message, finish_reason = _first_choice(response)
         tool_calls = _tool_calls_from_message(message)
         if finish_reason == "tool_calls" and not tool_calls:
@@ -370,16 +434,18 @@ class TextGenerator(text.TextGenerator):
             )
         _validate_tool_selection(input, tool_calls)
         response_model = response.get("model")
-        return text.OutputData(
+        return OutputData(
             content=_content_from_message(message, has_tool_calls=bool(tool_calls)),
             reasoning=_reasoning_from_message(message),
             provider=self.provider,
             model=response_model if isinstance(response_model, str) else None,
             tool_calls=tool_calls,
+            request_bytes=request_bytes,
+            usage=Usage.model_validate({name: counts.get(name) for name in Usage.model_fields}) if counts else None,
         )
 
-    async def _generate_whole(self, input: text.InputData) -> text.OutputData:
-        messages, tools, extra_body, model = self._request(input)
+    async def _generate_whole(self, input: text.InputData) -> OutputData:
+        messages, tools, extra_body, model, request_bytes = self._request(input)
         started = time.monotonic()
         response: collections.abc.Mapping[str, object] | None = None
         try:
@@ -389,7 +455,7 @@ class TextGenerator(text.TextGenerator):
                 response_format=self.response_format,
                 extra_body=extra_body,
             )
-            output = self._output(input, response)
+            output = self._output(input, response, request_bytes)
         except Exception as error:
             _record_response(self.provider, model, response, started, error)
             raise
@@ -398,10 +464,10 @@ class TextGenerator(text.TextGenerator):
 
     async def _generate_streaming(
         self, input: text.InputData, deltas: collections.abc.Callable[[text.Delta], None]
-    ) -> text.OutputData:
+    ) -> OutputData:
         """Stream the completion, hand out each delta, then map the assembled response as a whole one."""
 
-        messages, tools, extra_body, model = self._request(input)
+        messages, tools, extra_body, model, request_bytes = self._request(input)
         started = time.monotonic()
         response: collections.abc.Mapping[str, object] | None = None
         try:
@@ -415,7 +481,7 @@ class TextGenerator(text.TextGenerator):
                 for delta in stream.add(chunk):
                     deltas(delta)
             response = stream.response()
-            output = self._output(input, response)
+            output = self._output(input, response, request_bytes)
         except Exception as error:
             _record_response(self.provider, model, response, started, error)
             raise
@@ -671,7 +737,7 @@ class ResponsesTextGenerator(text.TextGenerator):
                 reasoning=None if self.reasoning_effort is None else {"effort": self.reasoning_effort.value},
                 extra_body=self.extra_body,
             )
-            _record_usage(self.provider, response, _RESPONSES_USAGE_FIELDS)
+            _ = _record_usage(self.provider, response, _RESPONSES_USAGE_FIELDS)
             content, reasoning, tool_calls = _responses_output(response)
             _validate_tool_selection(input, tool_calls)
             response_model = response.get("model")
@@ -689,4 +755,11 @@ class ResponsesTextGenerator(text.TextGenerator):
         return output
 
 
-__all__ = ["ResponsesTextGenerator", "TextGenerationError", "TextGenerator", "UnsupportedReasoningEffortError"]
+__all__ = [
+    "OutputData",
+    "ResponsesTextGenerator",
+    "TextGenerationError",
+    "TextGenerator",
+    "UnsupportedReasoningEffortError",
+    "Usage",
+]
