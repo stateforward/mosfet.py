@@ -786,7 +786,7 @@ def memory_words(value: object) -> tuple[str, ...]:
         if depth > _MAX_WORDS_DEPTH:
             return
         if isinstance(item, hsm.Event):
-            read(typing.cast(hsm.Event[object], item).data, depth + 1)
+            read(item.data, depth + 1)
             return
         if isinstance(item, list | tuple):
             for each in typing.cast(collections.abc.Sequence[object], item):
