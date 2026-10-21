@@ -36,6 +36,7 @@ from mosfet.protocols import attachment
 import mosfet
 from mosfet.abilities import cognition
 from mosfet.abilities import identification
+from mosfet.abilities.memory import stm
 from mosfet import telemetry
 from mosfet.telemetry import span
 from mosfet.environment import SoundData, SoundEvent
@@ -97,6 +98,8 @@ class Listening(ability.Ability[SoundData, cognition.InputData]):
     # The voice registry this ear owns (its group starts, attaches and stops it), or None when it does not
     # identify voices.
     _registry: identification.Registry | None
+    # The body's short-term register, injected; every utterance this ear transcribes is written there as heard.
+    _stm_memory: stm.StmMemory | None
 
     def __init__(
         self,
@@ -118,6 +121,7 @@ class Listening(ability.Ability[SoundData, cognition.InputData]):
         recognize_timeout: datetime.timedelta = interpretation.DEFAULT_RECOGNIZE_TIMEOUT,
         product_threshold_db: float = interpretation.DEFAULT_PRODUCT_THRESHOLD_DB,
         overlap_min_voiced: datetime.timedelta = interpretation.DEFAULT_OVERLAP_MIN_VOICED,
+        stm_memory: stm.StmMemory | None = None,
     ) -> None:
         """Hear through the given classifiers, or through streaming speech-to-text sessions.
 
@@ -135,6 +139,11 @@ class Listening(ability.Ability[SoundData, cognition.InputData]):
         ear states it as a ``listening.OverlapEvent`` fact. ``affect_classifier`` hears the tone each
         text speech product was said in (``SpeechData.affect``); on the local path it needs
         ``speech_decoder``, since only decoded speech is text.
+
+        ``stm_memory`` is the injected short-term register (the body's ``bot.register``): every
+        utterance this ear transcribes into words is written there as a heard ``stm.TurnEvent``,
+        whoever said it, under the id of the speech event cognition is handed, spoken by the
+        product's stamped source participants (none when no voice was identified).
 
         Raises:
             ValueError: If not exactly one of ``voice_activity_classifier`` and ``transcription`` is
@@ -175,6 +184,7 @@ class Listening(ability.Ability[SoundData, cognition.InputData]):
                 product_threshold_db=product_threshold_db,
             )
         self._registry = registry
+        self._stm_memory = stm_memory
         owned = (self._sensitivity, self._hearing, *(() if registry is None else (registry,)))
         self._attachment_group = attachment.Group(*owned)
 
@@ -375,8 +385,41 @@ class Listening(ability.Ability[SoundData, cognition.InputData]):
 
         Interpretation is this ability's own slow half, not a peer with its own audience, so its
         products leave through the terminal the owner is already attached to.
+
+        Speech in words is also what the bot heard: it is written to the injected short-term register
+        as a heard turn, identified or not, under the id of the speech event the product carries, so a
+        reader can tell the turn that is its own stimulus from the turns before it. Its speakers are
+        the product's stamped source participants, never inferred.
         """
 
+        product = event.data
+        assert isinstance(product, cognition.InputData)
+        stimulus = product.stimulus
+        register = instance._stm_memory
+        if (
+            register is not None
+            and isinstance(stimulus, hsm.Event)
+            and isinstance(stimulus.data, interpretation.SpeechData)
+            and isinstance(stimulus.data.content, str)
+            and stimulus.data.content.strip()
+        ):
+            heard = stm.TurnRecordData.of(
+                id=stimulus.id or event.id or uuid.uuid4().hex,
+                direction="heard",
+                speakers=[speaker for speaker in product.participants if speaker.role == mosfet.ParticipantRole.SOURCE],
+                words=stimulus.data.content,
+                conversation=hsm.id(instance),
+            )
+            _ = hsm.dispatch(
+                ctx,
+                register,
+                dataclasses.replace(
+                    stm.TurnEvent.with_data(heard),
+                    source=hsm.id(instance),
+                    target=hsm.id(register),
+                    metadata=dict(event.metadata),
+                ),
+            )
         _ = hsm.dispatch(
             ctx,
             instance,

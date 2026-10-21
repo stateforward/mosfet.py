@@ -412,7 +412,9 @@ def _cut_at_word(words: str) -> tuple[str, bool]:
 
 
 class TurnRecordData(pydantic.BaseModel):
-    """One committed message to remember as a turn: who spoke, in which direction, and the words.
+    """One turn to remember: who spoke, in which direction, and the words.
+
+    Listening writes what the bot heard (every utterance it transcribes); Conversation writes what it said.
 
     The register stamps the time it is written (``Turn.at``). Build one with ``TurnRecordData.of``,
     which cuts long text at a whole word and says so in ``cut``.
@@ -442,8 +444,9 @@ class TurnRecordData(pydantic.BaseModel):
     id: str = pydantic.Field(
         min_length=1,
         description=(
-            "Id of the committed message: the provenance id of the event that committed it, so a reader can tell "
-            "the turn that is its own stimulus from the turns before it."
+            "Id of the turn: for a heard turn the id of the speech event Listening handed on, for a said turn the "
+            "provenance id of the event that committed the message, so a reader can tell the turn that is its own "
+            "stimulus from the turns before it."
         ),
         examples=["turn-1"],
     )
@@ -455,9 +458,9 @@ class TurnRecordData(pydantic.BaseModel):
         default=(),
         max_length=MAX_TURN_SPEAKERS,
         description=(
-            "Who said it, as their producers stamped them: the inbound message's source participants for a heard "
+            "Who said it, as their producers stamped them: the heard speech's source participants for a heard "
             "turn, the participants stamped on the bot's own message (its own voice) for a said turn. Empty when "
-            "no producer stamped anyone."
+            "no producer stamped anyone, as for a voice nobody identified."
         ),
         examples=[
             [{"ref": "voice:3f2a9c", "role": "source"}],
@@ -476,7 +479,10 @@ class TurnRecordData(pydantic.BaseModel):
     )
     conversation: str = pydantic.Field(
         min_length=1,
-        description="Id of the Conversation that committed the message.",
+        description=(
+            "Id of the ability that recorded the turn: the Listening that heard it, or the Conversation that "
+            "committed what the bot said."
+        ),
         examples=["conversation-1"],
     )
 

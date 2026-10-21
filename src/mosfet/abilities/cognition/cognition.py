@@ -46,6 +46,8 @@ _ASSOCIATE_ID_SUFFIX = ":associate"
 _RECENT_ID_SUFFIX = ":recent"
 _INTUITION_ID_SUFFIX = ":intuition"
 _REASONING_ID_SUFFIX = ":reasoning"
+_MAX_SHOWN_PARENTS = 8
+"""Most causal parents followed up a stimulus for the ids of the turns it already shows."""
 _REFLECTION_ID_SUFFIX = ":reflection"
 _REMEMBER_ID_SUFFIX = ":remember"
 # How long cognition stays idle before it rests (and consolidation may run): a capacity of the
@@ -1138,12 +1140,24 @@ class Cognition(ability.Ability[InputData, OutputData]):
                     if isinstance(stimulus, hsm.Event) and isinstance(stimulus.data, mosfet.PerceivedData)
                     else ()
                 )
-                # The ids this turn already shows: its stimulus's, or each percept's of its batch.
+                # The ids this turn already shows: its stimulus's, or each percept's of its batch, and
+                # the causal parents each carries (``parent``, stamped by its producer). Speech admitted
+                # through Conversation carries the heard speech two parents up, and Listening wrote
+                # its heard turn under that speech's id.
                 shown: set[str] = set()
                 for given in (stimulus, *stimuli):
                     observed = given if isinstance(given, hsm.Event) else given.observation
                     if observed is not None and observed.id:
                         shown.add(observed.id)
+                    data: object = None if observed is None else observed.data
+                    for _ in range(_MAX_SHOWN_PARENTS):
+                        parent: object = getattr(data, "parent", None)
+                        if not isinstance(parent, mosfet.StimulusData):
+                            break
+                        cause = typing.cast(mosfet.StimulusData[object], parent)
+                        if cause.id:
+                            shown.add(cause.id)
+                        data = cause.data
                 return tuple(turn for turn in terminal.data.turns if turn.id not in shown)
 
             associations, recent = await asyncio.gather(associate(), recall_recent())

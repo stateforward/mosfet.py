@@ -1902,16 +1902,19 @@ def test_an_inbound_turn_opens_a_new_exchange_that_never_carries_the_last_one() 
     assert [(item.direction, item.content) for item in second.messages] == [("inbound", "B")]
 
 
-def test_every_committed_message_is_written_to_short_term_memory_as_heard_or_said() -> None:
-    """Conversation keeps one exchange; what was heard and said before it lives in the injected register."""
+def test_only_what_the_bot_said_is_written_to_short_term_memory() -> None:
+    """Conversation keeps one exchange; what the bot said before it lives in the injected register.
 
-    async def run() -> tuple[tuple[memory.stm.Turn, ...], str, mosfet.Participant]:
+    What the bot heard is written where it is heard (Listening), so an inbound commit writes nothing here.
+    """
+
+    async def run() -> tuple[tuple[memory.stm.Turn, ...], str]:
         context = shared_hsm_context()
         register = memory.StmMemory()
         await start_abilities_for_test(context, register)
         target = conversation.Conversation(stm_memory=register)
         await start_ability_tree(context, target)
-        turn, (_, heard) = _speech_turn("3f2a9c")
+        turn, _ = _speech_turn("3f2a9c")
         _ = await ability.run_terminal_operation(
             context,
             child=target,
@@ -1929,14 +1932,11 @@ def test_every_committed_message_is_written_to_short_term_memory_as_heard_or_sai
             timeout=datetime.timedelta(seconds=5),
         )
         assert isinstance(reply.data, memory.stm.RecentTurnsOutputData), reply.data
-        return reply.data.turns, hsm.id(target), heard
+        return reply.data.turns, hsm.id(target)
 
-    turns, conversation_id, heard = asyncio.run(run())
+    turns, conversation_id = asyncio.run(run())
 
-    assert [(turn.direction, turn.text, turn.speakers) for turn in turns] == [
-        ("heard", "hello", (heard,)),
-        ("said", "and this", (_OWN_VOICE,)),
-    ]
-    assert turns[0].id == "turn-1"
-    assert turns[1].id
-    assert {turn.conversation for turn in turns} == {conversation_id}
+    (said,) = turns
+    assert (said.direction, said.text, said.speakers) == ("said", "and this", (_OWN_VOICE,))
+    assert said.id
+    assert said.conversation == conversation_id

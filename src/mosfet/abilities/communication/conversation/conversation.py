@@ -925,9 +925,9 @@ class Conversation(ability.Ability[TurnData, Exchange]):
     bot's outbound messages join it, and the next inbound replaces it.
 
     ``stm_memory`` is the injected short-term register (the body's ``bot.register``):
-    every committed message with words is written there as a ``stm.TurnEvent``, heard
-    for an inbound message and said for the bot's own, so what was said before the
-    current exchange is remembered there, not here.
+    every message the bot commits with words is written there as a said ``stm.TurnEvent``,
+    so what the bot said before the current exchange is remembered there, not here. What
+    the bot heard is written where it is heard (Listening), never here.
     """
 
     input_data_type: typing.ClassVar[type[object] | tuple[type[object], ...] | None] = TurnData
@@ -1691,29 +1691,6 @@ class Conversation(ability.Ability[TurnData, Exchange]):
         # An inbound commit opens a new exchange; the one before it is not carried.
         instance._exchange = [inbound]
         instance._exchange_parent = parent
-        if instance._stm_memory is not None and isinstance(inbound.content, str) and inbound.content.strip():
-            # What the bot heard, remembered past this exchange, spoken by the turn's own sources as stamped.
-            heard = stm.TurnRecordData.of(
-                id=provenance.id or _operation_id(event),
-                direction="heard",
-                speakers=[
-                    speaker
-                    for speaker in turn_participants(input_data)
-                    if speaker.role == mosfet.ParticipantRole.SOURCE and speaker.ref in input_data.source_ids
-                ],
-                words=inbound.content,
-                conversation=hsm.id(instance),
-            )
-            _ = hsm.dispatch(
-                ctx,
-                instance._stm_memory,
-                dataclasses.replace(
-                    stm.TurnEvent.with_data(heard),
-                    source=hsm.id(instance),
-                    target=hsm.id(instance._stm_memory),
-                    metadata=dict(event.metadata),
-                ),
-            )
         handed_off = _terminal_output(
             ctx,
             instance,

@@ -1,5 +1,6 @@
 from mosfet import abilities
 from mosfet.abilities import cognition
+from mosfet.abilities import memory
 from mosfet.protocols import attachment
 
 import asyncio
@@ -223,3 +224,15 @@ def _register_ability_graph(ctx: hsm.Context, ability: abilities.Ability[typing.
     snapshot = ability.take_snapshot()
     if snapshot.ID:
         instances[snapshot.ID] = ability
+
+
+async def recent_turns(ctx: hsm.Context, register: memory.StmMemory) -> tuple[memory.stm.Turn, ...]:
+    reply = await abilities.run_terminal_operation(
+        ctx,
+        child=register,
+        request=memory.stm.RecentTurnsEvent.with_data_and_id(memory.stm.RecentTurnsData(), uuid.uuid4().hex),
+        terminals=(memory.stm.RecentTurnsOutputEvent, register.failed_event),
+        timeout=datetime.timedelta(seconds=5),
+    )
+    assert isinstance(reply.data, memory.stm.RecentTurnsOutputData), reply.data
+    return reply.data.turns

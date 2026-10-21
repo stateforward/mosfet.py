@@ -129,15 +129,17 @@ if __name__ == "__main__":
             ),
         )
     )
+    # The body's sensory register; the ear writes there everything Willy hears, and Conversation everything
+    # he says, so it is the same one.
+    register = memory.StmMemory()
     hearing = listening.Listening(
         transcription=lambda: speech_server.Transcription(url=settings.stt_url),
         voice_classifier=speech_server.VoiceEmbedder(base_url=settings.voiceprint_url),
         registry=voices,
         voice_diarizer=speech_server.Diarizer(base_url=settings.diar_url),
         affect_classifier=speech_server.AffectClassifier(base_url=settings.emotion_url),
+        stm_memory=register,
     )
-    # The body's sensory register; Conversation writes what Willy heard and said there, so it is the same one.
-    register = memory.StmMemory()
     talk = conversation.Conversation(stm_memory=register)
     mouth = speaking.Speaking(
         encoder=lambda key, description: openai_compat.SpeechEncoder(

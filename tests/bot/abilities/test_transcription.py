@@ -22,6 +22,7 @@ import pytest
 from mosfet.abilities import cognition
 from mosfet.abilities import identification
 from mosfet.abilities import listening
+from mosfet.abilities import memory
 from mosfet.abilities.hearing import voice
 from mosfet.abilities.hearing.speech import stream
 from mosfet.abilities.speaking import EfferenceData, EfferenceEvent
@@ -29,7 +30,7 @@ from mosfet.environment import SoundData, SoundEvent
 from mosfet.protocols import attachment
 from mosfet.telemetry.hsm import Traced
 from tests import metric_reader
-from tests.bot.abilities.support import EventRecorder, shared_hsm_context
+from tests.bot.abilities.support import EventRecorder, recent_turns, shared_hsm_context, start_abilities_for_test
 from tests.hsm_instance_state import ability_terminal_owner, start_ability_tree
 
 MOUTH = "the-mouth-that-is-producing"
@@ -201,8 +202,10 @@ class StreamingListening(listening.Listening):
         registry: identification.Registry | None = None,
         voice_diarizer: voice.diarization.VoiceDiarizer | None = None,
         affect_classifier: voice.AffectClassifier | None = None,
+        stm_memory: memory.StmMemory | None = None,
     ) -> None:
         super().__init__(
+            stm_memory=stm_memory,
             transcription=sessions,
             voice_classifier=voice_classifier,
             registry=registry,
@@ -421,6 +424,34 @@ def test_a_turns_voice_is_identified_and_stamped() -> None:
     assert speech.participants == (identification.participant("voice", voice_heard.recognition.id),)
     # The turn's audio, all of it, was embedded once.
     assert classifier.calls[0].segments[0].audio == _TENTH * 10
+
+
+def test_a_turn_heard_from_an_identified_voice_is_written_to_short_term_memory_spoken_by_it() -> None:
+    async def run() -> tuple[StreamingListening, tuple[memory.stm.Turn, ...]]:
+        ctx = shared_hsm_context()
+        register = memory.StmMemory()
+        await start_abilities_for_test(ctx, register)
+        sessions = Sessions()
+        classifier = FixedVoiceClassifier(voice.identification.VoiceEmbedding(embedding=(0.6, 0.8), model="m"))
+        ear = StreamingListening(sessions, voice_classifier=classifier, registry=_registry(), stm_memory=register)
+        await start_ability_tree(ctx, ear)
+        await arrives(ear, heard(10))
+        await _wait(lambda: len(sessions.made) == 1 and bool(sessions.made[0].controllers))
+        await sessions.made[0].say(
+            stream.TurnEndedEvent.with_data(stream.TurnEndedData(at_seconds=1.0, text="hello there"))
+        )
+        await _wait(lambda: bool(ear.handoffs))
+        return ear, await recent_turns(ctx, register)
+
+    ear, turns = asyncio.run(run())
+
+    (handoff,) = ear.handoffs
+    assert isinstance(handoff.stimulus, hsm.Event)
+    (turn,) = turns
+    assert (turn.direction, turn.text) == ("heard", "hello there")
+    assert turn.speakers == _speech(ear)[0].participants and len(turn.speakers) == 1
+    assert turn.speakers[0].ref.startswith("voice:")
+    assert turn.id == handoff.stimulus.id
 
 
 @pytest.mark.parametrize(("tenths", "known", "named"), [(9, False, False), (10, False, True), (5, True, True)])

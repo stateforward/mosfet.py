@@ -6,6 +6,7 @@ from mosfet import media
 from mosfet.abilities import ability as ability_module
 from mosfet.abilities import cognition
 from mosfet.abilities import communication
+from mosfet.abilities import listening
 from mosfet.abilities import memory
 from mosfet.abilities import persona
 from mosfet.abilities import processing
@@ -14,6 +15,7 @@ from mosfet.abilities import speaking
 from mosfet.abilities import vocal
 from mosfet.abilities.cognition import cognition as cognition_module
 from mosfet.abilities.language import text
+from mosfet.abilities.hearing import voice
 from mosfet.abilities.cognition import reflection as reflection_module
 from mosfet.behavior import instance as behavior_instance
 from mosfet.devices import audio
@@ -4388,6 +4390,80 @@ def test_recent_turns_reach_reasoning_oldest_first_without_the_turn_being_answer
     assert frame.situation is not None and frame.situation in prompt
     assert said < prompt.index(frame.situation) < prompt.index('stimulus:id="now"')
     assert "instructions=" not in prompt
+
+
+def _speech_now() -> hsm.Event[listening.SpeechData]:
+    """What the ear heard from a voice nobody identified: Listening wrote its heard turn under this id."""
+
+    speech = listening.SpeechData(
+        content="What did I just tell you?",
+        content_type="text/plain",
+        voice_detection=voice.detection.ApplyData(segments=()),
+        sample_rate_hz=16_000,
+        media_type="audio/pcm",
+    )
+    return dataclasses.replace(listening.SpeechEvent.with_data(speech), id="now")
+
+
+def _exchange_now() -> hsm.Event[communication.conversation.Exchange]:
+    """The same speech admitted through Conversation: the exchange's own ids differ, its causal parents carry it."""
+
+    turn = communication.conversation.TurnData(
+        source_ids=frozenset({_MAYA.ref}),
+        target_ids=frozenset(),
+        content="What did I just tell you?",
+        content_type="text/plain",
+        parent=mosfet.StimulusData.from_event(_speech_now()),
+    )
+    inbound = dataclasses.replace(communication.conversation.InputEvent.with_data(turn), id="conversation-input")
+    exchange = communication.conversation.Exchange(parent=mosfet.StimulusData.from_event(inbound))
+    return dataclasses.replace(communication.conversation.OutputEvent.with_data(exchange), id="exchange")
+
+
+@pytest.mark.parametrize("stimulus", [_speech_now, _exchange_now], ids=["raw-speech", "conversation-exchange"])
+def test_the_turn_listening_heard_for_this_stimulus_is_left_out_of_recent_while_earlier_turns_appear(
+    stimulus: collections.abc.Callable[[], hsm.Event[typing.Any]],
+) -> None:
+    """R-20: Listening writes every utterance it hears under its speech event's id, identified or not.
+
+    Whether that speech reaches cognition raw (a voice nobody identified) or through Conversation (whose
+    exchange carries it as a causal parent), this turn's own heard turn is not shown again as recent.
+    """
+
+    async def run() -> list[processing.InputData]:
+        register = memory.StmMemory()
+        reasoning_processor = RecordingReasoningProcessor(focus_output("phone", "reasoned focus"))
+        ability = RecordingCognition(
+            intuition_processor=RecordingIntuitionProcessor(cognition.intuition.OutputData(reason="think it over")),
+            reasoning_processor=reasoning_processor,
+            stm_memory=register,
+        )
+        ctx = await start_cognition_ability_for_test(ability)
+        await start_abilities_for_test(ctx, register)
+        await wait_until(lambda: ability.state().endswith("/idle"))
+        turns: tuple[tuple[str, memory.stm.TurnDirection, tuple[mosfet.Participant, ...], str], ...] = (
+            ("earlier", "heard", (), "Hi Willy, I'm Maya."),
+            ("reply", "said", (_OWN,), "Nice to meet you, Maya."),
+            ("now", "heard", (), "What did I just tell you?"),
+        )
+        for turn_id, direction, speakers, words in turns:
+            _ = await hsm.dispatch(
+                ctx,
+                register,
+                memory.stm.TurnEvent.with_data(
+                    memory.stm.TurnRecordData.of(
+                        id=turn_id, direction=direction, speakers=speakers, words=words, conversation="ear"
+                    )
+                ),
+            )
+        turn = (await started_cognition_input(ctx)).model_copy(update={"stimulus": stimulus()})
+        _ = await dispatch_ability_for_test(ability, ctx, turn)
+        return reasoning_processor.calls
+
+    (frame,) = asyncio.run(run())
+
+    assert isinstance(frame.recalled, cognition.RecalledData)
+    assert [(turn.id, turn.direction) for turn in frame.recalled.recent] == [("earlier", "heard"), ("reply", "said")]
 
 
 def test_cognition_remembers_a_failed_turn_with_its_stimulus_and_no_acts() -> None:

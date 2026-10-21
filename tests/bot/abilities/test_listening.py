@@ -3,6 +3,7 @@ from mosfet import abilities
 from mosfet.abilities import cognition
 from mosfet.abilities import identification
 from mosfet.abilities import listening
+from mosfet.abilities import memory
 from mosfet.abilities.language import text
 from mosfet import media
 from mosfet.abilities.hearing import sound as sound_hearing
@@ -22,7 +23,13 @@ from typing import override
 
 import hsm
 import mosfet
-from tests.bot.abilities.support import EventRecorder, dispatch_ability_for_test, shared_hsm_context
+from tests.bot.abilities.support import (
+    EventRecorder,
+    dispatch_ability_for_test,
+    recent_turns,
+    shared_hsm_context,
+    start_abilities_for_test,
+)
 import pydantic
 import pytest
 
@@ -355,8 +362,10 @@ class RecordingListening(listening.Listening):
         affect_classifier: voice.AffectClassifier | None = None,
         recognize_timeout: datetime.timedelta = datetime.timedelta(seconds=2),
         product_threshold_db: float | None = None,
+        stm_memory: memory.StmMemory | None = None,
     ) -> None:
         super().__init__(
+            stm_memory=stm_memory,
             voice_activity_classifier=voice_activity_classifier,
             sound_classifier=sound_classifier,
             speech_decoder=speech_decoder,
@@ -1979,6 +1988,33 @@ def test_listening_publishes_speech_cognition_input_when_voice_is_detected() -> 
     assert stimulus.data.content_type == "text/plain"
     assert decoder_calls == [b"voicesilence"]
     assert active_state == "/RecordingListeningLifecycle/attached/behavior/Perceiving/Listening"
+
+
+def test_speech_heard_from_a_voice_nobody_identified_is_written_to_short_term_memory_as_a_heard_turn() -> None:
+    """Everything the ear transcribes is a heard turn, written where it is perceived: identified or not."""
+
+    async def run() -> tuple[cognition.InputData, tuple[memory.stm.Turn, ...], str]:
+        ctx = shared_hsm_context()
+        register = memory.StmMemory()
+        await start_abilities_for_test(ctx, register)
+        ear = RecordingListening(
+            voice_activity_classifier=SequenceVoiceActivityClassifier(_VOICE_APPLY, _SILENCE_APPLY),
+            speech_decoder=RecordingSpeechDecoder(),
+            stm_memory=register,
+        )
+        await start_ability_tree(ctx, ear)
+        await _apply_utterance(ear, b"voice")
+        await wait_until(lambda: any(_is_decoded_speech_handoff(h) for h in ear.handoffs))
+        decoded = next(h for h in ear.handoffs if _is_decoded_speech_handoff(h))
+        return decoded, await recent_turns(ctx, register), hsm.id(ear)
+
+    decoded, turns, ear_id = asyncio.run(run())
+
+    (turn,) = turns
+    assert (turn.direction, turn.text, turn.speakers) == ("heard", "decoded:voicesilence", ())
+    # The turn is the very stimulus cognition is handed, so a turn can tell its own stimulus from the turns before.
+    assert turn.id == _stimulus(decoded).id
+    assert turn.conversation == ear_id
 
 
 def test_listening_runs_optional_diarization_before_decoding_speech() -> None:
