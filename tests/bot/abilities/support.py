@@ -175,7 +175,11 @@ async def dispatch_ability_for_test(
     input: object,
     *,
     timeout: float = 1.0,
+    operation_id: str | None = None,
 ) -> _TAbilityOutput:
+    """Dispatch ``input`` and await its terminal. ``operation_id`` is the input event's id, as its producer would
+    stamp it; by default the input's own operation id, or a fresh one."""
+
     shared_ctx = shared_hsm_context(ctx)
     _register_ability_graph(shared_ctx, ability)
     owner = ability_terminal_owner(ability)
@@ -204,7 +208,9 @@ async def dispatch_ability_for_test(
     turn = getattr(input, "turn", None)
     turn_operation_id = getattr(turn, "operation_id", None)
     operation_id = (
-        direct_operation_id
+        operation_id
+        if operation_id
+        else direct_operation_id
         if isinstance(direct_operation_id, str) and direct_operation_id
         else parent_operation_id
         if isinstance(parent_operation_id, str) and parent_operation_id

@@ -6254,6 +6254,67 @@ class _Communication(hsm.Instance):
         self.admitted = []
 
 
+def test_speech_and_the_exchange_conversation_returns_for_it_are_remembered_as_one_episode() -> None:
+    """R-20: speech admitted through Conversation is one experience, so it is one episode.
+
+    The speech turn (kept under the speech's id, the way Listening stamps it) is handled by the seeded
+    SpeechHeard behavior, which forwards the speech to Communication as its causal parent. The exchange
+    Conversation returns carries that forward, and through it the speech, as its causal parents; the
+    exchange turn extends the speech turn's episode instead of becoming a second one: what was heard, the
+    behavior's act, then the reply.
+    """
+
+    from mosfet.abilities import listening
+    from mosfet.abilities.communication import behaviors
+
+    async def run() -> tuple[tuple[memory.Episode, ...], list[hsm.Event[typing.Any]]]:
+        store = memory.Memory()
+        ability = RecordingCognition(
+            autonomy=cognition.Autonomy(seeded_behaviors=(behaviors.speech_heard_seed(),)),
+            decision_processor=RecordingDecisionProcessor(focus_output("phone", "answer Ada")),
+            reflection=cognition.Reflection(processor=FixedProcessor(no_output("observed")), memory=store),
+            store=store,
+        )
+        ctx = await start_cognition_ability_for_test(ability)
+        await wait_until(lambda: ability.state().endswith("/idle"))
+        talk = _Communication()
+        _ = await mosfet.started(ctx, talk, talk.model)
+        base = await started_cognition_input(ctx)
+        base = base.model_copy(update={"actors": {**base.actors, "communication": talk}, "participants": (_ADA,)})
+        speech = dataclasses.replace(_speech_event_stimulus(), id="heard")
+        _ = await dispatch_ability_for_test(
+            ability, ctx, base.model_copy(update={"stimulus": speech}), operation_id="heard"
+        )
+        await wait_until(lambda: bool(talk.admitted))
+        await wait_until(lambda: ability.state().endswith("/idle"))
+        (admitted,) = talk.admitted
+        exchange = dataclasses.replace(
+            communication.conversation.OutputEvent.with_data(
+                communication.conversation.Exchange(parent=mosfet.StimulusData.from_event(admitted))
+            ),
+            id="heard:autonomy",
+        )
+        _ = await dispatch_ability_for_test(
+            ability, ctx, base.model_copy(update={"stimulus": exchange}), operation_id="heard:autonomy"
+        )
+        await wait_until(lambda: ability.state().endswith("/idle"))
+        return await _remembered(ctx, store), talk.admitted
+
+    episodes, admitted = asyncio.run(run())
+
+    assert [event.name for event in admitted] == [communication.InputEvent.name]
+    (kept,) = episodes
+    assert kept.turn_id == "heard"
+    assert kept.continued == ("heard:autonomy",)
+    assert kept.stimulus == listening.SpeechEvent.name
+    assert [act.event for act in kept.acts] == [communication.InputEvent.name, mosfet.FocusDeviceEvent.name]
+    assert kept.acts[1].reason == "answer Ada"
+    heard = kept.text.index(listening.SpeechEvent.name)
+    replied = kept.text.index("answer Ada")
+    assert heard < replied
+    assert "voice:3f2a9c" in kept.text[:replied]
+
+
 def test_a_partly_handled_batch_carries_its_behaviors_acts_first_into_the_turn_and_its_episode() -> None:
     """D-W12-9: what behaviors already did on their percepts is the turn's, ahead of deliberation's.
 

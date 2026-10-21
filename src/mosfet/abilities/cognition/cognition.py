@@ -392,6 +392,34 @@ def _act(selection: EventData) -> memory.Act:
     )
 
 
+def _shown(stimulus: mosfet.InputData) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """The ids a turn's stimulus shows: its own (its stimulus's, or each percept's of its batch), then the ids of
+    the causal parents each carries (``parent``, stamped by its producer), nearest first, at most
+    ``_MAX_SHOWN_PARENTS`` up each. Read off the stimulus the turn holds, never by looking up an actor."""
+
+    stimuli = (
+        tuple(percept.stimulus for percept in stimulus.data.percepts)
+        if isinstance(stimulus, hsm.Event) and isinstance(stimulus.data, mosfet.PerceivedData)
+        else ()
+    )
+    own: list[str] = []
+    causes: list[str] = []
+    for given in (stimulus, *stimuli):
+        observed = given if isinstance(given, hsm.Event) else given.observation
+        if observed is not None and observed.id:
+            own.append(observed.id)
+        carried: object = None if observed is None else observed.data
+        for _ in range(_MAX_SHOWN_PARENTS):
+            parent: object = getattr(carried, "parent", None)
+            if not isinstance(parent, mosfet.StimulusData):
+                break
+            cause = typing.cast(mosfet.StimulusData[object], parent)
+            if cause.id:
+                causes.append(cause.id)
+            carried = cause.data
+    return tuple(dict.fromkeys(own)), tuple(dict.fromkeys(causes))
+
+
 def _public_metadata(metadata: dict[str, object]) -> dict[str, object]:
     """Metadata safe to forward on host apply / terminals (no turn payload)."""
 
@@ -648,7 +676,10 @@ class Cognition(ability.Ability[InputData, OutputData]):
         perceived, then, when the turn selected anything, its own output (``OutputEvent``: what it
         showed, said and asked of its tools), then, when the turn failed with a typed failure, that
         failure (``failed_event``), so what it did and what became of it are recalled with what it
-        perceived; a tool's result is perceived on a later turn and kept as that turn's. Memory's
+        perceived; a tool's result is perceived on a later turn and kept as that turn's. The episode
+        names the turns whose stimuli its stimulus carries as causal parents (``continues``): when
+        memory keeps one of them, this turn extends that episode (speech, then the exchange
+        Conversation returns for it, is one experience); otherwise it is an episode of its own. Memory's
         reply is not awaited: Memory counts its own outcome, and no transition here consumes it.
         """
 
@@ -691,6 +722,11 @@ class Cognition(ability.Ability[InputData, OutputData]):
                 focus_candidates=cognition_input.focus_candidates[:_MAX_ACTS],
                 acts=tuple(_act(selection) for selection in acts),
                 outcome=outcome,
+                # The earlier turns this one goes on with: whose stimuli its stimulus carries as causal
+                # parents. Memory extends the episode one of them began, so one experience is one episode.
+                continues=tuple(cause for cause in _shown(cognition_input.stimulus)[1] if cause != operation_id)[
+                    : memory.MAX_EXCLUDED_TURNS
+                ],
             )
         except pydantic.ValidationError as error:
             _LOG.warning("cognition did not remember a turn: invalid episode (%d errors)", error.error_count())
@@ -1156,30 +1192,12 @@ class Cognition(ability.Ability[InputData, OutputData]):
             child_timeout = instance._child_operation_timeout
             timeout = child_timeout if child_timeout is not None else types.STEP_TIMEOUT
             metadata = _public_metadata(dict(event.metadata))
-            stimulus = cognition_input.stimulus
-            stimuli = (
-                tuple(percept.stimulus for percept in stimulus.data.percepts)
-                if isinstance(stimulus, hsm.Event) and isinstance(stimulus.data, mosfet.PerceivedData)
-                else ()
-            )
             # The ids this turn already shows: its stimulus's, or each percept's of its batch, and
-            # the causal parents each carries (``parent``, stamped by its producer). Speech admitted
-            # through Conversation carries the heard speech two parents up: Listening wrote its heard
-            # turn under that speech's id, and cognition remembered the turn that admitted it there.
-            shown: set[str] = set()
-            for given in (stimulus, *stimuli):
-                observed = given if isinstance(given, hsm.Event) else given.observation
-                if observed is not None and observed.id:
-                    shown.add(observed.id)
-                carried: object = None if observed is None else observed.data
-                for _ in range(_MAX_SHOWN_PARENTS):
-                    parent: object = getattr(carried, "parent", None)
-                    if not isinstance(parent, mosfet.StimulusData):
-                        break
-                    cause = typing.cast(mosfet.StimulusData[object], parent)
-                    if cause.id:
-                        shown.add(cause.id)
-                    carried = cause.data
+            # the causal parents each carries. Speech admitted through Conversation carries the heard
+            # speech two parents up: Listening wrote its heard turn under that speech's id, and
+            # cognition remembered the turn that admitted it there.
+            own, causes = _shown(cognition_input.stimulus)
+            shown = {*own, *causes}
 
             async def associate() -> memory.AssociationsData | None:
                 associative = instance._associative
