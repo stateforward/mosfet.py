@@ -67,6 +67,7 @@ def test_output_mark_is_an_optional_bounded_label() -> None:
 def test_speaker_reports_reject_negative_durations_and_empty_marks() -> None:
     for build in (
         lambda: audio.FlushedData(dropped_seconds=-0.1, marks=()),
+        lambda: audio.FlushedData(dropped_seconds=0.1, marks=(), played_seconds=-0.1),
         lambda: audio.PlayedData(mark=""),
     ):
         try:

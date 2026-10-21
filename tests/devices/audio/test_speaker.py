@@ -369,6 +369,48 @@ def test_flush_drops_only_the_flushers_unplayed_slices_and_reports_their_marks()
     assert sounds == [pcm(1, fill=1), pcm(1, fill=2)]
 
 
+def test_flush_mid_chunk_reports_how_much_of_the_cut_chunk_played() -> None:
+    """A chunk cut short by a flush has partly played: its slices already played, and the one playing, which
+    finishes, are reported as played; the rest is dropped."""
+
+    async def run() -> tuple[list[hsm.Event[typing.Any]], list[bytes]]:
+        time = FakeTime(0.0)
+        (setup, _) = await room(time=time)
+        _ = await setup.speaker.dispatch(setup.environment, output(setup.controller, pcm(4), mark="a", event_id="a"))
+        _ = await setup.speaker.dispatch(setup.environment, output(setup.controller, pcm(1), mark="b", event_id="b"))
+        await wait_until(lambda: len(setup.ear.named(SoundEvent)) == 1)
+        time.release(0.010)
+        await wait_until(lambda: len(setup.ear.named(SoundEvent)) == 2)
+        _ = await setup.speaker.dispatch(setup.environment, flush(setup.controller))
+        await wait_until(lambda: bool(setup.controller.named(audio.FlushedEvent)))
+        time.release(0.020)
+        await settle()
+        sounds = [typing.cast(SoundData, event.data).audio for event in setup.ear.named(SoundEvent)]
+        return setup.controller.named(audio.FlushedEvent) + setup.controller.named(audio.PlayedEvent), sounds
+
+    told, sounds = asyncio.run(run())
+
+    (event,) = told
+    assert event.data == audio.FlushedData(dropped_seconds=0.03, marks=("a", "b"), played_seconds=0.02)
+    assert len(sounds) == 2
+
+
+def test_flush_before_a_chunk_starts_reports_none_of_it_played() -> None:
+    async def run() -> list[hsm.Event[typing.Any]]:
+        time = FakeTime(0.0)
+        (setup, _) = await room(time=time)
+        _ = await setup.speaker.dispatch(setup.environment, output(setup.controller, pcm(1), mark="a", event_id="a"))
+        _ = await setup.speaker.dispatch(setup.environment, output(setup.controller, pcm(2), mark="b", event_id="b"))
+        await wait_until(lambda: len(setup.ear.named(SoundEvent)) == 1)
+        _ = await setup.speaker.dispatch(setup.environment, flush(setup.controller))
+        await wait_until(lambda: bool(setup.controller.named(audio.FlushedEvent)))
+        return setup.controller.named(audio.FlushedEvent)
+
+    (event,) = asyncio.run(run())
+
+    assert event.data == audio.FlushedData(dropped_seconds=0.02, marks=("b",), played_seconds=0.0)
+
+
 def test_flush_of_a_silent_speaker_reports_nothing_dropped() -> None:
     async def run() -> list[hsm.Event[typing.Any]]:
         (setup, _) = await room()

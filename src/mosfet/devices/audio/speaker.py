@@ -71,13 +71,15 @@ class _Slice:
     """One frame-sized piece of a commanded chunk, queued until it plays.
 
     ``commander`` is the attached controller that sent the chunk: an address, dispatched to and never read.
-    Only a chunk's last slice carries its ``mark`` (and the ``event_id`` of the output that carried it).
+    Only a chunk's last slice carries its ``mark`` (and the ``event_id`` of the output that carried it). ``offset``
+    is the playout time of the chunk's slices before this one.
     """
 
     audio: bytes
     sample_rate_hz: int
     channels: int
     seconds: float
+    offset: float
     chunk: int
     mark: str | None
     event_id: str
@@ -106,7 +108,8 @@ class Speaker(Device):
     * ``devices.audio.played`` with a chunk's ``mark`` once that chunk's last slice has played;
     * ``devices.audio.flushed`` for ``devices.audio.flush``: the flusher's own unplayed slices are
       dropped and their marks listed (the slice already playing finishes, so a flush takes effect
-      within one ``frame``); another controller's audio is untouched;
+      within one ``frame``), with how much of a chunk cut short had played; another controller's audio
+      is untouched;
     * ``devices.audio.flushed`` for a chunk that would push the buffer past ``max_buffered``, which is
       dropped whole.
 
@@ -293,6 +296,7 @@ class Speaker(Device):
                     sample_rate_hz=rate,
                     channels=channels,
                     seconds=seconds,
+                    offset=start // frame_bytes / rate,
                     chunk=instance._chunks,
                     mark=data.mark if start == last else None,
                     event_id=event.id if start == last else "",
@@ -335,16 +339,27 @@ class Speaker(Device):
 
     @staticmethod
     def _flush(ctx: hsm.Context, instance: "Speaker", event: hsm.Event[typing.Any]) -> None:
-        """Drop the flusher's queued slices, keep everyone else's, and report what was dropped."""
+        """Drop the flusher's queued slices, keep everyone else's, and report what was dropped.
+
+        Only the first dropped chunk can have begun playing, since a chunk's slices are queued together; when it
+        carries the first dropped mark, the report says how much of it played: its slices before the first dropped
+        one, the slice playing now included, as that one finishes.
+        """
 
         commander = Speaker._commander(instance, event)
         assert commander is not None
         dropped = [piece for piece in instance._queue if piece.commander is commander]
         instance._queue = collections.deque(piece for piece in instance._queue if piece.commander is not commander)
         instance._queued_seconds = sum(piece.seconds for piece in instance._queue)
+        cut = dropped[0] if dropped else None
         report = FlushedData(
             dropped_seconds=sum(piece.seconds for piece in dropped),
             marks=tuple(piece.mark for piece in dropped if piece.mark is not None),
+            played_seconds=(
+                cut.offset
+                if cut is not None and any(piece.chunk == cut.chunk and piece.mark is not None for piece in dropped)
+                else 0.0
+            ),
         )
         Speaker._report_flushed(ctx, instance, commander, event, report)
         _dropped("flushed", len({piece.chunk for piece in dropped}))

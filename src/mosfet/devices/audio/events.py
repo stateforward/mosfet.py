@@ -107,12 +107,20 @@ class PlayedData(pydantic.BaseModel):
 
 
 class FlushedData(pydantic.BaseModel):
-    """Speaker report to a controller: audio it commanded was dropped unplayed, by a flush or by overflow."""
+    """Speaker report to a controller: audio it commanded was dropped unplayed, by a flush or by overflow.
+
+    A flush can cut a chunk short: ``played_seconds`` is how much of the first dropped chunk had played by then.
+    """
 
     model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
         frozen=True,
         extra="forbid",
-        json_schema_extra={"examples": [{"dropped_seconds": 0.4, "marks": ["u1.4", "u1.5"]}]},
+        json_schema_extra={
+            "examples": [
+                {"dropped_seconds": 0.4, "marks": ["u1.4", "u1.5"], "played_seconds": 0.0},
+                {"dropped_seconds": 0.3, "marks": ["u1.4"], "played_seconds": 0.2},
+            ]
+        },
     )
 
     dropped_seconds: float = pydantic.Field(
@@ -123,6 +131,16 @@ class FlushedData(pydantic.BaseModel):
     marks: tuple[str, ...] = pydantic.Field(
         description="Marks of the dropped chunks, in the order they would have played; empty when none carried one.",
         examples=[["u1.4", "u1.5"]],
+    )
+    played_seconds: float = pydantic.Field(
+        default=0.0,
+        ge=0.0,
+        description=(
+            "Playout time, in seconds, of the chunk whose mark is first in marks that played before it was cut "
+            "short, counting the frame that was playing when the flush came, which finishes; 0.0 when none of it "
+            "played (always for an overflow, which drops a chunk whole before it starts)."
+        ),
+        examples=[0.0, 0.2],
     )
 
 
