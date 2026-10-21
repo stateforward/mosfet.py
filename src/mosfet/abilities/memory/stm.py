@@ -433,7 +433,7 @@ class TurnRecordData(pydantic.BaseModel):
                     "id": "turn-1",
                     "direction": "heard",
                     "speakers": [{"ref": "voice:3f2a9c", "role": "source"}],
-                    "text": "Hi Willy, I'm Maya.",
+                    "text": "Hi there, I'm Maya.",
                     "cut": False,
                     "conversation": "conversation-1",
                 }
@@ -470,7 +470,7 @@ class TurnRecordData(pydantic.BaseModel):
     text: str = pydantic.Field(
         min_length=1,
         description=f"The words of the turn, at most {MAX_TURN_TEXT_BYTES} UTF-8 bytes, cut at a whole word.",
-        examples=["Hi Willy, I'm Maya."],
+        examples=["Hi there, I'm Maya."],
     )
     cut: bool = pydantic.Field(
         default=False,
@@ -530,7 +530,7 @@ class Turn(TurnRecordData):
                     "at": "2026-07-07T12:00:00.123456Z",
                     "direction": "heard",
                     "speakers": [{"ref": "voice:3f2a9c", "role": "source"}],
-                    "text": "Hi Willy, I'm Maya.",
+                    "text": "Hi there, I'm Maya.",
                     "cut": False,
                     "conversation": "conversation-1",
                 }
@@ -606,7 +606,7 @@ class RecentTurnsOutputData(pydantic.BaseModel):
                             "at": "2026-07-07T12:00:00.123456Z",
                             "direction": "heard",
                             "speakers": [{"ref": "voice:3f2a9c", "role": "source"}],
-                            "text": "Hi Willy, I'm Maya.",
+                            "text": "Hi there, I'm Maya.",
                             "cut": False,
                             "conversation": "conversation-1",
                         }
