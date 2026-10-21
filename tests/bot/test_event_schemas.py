@@ -88,11 +88,11 @@ def test_bot_degraded_is_an_error_terminal_with_a_closed_stage_and_never_a_tool(
         _ = mosfet.DegradedEventData.model_validate({"stage": "unknown"})
 
 
-def test_messages_carry_no_recalled_memories() -> None:
-    """Hard cutover: history never carried host-only memories; memory keeps only the causal turn."""
+def test_an_exchange_carries_no_recalled_memories() -> None:
+    """Hard cutover: an exchange never carries host-only memories; memory keeps only the causal turn."""
 
-    assert "memories" not in conversation.Messages.model_fields
-    assert conversation.Messages.__memory_fields__ == frozenset({"parent"})
+    assert "memories" not in conversation.Exchange.model_fields
+    assert conversation.Exchange.__memory_fields__ == frozenset({"parent"})
 
 
 def test_observed_bot_event_keeps_binary_python_dump_but_canonical_omits_media() -> None:
@@ -183,11 +183,10 @@ def test_response_model_facing_content_renders_terminal_event_without_causal_anc
         source="communication-1",
         target="conversation-1",
     )
-    response = conversation.Messages(
+    response = conversation.Exchange(
         parent=mosfet.StimulusData.from_event(communication_event),
         messages=(
             conversation.Message(
-                sequence=0,
                 direction="inbound",
                 source_ids=input_data.source_ids,
                 target_ids=input_data.target_ids,
@@ -202,7 +201,6 @@ def test_response_model_facing_content_renders_terminal_event_without_causal_anc
                 ),
             ),
             conversation.Message(
-                sequence=1,
                 direction="outbound",
                 source_ids=conversation.IdentitySet(),
                 target_ids=input_data.source_ids,
@@ -225,8 +223,8 @@ def test_response_model_facing_content_renders_terminal_event_without_causal_anc
     )
     # This is intentionally pseudo-XML with unbound prefixes, so assert its presentation text
     # instead of passing it through an XML namespace parser.
-    assert xml.startswith("<communication:messages")
-    assert "<communication:messages" in xml
+    assert xml.startswith("<communication:exchange")
+    assert "<communication:exchange" in xml
     assert f'stimulus:event="{conversation.OutputEvent.name}"' in xml
     assert 'stimulus:id="response-1"' in xml
     assert "<environment:sound" not in xml
@@ -339,24 +337,10 @@ def test_inherited_phone_sound_stamps_event_envelope_on_outer_root() -> None:
 
 def test_conversation_message_attachment_renders_inside_its_message_element() -> None:
     image = media.Image(content=b"\x89PNG\r\n\x1a\n" + b"photo", media_type="image/png")
-    released = media.ReleasedImage.of(
-        media.Image(content=b"\x89PNG\r\n\x1a\n" + b"older", media_type="image/png"), reason="retention"
-    )
     provenance = conversation.MessageProvenance(event=conversation.InputEvent.name, session_ref="session-1")
-    history = conversation.Messages(
+    exchange = conversation.Exchange(
         messages=(
             conversation.Message(
-                sequence=0,
-                direction="inbound",
-                source_ids=frozenset({"caller"}),
-                target_ids=frozenset({"bot"}),
-                content=None,
-                content_type="text/plain",
-                attachments=(released,),
-                provenance=provenance,
-            ),
-            conversation.Message(
-                sequence=1,
                 direction="inbound",
                 source_ids=frozenset({"caller"}),
                 target_ids=frozenset({"bot"}),
@@ -370,17 +354,14 @@ def test_conversation_message_attachment_renders_inside_its_message_element() ->
 
     xml = _xml(
         processing.InputData(
-            input=conversation.OutputEvent.with_data_and_id(history, "history-1")
+            input=conversation.OutputEvent.with_data_and_id(exchange, "exchange-1")
         ).model_facing_content(media.ImageCapacity())
     )
 
-    first, second = xml.split('content="what is this"')
-    assert first.count("<media:image") == 1
-    assert '<media:image media_type="image/png" omitted="retention" />' in first
-    assert second.count("<media:image") == 1
+    assert xml.count("<media:image") == 1
     # A text-only capacity admits no image type, so the attached image is only a placeholder.
-    placeholder = second.index('<media:image media_type="image/png" omitted="media_type" />')
-    assert placeholder < second.index("</communication:message>")
+    placeholder = xml.index('<media:image media_type="image/png" omitted="media_type" />')
+    assert xml.index('content="what is this"') < placeholder < xml.index("</communication:message>")
     assert "photo" not in xml
     assert "<media:image ref=" not in xml
 

@@ -1834,7 +1834,6 @@ class Speaking(ability.Ability[InputData, OutputData]):
             if data.spoken:
                 for target in instance._conversation_targets:
                     message = conversation.Message(
-                        sequence=0,
                         direction="outbound",
                         source_ids=frozenset(),
                         target_ids=frozenset(),
@@ -2027,7 +2026,7 @@ class Speaking(ability.Ability[InputData, OutputData]):
             instance,
             utterance.id,
             utterance.requester,
-            ability.FailureData(message="Conversation history recording timed out."),
+            ability.FailureData(message="Conversation recording timed out."),
             dict(utterance.metadata),
         )
 

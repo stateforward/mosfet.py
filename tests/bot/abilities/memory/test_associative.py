@@ -327,7 +327,6 @@ def test_a_surfaced_image_is_a_memory_placeholder_never_bytes() -> None:
         if isinstance(part, text.TextPart)
     )
     assert 'omitted="memory"' in rendered
-    assert 'omitted="retention"' not in rendered
 
 
 # --- failure, timeout, exactly once -------------------------------------------------------------

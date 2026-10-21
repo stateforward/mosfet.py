@@ -52,13 +52,13 @@ def run_terminal(
     )
 
 
-def terminal_messages(terminal: hsm.Event[typing.Any]) -> conversation.Messages:
-    if isinstance(terminal.data, conversation.Messages):
+def terminal_messages(terminal: hsm.Event[typing.Any]) -> conversation.Exchange:
+    if isinstance(terminal.data, conversation.Exchange):
         return terminal.data
     assert isinstance(terminal.data, cognition.InputData)
     stimulus = terminal.data.stimulus
     assert isinstance(stimulus, hsm.Event)
-    assert isinstance(stimulus.data, conversation.Messages)
+    assert isinstance(stimulus.data, conversation.Exchange)
     return stimulus.data
 
 
@@ -175,10 +175,9 @@ def test_message_content_recursive_alias_preserves_schema_and_validation() -> No
 
     schema = conversation.Message.model_json_schema()
     schema_hash = hashlib.sha256(json.dumps(schema, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-    assert schema_hash == "0d1a54a6b3d0dbeafcf216c82743db5e333606f6340edc9287802fccc6f139a2"
+    assert schema_hash == "54b056371520d33756f9c8a7a366a020d3dc4d2cf7444da05c665ae3894ce9f5"
 
     payload = {
-        "sequence": 0,
         "direction": "inbound",
         "source_ids": ["caller"],
         "target_ids": ["bot"],
@@ -1212,7 +1211,6 @@ def test_conversation_stays_active_and_offers_input_after_turn() -> None:
 def test_messages_reject_raw_media_and_preserve_immutable_provenance() -> None:
     with pytest.raises(pydantic.ValidationError):
         conversation.Message(
-            sequence=0,
             direction="inbound",
             source_ids=frozenset({"caller"}),
             target_ids=frozenset(),
@@ -1222,8 +1220,8 @@ def test_messages_reject_raw_media_and_preserve_immutable_provenance() -> None:
         )
 
 
-def test_memory_keeps_the_inbound_turn_behind_a_history_emission_not_the_history() -> None:
-    """Messages declares __memory_fields__ = {parent}: memory keeps the causal turn, the prompt keeps history."""
+def test_memory_keeps_the_inbound_turn_behind_an_exchange_emission_not_the_exchange() -> None:
+    """Exchange declares __memory_fields__ = {parent}: memory keeps the causal turn, the prompt keeps the exchange."""
 
     turn = conversation.TurnData(
         source_ids=frozenset({"caller"}),
@@ -1231,21 +1229,20 @@ def test_memory_keeps_the_inbound_turn_behind_a_history_emission_not_the_history
         content="call me back at noon",
         content_type="text/plain",
     )
-    history = conversation.Messages(
+    exchange = conversation.Exchange(
         parent=mosfet.StimulusData(event=conversation.InputEvent.name, data=turn, id="turn-1"),
         messages=(
             conversation.Message(
-                sequence=0,
                 direction="inbound",
                 source_ids=frozenset({"caller"}),
                 target_ids=frozenset({"bot"}),
-                content="an earlier line of history",
+                content="a line of the exchange",
                 content_type="text/plain",
                 provenance=conversation.MessageProvenance(event="test.input"),
             ),
         ),
     )
-    emitted = conversation.OutputEvent.with_data(history)
+    emitted = conversation.OutputEvent.with_data(exchange)
 
     kept = "".join(
         part.text
@@ -1259,8 +1256,8 @@ def test_memory_keeps_the_inbound_turn_behind_a_history_emission_not_the_history
     )
 
     assert "call me back at noon" in kept
-    assert "an earlier line of history" not in kept
-    assert "an earlier line of history" in prompt
+    assert "a line of the exchange" not in kept
+    assert "a line of the exchange" in prompt
     assert "call me back at noon" not in prompt
 
 
@@ -1277,22 +1274,21 @@ def test_conversation_append_same_correlation_is_idempotent() -> None:
     class RecordingConversation(conversation.Conversation):
         def __init__(self) -> None:
             super().__init__()
-            self.outputs: list[conversation.Messages] = []
+            self.outputs: list[conversation.Exchange] = []
 
         @typing.override
         def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> collections.abc.Awaitable[bool]:
             if event.name == ability.TerminalOutputEvent.name and isinstance(event.data, hsm.Event):
                 terminal = event.data
-                if terminal.name == conversation.OutputEvent.name and isinstance(terminal.data, conversation.Messages):
+                if terminal.name == conversation.OutputEvent.name and isinstance(terminal.data, conversation.Exchange):
                     self.outputs.append(terminal.data)
             return super().dispatch(ctx, event)
 
-    async def run() -> tuple[conversation.Messages, conversation.Messages]:
+    async def run() -> tuple[conversation.Exchange, conversation.Exchange]:
         context = hsm.Context()
         target = RecordingConversation()
         await start_ability_tree(context, target)
         message = conversation.Message(
-            sequence=0,
             direction="outbound",
             source_ids=frozenset(),
             target_ids=frozenset({"caller"}),
@@ -1317,11 +1313,10 @@ def test_conversation_append_same_correlation_is_idempotent() -> None:
     assert len(first.messages) == 1
     assert len(second.messages) == 1
     assert second.messages == first.messages
-    assert second.messages[0].sequence == 0
     assert second.messages[0].provenance.id == "append-1"
 
 
-def test_conversation_commits_cumulative_bidirectional_history() -> None:
+def test_an_outbound_reply_joins_the_exchange_its_inbound_opened() -> None:
     ability, context = started_conversation()
     inbound = run_input(
         ability,
@@ -1333,11 +1328,10 @@ def test_conversation_commits_cumulative_bidirectional_history() -> None:
     )
     assert tuple(item.direction for item in inbound.messages) == ("inbound",)
 
-    async def append() -> conversation.Messages:
+    async def append() -> conversation.Exchange:
         return await conversation.append_conversation_message(
             ability,
             conversation.Message(
-                sequence=1,
                 direction="outbound",
                 source_ids=frozenset(),
                 target_ids=frozenset({"caller"}),
@@ -1352,20 +1346,18 @@ def test_conversation_commits_cumulative_bidirectional_history() -> None:
             ctx=context,
         )
 
-    history = asyncio.run(append())
-    assert tuple(item.sequence for item in history.messages) == (0, 1)
-    assert tuple(item.direction for item in history.messages) == ("inbound", "outbound")
+    exchange = asyncio.run(append())
+    assert tuple(item.direction for item in exchange.messages) == ("inbound", "outbound")
 
 
 def test_concurrent_host_appends_complete_their_own_operations() -> None:
-    async def run() -> tuple[conversation.Messages, conversation.Messages]:
+    async def run() -> tuple[conversation.Exchange, conversation.Exchange]:
         ability = conversation.Conversation()
         context = hsm.Context()
         await start_ability_tree(context, ability)
 
         def message(content: str) -> conversation.Message:
             return conversation.Message(
-                sequence=0,
                 direction="outbound",
                 source_ids=frozenset(),
                 target_ids=frozenset({"caller"}),
@@ -1616,62 +1608,26 @@ def test_cognition_handoff_on_a_decoderless_detector_takes_text_and_image_turns_
     assert terminal_messages(terminal).messages[-1].attachments == attachments
 
 
-def _released_history_images(metrics: metric_reader.Reader) -> int:
-    total = 0
-    for point in metrics.points("bot.conversation.history.image.released"):
-        assert point.attributes == {"media_type": "image/png"}
-        total += int(point.value)
-    return total
+def test_an_exchange_holds_only_the_images_of_its_own_turn() -> None:
+    """Each image turn opens a new exchange, so no earlier turn's image bytes are carried."""
 
+    target, context = started_conversation()
+    images = tuple(_image(index) for index in range(5))
 
-def test_history_keeps_image_bytes_only_within_the_injected_retention_budget(
-    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    with metric_reader.recording(tmp_path, monkeypatch) as metrics:
-        released_before = _released_history_images(metrics)
-        retention = media.ImageRetention(max_images=2, max_total_bytes=1_000_000)
-        target = conversation.Conversation(image_retention=retention)
-        context = hsm.Context()
-        asyncio.run(start_ability_tree(context, target))
-        images = tuple(_image(index) for index in range(5))
-        histories: list[conversation.Messages] = []
-
-        for image in images:
-            terminal = run_terminal(
-                target,
-                context,
-                conversation.TurnData(
-                    source_ids=frozenset({"caller"}),
-                    target_ids=frozenset({"bot"}),
-                    content=None,
-                    content_type="text/plain",
-                    attachments=(image,),
-                ),
-            )
-            history = terminal_messages(terminal)
-            histories.append(history)
-            (newest,) = history.messages[-1].attachments
-            assert newest == image
-            older = [attachment for message in history.messages[:-1] for attachment in message.attachments]
-            assert sum(isinstance(attachment, media.Image) for attachment in older) <= retention.max_images
-            held = sum(
-                len(attachment.content)
-                for message in history.messages
-                for attachment in message.attachments
-                if isinstance(attachment, media.Image)
-            )
-            assert held <= media.MAX_TURN_IMAGES * media.MAX_IMAGE_BYTES + retention.max_total_bytes
-
-        final = histories[-1].messages
-        assert [message.attachments for message in final[2:]] == [(images[2],), (images[3],), (images[4],)]
-        for message, image in zip(final[:2], images[:2], strict=True):
-            assert message.attachments == (media.ReleasedImage.of(image, reason="retention"),)
-        for earlier in histories[:-1]:
-            for kept, committed in zip(final, earlier.messages):
-                assert (kept.sequence, kept.provenance) == (committed.sequence, committed.provenance)
-        released_after = _released_history_images(metrics)
-
-    assert released_after - released_before == 2
+    for image in images:
+        terminal = run_terminal(
+            target,
+            context,
+            conversation.TurnData(
+                source_ids=frozenset({"caller"}),
+                target_ids=frozenset({"bot"}),
+                content=None,
+                content_type="text/plain",
+                attachments=(image,),
+            ),
+        )
+        (inbound,) = terminal_messages(terminal).messages
+        assert inbound.attachments == (image,)
 
 
 _CALLER = mosfet.Participant(ref="caller", role=mosfet.ParticipantRole.SOURCE)
@@ -1778,7 +1734,6 @@ def _append_outbound(
     target: conversation.Conversation, context: hsm.Context, *participants: mosfet.Participant
 ) -> None:
     message = conversation.Message(
-        sequence=0,
         direction="outbound",
         source_ids=frozenset(),
         target_ids=frozenset(),
@@ -1815,13 +1770,13 @@ def test_the_bots_own_voice_on_what_it_said_reaches_the_next_cognition_handoff_o
     # Producer-stamped on the outbound message, copied into the next handoff after the turn's own, then cleared.
     assert first == (heard, _BOT, ada, _OWN_VOICE)
     assert second == (heard, _BOT, ada)
-    history = asyncio.run(conversation.append_conversation_message(target, _outbound(), ctx=context))
-    assert history.messages[0].participants == (_OWN_VOICE,)
+    said = _outbound().model_copy(update={"participants": (_OWN_VOICE,)})
+    exchange = asyncio.run(conversation.append_conversation_message(target, said, ctx=context))
+    assert [message.participants for message in exchange.messages[1:]] == [(_OWN_VOICE,)]
 
 
 def _outbound() -> conversation.Message:
     return conversation.Message(
-        sequence=0,
         direction="outbound",
         source_ids=frozenset(),
         target_ids=frozenset(),
@@ -1887,3 +1842,30 @@ def test_turn_participants_counts_a_ref_too_long_to_stamp_instead_of_failing_the
 
         assert participants == (_BOT,)
         assert _unstamped(metrics) - before == 1
+
+
+def test_an_inbound_turn_opens_a_new_exchange_that_never_carries_the_last_one() -> None:
+    """The current exchange is the inbound that opened it and what the bot said since; the next inbound replaces it."""
+
+    target, context = started_conversation()
+    first = run_input(
+        target,
+        context,
+        source_ids=frozenset({"caller"}),
+        target_ids=frozenset({"bot"}),
+        content="A",
+        content_type="text/plain",
+    )
+    reply = asyncio.run(conversation.append_conversation_message(target, _outbound(), ctx=context))
+    second = run_input(
+        target,
+        context,
+        source_ids=frozenset({"caller"}),
+        target_ids=frozenset({"bot"}),
+        content="B",
+        content_type="text/plain",
+    )
+
+    assert [(item.direction, item.content) for item in first.messages] == [("inbound", "A")]
+    assert [(item.direction, item.content) for item in reply.messages] == [("inbound", "A"), ("outbound", "and this")]
+    assert [(item.direction, item.content) for item in second.messages] == [("inbound", "B")]

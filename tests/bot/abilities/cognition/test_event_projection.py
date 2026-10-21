@@ -179,7 +179,7 @@ def test_model_facing_content_text_only_capacity_yields_one_text_part() -> None:
     assert '<media:image media_type="image/png" omitted="media_type" />' in part.text
 
 
-@pytest.mark.parametrize("reason", ["retention", "memory"])
+@pytest.mark.parametrize("reason", typing.get_args(media.ReleaseReason))
 def test_model_facing_content_renders_released_images_by_reason(reason: media.ReleaseReason) -> None:
     kept = media.Image(content=_PNG, media_type="image/png")
     released = media.ReleasedImage.of(
@@ -249,7 +249,7 @@ def test_model_facing_content_records_one_image_metric_per_placeholder(
         attached = media.Image(content=_PNG, media_type="image/png")
         over_capacity = media.Image(content=_PNG + b"older", media_type="image/png")
         unsupported = media.Image(content=_JPEG, media_type="image/jpeg")
-        released = media.ReleasedImage.of(attached, reason="retention")
+        released = media.ReleasedImage.of(attached, reason="memory")
         png_only = media.ImageCapacity(max_images=1, max_total_bytes=1_000_000, media_types=frozenset({"image/png"}))
 
         _ = cognition.event.model_facing_content(

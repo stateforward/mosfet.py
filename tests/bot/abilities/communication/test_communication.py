@@ -92,12 +92,12 @@ def _speaking(
 class RecordingConversation(conversation.Conversation):
     def __init__(self) -> None:
         super().__init__(turn_detector=turn_detector.TurnDetector(decoder=IdentityTextDecoder()))
-        self.outputs: list[conversation.Messages] = []
+        self.outputs: list[conversation.Exchange] = []
 
     def dispatch(self, ctx: hsm.Context, event: hsm.Event) -> typing.Awaitable[bool]:
         if event.name == ability.TerminalOutputEvent.name and isinstance(event.data, hsm.Event):
             terminal = event.data
-            if terminal.name == conversation.OutputEvent.name and isinstance(terminal.data, conversation.Messages):
+            if terminal.name == conversation.OutputEvent.name and isinstance(terminal.data, conversation.Exchange):
                 self.outputs.append(terminal.data)
         return super().dispatch(ctx, event)
 
@@ -204,7 +204,7 @@ def test_communication_responding_follows_speaking_by_events_without_private_wai
 
 
 def test_communication_respond_routes_one_typed_request_to_speaking_and_records_what_was_said() -> None:
-    async def run() -> tuple[list[str], list[conversation.Messages], list[hsm.Event[typing.Any]]]:
+    async def run() -> tuple[list[str], list[conversation.Exchange], list[hsm.Event[typing.Any]]]:
         ctx = Environment()
         conv = RecordingConversation()
         script = Script()
@@ -616,7 +616,7 @@ def test_a_reply_is_one_to_sixty_four_parts_whose_words_are_the_text_of_record()
 
 
 def test_a_reply_in_parts_is_recorded_as_its_words_joined_verbatim() -> None:
-    async def run() -> list[conversation.Messages]:
+    async def run() -> list[conversation.Exchange]:
         ctx = Environment()
         conv = RecordingConversation()
         speaker = _speaking(Script(), conversation=(conv,))
@@ -744,7 +744,7 @@ def test_stop_is_offered_only_while_a_response_is_being_spoken() -> None:
 
 
 def test_stop_reaches_speaking_and_the_response_ends_stopped_with_what_was_said() -> None:
-    async def run() -> tuple[list[hsm.Event[typing.Any]], list[conversation.Messages], list[str], str]:
+    async def run() -> tuple[list[hsm.Event[typing.Any]], list[conversation.Exchange], list[str], str]:
         ctx = Environment()
         conv = RecordingConversation()
         script = Script(stall_on="stuck")
@@ -912,10 +912,9 @@ def test_conversation_output_does_not_automatically_speak() -> None:
             ctx,
             comm,
             conversation.OutputEvent.with_data(
-                conversation.Messages(
+                conversation.Exchange(
                     messages=(
                         conversation.Message(
-                            sequence=0,
                             direction="inbound",
                             source_ids=frozenset({"caller"}),
                             target_ids=frozenset({"bot"}),
@@ -954,10 +953,9 @@ def test_outbound_latest_conversation_output_is_not_forwarded() -> None:
             ctx,
             comm,
             conversation.OutputEvent.with_data(
-                conversation.Messages(
+                conversation.Exchange(
                     messages=(
                         conversation.Message(
-                            sequence=0,
                             direction="inbound",
                             source_ids=frozenset({"caller"}),
                             target_ids=frozenset({"bot"}),
@@ -966,7 +964,6 @@ def test_outbound_latest_conversation_output_is_not_forwarded() -> None:
                             provenance=conversation.MessageProvenance(event="test.inbound"),
                         ),
                         conversation.Message(
-                            sequence=1,
                             direction="outbound",
                             source_ids=frozenset({"bot"}),
                             target_ids=frozenset({"caller"}),
@@ -981,7 +978,7 @@ def test_outbound_latest_conversation_output_is_not_forwarded() -> None:
         forwarded = [
             item
             for item in collector.events
-            if item.name == conversation.OutputEvent.name and isinstance(item.data, conversation.Messages)
+            if item.name == conversation.OutputEvent.name and isinstance(item.data, conversation.Exchange)
         ]
         return forwarded, encoder.calls
 

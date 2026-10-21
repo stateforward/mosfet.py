@@ -5,7 +5,7 @@ attachment owner. These helpers wire contribute → decide → encode
 for **standalone** composition where no Bot body bridge is in play.
 
 Product path when Conversation is on ``Bot(acquired_abilities=…)``: contribution
-terminals are ``cognition.InputEvent`` (stimulus carries ``Messages``); the Bot
+terminals are ``cognition.InputEvent`` (stimulus carries ``Exchange``); the Bot
 admits that handoff the same way Listening does and runs body-enriched cognition
 → Speaking. Do not call ``run_host_*_respond_turn`` on that path — it would
 double-drive cognition. Conversation never inspects who attached it.
@@ -29,8 +29,8 @@ from .conversation import (
     TurnData,
     Conversation,
     ParticipatedTurn,
-    Messages,
-    participated_turn_from_messages,
+    Exchange,
+    participated_turn_from_exchange,
     Message,
     MessageProvenance,
     append_conversation_message,
@@ -127,11 +127,11 @@ async def contribute_conversation_turn(
     context = conversation.context() if ctx is None else ctx
 
     def _accept_contribution_payload(output: object) -> bool:
-        if isinstance(output, Messages):
+        if isinstance(output, Exchange):
             return True
         if isinstance(output, cognition.InputData):
             stimulus = output.stimulus
-            return isinstance(stimulus, hsm.Event) and isinstance(stimulus.data, Messages)
+            return isinstance(stimulus, hsm.Event) and isinstance(stimulus.data, Exchange)
         return False
 
     payload = await _apply_and_await_output(
@@ -141,15 +141,15 @@ async def contribute_conversation_turn(
         accept=_accept_contribution_payload,
         terminals=(conversation.output_event, cognition.InputEvent, conversation.failed_event),
     )
-    if isinstance(payload, Messages):
+    if isinstance(payload, Exchange):
         response = payload
     else:
         assert isinstance(payload, cognition.InputData)
         stimulus = payload.stimulus
         assert isinstance(stimulus, hsm.Event)
-        assert isinstance(stimulus.data, Messages)
+        assert isinstance(stimulus.data, Exchange)
         response = stimulus.data
-    return participated_turn_from_messages(message, response)
+    return participated_turn_from_exchange(message, response)
 
 
 async def run_host_voice_respond_turn(
@@ -159,7 +159,7 @@ async def run_host_voice_respond_turn(
     message: TurnData,
     decision_input_factory: decision_input.DecisionInputFactory | None = None,
     ctx: hsm.Context | None = None,
-) -> Messages:
+) -> Exchange:
     """Standalone contribute → decide → encode (not the Bot body product path)."""
 
     context = conversation.context() if ctx is None else ctx
@@ -195,7 +195,6 @@ async def run_host_voice_respond_turn(
     return await append_conversation_message(
         conversation,
         Message(
-            sequence=len(participated.messages),
             direction="outbound",
             source_ids=frozenset(),
             target_ids=message.source_ids,
@@ -219,7 +218,7 @@ async def run_host_text_respond_turn(
     message: TurnData,
     decision_input_factory: decision_input.DecisionInputFactory | None = None,
     ctx: hsm.Context | None = None,
-) -> Messages:
+) -> Exchange:
     """Standalone contribute → decide → generate → encode (not the Bot body product path)."""
 
     context = conversation.context() if ctx is None else ctx
@@ -270,7 +269,6 @@ async def run_host_text_respond_turn(
     return await append_conversation_message(
         conversation,
         Message(
-            sequence=len(participated.messages),
             direction="outbound",
             source_ids=frozenset(),
             target_ids=message.source_ids,

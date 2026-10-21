@@ -391,7 +391,7 @@ class Run(hsm.Instance):
         return (
             isinstance(data, cognition.InputData)
             and isinstance(data.stimulus, hsm.Event)
-            and isinstance(data.stimulus.data, conversation.Messages)
+            and isinstance(data.stimulus.data, conversation.Exchange)
         )
 
     @staticmethod

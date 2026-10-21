@@ -192,7 +192,7 @@ def _has_conversation_product(
     del ctx, instance
     if isinstance(event.data, cognition.InputData):
         return True
-    if isinstance(event.data, conversation.Messages):
+    if isinstance(event.data, conversation.Exchange):
         return bool(event.data.messages) and event.data.messages[-1].direction == "inbound"
     return False
 
@@ -701,7 +701,7 @@ class Communication(ability.Ability[TurnData, object]):
         """Re-emit Conversation contribution products through this ability's terminal.
 
         Contribute the conversation product as a cognition.InputEvent handoff (text products)
-        or a bare Messages terminal to the attached owner (outer requester) so the ability
+        or a bare Exchange terminal to the attached owner (outer requester) so the ability
         lifecycle surfaces it to the owner object directly. The inner event carries no target
         so ``_forward_terminal_event`` dispatches to the owner object rather than resolving the
         owner by id through an Instances map (Communication runs under a private scope). With

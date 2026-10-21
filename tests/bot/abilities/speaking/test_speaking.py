@@ -205,13 +205,13 @@ class SoundListener(hsm.Instance):
 class RecordingConversation(conversation.Conversation):
     def __init__(self) -> None:
         super().__init__()
-        self.outputs: list[conversation.Messages] = []
+        self.outputs: list[conversation.Exchange] = []
 
     @typing.override
     def dispatch(self, ctx: hsm.Context, event: hsm.Event[typing.Any]) -> collections.abc.Awaitable[bool]:
         if event.name == ability.TerminalOutputEvent.name and isinstance(event.data, hsm.Event):
             terminal = typing.cast(hsm.Event[typing.Any], event.data)
-            if terminal.name == conversation.OutputEvent.name and isinstance(terminal.data, conversation.Messages):
+            if terminal.name == conversation.OutputEvent.name and isinstance(terminal.data, conversation.Exchange):
                 self.outputs.append(terminal.data)
         return super().dispatch(ctx, event)
 
@@ -1201,7 +1201,7 @@ def test_one_utterance_at_a_time_the_next_waits_for_the_first_to_be_recorded() -
 
 
 def test_speaking_records_what_the_room_heard_as_one_trusted_outbound_message() -> None:
-    async def run() -> tuple[list[conversation.Messages], str, str]:
+    async def run() -> tuple[list[conversation.Exchange], str, str]:
         target = RecordingConversation()
         voice = await stage(Script(fail_on="broken"), conversation_targets=(target,))
         await start_ability_tree(voice.environment, target)
@@ -1230,7 +1230,7 @@ def test_own_voice_is_enrolled_from_each_utterance_long_enough_until_hearing_tel
     with metric_reader.recording(tmp_path, monkeypatch) as reader:
         before = sum(int(point.value) for point in reader.points("bot.speaking.voice.learned.count"))
 
-        async def run() -> tuple[Stage, list[conversation.Messages]]:
+        async def run() -> tuple[Stage, list[conversation.Exchange]]:
             target = RecordingConversation()
             voice = await stage(Script(chunk_ms=500), conversation_targets=(target,))
             await start_ability_tree(voice.environment, target)

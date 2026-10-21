@@ -101,7 +101,7 @@ class ContributionProcessor(processing.DecisionProcessor):
         assert isinstance(stimulus, hsm.Event)
         assert stimulus.name == conversation.OutputEvent.name
         response = stimulus.data
-        assert isinstance(response, conversation.Messages)
+        assert isinstance(response, conversation.Exchange)
         inbound = next(item for item in reversed(response.messages) if item.direction == "inbound")
         assert isinstance(inbound.content, str) and inbound.content
         assert inbound.content_type.lower().startswith("text/")
@@ -115,11 +115,10 @@ def _history_message(
     target_ids: conversation.IdentitySet = frozenset({"bot"}),
     content_type: str = "text/plain",
     direction: typing.Literal["inbound", "outbound"] = "inbound",
-) -> conversation.Messages:
-    return conversation.Messages(
+) -> conversation.Exchange:
+    return conversation.Exchange(
         messages=(
             conversation.Message(
-                sequence=0,
                 direction=direction,
                 source_ids=source_ids if direction == "inbound" else conversation.IdentitySet(),
                 target_ids=target_ids if direction == "inbound" else source_ids,
@@ -195,7 +194,7 @@ def test_conversation_input_uses_identity_sets_and_content() -> None:
 def test_bot_conversation_contribution_reaches_cognition_without_direct_speaking() -> None:
     """Message → Conversation contribution → Bot cognition, without a direct Speaking affordance."""
 
-    async def run() -> tuple[list[str], list[processing.InputData], conversation.Messages | None]:
+    async def run() -> tuple[list[str], list[processing.InputData], conversation.Exchange | None]:
         encoder = RecordingSpeechEncoder()
         speaking_ability = _speaking(encoder)
         communication_ability, conversation_ability, _ = _text_communication(speaking_ability=speaking_ability)
@@ -236,7 +235,7 @@ def test_bot_conversation_contribution_reaches_cognition_without_direct_speaking
         stimulus = processor.inputs[0].input
         assert isinstance(stimulus, hsm.Event)
         response = stimulus.data
-        assert isinstance(response, conversation.Messages)
+        assert isinstance(response, conversation.Exchange)
         return encoder.calls, processor.inputs, response
 
     calls, inputs, response = asyncio.run(run())
@@ -298,7 +297,7 @@ def test_bot_image_only_contribution_reaches_cognition_with_image_part(decoder_e
     (entry,) = inputs
     stimulus = entry.input
     assert isinstance(stimulus, hsm.Event)
-    assert isinstance(stimulus.data, conversation.Messages)
+    assert isinstance(stimulus.data, conversation.Exchange)
     inbound = next(item for item in reversed(stimulus.data.messages) if item.direction == "inbound")
     assert inbound.attachments == (png,)
     parts = entry.model_facing_content(
@@ -316,7 +315,7 @@ def test_bot_image_only_contribution_reaches_cognition_with_image_part(decoder_e
 
 
 def test_bot_ignores_host_encoded_conversation_response() -> None:
-    """Host-encoded Messages history (content set) must not re-enter cognition."""
+    """Host-encoded Exchange (content set) must not re-enter cognition."""
 
     async def run() -> tuple[list[processing.InputData], str]:
         processor = CountingProcessor()
@@ -356,7 +355,7 @@ def test_bot_ignores_host_encoded_conversation_response() -> None:
 
 
 def test_bot_ignores_response_without_text_product() -> None:
-    """Messages history with no text product (content is not text) must not re-enter cognition."""
+    """An exchange with no text product (content is not text) must not re-enter cognition."""
 
     async def run() -> list[processing.InputData]:
         processor = CountingProcessor()
@@ -416,7 +415,7 @@ def test_bot_accepts_contribution_with_empty_text_product() -> None:
         texts: list[object] = []
         for item in processor.inputs:
             stimulus = item.input
-            if isinstance(stimulus, hsm.Event) and isinstance(stimulus.data, conversation.Messages):
+            if isinstance(stimulus, hsm.Event) and isinstance(stimulus.data, conversation.Exchange):
                 texts.append(stimulus.data.messages[-1].content)
         return texts
 
@@ -533,7 +532,7 @@ def test_bot_defers_second_conversation_contribution_until_idle() -> None:
                 stimulus = input.input
                 assert isinstance(stimulus, hsm.Event)
                 response = stimulus.data
-                assert isinstance(response, conversation.Messages)
+                assert isinstance(response, conversation.Exchange)
                 inbound = next(item for item in reversed(response.messages) if item.direction == "inbound")
                 assert isinstance(inbound.content, str) and inbound.content
                 return ()
@@ -600,7 +599,7 @@ def test_bot_defers_second_conversation_contribution_until_idle() -> None:
             stimulus = call.input
             assert isinstance(stimulus, hsm.Event)
             response = stimulus.data
-            assert isinstance(response, conversation.Messages)
+            assert isinstance(response, conversation.Exchange)
             inbound = next(item for item in reversed(response.messages) if item.direction == "inbound")
             assert isinstance(inbound.content, str)
             texts.append(inbound.content)

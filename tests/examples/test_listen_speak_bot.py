@@ -572,8 +572,8 @@ def test_hear_closes_its_workers_when_the_run_never_settles() -> None:
 def _handed(turn: str) -> hsm.Event[typing.Any]:
     """The body handing its cognition a conversation turn, as the run's observer sees it."""
 
-    history = conversation.OutputEvent.with_data(conversation.Messages())
-    return cognition.InputEvent.with_data_and_id(cognition.InputData(stimulus=history), turn)
+    exchange = conversation.OutputEvent.with_data(conversation.Exchange())
+    return cognition.InputEvent.with_data_and_id(cognition.InputData(stimulus=exchange), turn)
 
 
 def _decided(turn: str, *, responses: int) -> hsm.Event[typing.Any]:

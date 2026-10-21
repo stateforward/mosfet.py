@@ -48,12 +48,6 @@ _TURN_TIMEOUT_SECONDS = 5.0
 # Recall, detector ready, detector turn, and remember are sequential inner stages.
 # The contribution waiter must outlive one inner stage so a typed stage failure can settle.
 _CONTRIBUTION_TIMEOUT_STAGES = 4
-_DEFAULT_IMAGE_RETENTION: typing.Final = media.ImageRetention()
-_HISTORY_IMAGE_RELEASED = metrics.get_meter("bot.abilities.communication").create_counter(
-    "bot.conversation.history.image.released",
-    unit="{image}",
-    description="Images whose bytes Conversation history released to stay within its retention budget, by media type.",
-)
 _PARTICIPANT_UNSTAMPED = metrics.get_meter("bot.abilities.communication").create_counter(
     "bot.memory.participant.unstamped.count",
     unit="{identity}",
@@ -243,7 +237,7 @@ class MessageProvenance(pydantic.BaseModel):
     """Typed HSM provenance for one committed model-facing message.
 
     Provenance identifies the event that committed the item.  It intentionally carries
-    no payload or media, so model-facing history cannot become a raw-media side channel.
+    no payload or media, so a model-facing exchange cannot become a raw-media side channel.
     """
 
     model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
@@ -274,7 +268,7 @@ class MessageProvenance(pydantic.BaseModel):
 
 
 class Message(pydantic.BaseModel):
-    """One immutable, ordered, model-safe inbound or outbound message."""
+    """One immutable, model-safe inbound or outbound message of the current exchange."""
 
     model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
         frozen=True,
@@ -282,7 +276,6 @@ class Message(pydantic.BaseModel):
         json_schema_extra={
             "examples": [
                 {
-                    "sequence": 0,
                     "direction": "inbound",
                     "source_ids": ["caller"],
                     "target_ids": ["bot"],
@@ -299,7 +292,6 @@ class Message(pydantic.BaseModel):
         },
     )
 
-    sequence: int = pydantic.Field(ge=0, description="Zero-based position in committed conversation history.")
     direction: typing.Literal["inbound", "outbound"] = pydantic.Field(
         description="Whether the message came from a participant or the bot."
     )
@@ -329,13 +321,10 @@ class Message(pydantic.BaseModel):
         return raw_value
 
     content_type: str = pydantic.Field(min_length=1, description="Media type of the model-safe message content.")
-    attachments: tuple[media.Image | media.ReleasedImage, ...] = pydantic.Field(
+    attachments: tuple[media.Image, ...] = pydantic.Field(
         default=(),
         max_length=media.MAX_TURN_IMAGES,
-        description=(
-            "Images the sender attached to this message. History keeps image bytes only within its retention "
-            "budget; an older image whose bytes were released stays as metadata only."
-        ),
+        description="Images the sender attached to this message.",
     )
     participants: tuple[mosfet.Participant, ...] = pydantic.Field(
         default=(),
@@ -358,10 +347,14 @@ class Message(pydantic.BaseModel):
         return value.identities_json(identities)
 
 
-class Messages(pydantic.BaseModel):
-    """Cumulative immutable conversation history emitted after each commit."""
+class Exchange(pydantic.BaseModel):
+    """The current exchange, emitted after each commit: the inbound that opened it and what the bot said since.
 
-    # Memory keeps the inbound turn that caused an emission, not the history it re-sends.
+    An inbound commit opens a new exchange; the bot's outbound messages join it; the next inbound replaces
+    it. Nothing earlier is carried: what was said before lives in short-term memory, not here.
+    """
+
+    # Memory keeps the inbound turn that caused an emission, not the exchange it re-sends.
     __memory_fields__: typing.ClassVar[frozenset[str]] = frozenset({"parent"})
 
     model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
@@ -372,7 +365,6 @@ class Messages(pydantic.BaseModel):
                 {
                     "messages": [
                         {
-                            "sequence": 0,
                             "direction": "inbound",
                             "source_ids": ["caller"],
                             "target_ids": ["bot"],
@@ -393,11 +385,14 @@ class Messages(pydantic.BaseModel):
 
     parent: mosfet.StimulusData[TurnData] | None = pydantic.Field(
         default=None,
-        description="The exact typed inbound event that caused this history emission, when one exists.",
+        description="The exact typed inbound event that opened this exchange, when one exists.",
     )
     messages: tuple[Message, ...] = pydantic.Field(
         default=(),
-        description="All committed inbound and outbound messages in causal order.",
+        description=(
+            "The current exchange in causal order: the inbound message that opened it, then the bot's outbound "
+            "messages committed since. Empty of anything before that inbound."
+        ),
     )
 
 
@@ -407,11 +402,9 @@ def _message_for_turn(
     content: MessageContent,
     content_type: str,
     attachments: tuple[media.Image, ...],
-    sequence: int,
     provenance: MessageProvenance,
 ) -> Message:
     return Message(
-        sequence=sequence,
         direction="inbound",
         source_ids=data.source_ids,
         target_ids=data.target_ids,
@@ -461,18 +454,21 @@ class ParticipatedTurn(pydantic.BaseModel):
     participation: turn_detector.ParticipantContribution
     participations: tuple[turn_detector.ParticipantContribution, ...] = ()
     session_ref: str = pydantic.Field(min_length=1)
-    messages: tuple[Message, ...] = ()
+    messages: tuple[Message, ...] = pydantic.Field(
+        default=(),
+        description="The current exchange this contribution opened: its inbound message, then what the bot said since.",
+    )
 
 
-def participated_turn_from_messages(
+def participated_turn_from_exchange(
     input_data: TurnData,
-    messages: Messages,
+    exchange: Exchange,
 ) -> ParticipatedTurn:
-    """Reconstruct host composition data from the latest inbound history item."""
+    """Reconstruct host composition data from the inbound message that opened the exchange."""
 
-    inbound = next((item for item in reversed(messages.messages) if item.direction == "inbound"), None)
+    inbound = next((item for item in exchange.messages if item.direction == "inbound"), None)
     if inbound is None or inbound.source_ids != input_data.source_ids or inbound.target_ids != input_data.target_ids:
-        raise RuntimeError("Conversation history has no matching inbound message for the input identities.")
+        raise RuntimeError("Conversation exchange has no matching inbound message for the input identities.")
     content = inbound.content
     content_type = inbound.content_type
     normalized_type = content_type.lower()
@@ -497,9 +493,9 @@ def participated_turn_from_messages(
         )
 
     if not sources:
-        raise RuntimeError("Conversation history inbound message contains no source identities.")
+        raise RuntimeError("Conversation exchange inbound message contains no source identities.")
     stimuli = tuple(stimulus_for(source_id) for source_id in sources)
-    session_ref = inbound.provenance.session_ref or "history"
+    session_ref = inbound.provenance.session_ref or "exchange"
     contributions = tuple(
         turn_detector.ParticipantContribution(
             conversation_ref=session_ref,
@@ -524,7 +520,7 @@ def participated_turn_from_messages(
         participation=contributions[0],
         participations=contributions,
         session_ref=session_ref,
-        messages=messages.messages,
+        messages=exchange.messages,
     )
 
 
@@ -561,9 +557,9 @@ AppendEvent = hsm.Event[AppendData](
     name="bot.ability.conversation.append",
     schema=AppendData,
 )
-OutputEvent = hsm.Event[Messages](
+OutputEvent = hsm.Event[Exchange](
     name="bot.ability.conversation.output",
-    schema=Messages,
+    schema=Exchange,
 )
 FailedEvent = hsm.Event[FailureData](
     name="bot.ability.conversation.failed",
@@ -791,20 +787,20 @@ def _content_for_detector(
     )
 
 
-def _messages_from_contribution_terminal(terminal: hsm.Event[typing.Any]) -> Messages:
-    """Extract cumulative history from a Conversation contribution terminal."""
+def _exchange_from_contribution_terminal(terminal: hsm.Event[typing.Any]) -> Exchange:
+    """Extract the current exchange from a Conversation contribution terminal."""
 
-    if isinstance(terminal.data, Messages):
+    if isinstance(terminal.data, Exchange):
         return terminal.data
     if isinstance(terminal.data, cognition.InputData):
         stimulus = terminal.data.stimulus
-        if isinstance(stimulus, hsm.Event) and isinstance(stimulus.data, Messages):
+        if isinstance(stimulus, hsm.Event) and isinstance(stimulus.data, Exchange):
             return stimulus.data
-    raise RuntimeError("Conversation produced no messages terminal.")
+    raise RuntimeError("Conversation produced no exchange terminal.")
 
 
 def _cognition_ready(message: Message) -> bool:
-    """Whether a committed inbound message hands body cognition a typed history stimulus.
+    """Whether a committed inbound message hands body cognition a typed exchange stimulus.
 
     Text does, and so does a text-typed message that carries only images. Audio and structured
     products do not, which preserves the audio trust boundary.
@@ -854,32 +850,32 @@ def _terminal_output(
     ctx: hsm.Context,
     instance: "Conversation",
     event: hsm.Event[typing.Any],
-    output: Messages,
+    output: Exchange,
     *,
     turn: TurnData,
     outbound: tuple[mosfet.Participant, ...],
     reply_target: str | None,
 ) -> bool:
-    """Emit the history terminal; whether it handed cognition the turn (and so carried ``outbound``).
+    """Emit the exchange terminal; whether it handed cognition the turn (and so carried ``outbound``).
 
     ``outbound`` are the participants stamped on the bot's own messages since the last handoff:
     they follow the turn's own participants, deduplicated and bounded.
     """
 
-    history_event = dataclasses.replace(
+    exchange_event = dataclasses.replace(
         _with_operation(instance.output_event.with_data(output), event),
         source=hsm.id(instance),
         target=reply_target,
     )
-    latest_inbound = next((item for item in reversed(output.messages) if item.direction == "inbound"), None)
-    if latest_inbound is not None and _cognition_ready(latest_inbound):
-        # Text or image-attachment contributions hand body cognition a typed history stimulus.
+    inbound = next((item for item in output.messages if item.direction == "inbound"), None)
+    if inbound is not None and _cognition_ready(inbound):
+        # Text or image-attachment contributions hand body cognition a typed exchange stimulus.
         # Audio and structured products remain bare Conversation output terminals, preserving the
         # audio trust boundary.
         participants = _distinct((*turn_participants(turn), *outbound))[:_MAX_PARTICIPANTS]
         handoff = dataclasses.replace(
             _with_operation(
-                cognition.InputEvent.with_data(cognition.InputData(stimulus=history_event, participants=participants)),
+                cognition.InputEvent.with_data(cognition.InputData(stimulus=exchange_event, participants=participants)),
                 event,
             ),
             source=hsm.id(instance),
@@ -887,7 +883,7 @@ def _terminal_output(
         )
         _ = hsm.dispatch(ctx, instance, ability.TerminalOutputEvent.with_data(handoff))
         return True
-    _ = hsm.dispatch(ctx, instance, ability.TerminalOutputEvent.with_data(history_event))
+    _ = hsm.dispatch(ctx, instance, ability.TerminalOutputEvent.with_data(exchange_event))
     return False
 
 
@@ -907,7 +903,7 @@ def _terminal_failure(
     _ = hsm.dispatch(ctx, instance, ability.TerminalErrorEvent.with_data(terminal))
 
 
-class Conversation(ability.Ability[TurnData, Messages]):
+class Conversation(ability.Ability[TurnData, Exchange]):
     """Infer relationships and own one detector per participant track.
 
     One Conversation instance is the topology-owned ambient stream boundary:
@@ -915,16 +911,14 @@ class Conversation(ability.Ability[TurnData, Messages]):
     rooms require separate Conversation instances because the input has no
     conversation_ref.
 
-    ``image_retention`` is the injected bound on image bytes this instance's
-    history keeps in process. The newest turn always keeps its images; older
-    attachments past the bound become metadata-only ``media.ReleasedImage``
-    values, newest kept first.
+    It keeps only the current exchange: an inbound commit opens a new one, the
+    bot's outbound messages join it, and the next inbound replaces it.
     """
 
     input_data_type: typing.ClassVar[type[object] | tuple[type[object], ...] | None] = TurnData
-    output_data_type: typing.ClassVar[type[object] | tuple[type[object], ...] | None] = Messages
+    output_data_type: typing.ClassVar[type[object] | tuple[type[object], ...] | None] = Exchange
     input_event: typing.ClassVar[hsm.Event[TurnData]] = InputEvent
-    output_event: typing.ClassVar[hsm.Event[Messages]] = OutputEvent
+    output_event: typing.ClassVar[hsm.Event[Exchange]] = OutputEvent
     failed_event: typing.ClassVar[hsm.Event[FailureData]] = FailedEvent
     snapshot_request_event: typing.ClassVar[hsm.Event[SnapshotRequest]] = SnapshotRequestEvent
     snapshot_output_event: typing.ClassVar[hsm.Event[Snapshot]] = SnapshotOutputEvent
@@ -942,9 +936,10 @@ class Conversation(ability.Ability[TurnData, Messages]):
     _relationships: list[_RelationshipProfile]
     _typing: language.TextGeneration | None
     _encoding: encoding_module.Encoding[typing.Any, str | bytes] | None
-    _history: list[Message]
-    _history_parent: mosfet.StimulusData[TurnData] | None
-    _image_retention: media.ImageRetention
+    # Durable, bounded by one inbound and the bot's replies to it: the current exchange and the inbound
+    # event that opened it. The next inbound commit replaces both.
+    _exchange: list[Message]
+    _exchange_parent: mosfet.StimulusData[TurnData] | None
     # Durable, bounded: participants stamped on outbound messages committed since the last cognition handoff,
     # carried into the next one and then cleared.
     _outbound_participants: list[mosfet.Participant]
@@ -959,7 +954,6 @@ class Conversation(ability.Ability[TurnData, Messages]):
         typing: language.TextGeneration | None = None,
         encoding: encoding_module.Encoding[typing.Any, str | bytes] | None = None,
         encoder: encoding_module.Encoder[typing.Any, str | bytes] | None = None,
-        image_retention: media.ImageRetention = _DEFAULT_IMAGE_RETENTION,
     ) -> None:
         if turn_detector is not None and turn_detector_factory is not None:
             raise ValueError("Conversation accepts turn_detector or turn_detector_factory, not both.")
@@ -979,9 +973,8 @@ class Conversation(ability.Ability[TurnData, Messages]):
         super().__init__(id=id, clock=clock)
         self._detectors = {}
         self._relationships = []
-        self._history = []
-        self._history_parent = None
-        self._image_retention = image_retention
+        self._exchange = []
+        self._exchange_parent = None
         self._outbound_participants = []
 
     @property
@@ -1118,11 +1111,12 @@ class Conversation(ability.Ability[TurnData, Messages]):
             raise ValueError("Conversation append accepts outbound messages only.")
         event_source = event.source or None
         event_target = event.target or None
+        # Idempotent within the current exchange: a redelivered append is not committed twice.
         duplicate = bool(event.id) and any(
             committed.provenance.id == event.id
             and committed.provenance.source == event_source
             and committed.provenance.target == event_target
-            for committed in instance._history
+            for committed in instance._exchange
         )
         if not duplicate:
             provenance = message.provenance.model_copy(
@@ -1133,12 +1127,12 @@ class Conversation(ability.Ability[TurnData, Messages]):
                     "target": event_target,
                 }
             )
-            committed = message.model_copy(update={"sequence": len(instance._history), "provenance": provenance})
-            instance._history.append(committed)
+            committed = message.model_copy(update={"provenance": provenance})
+            instance._exchange.append(committed)
             # Producer-stamped (the bot's own voice on what it said): carried into the next handoff, bounded.
             carried = _distinct((*instance._outbound_participants, *committed.participants))
             instance._outbound_participants = list(carried[:_MAX_OUTBOUND_PARTICIPANTS])
-        output = Messages(parent=instance._history_parent, messages=tuple(instance._history))
+        output = Exchange(parent=instance._exchange_parent, messages=tuple(instance._exchange))
         terminal = dataclasses.replace(
             instance.output_event.with_data(output),
             id=event.id or None,
@@ -1628,7 +1622,7 @@ class Conversation(ability.Ability[TurnData, Messages]):
         assert isinstance(data, _TurnOperationCompletedData)
         input_data = data.input
         # Decode rewrites the product: media stays turn-local and only transcript/structured
-        # products enter model-facing committed history.
+        # products enter the model-facing exchange.
         non_empty = tuple(part for turn in data.turns if (part := turn.text))
         if non_empty:
             product_content: object = " ".join(non_empty)
@@ -1653,17 +1647,16 @@ class Conversation(ability.Ability[TurnData, Messages]):
             content=_model_safe_content(product_content),
             content_type=product_type,
             attachments=tuple(image for turn in data.turns for image in turn.images),
-            sequence=len(instance._history),
             provenance=provenance,
         )
-        instance._history.append(inbound)
-        Conversation._retain_history_images(instance._history, instance._image_retention)
-        instance._history_parent = parent
+        # An inbound commit opens a new exchange; the one before it is not carried.
+        instance._exchange = [inbound]
+        instance._exchange_parent = parent
         handed_off = _terminal_output(
             ctx,
             instance,
             event,
-            Messages(parent=parent, messages=tuple(instance._history)),
+            Exchange(parent=parent, messages=(inbound,)),
             turn=input_data,
             outbound=tuple(instance._outbound_participants),
             reply_target=(
@@ -1672,29 +1665,6 @@ class Conversation(ability.Ability[TurnData, Messages]):
         )
         if handed_off:
             instance._outbound_participants = []
-
-    @staticmethod
-    def _retain_history_images(history: list[Message], retention: media.ImageRetention) -> None:
-        """Bound the image bytes history keeps, newest first, releasing older ones to metadata only.
-
-        The newest message is always kept intact: it is the turn just sent, already bounded by
-        ``media.MAX_TURN_IMAGES``. Every older attachment passes through ``retention``; a message
-        whose attachments change is replaced with its ``sequence`` and ``provenance`` unchanged.
-        """
-
-        older = range(len(history) - 2, -1, -1)
-        retained = iter(
-            retention.retain([attachment for index in older for attachment in reversed(history[index].attachments)])
-        )
-        for index in older:
-            message = history[index]
-            kept = tuple(reversed([next(retained) for _ in message.attachments]))
-            if all(after is before for before, after in zip(message.attachments, kept, strict=True)):
-                continue
-            for before, after in zip(message.attachments, kept, strict=True):
-                if isinstance(before, media.Image) and isinstance(after, media.ReleasedImage):
-                    _HISTORY_IMAGE_RELEASED.add(1, {"media_type": before.media_type})
-            history[index] = message.model_copy(update={"attachments": kept})
 
     @staticmethod
     def _fail_turn(ctx: hsm.Context, instance: "Conversation", event: hsm.Event[typing.Any]) -> None:
@@ -1854,7 +1824,7 @@ async def append_conversation_message(
     message: Message,
     *,
     ctx: hsm.Context | None = None,
-) -> Messages:
+) -> Exchange:
     """Commit one trusted outbound message through Conversation's typed event boundary."""
 
     context = conversation.context() if ctx is None else ctx
@@ -1866,8 +1836,8 @@ async def append_conversation_message(
         terminals=(conversation.output_event, conversation.failed_event),
         timeout=datetime.timedelta(seconds=_TURN_TIMEOUT_SECONDS),
     )
-    if not isinstance(terminal.data, Messages):
-        raise RuntimeError("Conversation outbound append produced no history output.")
+    if not isinstance(terminal.data, Exchange):
+        raise RuntimeError("Conversation outbound append produced no exchange output.")
     return terminal.data
 
 
@@ -1904,7 +1874,7 @@ async def contribute_conversation_input(
         raise
     if terminal.name == conversation.failed_event.name:
         raise RuntimeError(f"Conversation failed during input contribution: {terminal.data!r}")
-    return participated_turn_from_messages(input_data, _messages_from_contribution_terminal(terminal))
+    return participated_turn_from_exchange(input_data, _exchange_from_contribution_terminal(terminal))
 
 
 Conversation.submodel = define_conversation_model("Conversation")
@@ -1919,8 +1889,8 @@ __all__ = [
     "InputEvent",
     "OutputEvent",
     "ParticipatedTurn",
-    "participated_turn_from_messages",
-    "Messages",
+    "participated_turn_from_exchange",
+    "Exchange",
     "Message",
     "MessageProvenance",
     "RoutedInputData",

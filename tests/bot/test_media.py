@@ -92,67 +92,19 @@ def test_default_image_capacity_is_text_only() -> None:
 def test_released_image_carries_metadata_without_bytes() -> None:
     image = media.Image(content=_PNG, media_type="image/png", width_px=5, height_px=6)
 
-    released = media.ReleasedImage.of(image, reason="retention")
+    released = media.ReleasedImage.of(image, reason="memory")
 
     assert released == media.ReleasedImage(
-        media_type="image/png", width_px=5, height_px=6, byte_count=len(_PNG), reason="retention"
+        media_type="image/png", width_px=5, height_px=6, byte_count=len(_PNG), reason="memory"
     )
     assert "content" not in media.ReleasedImage.model_fields
     with pytest.raises(pydantic.ValidationError):
         _ = media.ReleasedImage.model_validate(
-            {"media_type": "image/png", "byte_count": 1, "reason": "retention", "content": _PNG}
+            {"media_type": "image/png", "byte_count": 1, "reason": "memory", "content": _PNG}
         )
     with pytest.raises(pydantic.ValidationError):
         _ = media.ReleasedImage.model_validate({"media_type": "image/png", "byte_count": 1})
 
 
-def test_image_retention_keeps_newest_within_count_cap() -> None:
-    images = (_png(10), _png(11), _png(12))
-    retention = media.ImageRetention(max_images=2, max_total_bytes=1_000)
-
-    retained = retention.retain(images)
-
-    assert retained == (images[0], images[1], media.ReleasedImage.of(images[2], reason="retention"))
-
-
-def test_image_retention_keeps_newest_within_byte_cap_and_releases_every_later_image() -> None:
-    images = (_png(40), _png(70), _png(10))
-    retention = media.ImageRetention(max_images=8, max_total_bytes=100)
-
-    retained = retention.retain(images)
-
-    assert retained == (
-        images[0],
-        media.ReleasedImage.of(images[1], reason="retention"),
-        media.ReleasedImage.of(images[2], reason="retention"),
-    )
-
-
-def test_image_retention_passes_released_images_through_at_zero_bytes() -> None:
-    remembered = media.ReleasedImage(media_type="image/png", byte_count=900, reason="memory")
-    images = (remembered, _png(50), _png(50))
-    retention = media.ImageRetention(max_images=2, max_total_bytes=100)
-
-    retained = retention.retain(images)
-
-    assert retained == (remembered, images[1], images[2])
-
-
-def test_image_retention_is_idempotent() -> None:
-    retention = media.ImageRetention(max_images=1, max_total_bytes=1_000)
-    once = retention.retain((_png(10), _png(11), _png(12)))
-
-    assert retention.retain(once) == once
-
-
-def test_image_retention_with_zero_images_releases_all() -> None:
-    images = (_png(10), _png(11))
-
-    assert media.ImageRetention(max_images=0).retain(images) == tuple(
-        media.ReleasedImage.of(image, reason="retention") for image in images
-    )
-
-
-def test_media_limits_and_retention_defaults() -> None:
+def test_media_limits() -> None:
     assert media.MAX_TURN_IMAGES == 8
-    assert media.ImageRetention() == media.ImageRetention(max_images=8, max_total_bytes=12 * 1024 * 1024)

@@ -2,9 +2,8 @@
 
 An image travels as one typed value, ``Image``: its encoded file bytes, a validated media type, and
 an optional pixel size. ``ImageCapacity`` states what one model can take in one request and is
-injected into the generator that fronts that model; ``ImageRetention`` bounds how many image bytes
-one conversation's history keeps in process. ``ReleasedImage`` is the metadata-only stand-in for an
-image whose bytes are not carried. Every bound here is mechanical and content-blind: it trims by
+injected into the generator that fronts that model. ``ReleasedImage`` is the metadata-only stand-in
+for an image whose bytes are not carried. Every bound here is mechanical and content-blind: it trims by
 order, count, size, and media type, never by what an image shows.
 
 Usage::
@@ -31,10 +30,10 @@ MAX_IMAGE_BYTES: typing.Final = 4 * 1024 * 1024
 MAX_TURN_IMAGES: typing.Final = 8
 """Most images one conversation turn may carry (a boundary count limit, PY-DATA-002)."""
 
-ReleaseReason = typing.Literal["retention", "memory"]
-"""Why an image's bytes are absent: history retention released them, or a memory read omitted them."""
+ReleaseReason = typing.Literal["memory"]
+"""Why an image's bytes are absent: a memory read omitted them."""
 
-ImageOmission = typing.Literal["capacity", "media_type", "retention", "memory"]
+ImageOmission = typing.Literal["capacity", "media_type", "memory"]
 """Why an image is shown to a model as a placeholder only."""
 
 _PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
@@ -107,7 +106,7 @@ class ReleasedImage(pydantic.BaseModel):
                     "width_px": 640,
                     "height_px": 480,
                     "byte_count": 48213,
-                    "reason": "retention",
+                    "reason": "memory",
                 }
             ],
         },
@@ -135,11 +134,8 @@ class ReleasedImage(pydantic.BaseModel):
         examples=[48213],
     )
     reason: ReleaseReason = pydantic.Field(
-        description=(
-            "Why the bytes are absent: 'retention' when conversation history released them, 'memory' when a "
-            "memory read returned the image without its bytes."
-        ),
-        examples=["retention"],
+        description="Why the bytes are absent: 'memory' when a memory read returned the image without its bytes.",
+        examples=["memory"],
     )
 
     @classmethod
@@ -153,55 +149,6 @@ class ReleasedImage(pydantic.BaseModel):
             byte_count=len(image.content),
             reason=reason,
         )
-
-
-class ImageRetention(pydantic.BaseModel):
-    """How many image bytes one conversation's history keeps in process; a resource bound, not a choice."""
-
-    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
-        frozen=True,
-        json_schema_extra={"examples": [{"max_images": 8, "max_total_bytes": 12 * 1024 * 1024}]},
-    )
-
-    max_images: int = pydantic.Field(
-        default=8,
-        ge=0,
-        description="Most images whose bytes history keeps.",
-        examples=[8],
-    )
-    max_total_bytes: int = pydantic.Field(
-        default=12 * 1024 * 1024,
-        ge=0,
-        description="Most image bytes, summed, that history keeps.",
-        examples=[12 * 1024 * 1024],
-    )
-
-    def retain(
-        self, attachments_newest_first: collections.abc.Sequence[Image | ReleasedImage]
-    ) -> tuple[Image | ReleasedImage, ...]:
-        """Keep the newest images while count and byte totals fit; release every later one.
-
-        A ``ReleasedImage`` passes through unchanged and counts zero bytes, so retaining twice
-        yields the same result as retaining once.
-        """
-
-        retained: list[Image | ReleasedImage] = []
-        kept = 0
-        kept_bytes = 0
-        full = False
-        for attachment in attachments_newest_first:
-            if isinstance(attachment, ReleasedImage):
-                retained.append(attachment)
-                continue
-            size = len(attachment.content)
-            full = full or kept + 1 > self.max_images or kept_bytes + size > self.max_total_bytes
-            if full:
-                retained.append(ReleasedImage.of(attachment, reason="retention"))
-                continue
-            kept += 1
-            kept_bytes += size
-            retained.append(attachment)
-        return tuple(retained)
 
 
 class ImageCapacity(pydantic.BaseModel):
@@ -269,7 +216,6 @@ __all__ = [
     "ImageCapacity",
     "ImageMediaType",
     "ImageOmission",
-    "ImageRetention",
     "ReleaseReason",
     "ReleasedImage",
 ]

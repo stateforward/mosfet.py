@@ -213,7 +213,7 @@ gives an undecided unit back unreviewed. Consolidation tells its owner what beca
 Cognition owns the bot's memory: it attaches `memory.Memory` and remembers every turn it settles
 (completed, failed, or cancelled) with one `RememberEvent` it does not wait on, rendering the
 stimulus through `cognition.event.memory_content` (a payload's `__memory_fields__` choose what is
-kept; `conversation.Messages` keeps its causal turn). With `memory.Associative` composed, a turn
+kept; `conversation.Exchange` keeps its causal turn). With `memory.Associative` composed, a turn
 autonomy leaves unhandled first asks it what memory associates with the stimulus: candidates from
 every search lane, scored by injected `memory.Weights` and fit to a token budget. The associations
 ride the turn to intuition and reasoning (their frame's `processing.InputData.recalled`, rendered
