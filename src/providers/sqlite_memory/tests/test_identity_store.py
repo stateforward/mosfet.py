@@ -664,7 +664,7 @@ def test_forget_removes_only_the_identity_row_and_its_print(tmp_path: pathlib.Pa
     store = sqlite_memory.IdentityStore(engine=engine)
     (voice,) = _minted(store, "voice", _angle(0), at=_START)
     ref = identification.ref("voice", voice.id)
-    kept = memory.graph.write_episode(engine, _episode("hello", voice.id), at=_START)
+    kept = memory.graph.write_episode(engine, memory.ExactIndex(), _episode("hello", voice.id), at=_START)
 
     assert store.forget("voice", voice.id) is True
     with engine.connect() as connection:
@@ -686,7 +686,7 @@ def test_memory_forget_and_merge_leave_identities_intact(tmp_path: pathlib.Path)
     vec = sqlite_memory.VecIndex()
     _ = store.enroll("voice", "tts:warm", _angle(0), True, _POLICY, at=_START)
     (heard,) = _minted(store, "voice", _angle(90), at=_START)
-    seqs = [memory.graph.write_episode(engine, _episode(words), at=_START).seq for words in ("a", "b", "c")]
+    seqs = [memory.graph.write_episode(engine, vec, _episode(words), at=_START).seq for words in ("a", "b", "c")]
     memory.graph.write_vectors(
         engine, vec, _SPACE, [(seq, _angle(index * 10).vector) for index, seq in enumerate(seqs)]
     )

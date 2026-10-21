@@ -43,6 +43,10 @@ MAX_EPISODE_TEXT_BYTES: typing.Final = 262_144
 MAX_PARTICIPANTS: typing.Final = 32
 """Most participants one episode or search carries."""
 
+MAX_EXCLUDED_TURNS: typing.Final = 128
+"""Most turn ids one cue leaves out, or one episode goes on with: a turn's stimulus, or each percept of its batch,
+and their causal parents."""
+
 _RELATION = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 
 
@@ -241,6 +245,24 @@ class EpisodeData(pydantic.BaseModel):
         description="How the turn ended.",
         examples=["completed"],
     )
+    continues: tuple[typing.Annotated[str, pydantic.StringConstraints(min_length=1, max_length=200)], ...] = (
+        pydantic.Field(
+            default=(),
+            max_length=MAX_EXCLUDED_TURNS,
+            description=(
+                "Turn ids of earlier turns this turn goes on with, stamped by the turn's producer: the ids of the "
+                "causal parents its stimulus carries (or each percept of its batch carries), nearest first. Speech "
+                "admitted through a conversation is first a turn of its own, kept under the speech's id, and then "
+                "the exchange that carries that speech as a parent: one experience. When memory keeps an episode "
+                "under one of these turn ids (the first such, in this order), this turn extends that episode in "
+                "place: its parts follow the episode's, its acts follow the episode's acts, its participants and "
+                "focus candidates join the episode's, its focus (when it chose one) and outcome become the "
+                "episode's, and the episode is embedded again. Otherwise, or when the extended episode would "
+                "exceed what one episode may hold, the turn is kept as an episode of its own under turn_id."
+            ),
+            examples=[["5e5b95c437364ad5a1763d96a735b673:autonomy", "5e5b95c437364ad5a1763d96a735b673"]],
+        )
+    )
 
     @pydantic.model_validator(mode="after")
     def _validate_parts(self) -> typing.Self:
@@ -319,6 +341,14 @@ class Episode(pydantic.BaseModel):
     acts: tuple[Act, ...] = pydantic.Field(default=(), description="What the bot chose to do on that turn.")
     outcome: Outcome = pydantic.Field(description="How the turn ended.", examples=["completed"])
     turn_id: str = pydantic.Field(description="The cognition operation id of the turn.", examples=["turn-7c1e"])
+    continued: tuple[str, ...] = pydantic.Field(
+        default=(),
+        description=(
+            "Turn ids of the later turns that went on with this one and extended this episode in place, in the "
+            "order they were kept (see EpisodeData.continues); empty when the episode is one turn."
+        ),
+        examples=[["turn-7c1e:autonomy"]],
+    )
     created_at: datetime.datetime = pydantic.Field(description="When the episode was remembered (UTC).")
     recalled_at: datetime.datetime | None = pydantic.Field(
         default=None, description="When the bot last deliberately recalled it (UTC), if ever."
@@ -353,7 +383,11 @@ class Node(pydantic.BaseModel):
     text: str = pydantic.Field(description="The node's text.", examples=["Ada prefers calls at noon."])
     created_at: datetime.datetime = pydantic.Field(description="When the node was created (UTC).")
     episode: Episode | None = pydantic.Field(default=None, description="The episode, for episode nodes.")
-    key: str | None = pydantic.Field(default=None, description="The person id, for person nodes.", examples=["self"])
+    key: str | None = pydantic.Field(
+        default=None,
+        description="The person id, for person nodes; the turn id the episode began with, for episode nodes.",
+        examples=["self"],
+    )
 
 
 SELF: typing.Final = "self"
@@ -1213,10 +1247,6 @@ def approximate_tokens(text: str) -> int:
     """Approximate model tokens in ``text``: one per four UTF-8 bytes, rounded up (the default counter)."""
 
     return -(-len(text.encode("utf-8")) // 4)
-
-
-MAX_EXCLUDED_TURNS: typing.Final = 128
-"""Most turn ids one cue leaves out: a turn's stimulus, or each percept of its batch, and their causal parents."""
 
 
 class CueData(pydantic.BaseModel):

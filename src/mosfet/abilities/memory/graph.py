@@ -407,6 +407,7 @@ def _load(
                 acts=tuple(payload.Act.model_validate(act) for act in content.get("acts", ())),
                 outcome=payload.Outcome(content["outcome"]),
                 turn_id=content["turn_id"],
+                continued=tuple(content.get("continued", ())),
                 created_at=created_at,
                 recalled_at=None if row.recalled_at is None else parse_utc(row.recalled_at),
                 recall_count=int(row.recall_count),
@@ -579,35 +580,109 @@ def ensure_self(engine: Engine, *, at: datetime.datetime) -> bool:
 
 @dataclasses.dataclass(frozen=True)
 class Kept:
-    """What keeping one episode wrote: its node, the person-count change, and own-ref conflicts."""
+    """What keeping one episode wrote: its node, the parts it now holds (image bytes included), whether it extended
+    an episode an earlier turn began, the person-count change, and own-ref conflicts."""
 
     seq: int
     node_id: str
+    parts: tuple[text.ContentPart, ...]
+    extended: bool
     persons: int
     conflicts: int
 
 
-def write_episode(engine: Engine, data: payload.EpisodeData, *, at: datetime.datetime) -> Kept:
-    """Keep one episode: its node, its parts, each participant's person, and involves links. One transaction."""
+def write_episode(engine: Engine, idx: index.Index, data: payload.EpisodeData, *, at: datetime.datetime) -> Kept:
+    """Keep one episode: its node, its parts, each participant's person, and involves links. One transaction.
+
+    An episode node is keyed by the turn id it began with. When an episode is keyed by one of the turns
+    ``data.continues`` names (the first such, in that order), the turn extends it in place: its parts follow the
+    episode's, its acts follow the episode's acts, its participants and focus candidates join the episode's, its
+    focus (when it chose one) and outcome become the episode's, and its turn id is appended to the episode's
+    ``continued``. The extended episode is unreviewed again, and its vectors and failed index attempts are
+    dropped (from ``idx`` too) so it is embedded again from everything it now holds. When nothing is keyed by
+    those turns, or the extended episode would exceed what one episode may hold, the turn is a node of its own,
+    keyed by its turn id unless an episode already holds that key (then it is kept apart, unkeyed).
+    """
 
     stamp = utc_text(at)
-    node_id = uuid.uuid4().hex
-    content: dict[str, object] = {
-        "turn_id": data.turn_id,
-        "stimulus": data.stimulus,
-        "focus": data.focus,
-        "focus_candidates": list(data.focus_candidates),
-        "acts": [act.model_dump(mode="json") for act in data.acts],
-        "outcome": data.outcome.value,
-        "participants": [participant.model_dump(mode="json") for participant in data.participants],
-    }
-    joined = "\n".join(part.text for part in data.parts if isinstance(part, text.TextPart))
     with engine.begin() as connection:
-        result = connection.execute(
-            node_insert_clause(node_id=node_id, kind=payload.NodeKind.EPISODE, text=joined, content=content, at=stamp)
-        )
-        seq = int(typing.cast(tuple[int, ...], result.inserted_primary_key)[0])
-        for ordinal, part in enumerate(data.parts):
+        root: tuple[int, str, payload.Episode] | None = None
+        kept = data
+        if data.continues:
+            keyed = {
+                str(key): (int(seq), str(node_id))
+                for seq, node_id, key in connection.execute(
+                    select(_NODES.c.seq, _NODES.c.node_id, _NODES.c.key).where(
+                        _NODES.c.kind == payload.NodeKind.EPISODE.value, _NODES.c.key.in_(list(data.continues))
+                    )
+                ).all()
+            }
+            found = next((keyed[turn] for turn in data.continues if turn in keyed), None)
+            if found is not None:
+                earlier = _load(connection, [found[0]], space=None, media_bytes=True)[found[0]]
+                episode = earlier.node.episode
+                assert episode is not None
+                participants = list(episode.participants)
+                participants.extend(person for person in data.participants if person not in participants)
+                try:
+                    kept = payload.EpisodeData(
+                        turn_id=episode.turn_id,
+                        stimulus=episode.stimulus,
+                        parts=(*earlier.parts, *data.parts),
+                        participants=tuple(participants),
+                        focus=episode.focus if data.focus is None else data.focus,
+                        focus_candidates=tuple(dict.fromkeys((*episode.focus_candidates, *data.focus_candidates))),
+                        acts=(*episode.acts, *data.acts),
+                        outcome=data.outcome,
+                    )
+                    root = (found[0], found[1], episode)
+                except pydantic.ValidationError:
+                    kept = data
+        content: dict[str, object] = {
+            "turn_id": kept.turn_id,
+            "stimulus": kept.stimulus,
+            "focus": kept.focus,
+            "focus_candidates": list(kept.focus_candidates),
+            "acts": [act.model_dump(mode="json") for act in kept.acts],
+            "outcome": kept.outcome.value,
+            "participants": [participant.model_dump(mode="json") for participant in kept.participants],
+            "continued": [] if root is None else [*root[2].continued, data.turn_id],
+        }
+        joined = "\n".join(part.text for part in kept.parts if isinstance(part, text.TextPart))
+        if root is None:
+            taken = connection.execute(
+                select(_NODES.c.seq).where(
+                    _NODES.c.kind == payload.NodeKind.EPISODE.value, _NODES.c.key == data.turn_id
+                )
+            ).first()
+            node_id = uuid.uuid4().hex
+            result = connection.execute(
+                node_insert_clause(
+                    node_id=node_id,
+                    kind=payload.NodeKind.EPISODE,
+                    text=joined,
+                    content=content,
+                    at=stamp,
+                    key=None if taken is not None else data.turn_id,
+                )
+            )
+            seq = int(typing.cast(tuple[int, ...], result.inserted_primary_key)[0])
+        else:
+            seq, node_id, _ = root
+            _ = connection.execute(
+                update(_NODES)
+                .where(_NODES.c.seq == seq)
+                .values(
+                    text=joined,
+                    content_json=json.dumps(content, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+                    updated_at=stamp,
+                    reviewed_at=None,
+                )
+            )
+            for table in (_PARTS, _VECTORS, _ATTEMPTS):
+                _ = connection.execute(delete(table).where(table.c.node_seq == seq))
+            idx.remove(connection, [seq])
+        for ordinal, part in enumerate(kept.parts):
             if isinstance(part, text.TextPart):
                 values: dict[str, object] = {"kind": "text", "text": part.text}
             else:
@@ -633,7 +708,9 @@ def write_episode(engine: Engine, data: payload.EpisodeData, *, at: datetime.dat
                     at=stamp,
                 )
             )
-    return Kept(seq=seq, node_id=node_id, persons=created, conflicts=conflicts)
+    return Kept(
+        seq=seq, node_id=node_id, parts=kept.parts, extended=root is not None, persons=created, conflicts=conflicts
+    )
 
 
 def write_vectors(
@@ -937,7 +1014,24 @@ class Lease:
     aliases: dict[str, int]
     roles: dict[str, payload.UnitRole]
     episodes: tuple[int, ...]
+    # How many later turns had extended each leased episode node when it was leased: one extended since
+    # (``write_episode``) is more than the unit was decided on, so the unit neither forgets nor reviews it.
+    continued: dict[int, int]
     decided: bool = False
+
+
+def _continued_since(connection: Connection, lease_state: Lease) -> set[int]:
+    """The leased episode nodes later turns extended after the unit was leased."""
+
+    rows = connection.execute(
+        select(_NODES.c.seq, _NODES.c.content_json).where(_NODES.c.seq.in_(list(lease_state.continued)))
+    ).all()
+    return {
+        int(seq)
+        for seq, content_json in rows
+        if len(typing.cast(dict[str, typing.Any], json.loads(content_json)).get("continued", ()))
+        != lease_state.continued[int(seq)]
+    }
 
 
 def lease(
@@ -1030,6 +1124,9 @@ def lease(
         aliases={alias: seq for seq, alias in aliases.items()},
         roles=roles,
         episodes=tuple(episodes),
+        continued={
+            seq: len(item.node.episode.continued) for seq, item in loaded.items() if item.node.episode is not None
+        },
     )
 
 
@@ -1062,6 +1159,9 @@ def commit(
 ) -> tuple[payload.ConsolidatedData, dict[payload.NodeKind, int]]:
     """Apply one decision in one transaction: merges, links, forgets, and the review stamp.
 
+    A leased episode a later turn extended since the unit was leased is neither forgotten nor reviewed: the
+    decision was made on what it was, so what it became is left for a later unit.
+
     Returns the outcome and the node-count change per kind (for telemetry).
     """
 
@@ -1069,7 +1169,8 @@ def commit(
     seq_of = lease_state.aliases
     changes: dict[payload.NodeKind, int] = collections.defaultdict(int)
     with engine.begin() as connection:
-        forgotten = {seq_of[ref] for ref in decision.forgets}
+        extended = _continued_since(connection, lease_state)
+        forgotten = {seq_of[ref] for ref in decision.forgets} - extended
         if space is not None and any(values is not None for values in merged_vectors):
             idx.ensure(connection, space)
         for merge, values in zip(decision.merges, merged_vectors, strict=True):
@@ -1086,7 +1187,7 @@ def commit(
                         source=concept, target=seq_of[ref], relation=DERIVED_FROM, weight=1.0, origin="model", at=stamp
                     )
                 )
-                if merge.forget_sources and lease_state.roles[ref] != "person":
+                if merge.forget_sources and lease_state.roles[ref] != "person" and seq_of[ref] not in extended:
                     forgotten.add(seq_of[ref])
             if space is not None and values is not None:
                 _ = connection.execute(vector_upsert_clause(seq=concept, space=space, values=values))
@@ -1109,7 +1210,11 @@ def commit(
             for clause in forget_clauses(forgotten):
                 _ = connection.execute(clause)
             idx.remove(connection, sorted(forgotten))
-        _ = connection.execute(reviewed_clause([seq for seq in lease_state.episodes if seq not in forgotten], at=stamp))
+        _ = connection.execute(
+            reviewed_clause(
+                [seq for seq in lease_state.episodes if seq not in forgotten and seq not in extended], at=stamp
+            )
+        )
     return (
         payload.ConsolidatedData(
             unit=decision.unit, linked=linked, merged=len(decision.merges), forgotten=len(forgotten)
@@ -1119,12 +1224,16 @@ def commit(
 
 
 def release(engine: Engine, lease_state: Lease, *, reviewed: bool, at: datetime.datetime) -> None:
-    """Give a unit back, marking its episodes reviewed when asked. One transaction."""
+    """Give a unit back, marking its episodes reviewed when asked (not one a later turn extended since). One
+    transaction."""
 
     if not reviewed:
         return
     with engine.begin() as connection:
-        _ = connection.execute(reviewed_clause(lease_state.episodes, at=utc_text(at)))
+        extended = _continued_since(connection, lease_state)
+        _ = connection.execute(
+            reviewed_clause([seq for seq in lease_state.episodes if seq not in extended], at=utc_text(at))
+        )
 
 
 # --- person statements (one transaction each) -------------------------------------------------

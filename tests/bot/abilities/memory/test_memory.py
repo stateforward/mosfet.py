@@ -427,6 +427,120 @@ def test_an_episode_with_nothing_said_is_kept_without_an_index_attempt(caplog: p
     assert "unindexable" not in caplog.text
 
 
+def _continuation(
+    words: str,
+    *,
+    turn_id: str,
+    continues: tuple[str, ...],
+    participants: tuple[mosfet.Participant, ...] = (_ADA, _BOT),
+) -> memory.EpisodeData:
+    """A later turn whose stimulus carries earlier turns' stimuli as its causal parents (nearest first)."""
+
+    return memory.EpisodeData(
+        turn_id=turn_id,
+        stimulus="bot.ability.conversation.output",
+        parts=(text.TextPart(text=words),),
+        participants=participants,
+        focus="conversation",
+        focus_candidates=("conversation",),
+        acts=(memory.Act(event="bot.ability.speaking.say", data={"text": "At noon, then."}),),
+        outcome=memory.Outcome.FAILED,
+        continues=continues,
+    )
+
+
+def test_a_turn_that_continues_a_kept_episode_extends_that_one_node_and_re_indexes_it() -> None:
+    """One experience is one episode: the later turn's parts follow the root's, its acts are merged after the
+    root's, its outcome is the experience's, and the node is embedded again from everything it now holds."""
+
+    async def scenario() -> tuple[
+        memory.RememberedData,
+        memory.RememberedData,
+        memory.EpisodesData,
+        list[tuple[typing.Any, ...]],
+        list[embedding.InputData],
+        list[tuple[typing.Any, ...]],
+    ]:
+        embedder = FakeEmbedder()
+        harness = await _harness(embedder)
+        await harness.attached()
+        root = await harness.ask(memory.RememberEvent, _episode("Ada: call me at noon?", turn_id="heard"))
+        later = await harness.ask(
+            memory.RememberEvent,
+            _continuation("Ada: call me at noon?", turn_id="heard:autonomy", continues=("conversation-in", "heard")),
+        )
+        recent = await harness.ask(memory.RecentEvent, memory.RecentData(limit=4))
+        assert isinstance(root.data, memory.RememberedData) and isinstance(later.data, memory.RememberedData)
+        assert isinstance(recent.data, memory.EpisodesData)
+        vectors = harness.rows("SELECT node_seq FROM bot_memory_vector")
+        edges = harness.rows("SELECT relation FROM bot_memory_edge ORDER BY relation")
+        return root.data, later.data, recent.data, vectors, embedder.calls, edges
+
+    root, later, recent, vectors, calls, edges = _run(scenario)
+
+    assert later.node_id == root.node_id
+    assert later.indexed is True
+    (kept,) = recent.episodes
+    assert kept.turn_id == "heard"
+    assert kept.continued == ("heard:autonomy",)
+    assert kept.stimulus == "bot.ability.conversation.messages"
+    assert kept.text == "Ada: call me at noon?\nAda: call me at noon?"
+    assert [act.data for act in kept.acts] == [{"text": "Sure."}, {"text": "At noon, then."}]
+    assert kept.outcome is memory.Outcome.FAILED
+    assert kept.participants == (_ADA, _BOT)
+    assert kept.focus == "conversation"
+    assert kept.focus_candidates == ("conversation",)
+    assert edges == [("involves_source",), ("involves_target",)]
+    assert len(vectors) == 1
+    assert [call.items for call in calls] == [
+        (embedding.Item(parts=(text.TextPart(text="Ada: call me at noon?"),)),),
+        (embedding.Item(parts=(text.TextPart(text="Ada: call me at noon?\nAda: call me at noon?"),)),),
+    ]
+
+
+def test_a_turn_whose_continued_turns_were_never_kept_is_an_episode_of_its_own() -> None:
+    async def scenario() -> tuple[memory.RememberedData, memory.RememberedData, memory.EpisodesData]:
+        harness = await _harness()
+        await harness.attached()
+        first = await harness.ask(memory.RememberEvent, _episode("Ada: hello", turn_id="earlier"))
+        own = await harness.ask(
+            memory.RememberEvent, _continuation("Ada: noon?", turn_id="exchange", continues=("never-kept",))
+        )
+        recent = await harness.ask(memory.RecentEvent, memory.RecentData(limit=4))
+        assert isinstance(first.data, memory.RememberedData) and isinstance(own.data, memory.RememberedData)
+        assert isinstance(recent.data, memory.EpisodesData)
+        return first.data, own.data, recent.data
+
+    first, own, recent = _run(scenario)
+
+    assert own.node_id != first.node_id
+    assert [(episode.turn_id, episode.continued) for episode in recent.episodes] == [("earlier", ()), ("exchange", ())]
+
+
+def test_a_continuation_that_would_overflow_the_episode_is_kept_as_an_episode_of_its_own() -> None:
+    """An episode never grows past what one episode may hold; the later turn is still kept, apart."""
+
+    async def scenario() -> tuple[memory.RememberedData, memory.RememberedData, memory.EpisodesData]:
+        harness = await _harness()
+        await harness.attached()
+        root = await harness.ask(memory.RememberEvent, _episode("a" * 200_000, turn_id="heard"))
+        later = await harness.ask(
+            memory.RememberEvent, _continuation("b" * 100_000, turn_id="heard:autonomy", continues=("heard",))
+        )
+        recent = await harness.ask(memory.RecentEvent, memory.RecentData(limit=4))
+        assert isinstance(root.data, memory.RememberedData) and isinstance(later.data, memory.RememberedData)
+        assert isinstance(recent.data, memory.EpisodesData)
+        return root.data, later.data, recent.data
+
+    root, later, recent = _run(scenario)
+
+    assert later.node_id != root.node_id
+    assert [(episode.turn_id, len(episode.text)) for episode in recent.episodes] == [
+        ("heard", 200_000),
+        ("heard:autonomy", 100_000),
+    ]
+
+
 def test_image_parts_are_dropped_for_a_text_only_embedder() -> None:
     async def scenario() -> list[embedding.InputData]:
         embedder = FakeEmbedder()
@@ -737,6 +851,51 @@ def test_lease_names_nodes_by_alias_and_consolidate_applies_one_decision() -> No
         ("involves_source", "stamped"),
     ]
     assert nothing.data == memory.LeasedData(unit=None)
+
+
+def test_an_episode_continued_while_its_unit_is_leased_is_neither_forgotten_nor_reviewed_by_that_unit() -> None:
+    """The unit was decided on what the episode was; what it became since is left for a later rest."""
+
+    async def scenario() -> tuple[hsm.Event[typing.Any], list[tuple[typing.Any, ...]], memory.UnitData | None]:
+        harness = await _harness()
+        await harness.attached()
+        unit = await _leased(harness, "heard", "other")
+        _ = await harness.ask(
+            memory.RememberEvent, _continuation("Ada: noon?", turn_id="heard:autonomy", continues=("heard",))
+        )
+        decided = await harness.ask(
+            memory.ConsolidateEvent, memory.ConsolidateData(unit=unit.unit, forgets=("n1", "n2"))
+        )
+        nodes = harness.rows(
+            "SELECT text, reviewed_at IS NOT NULL FROM bot_memory_node WHERE kind = 'episode' ORDER BY seq"
+        )
+        again = await harness.ask(memory.LeaseEvent, memory.LeaseData())
+        assert isinstance(again.data, memory.LeasedData)
+        return decided, nodes, again.data.unit
+
+    decided, nodes, again = _run(scenario)
+
+    assert isinstance(decided.data, memory.ConsolidatedData)
+    assert decided.data.forgotten == 1
+    assert nodes == [("heard\nAda: noon?", 0)]
+    assert again is not None
+    assert [node.text for node in again.nodes if node.role == "episode"] == ["heard\nAda: noon?"]
+
+
+def test_an_episode_continued_while_its_unit_is_leased_stays_unreviewed_when_the_unit_is_released() -> None:
+    async def scenario() -> list[tuple[typing.Any, ...]]:
+        harness = await _harness()
+        await harness.attached()
+        unit = await _leased(harness, "heard", "other")
+        _ = await harness.ask(
+            memory.RememberEvent, _continuation("Ada: noon?", turn_id="heard:autonomy", continues=("heard",))
+        )
+        _ = await harness.ask(memory.ReleaseEvent, memory.ReleaseData(unit=unit.unit, reviewed=True))
+        return harness.rows(
+            "SELECT text, reviewed_at IS NOT NULL FROM bot_memory_node WHERE kind = 'episode' ORDER BY seq"
+        )
+
+    assert _run(scenario) == [("heard\nAda: noon?", 0), ("other", 1)]
 
 
 def test_a_failed_commit_changes_nothing() -> None:

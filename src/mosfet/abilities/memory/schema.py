@@ -138,8 +138,10 @@ node_table = Table(
     Column("seq", Integer, primary_key=True, autoincrement=True),
     Column("node_id", Text, nullable=False),
     Column("kind", Text, nullable=False),
-    # The person id of a person node ("self", or a minted uuid hex); NULL
-    # for every other kind. A person's refs are in ``person_ref_table``.
+    # The person id of a person node ("self", or a minted uuid hex); the turn id an episode node began
+    # with (later turns that go on with it extend it, found by this key); NULL for every other kind
+    # and for an episode kept apart because its turn id was already taken. A person's refs are in
+    # ``person_ref_table``.
     Column("key", Text, nullable=True),
     # A person node's text is its name, or empty while it has none.
     Column("text", Text, nullable=False, server_default=""),

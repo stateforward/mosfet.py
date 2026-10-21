@@ -1827,6 +1827,7 @@ def test_the_bots_voice_and_its_heard_echo_are_one_person_in_memory(echo: bool) 
     engine = memory.store.open_sqlite_engine()
     _ = memory.graph.write_episode(
         engine,
+        memory.ExactIndex(),
         memory.EpisodeData(
             turn_id="turn-1",
             parts=(text.TextPart(text="hello"),),

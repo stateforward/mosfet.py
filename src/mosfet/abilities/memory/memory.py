@@ -5,7 +5,8 @@ transaction it inherits (``input_event``, used by behavior inventory and identit
 cognition turn as an episode node of a graph, links episodes to the persons they involve, and
 holds a canonical vector per node in its embedder's space. Requests:
 
-* ``RememberEvent`` (``EpisodeData``) → ``RememberedEvent``
+* ``RememberEvent`` (``EpisodeData``) → ``RememberedEvent``: a new episode node, or, when the turn goes on with
+  an earlier turn memory keeps (``EpisodeData.continues``), that episode extended in place and embedded again
 * ``SearchEvent`` (``SearchData``) → ``FoundEvent``: candidates, and who is here (each participant
   resolved to its person, the persons they are, and ``self``)
 * ``FetchEvent`` (``FetchData``) → ``FetchedEvent``
@@ -929,9 +930,10 @@ class Memory(store.MemoryStore):
             output = await Memory._run(instance, instance._execute, data)
             Memory._done(ctx, instance, in_flight, OutputEvent.with_data(output))
         elif isinstance(data, payload.EpisodeData):
-            kept = await Memory._run(instance, graph.write_episode, engine, data, at=instance._now())
+            kept = await Memory._run(instance, graph.write_episode, engine, instance._index, data, at=instance._now())
             seq, node_id = kept.seq, kept.node_id
-            _NODES.add(1, {"bot.memory.node.kind": payload.NodeKind.EPISODE.value})
+            if not kept.extended:
+                _NODES.add(1, {"bot.memory.node.kind": payload.NodeKind.EPISODE.value})
             if kept.persons:
                 _NODES.add(kept.persons, {"bot.memory.node.kind": payload.NodeKind.PERSON.value})
             if kept.conflicts:
@@ -941,12 +943,15 @@ class Memory(store.MemoryStore):
                 )
             # An episode with no parts has nothing to embed: it is not an index attempt, so it
             # records no attempt row, logs nothing and counts nothing, and backfill never selects it.
-            item = None if capacity is None or not data.parts else _item(capacity, data.parts)
+            # An episode a later turn extended is embedded again from everything it now holds; the
+            # Embedding child serves in order, so an earlier embed of the same node never lands last.
+            parts = kept.parts
+            item = None if capacity is None or not parts else _item(capacity, parts)
             if item is not None:
                 resume = _Remembering(seq=seq, node_id=node_id)
                 Memory._wait(ctx, instance, in_flight, embedding.Role.DOCUMENT, (item,), resume)
                 return
-            if capacity is None and data.parts:
+            if capacity is None and parts:
                 _INDEXED.add(
                     1,
                     {
@@ -955,7 +960,7 @@ class Memory(store.MemoryStore):
                         "bot.memory.index.path": "remember",
                     },
                 )
-            elif data.parts:
+            elif parts:
                 await Memory._record_failed_index(instance, seq, embedding.FailureKind.UNSUPPORTED_INPUT, "capacity")
             active.set_attribute("bot.memory.indexed", False)
             Memory._done(
