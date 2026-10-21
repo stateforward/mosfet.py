@@ -42,7 +42,7 @@ bot.cognition(processor, intuition=decision.Processor(base_url="http://127.0.0.1
 ## Fitting the model's context
 
 With `max_context_tokens`, each request is fitted to the decision model's context before it is
-sent. Its size is estimated from its JSON body at the fewest bytes per token any answer's `usage.input_tokens`
+sent, through core's shared `processing.ContextFit`. Its size is estimated from its JSON body at the fewest bytes per token any answer's `usage.input_tokens`
 has shown (the server's own tokenizer and prompt template), and at 3 until a server has said. A request over the
 limit has the selection question's instructions cut: those are the turn's world, self and acted
 blocks, which are context assembly. They keep as many leading whole lines as fit (the world block
@@ -80,6 +80,6 @@ Requests and answers are logged through `mosfet.telemetry` with `provider="decis
 model that answered (`model`), the answer as JSON when payload capture is on. The server's address
 never reaches telemetry.
 
-`bot.provider.decision.fit.count{outcome}` counts the requests that were over
-`max_context_tokens`: `cut` when cutting the instructions made them fit, `overflow` when they were
-still over and were sent anyway.
+With `max_context_tokens`, core's `bot.processing.context.fit.count{processor="decision", outcome}`
+counts each request: `fit` when it was sent whole, `cut` when cutting the instructions made it fit,
+`overflow` when it was still over and was sent anyway.

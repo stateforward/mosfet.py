@@ -24,6 +24,7 @@ import functools
 import inspect
 import json
 import logging
+import math
 import re
 import typing
 import uuid
@@ -1222,7 +1223,9 @@ class InputData(pydantic.BaseModel):
 
         return event_json_value(value)
 
-    def model_facing_content(self, capacity: media.ImageCapacity) -> tuple[text.ContentPart, ...]:
+    def model_facing_content(
+        self, capacity: media.ImageCapacity, *, budget_bytes: int | None = None
+    ) -> tuple[text.ContentPart, ...]:
         """Project this turn exactly as a model may see it: the stimulus as content parts.
 
         The text parts carry the stimulus as one pseudo-XML element. The terminal stimulus is the
@@ -1260,6 +1263,12 @@ class InputData(pydantic.BaseModel):
         when not even its frame fits it is left out. Images it carries render as placeholders only:
         the stimulus's images are the ones this pass attaches.
 
+        ``budget_bytes`` is the receiving model's fitted budget for this content's text (a
+        :class:`ContextFit` budget, less what the provider sends beside it). When given and smaller,
+        it replaces the provider-neutral budget for ``recalled`` only: the stimulus is never cut to
+        fit it, and a stimulus over it still renders whole, without ``recalled`` (the request goes and
+        the server's refusal is the failure, as D-R-36).
+
         Raises ``ValueError`` when the instructions are over the scalar budget, or when the
         instructions, the dispatch tool, and the stimulus without its budgeted items together
         exceed the provider-neutral prompt budgets. Recalled memory never raises.
@@ -1279,8 +1288,11 @@ class InputData(pydantic.BaseModel):
         if self.recalled is None:
             return parts
         stimulus = sum(len(part.text.encode("utf-8")) for part in parts if isinstance(part, text.TextPart))
+        available = _MAX_MODEL_PROMPT_BYTES - reserved
+        if budget_bytes is not None:
+            available = min(available, budget_bytes)
         # A newline joins the recalled element to the stimulus text that precedes it.
-        remaining = _MAX_MODEL_PROMPT_BYTES - reserved - stimulus - len("\n")
+        remaining = available - stimulus - len("\n")
         try:
             recalled = model_facing_content(self.recalled, capacity=media.ImageCapacity(), budget_bytes=remaining)
         except ValueError:
@@ -1866,7 +1878,74 @@ _LEADING = _METER.create_counter(
         "drafted field began; only the final selection carries it)."
     ),
 )
+_CONTEXT_FITS = _METER.create_counter(
+    "bot.processing.context.fit.count",
+    unit="{request}",
+    description=(
+        "Model requests fitted to a model's context, by processor and outcome: fit (sent whole), cut (context "
+        "assembly or recalled memory was cut to fit), or overflow (still over at its smallest, sent anyway)."
+    ),
+)
 _JSON: pydantic.TypeAdapter[pydantic.JsonValue] = pydantic.TypeAdapter(pydantic.JsonValue)
+
+type ContextFitOutcome = typing.Literal["fit", "cut", "overflow"]
+"""How a request was fitted to a model's context: whole, cut to fit, or over it at its smallest and sent anyway."""
+
+
+class ContextFit:
+    """A model's context window, in bytes of the request a provider sends it (D-R-36, D-R-45).
+
+    A provider-owned plain object, not an actor: a processor that knows its model's
+    ``max_context_tokens`` owns one and fits each request to :meth:`budget_bytes`. The estimate starts
+    at 3 UTF-8 bytes of request body a token and only tightens: :meth:`observe` keeps the fewest bytes a
+    token that any answer showed, since what the server counted, its own tokenizer and prompt template
+    included, is what fits. ``processor`` labels :meth:`record`'s counter; it is a code-defined
+    provider name (``"decision"``, ``"openai_compat"``), never a model name or any per-request value.
+    """
+
+    _max_context_tokens: int
+    _processor: str
+    _bytes_per_token: float
+
+    def __init__(self, *, max_context_tokens: int, processor: str) -> None:
+        """Raises ``ValueError`` for a ``max_context_tokens`` that is not positive."""
+
+        if max_context_tokens <= 0:
+            raise ValueError("max_context_tokens must be positive.")
+        self._max_context_tokens = max_context_tokens
+        self._processor = processor
+        self._bytes_per_token = 3.0
+
+    @property
+    def max_context_tokens(self) -> int:
+        """The model's context, in tokens: the prompt and what the model may write together."""
+
+        return self._max_context_tokens
+
+    @property
+    def bytes_per_token(self) -> float:
+        """Bytes of request body a token: 3.0 until a server answers, then the fewest any answer showed."""
+
+        return self._bytes_per_token
+
+    def budget_bytes(self, reserve_tokens: int = 0) -> int:
+        """The request body bytes that fit beside ``reserve_tokens`` the model may write; never negative."""
+
+        return max(0, math.floor((self._max_context_tokens - reserve_tokens) * self._bytes_per_token))
+
+    def observe(self, body_bytes: int, input_tokens: int) -> None:
+        """Learn from one answered request: ``body_bytes`` sent, ``input_tokens`` the server said it read.
+
+        A count that is not positive (a server that reports none) teaches nothing.
+        """
+
+        if body_bytes > 0 and input_tokens > 0:
+            self._bytes_per_token = min(self._bytes_per_token, body_bytes / input_tokens)
+
+    def record(self, outcome: ContextFitOutcome) -> None:
+        """Count one request's fit on ``bot.processing.context.fit.count`` under this fit's processor."""
+
+        _CONTEXT_FITS.add(1, {"processor": self._processor, "outcome": outcome})
 
 
 def _draft_marker(event: Event[typing.Any] | None) -> Draft | None:
@@ -2684,6 +2763,8 @@ __all__ = [
     "CONFIDENCE_MAX",
     "CONFIDENCE_MIN",
     "CompletionData",
+    "ContextFit",
+    "ContextFitOutcome",
     "FailureData",
     "DESCRIPTION_ATTRIBUTE",
     "DISPATCH_TOOL_NAME",

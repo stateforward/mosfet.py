@@ -6,6 +6,8 @@ import pathlib
 
 _ROOT = pathlib.Path(__file__).resolve().parents[1]
 _ALLOWED_NON_HSM_PROPERTIES = {
+    "src/mosfet/abilities/processing.py:ContextFit.bytes_per_token",
+    "src/mosfet/abilities/processing.py:ContextFit.max_context_tokens",
     "src/providers/livekit/src/mosfet/providers/livekit/audio.py:AudioFrame.data",
     "src/providers/livekit/src/mosfet/providers/livekit/audio.py:AudioFrame.num_channels",
     "src/providers/livekit/src/mosfet/providers/livekit/audio.py:AudioFrame.sample_rate",

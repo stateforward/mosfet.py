@@ -1839,6 +1839,98 @@ def test_a_stimulus_that_alone_overflows_still_fails_with_recalled_context() -> 
         _ = input.model_facing_content(media.ImageCapacity())
 
 
+def _text_bytes(parts: tuple[text.ContentPart, ...]) -> int:
+    return sum(len(part.text.encode("utf-8")) for part in parts if isinstance(part, text.TextPart))
+
+
+def test_a_fitted_budget_trims_recalled_context_and_never_the_stimulus() -> None:
+    """C6: a model's context, smaller than the provider-neutral cap, trims what was recalled; the turn is whole."""
+
+    said = "incoming speech " + "s" * 2_000
+    input = processing.InputData(input=said, recalled=_associations(40, size=500))
+    whole = input.model_facing_content(media.ImageCapacity())
+    stimulus = _text_bytes(processing.InputData(input=said).model_facing_content(media.ImageCapacity()))
+
+    parts = input.model_facing_content(media.ImageCapacity(), budget_bytes=stimulus + 3_000)
+
+    rendered = "".join(part.text for part in parts if isinstance(part, text.TextPart))
+    assert said in rendered
+    assert _text_bytes(parts) <= stimulus + 3_000 < _text_bytes(whole)
+    kept = [index for index in range(40) if f"association-{index}-" in rendered]
+    assert kept == list(range(len(kept)))
+    assert 0 < len(kept) < 40
+
+
+def test_a_stimulus_over_the_fitted_budget_still_renders_whole_without_recalled_context() -> None:
+    """C6, as D-R-36: the stimulus is never cut to fit; the request goes and the server's refusal is the failure."""
+
+    said = "incoming speech " + "s" * 2_000
+    input = processing.InputData(input=said, recalled=_associations(3, size=10))
+
+    parts = input.model_facing_content(media.ImageCapacity(), budget_bytes=100)
+
+    rendered = "".join(part.text for part in parts if isinstance(part, text.TextPart))
+    assert said in rendered
+    assert "association-" not in rendered
+
+
+def test_context_fit_budgets_bytes_at_three_a_token_less_the_reserve() -> None:
+    fit = processing.ContextFit(max_context_tokens=1_000, processor="tests")
+
+    assert fit.max_context_tokens == 1_000
+    assert fit.bytes_per_token == 3.0
+    assert fit.budget_bytes() == 3_000
+    assert fit.budget_bytes(reserve_tokens=400) == 1_800
+    assert fit.budget_bytes(reserve_tokens=1_000) == 0
+    assert fit.budget_bytes(reserve_tokens=5_000) == 0
+
+
+def test_context_fit_learns_the_fewest_bytes_a_token_any_server_counted() -> None:
+    """D-R-45: what the server counted, its own tokenizer and template included, is what fits."""
+
+    fit = processing.ContextFit(max_context_tokens=1_000, processor="tests")
+
+    fit.observe(body_bytes=2_000, input_tokens=1_000)
+    assert fit.bytes_per_token == 2.0
+    fit.observe(body_bytes=5_000, input_tokens=1_000)
+    assert fit.bytes_per_token == 2.0
+    fit.observe(body_bytes=1_000, input_tokens=0)
+    assert fit.bytes_per_token == 2.0
+    assert fit.budget_bytes(reserve_tokens=500) == 1_000
+
+
+@pytest.mark.parametrize("max_context_tokens", [0, -1])
+def test_context_fit_needs_a_positive_context(max_context_tokens: int) -> None:
+    with pytest.raises(ValueError, match="max_context_tokens"):
+        _ = processing.ContextFit(max_context_tokens=max_context_tokens, processor="tests")
+
+
+def test_context_fit_counts_each_outcome_under_its_processor(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fit = processing.ContextFit(max_context_tokens=1_000, processor="tests")
+
+    def counts(reader: metric_reader.Reader) -> dict[tuple[object, object], float]:
+        return {
+            (point.attributes["processor"], point.attributes["outcome"]): point.value
+            for point in reader.points("bot.processing.context.fit.count")
+        }
+
+    with metric_reader.recording(tmp_path, monkeypatch) as reader:
+        before = counts(reader)
+        fit.record("fit")
+        fit.record("cut")
+        fit.record("cut")
+        fit.record("overflow")
+        after = counts(reader)
+
+    assert {key: value - before.get(key, 0.0) for key, value in after.items() if key[0] == "tests"} == {
+        ("tests", "fit"): 1.0,
+        ("tests", "cut"): 2.0,
+        ("tests", "overflow"): 1.0,
+    }
+
+
 class _StampedData(pydantic.BaseModel):
     """A payload whose producer stamps ``attachments``; a model may never author them."""
 

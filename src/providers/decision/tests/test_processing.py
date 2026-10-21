@@ -363,7 +363,11 @@ def _without_selection_instructions(sent: dict[str, typing.Any]) -> dict[str, ty
 
 
 def _fit_points(reader: metric_reader.Reader) -> dict[str, float]:
-    return {str(point.attributes["outcome"]): point.value for point in reader.points("bot.provider.decision.fit.count")}
+    return {
+        str(point.attributes["outcome"]): point.value
+        for point in reader.points("bot.processing.context.fit.count")
+        if point.attributes["processor"] == "decision"
+    }
 
 
 def test_a_request_over_max_context_tokens_cuts_its_turn_instructions_to_their_leading_lines(
