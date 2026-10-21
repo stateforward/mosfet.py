@@ -369,7 +369,7 @@ def _body(
         except Exception as error:
             raise _raised(name, voice.location, "voice", error, location) from error
     try:
-        mind = _mind(declared, processor, store, nature, born, None if timeouts is None else timeouts.step)
+        mind = _mind(declared, processor, store, nature, born, timeouts)
     except Exception as error:
         raise _raised(name, declared.location, "cognition", error, location) from error
     # A firmware of its own for every body: it starts fresh with each start of the model, and takes
@@ -430,7 +430,7 @@ def _mind(
     store: memory.Memory,
     nature: persona.Traits | None,
     voice: vocal.voice.Inception | None,
-    step: datetime.timedelta | None,
+    timeouts: elements.TimeoutsElement | None,
 ) -> cognition.Cognition:
     """Cognition, its faculties, its persona and the ``voice`` it is given at inception, all on ``store``.
 
@@ -438,9 +438,9 @@ def _mind(
     traits of ``bot.traits``, which give the bot a persona. Reflex's decision layer and intuition are built
     only when ``declared.reflex`` and ``declared.intuition`` are given, each on its own; reflection and
     consolidation think on ``declared.reflection``, or on ``processor`` when it is not given, and reasoning on
-    ``processor``. ``step`` is
-    ``bot.timeouts(step=)``, the step timeout of cognition and of its reflection; ``None`` keeps cognition's own
-    step timeout for both.
+    ``processor``. ``timeouts`` is ``bot.timeouts``: its ``step`` is the step timeout of cognition and of its
+    reflection, and ``reflex``, ``intuition`` and ``reasoning`` bound each tier's steps; one not given keeps
+    cognition's own default (each tier falls back to the step timeout).
 
     Raises:
         TypeError: If ``declared.reflex`` is given and is no decision processor, which ``bot.define`` reports first.
@@ -452,6 +452,7 @@ def _mind(
     # bot.define's validator has checked each given processor's type; the element keeps them as written.
     fast = typing.cast(processing.Processor | None, declared.intuition)
     reflecting = typing.cast(processing.Processor | None, declared.reflection) or processor
+    step = None if timeouts is None else timeouts.step
     now = typing.cast(schedule.WallClock | None, declared.routines)
     self_knowledge = None if nature is None else persona.Persona(traits=nature, memory=store)
     return cognition.Cognition(
@@ -478,6 +479,9 @@ def _mind(
         persona=self_knowledge,
         voice=voice,
         child_operation_timeout=step,
+        reflex_timeout=None if timeouts is None else timeouts.reflex,
+        intuition_timeout=None if timeouts is None else timeouts.intuition,
+        reasoning_timeout=None if timeouts is None else timeouts.reasoning,
     )
 
 

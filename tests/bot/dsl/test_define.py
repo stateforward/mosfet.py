@@ -297,6 +297,21 @@ def test_a_decision_processor_given_where_words_are_written_is_b0026(keyword: st
         assert named in deciding.help.message
 
 
+@pytest.mark.parametrize("tier", ["reflex", "intuition", "reasoning"])
+def test_a_tiers_timeout_that_is_not_positive_is_b0011(tier: str) -> None:
+    given = {tier: datetime.timedelta()}
+    with pytest.raises(bot.DefinitionError) as caught:
+        _ = bot.define(
+            "greeter",
+            bot.cognition(reasoning=support.Silent()),
+            bot.attach(phone.Phone()),
+            bot.timeouts(**given),
+        )
+
+    (wrong,) = caught.value.diagnostics
+    assert (wrong.code, wrong.message) == ("B0011", f"the {tier} timeout is not a positive `datetime.timedelta`")
+
+
 def test_a_cognition_with_every_tier_defines() -> None:
     model = bot.define(
         "greeter",

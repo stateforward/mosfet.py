@@ -256,6 +256,33 @@ def test_the_step_timeout_bounds_each_step_of_the_bots_cognition(
     ]
 
 
+def test_each_tiers_timeout_bounds_its_steps_in_the_bots_cognition(monkeypatch: pytest.MonkeyPatch) -> None:
+    """D-R-52: ``bot.timeouts(reflex=, intuition=, reasoning=)`` reach cognition; one left unset is ``None``,
+    so cognition bounds that tier by the step timeout."""
+
+    found: Built = []
+    monkeypatch.setattr(cognition, "Cognition", _recorded(cognition.Cognition, found))
+    model = bot.define(
+        "greeter",
+        bot.cognition(reasoning=support.Silent(), reflex=support.Undecided()),
+        bot.attach(phone.Phone()),
+        bot.timeouts(reflex=datetime.timedelta(seconds=5), reasoning=datetime.timedelta(seconds=180)),
+    )
+
+    async def run() -> None:
+        started, _ = await _started(model)
+        await bot.stop(started)
+
+    asyncio.run(run())
+
+    ((_, given),) = found
+    assert (given["reflex_timeout"], given["intuition_timeout"], given["reasoning_timeout"]) == (
+        datetime.timedelta(seconds=5),
+        None,
+        datetime.timedelta(seconds=180),
+    )
+
+
 def test_one_ability_given_as_input_and_acquired_is_given_to_the_body_in_both_roles(
     recording: type[Recording],
 ) -> None:

@@ -581,12 +581,7 @@ class Validator(hsm.ModelValidator):
 
     def _validate_timeouts(self, model: elements.Model, member: elements.TimeoutsElement) -> None:
         call = diagnostics.Span.of(member.location)
-        for key, value in (
-            ("processing", member.processing),
-            ("deactivation", member.deactivation),
-            ("attachment", member.attachment),
-            ("step", member.step),
-        ):
+        for key, value in member.given():
             # The annotation is the bot file's promise, not a fact: check what was actually given.
             given = typing.cast(object, value)
             if given is None or (isinstance(given, datetime.timedelta) and given > datetime.timedelta()):

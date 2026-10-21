@@ -37,7 +37,7 @@ from . import elements, firmware
 
 _FROZEN = pydantic.ConfigDict(frozen=True, extra="forbid")
 
-Timeout = typing.Literal["processing", "deactivation", "attachment", "step"]
+Timeout = typing.Literal["processing", "deactivation", "attachment", "step", "reflex", "intuition", "reasoning"]
 """A body timeout ``bot.timeouts`` can override."""
 
 
@@ -167,13 +167,7 @@ def _outline(model: elements.Model) -> Outline:
             case elements.RegisterElement(store=given):
                 sensory_register = type(given).__name__
             case elements.TimeoutsElement():
-                overrides: tuple[tuple[Timeout, object], ...] = (
-                    ("processing", member.processing),
-                    ("deactivation", member.deactivation),
-                    ("attachment", member.attachment),
-                    ("step", member.step),
-                )
-                timeouts = tuple(name for name, value in overrides if value is not None)
+                timeouts = tuple(typing.cast(Timeout, name) for name, value in member.given() if value is not None)
             case elements.AllowElement(lints=given):
                 allowed = tuple(str(lint) for lint in given)
             case firmware.FirmwareElement(model=compiled):

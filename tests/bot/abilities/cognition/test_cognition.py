@@ -1770,6 +1770,62 @@ def test_a_step_is_given_a_local_models_time_by_default(monkeypatch: pytest.Monk
     assert all(timeout >= datetime.timedelta(seconds=120) for _, timeout in hops)
 
 
+def test_each_tier_is_bounded_by_its_own_timeout_or_else_the_step_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    """D-R-52: ``bot.timeouts(reflex=, intuition=, reasoning=)`` bound each tier's steps; one left unset is
+    bounded by the step timeout."""
+
+    hops: list[tuple[str, datetime.timedelta]] = []
+    run_terminal_operation = ability_module.run_terminal_operation
+
+    async def recorded(
+        ctx: hsm.Context,
+        *,
+        child: hsm.Instance,
+        request: hsm.Event[typing.Any] | collections.abc.Callable[[hsm.Instance], hsm.Event[typing.Any]],
+        terminals: tuple[hsm.Event[typing.Any], ...],
+        timeout: datetime.timedelta,
+        on_terminal: collections.abc.Callable[[hsm.Event[typing.Any]], None] | None = None,
+    ) -> hsm.Event[typing.Any]:
+        if isinstance(child, cognition.Decision | cognition.Intuition | cognition.Reasoning):
+            hops.append((type(child).__name__, timeout))
+        return await run_terminal_operation(
+            ctx, child=child, request=request, terminals=terminals, timeout=timeout, on_terminal=on_terminal
+        )
+
+    monkeypatch.setattr(ability_module, "run_terminal_operation", recorded)
+    handoff = cognition.types.EventData(target="cognition", event=cognition.Reasoning.input_event.name, data={})
+
+    async def run() -> None:
+        ability = cognition.Cognition(
+            decision=cognition.Decision(
+                processor=RecordingDecisionProcessor(cognition.decision.OutputData(result=None))
+            ),
+            intuition=cognition.Intuition(processor=RecordingReasoningProcessor((handoff,))),
+            reasoning=cognition.Reasoning(processor=RecordingReasoningProcessor(no_output("reasoned"))),
+            reflection=cognition.Reflection(processor=FixedProcessor(no_output("reflection")), memory=memory.Memory()),
+            child_operation_timeout=datetime.timedelta(seconds=150),
+            intuition_timeout=datetime.timedelta(seconds=20),
+            reasoning_timeout=datetime.timedelta(seconds=180),
+        )
+        ctx = shared_hsm_context()
+        owner = CognitionAttachmentOwner()
+        _ = await mosfet.started(ctx, owner, owner.model)
+        await ability.attach(ctx, attachment.AttachEvent.with_data(attachment.AttachData(actor=owner)))
+        await wait_until(lambda: ability.state().endswith("/idle"))
+        _ = await hsm.dispatch(
+            ctx, ability, ability.input_event.with_data_and_id(await started_cognition_input(ctx), "turn")
+        )
+        await wait_until(lambda: len(hops) >= 3 and ability.state().endswith("/idle"))
+
+    asyncio.run(run())
+
+    assert hops == [
+        ("Decision", datetime.timedelta(seconds=150)),
+        ("Intuition", datetime.timedelta(seconds=20)),
+        ("Reasoning", datetime.timedelta(seconds=180)),
+    ]
+
+
 def test_cognition_settled_child_terminal_is_not_abandoned_by_parent_deadline() -> None:
     """An instant child hop completes through the one-shot; a settled hop is not rebooted."""
 

@@ -292,9 +292,10 @@ STEP_TIMEOUT: typing.Final = datetime.timedelta(seconds=120)
 """How long one step of the bot's cognition may take when the composition gives no ``bot.timeouts(step=)``.
 
 Cognition's steps (each reflex layer, associating, intuition, reasoning) and reflection's (its select step, its
-revision child, and stopping either) are each bounded by the same step timeout. One step of a local model with
-thinking on takes 30 s and more, and reflex, intuition and reasoning together still fit the body's 5-minute turn
-bound."""
+revision child, and stopping either) are each bounded by the step timeout. Each tier (reflex, intuition,
+reasoning) has its own bound instead when the composition gives one (``bot.timeouts(reflex=, intuition=,
+reasoning=)``), and falls back to the step timeout otherwise. One step of a local model with thinking on takes
+30 s and more, and reflex, intuition and reasoning together still fit the body's 5-minute turn bound."""
 
 MAX_SELECTION_REPAIRS: typing.Final[int] = 2
 """How many times a cognition stage (decision, intuition, reasoning, reflection) asks its model again after a

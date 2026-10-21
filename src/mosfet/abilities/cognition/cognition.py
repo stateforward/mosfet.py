@@ -429,7 +429,10 @@ class Cognition(ability.Ability[InputData, OutputData]):
 
     Each step of a turn (a reflex layer, associating, intuition, reasoning) is bounded by the step
     timeout, ``child_operation_timeout`` (``bot.timeouts(step=)``; two minutes by default, as one
-    step of a local model can take half a minute and more). A step that outlasts it fails only its
+    step of a local model can take half a minute and more), and a tier's steps by its own timeout
+    when given (``reflex_timeout``, ``intuition_timeout``, ``reasoning_timeout``;
+    ``bot.timeouts(reflex=, intuition=, reasoning=)``), since a tier is defined by how long it is
+    expected to take. A step that outlasts it fails only its
     turn: the body gets the turn's ``StepTimedOutData`` failure and then a ``cognition.InputEvent``
     observing ``StepTimedOutEvent``, a new turn the bot decides on, while the step is stopped the
     way a cancel stops it. Nothing reboots and no ability loses its state, unless the step cannot be
@@ -511,6 +514,8 @@ class Cognition(ability.Ability[InputData, OutputData]):
     # Injected operation bounds (None = live module default, so tests may still tune
     # the module constants around construction). Never hardcode per-caller durations.
     _child_operation_timeout: datetime.timedelta | None
+    # Each tier's own step bound (``bot.timeouts(reflex=, intuition=, reasoning=)``); None = the step timeout.
+    _tier_timeouts: dict[Stage, datetime.timedelta | None]
     _cancel_teardown_timeout: datetime.timedelta | None
 
     @staticmethod
@@ -710,9 +715,9 @@ class Cognition(ability.Ability[InputData, OutputData]):
         turn: types.TurnData,
         stage: Stage,
     ) -> None:
-        """Await one child hop through the settled one-shot. The step timeout is the hop bound."""
+        """Await one child hop through the settled one-shot, bounded by its tier's timeout or else the step timeout."""
 
-        child_timeout = instance._child_operation_timeout
+        child_timeout = instance._tier_timeouts[stage] or instance._child_operation_timeout
         timeout = child_timeout if child_timeout is not None else types.STEP_TIMEOUT
         try:
             terminal = await ability.run_terminal_operation(
@@ -2825,11 +2830,20 @@ class Cognition(ability.Ability[InputData, OutputData]):
         voice: "vocal.voice.Inception | None" = None,
         rest_after: datetime.timedelta = _DEFAULT_REST_AFTER,
         child_operation_timeout: datetime.timedelta | None = None,
+        reflex_timeout: datetime.timedelta | None = None,
+        intuition_timeout: datetime.timedelta | None = None,
+        reasoning_timeout: datetime.timedelta | None = None,
         cancel_teardown_timeout: datetime.timedelta | None = None,
     ) -> None:
         super().__init__(id=id, clock=clock)
-        if child_operation_timeout is not None and child_operation_timeout <= datetime.timedelta():
-            raise ValueError("child_operation_timeout must be positive.")
+        tier_timeouts: dict[Stage, datetime.timedelta | None] = {
+            "reflex": reflex_timeout,
+            "intuition": intuition_timeout,
+            "reasoning": reasoning_timeout,
+        }
+        for name, bound in (("child_operation", child_operation_timeout), *tier_timeouts.items()):
+            if bound is not None and bound <= datetime.timedelta():
+                raise ValueError(f"{name}_timeout must be positive.")
         if cancel_teardown_timeout is not None and cancel_teardown_timeout <= datetime.timedelta():
             raise ValueError("cancel_teardown_timeout must be positive.")
         if associative is not None and memory is None:
@@ -2853,6 +2867,7 @@ class Cognition(ability.Ability[InputData, OutputData]):
         self._voice_told = None
         self._rest_after = rest_after
         self._child_operation_timeout = child_operation_timeout
+        self._tier_timeouts = tier_timeouts
         self._cancel_teardown_timeout = cancel_teardown_timeout
         children: list[hsm.Instance] = []
         if autonomy is not None:

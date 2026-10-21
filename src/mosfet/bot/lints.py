@@ -194,10 +194,7 @@ def empty_timeouts(model: elements.Model) -> list[diagnostics.Diagnostic]:
             ),
         )
         for member in _members(model, elements.TimeoutsElement)
-        if member.processing is None
-        and member.deactivation is None
-        and member.attachment is None
-        and member.step is None
+        if all(value is None for _, value in member.given())
     ]
 
 

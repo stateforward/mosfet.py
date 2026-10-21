@@ -149,6 +149,22 @@ class TimeoutsElement(Member, kind=TimeoutsKind):
     deactivation: datetime.timedelta | None = None
     attachment: datetime.timedelta | None = None
     step: datetime.timedelta | None = None
+    reflex: datetime.timedelta | None = None
+    intuition: datetime.timedelta | None = None
+    reasoning: datetime.timedelta | None = None
+
+    def given(self) -> tuple[tuple[str, object], ...]:
+        """Every timeout by name, as written (``None`` keeps its default), in ``bot.timeouts``' order."""
+
+        return (
+            ("processing", self.processing),
+            ("deactivation", self.deactivation),
+            ("attachment", self.attachment),
+            ("step", self.step),
+            ("reflex", self.reflex),
+            ("intuition", self.intuition),
+            ("reasoning", self.reasoning),
+        )
 
 
 @dataclasses.dataclass(kw_only=True)
@@ -729,6 +745,9 @@ class RedefinableTimeouts(_Single[TimeoutsElement]):
     deactivation: datetime.timedelta | None = None
     attachment: datetime.timedelta | None = None
     step: datetime.timedelta | None = None
+    reflex: datetime.timedelta | None = None
+    intuition: datetime.timedelta | None = None
+    reasoning: datetime.timedelta | None = None
 
     @typing.override
     def _redefine(self, model: Model, stack: list[hsm.Element]) -> TimeoutsElement | None:
@@ -738,6 +757,9 @@ class RedefinableTimeouts(_Single[TimeoutsElement]):
             deactivation=self.deactivation,
             attachment=self.attachment,
             step=self.step,
+            reflex=self.reflex,
+            intuition=self.intuition,
+            reasoning=self.reasoning,
             location=self.location,
         )
         return self._register(model, member)
@@ -991,12 +1013,17 @@ def timeouts(
     deactivation: datetime.timedelta | None = None,
     attachment: datetime.timedelta | None = None,
     step: datetime.timedelta | None = None,
+    reflex: datetime.timedelta | None = None,
+    intuition: datetime.timedelta | None = None,
+    reasoning: datetime.timedelta | None = None,
 ) -> RedefinableTimeouts:
     """The bot's timeout overrides (``bot.timeouts(processing=datetime.timedelta(seconds=30))``); each positive.
 
     ``processing``, ``deactivation`` and ``attachment`` are the body's own bounds. ``step`` bounds each step
     of a turn in cognition (each reflex layer, intuition, reasoning, ...; two minutes by default) and each step of its
-    reflection; a step that outlasts it fails only its turn, which the bot then perceives.
+    reflection; a step that outlasts it fails only its turn, which the bot then perceives. ``reflex``,
+    ``intuition`` and ``reasoning`` bound each step of that tier instead (``reflex`` each of its layers), as a
+    tier is defined by how long it is expected to take; one left unset is bounded by ``step``.
     """
 
     return RedefinableTimeouts(
@@ -1004,6 +1031,9 @@ def timeouts(
         deactivation=deactivation,
         attachment=attachment,
         step=step,
+        reflex=reflex,
+        intuition=intuition,
+        reasoning=reasoning,
         location=diagnostics.Location.capture(),
     )
 

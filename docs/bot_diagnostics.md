@@ -280,7 +280,7 @@ model = bot.define("greeter", bot.traits("curious"), bot.cognition(reasoning=pro
 
 **error:** a timeout is not a positive `datetime.timedelta`
 
-Each of `bot.timeouts(processing=, deactivation=, attachment=, step=)` is a positive `datetime.timedelta`.
+Each of `bot.timeouts(processing=, deactivation=, attachment=, step=, reflex=, intuition=, reasoning=)` is a positive `datetime.timedelta`.
 
 Why: A timeout bounds how long the bot waits for something; zero or less would never wait at all.
 
