@@ -145,6 +145,7 @@ class _InvocationCompletedData(pydantic.BaseModel):
     attempt: int = pydantic.Field(ge=0, le=types.MAX_SELECTION_REPAIRS)
     previous_normalized: str | None = None
     event_confidences: tuple[int | None, ...] | None = None
+    hand_to: processing.HandOn | None = None
 
 
 class _DispatchPlanData(pydantic.BaseModel):
@@ -257,6 +258,14 @@ class OutputData(pydantic.BaseModel):
         ),
         examples=[[]],
     )
+    hand_to: processing.HandOn | None = pydantic.Field(
+        default=None,
+        description=(
+            "The later tier a pass (``result`` None) hands the turn to (R-23): intuition, to answer it in words "
+            "now, or reasoning, to think it through first. None hands it to the first tier the turn offers."
+        ),
+        examples=["reasoning"],
+    )
     reason: str | None = pydantic.Field(
         default=None,
         min_length=1,
@@ -353,27 +362,27 @@ def _events_as_output(value: object) -> tuple[types.OutputData | None, int | Non
 
 def _product_from_processor_output(
     output: object,
-) -> tuple[types.OutputData | None, int | None, tuple[int | None, ...] | None]:
-    """Return (event product, min aggregate confidence, per-event confidences)."""
+) -> tuple[types.OutputData | None, int | None, tuple[int | None, ...] | None, processing.HandOn | None]:
+    """Return (event product, min aggregate confidence, per-event confidences, the tier a pass chose)."""
 
     if isinstance(output, processing.Result):
         result = typing.cast(processing.Result[object], output)
         if not result.is_handled:
-            return None, None, None
+            return None, None, None, None
         return _product_from_processor_output(result.output)
     if output is None:
-        return None, None, None
+        return None, None, None, None
     if isinstance(output, OutputData):
-        # Envelope has no confidence; only explicit unhandled (result is None) vs product.
+        # Envelope has no confidence; only explicit unhandled (result is None), with its chosen tier, vs product.
         if output.result is None:
-            return None, None, None
+            return None, None, None, output.hand_to
         product, aggregate, per_event = _events_as_output(output.result)
-        return product, aggregate, per_event
+        return product, aggregate, per_event, None
     if types.is_output(output):
-        return output, None, None
+        return output, None, None, None
     events, aggregate, per_event = _events_as_output(output)
     if events is not None:
-        return events, aggregate, per_event
+        return events, aggregate, per_event, None
     raise TypeError("Decision processor produced output that does not match a cognitive output schema.")
 
 
@@ -629,7 +638,7 @@ class Decision(processing.Processing):
                 if retry is not None:
                     input = types.with_selection_feedback(input, retry.message)
                 raw = await instance._processor.process(input)
-                product, confidence, event_confidences = _product_from_processor_output(raw)
+                product, confidence, event_confidences, hand_to = _product_from_processor_output(raw)
             except processing.SelectionRejectionError as error:
                 # The processor refused a selection (an event this turn does not offer): the model's to repair.
                 active.set_attribute("bot.selection.rejected", True)
@@ -679,6 +688,7 @@ class Decision(processing.Processing):
                             attempt=attempt,
                             previous_normalized=previous_normalized,
                             event_confidences=event_confidences,
+                            hand_to=hand_to,
                         )
                     ),
                     id=operation_id,
@@ -763,6 +773,16 @@ class Decision(processing.Processing):
             active.set_attribute("bot.selection.count", len(selections))
             active.set_attribute("bot.cognition.escalated", terminal is None)
             active.set_attribute("bot.cognition.escalation.reason", escalation)
+            # Only the decision model's own pass chooses the tier (R-23); every other hand-on keeps the first one
+            # the turn offers.
+            turn = (
+                data.request.turn.model_copy(update={"hand_to": data.hand_to})
+                if terminal is None and data.hand_to is not None
+                else data.request.turn
+            )
+            if terminal is None:
+                offered = data.input.hand_ons or ("reasoning",)
+                active.set_attribute("bot.reflex.handed_to", data.hand_to or offered[0])
             if selections and data.input.actors:
                 next_event: hsm.Event[typing.Any] = _DispatchPlannedEvent.with_data(
                     _DispatchPlanData(
@@ -776,7 +796,7 @@ class Decision(processing.Processing):
                 )
             else:
                 next_event = _PublishReadyEvent.with_data(
-                    _PublishData(completion=types.CompletionData(turn=data.request.turn, output=terminal))
+                    _PublishData(completion=types.CompletionData(turn=turn, output=terminal))
                 )
             await hsm.dispatch(
                 ctx,

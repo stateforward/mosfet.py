@@ -16,6 +16,10 @@ import typing
 import hsm
 import pydantic
 import pytest
+from mosfet.telemetry import span
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
 from tests.bot.abilities.cognition.metadata_contract import assert_metadata_is_not_coordination
 from tests.bot.abilities.support import dispatch_ability_for_test, shared_hsm_context
@@ -152,6 +156,81 @@ def _run_decision(
         )
 
     return asyncio.run(run()), processor
+
+
+class _Passing(processing.DecisionProcessor):
+    """A decision model that passes, choosing the tier ``hand_to`` (None: an empty product, no choice made)."""
+
+    hand_to: processing.HandOn | None
+
+    def __init__(self, hand_to: processing.HandOn | None) -> None:
+        self.hand_to = hand_to
+
+    @typing.override
+    async def process(
+        self, input: processing.InputData, *, drafts: processing.DraftSink | None = None
+    ) -> processing.Events:
+        del input, drafts
+        if self.hand_to is None:
+            return ()
+        envelope = decision.OutputData(result=None, hand_to=self.hand_to, reason="none of these fits")
+        return typing.cast(processing.Events, typing.cast(object, envelope))
+
+
+@pytest.mark.parametrize(
+    ("hand_to", "handed_to"),
+    [("reasoning", "reasoning"), ("intuition", "intuition"), (None, "intuition")],
+    ids=["chose-reasoning", "chose-intuition", "no-choice"],
+)
+def test_a_pass_carries_the_chosen_tier_on_the_turn_and_its_span_names_where_it_went(
+    hand_to: processing.HandOn | None,
+    handed_to: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R-23: the decision model's pass names the tier it hands the turn to, which rides the typed turn to the host;
+    a hand-on that names none (here an empty product) keeps the first tier the frame offers. The classify span says
+    where the turn went (``bot.reflex.handed_to``)."""
+
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    monkeypatch.setattr(span, "tracer_provider", lambda: provider)
+
+    async def run() -> types.CompletionData:
+        ctx = shared_hsm_context()
+        actor = _SelectionActor()
+        assert actor.model is not None
+        _ = await mosfet.started(ctx, actor, actor.model)
+        request = _selection_input(actor, operation_id="pass-turn")
+        framed = request.model_copy(
+            update={
+                "processing_input": request.processing_input.model_copy(update={"hand_ons": ("intuition", "reasoning")})
+            }
+        )
+        ability = decision.Decision(processor=_Passing(hand_to))
+        return typing.cast(
+            types.CompletionData, typing.cast(object, await dispatch_ability_for_test(ability, ctx, framed))
+        )
+
+    completion = asyncio.run(run())
+
+    assert completion.output is None
+    assert completion.turn.hand_to == hand_to
+    (classified,) = [recorded for recorded in exporter.get_finished_spans() if recorded.name == "bot.reflex.classify"]
+    assert (classified.attributes or {}).get("bot.reflex.handed_to") == handed_to
+
+
+def test_a_settled_turn_names_no_tier_it_was_handed_to(monkeypatch: pytest.MonkeyPatch) -> None:
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    monkeypatch.setattr(span, "tracer_provider", lambda: provider)
+
+    completion, _ = _run_decision(_SequenceProcessor(_selection(value="settled")), operation_id="settled-turn")
+
+    assert completion.output is not None
+    (classified,) = [recorded for recorded in exporter.get_finished_spans() if recorded.name == "bot.reflex.classify"]
+    assert "bot.reflex.handed_to" not in (classified.attributes or {})
 
 
 class _Chatting(processing.Processor):

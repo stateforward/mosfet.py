@@ -123,8 +123,9 @@ and `sandbox.Spec` gives `HOME` the workspace.
 
 Reflex is the bot's fast first decision on every turn: its behaviors (the ones autonomy runs) match the turn first,
 and its decision layer chooses among the events the turn offers for what they leave unhandled, each with its
-confidence, and hands what it does not decide on: to intuition, a chat model that answers without thinking first and
-may hand the turn on to reasoning, which thinks first. The decision layer runs on a decision model, never a chat
+confidence, and hands what it does not decide on to the tier it chooses (R-23): to intuition, a chat model that
+answers in words now without thinking first (and may still hand the turn on to reasoning), or to reasoning, which
+thinks it through first. Its failures and unsure choices go on to intuition. The decision layer runs on a decision model, never a chat
 model, so `bot.cognition` takes it apart from the others: `reflex=` is a `processing.DecisionProcessor`, and
 `intuition=`, `reasoning=` and `reflection=` are chat models' `processing.Processor`s. Reflection and consolidation
 think on `reflection=`, or on `reasoning=` when it is not given; the voice inception stays on `reasoning=`. Without

@@ -235,6 +235,13 @@ actor rated above it) is named on its frame after the world and self blocks, in 
 turn on, so passing it on is the model's informed choice. The Cognition host offers the deliberative
 handoff `bot.ability.reasoning.input` (`reasoning.CallData`) as a call surface, like ignore, but the
 decision layer is never offered it: its pass is its hand-on, and reasoning never offers it to itself.
+The decision layer's pass names the tier it hands the turn to (R-23): its frame lists the tiers
+composed (`processing.InputData.hand_ons`), the decision provider offers one pass criterion per
+tier ("answer it in words now, with intuition"; "it needs thought, so think it through first,
+with reasoning"), and the choice rides the turn (`TurnData.hand_to`) through associating to the
+guard that picks intuition or reasoning. A hand-on that names no tier (a decision failure or
+timeout, low confidence, an empty selection, a confidence gate that dropped everything) goes on
+to intuition. The reflex classify span says where a turn went (`bot.reflex.handed_to`).
 Intuition is offered it on every turn, with what reasoning holds above intuition's ceiling named in
 its own `<held>` block, reached by the handoff; a selection of it hands the turn on to reasoning
 after intuition's other selections (what it says first) run. Associative reads the chosen memories in full,

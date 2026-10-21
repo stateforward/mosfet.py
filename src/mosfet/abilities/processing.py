@@ -1137,6 +1137,10 @@ def dispatch_child_cancel(
     )
 
 
+HandOn: typing.TypeAlias = typing.Literal["intuition", "reasoning"]
+"""A later tier of cognition a decision processor's pass may hand a turn to (R-23)."""
+
+
 class InputData(pydantic.BaseModel):
     """Processing input: stimulus plus selectable event schemas."""
 
@@ -1214,6 +1218,16 @@ class InputData(pydantic.BaseModel):
             "schemas. Different processing abilities stamp different patches (e.g. the decision "
             "layer adds confidence; reasoning may leave this None)."
         ),
+    )
+    hand_ons: SkipJsonSchema[tuple[HandOn, ...]] = pydantic.Field(
+        default=(),
+        exclude=True,
+        description=(
+            "The later tiers a decision processor's pass may hand this turn to, in the order a turn takes them up: "
+            "the host names the ones it composes (R-23). Empty for every other processor; a decision processor "
+            "given none hands a pass to reasoning, which every cognition has."
+        ),
+        examples=[("intuition", "reasoning")],
     )
 
     @pydantic.field_serializer("input", when_used="json")
@@ -2699,6 +2713,7 @@ __all__ = [
     "OutputEvent",
     "OutputData",
     "Operation",
+    "HandOn",
     "InputData",
     "DecisionProcessor",
     "Processor",

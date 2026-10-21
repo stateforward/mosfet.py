@@ -16,12 +16,15 @@ bot.cognition(reasoning=processor, reflex=decision.Processor(base_url="http://12
   left out and media as a placeholder, never as bytes or base64; what someone said or typed is kept
   whole. It asks a choice question over the offered event menu
   (each event described by the first line of its schema's description) plus a reserved pass
-  criterion ("none of these"), and one choice question per required payload key whose criteria
+  criterion ("none of these") for each later tier the turn may go to (R-23), and one choice question per required payload key whose criteria
   are values taken mechanically from the turn's own evidence (the stimulus data, media left out, then the
   schema's enum options). The answer label *is* the value, so a payload can never leave the menu,
   and an event with a required key that has no grounded value is left unoffered, before any
   request. Only the option the question chose is returned, with its probability as the
-  confidence; the pass criterion leaves the turn unhandled, so the next tier (intuition, then reasoning) takes it.
+  confidence. A pass leaves the turn unhandled and names the tier it hands the turn to (`hand_to`):
+  `__intuition__`, "answer it in words now, with intuition", offered only when the frame names intuition
+  (`processing.InputData.hand_ons`), or `__reasoning__`, "it needs thought, so think it through first, with
+  reasoning", always offered. `pass_wording=` rewords them, one wording per tier.
 - `Client` sends one request and returns the answer. It opens an `httpx.AsyncClient` per request,
   so cancelling a turn closes its request. Every failure is a `decision.Error` that names the HTTP
   status or the error type and never a body.
@@ -59,7 +62,8 @@ cognition hands on to the next tier in the same turn. `None` sends every request
 {"state": {"turn": "<environment:sound kind=\"phone.ringing\" stimulus:event=\"environment.sound\" />"},
  "questions": {"selection": {"type": "choice", "instructions": "...",
                              "criteria": {"phone.answer_call": "Answer the ringing call.",
-                                          "__unhandled__": "None of these fits: take the turn up in words, with intuition."}}}}
+                                          "__intuition__": "None of these fits: answer it in words now, with intuition.",
+                                          "__reasoning__": "None of these fits: it needs thought, so think it through first, with reasoning."}}}}
 ```
 
 answered by
@@ -67,7 +71,7 @@ answered by
 ```json
 {"model": "pplx-decider-flash",
  "answers": {"selection": {"type": "choice", "choice": "phone.answer_call", "confidence": 0.7,
-                           "probabilities": {"phone.answer_call": 0.8, "__unhandled__": 0.2}}},
+                           "probabilities": {"phone.answer_call": 0.8, "__intuition__": 0.15, "__reasoning__": 0.05}}},
  "usage": {"input_tokens": 10, "output_tokens": 0}}
 ```
 

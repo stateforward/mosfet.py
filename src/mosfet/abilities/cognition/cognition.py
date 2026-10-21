@@ -596,6 +596,7 @@ class Cognition(ability.Ability[InputData, OutputData]):
         *,
         associations: memory.AssociationsData | None = None,
         acted: types.ActedData | None = None,
+        hand_to: processing.HandOn | None = None,
     ) -> types.TurnData:
         operation = processing.active_operation(instance, operation_id)
         assert operation is not None
@@ -604,6 +605,7 @@ class Cognition(ability.Ability[InputData, OutputData]):
             operation_id=operation_id,
             generation=hsm.id(operation),
             associations=associations,
+            hand_to=hand_to,
             acted=acted,
         )
 
@@ -760,8 +762,9 @@ class Cognition(ability.Ability[InputData, OutputData]):
     @staticmethod
     def _reached(
         event: hsm.Event[typing.Any],
-    ) -> tuple[InputData, str, memory.AssociationsData | None, types.ActedData | None]:
-        """The turn a stage is entered with: its input, id, associations and what earlier stages did.
+    ) -> tuple[InputData, str, memory.AssociationsData | None, types.ActedData | None, processing.HandOn | None]:
+        """The turn a stage is entered with: its input, id, associations, what earlier stages did, and the tier the
+        decision layer's pass chose for it (R-23).
 
         A stage is entered by the turn's input, or by the terminal of the stage before it (a completion,
         a failure that cascades, or what memory surfaced), which carries the turn. Topology selected the
@@ -771,9 +774,9 @@ class Cognition(ability.Ability[InputData, OutputData]):
         data = event.data
         if isinstance(data, types.CompletionData | types.FailureData | _AssociatedData):
             turn = data.turn
-            return turn.input, turn.operation_id, turn.associations, turn.acted
+            return turn.input, turn.operation_id, turn.associations, turn.acted, turn.hand_to
         assert is_input(data)
-        return data, event.id or uuid.uuid4().hex, None, None
+        return data, event.id or uuid.uuid4().hex, None, None, None
 
     @staticmethod
     async def _start_behaviors(
@@ -846,6 +849,7 @@ class Cognition(ability.Ability[InputData, OutputData]):
             active.set_attribute("bot.cognition.entered_from", "input" if is_input(event.data) else "reflex")
             decision_ability = instance._decision
             assert decision_ability is not None
+            # Its pass chooses which later tier takes the turn (R-23): intuition only when it is composed.
             await Cognition._hop_or_pass(
                 ctx,
                 instance,
@@ -855,6 +859,7 @@ class Cognition(ability.Ability[InputData, OutputData]):
                 suffix=_DECISION_ID_SUFFIX,
                 stage="reflex",
                 recalls=False,
+                hand_ons=("reasoning",) if instance._intuition is None else ("intuition", "reasoning"),
             )
 
     @staticmethod
@@ -896,6 +901,7 @@ class Cognition(ability.Ability[InputData, OutputData]):
         suffix: str,
         stage: Stage,
         recalls: bool,
+        hand_ons: tuple[processing.HandOn, ...] = (),
     ) -> None:
         """Hop the turn to a stage that hands its failures on (the decision layer, intuition), or pass it on.
 
@@ -904,19 +910,19 @@ class Cognition(ability.Ability[InputData, OutputData]):
         own frame build reports what failed if it fails too (D-R-36).
         """
 
-        cognition_input, base, associations, acted = Cognition._reached(event)
+        cognition_input, base, associations, acted, hand_to = Cognition._reached(event)
         public_metadata = _public_metadata(dict(event.metadata))
         frame: processing.InputData | None = None
         try:
             frame = Cognition._build_processing_input(
                 instance, cognition_input, recalled=associations if recalls else None, acted=acted
-            )
+            ).model_copy(update={"hand_ons": hand_ons})
         except Exception:
             # The documented boundary: a frame that cannot be built passes the turn on (D-R-36).
             _HANDED_BACK.add(1, {"stage": stage, "kind": "failed", "outcome": "cascaded"})
         if processing.active_operation(instance, base) is None:
             _ = await processing.start_operation(instance, base)
-        turn = Cognition._turn(instance, cognition_input, base, associations=associations, acted=acted)
+        turn = Cognition._turn(instance, cognition_input, base, associations=associations, acted=acted, hand_to=hand_to)
         if frame is None:
             Cognition._pass_stage(ctx, instance, turn, public_metadata)
             return
@@ -1103,7 +1109,7 @@ class Cognition(ability.Ability[InputData, OutputData]):
             stage="associating",
             context=telemetry.event_context(event),
         ) as active:
-            cognition_input, operation_id, _, acted = Cognition._reached(event)
+            cognition_input, operation_id, _, acted, hand_to = Cognition._reached(event)
             associative = instance._associative
             assert associative is not None
             if processing.active_operation(instance, operation_id) is None:
@@ -1136,7 +1142,9 @@ class Cognition(ability.Ability[InputData, OutputData]):
             if terminal is not None and isinstance(terminal.data, memory.AssociationsData):
                 associations = terminal.data
             active.set_attribute("bot.cognition.associated", associations is not None)
-            turn = Cognition._turn(instance, cognition_input, operation_id, associations=associations, acted=acted)
+            turn = Cognition._turn(
+                instance, cognition_input, operation_id, associations=associations, acted=acted, hand_to=hand_to
+            )
             _ = hsm.dispatch(
                 ctx,
                 instance,
@@ -1356,7 +1364,7 @@ class Cognition(ability.Ability[InputData, OutputData]):
         ):
             # The turn's input, or the terminal of the stage before: a completion (unhandled, or passed),
             # what memory surfaced, or a failure that cascades here (D-R-36).
-            cognition_input, operation_id, associations, acted = Cognition._reached(event)
+            cognition_input, operation_id, associations, acted, hand_to = Cognition._reached(event)
             public_metadata = _public_metadata(dict(event.metadata))
             base = operation_id
             if processing.active_operation(instance, base) is None:
@@ -1399,7 +1407,9 @@ class Cognition(ability.Ability[InputData, OutputData]):
                     ),
                 )
                 return
-            turn = Cognition._turn(instance, cognition_input, base, associations=associations, acted=acted)
+            turn = Cognition._turn(
+                instance, cognition_input, base, associations=associations, acted=acted, hand_to=hand_to
+            )
             hop_id = f"{base}{_REASONING_ID_SUFFIX}"
             input_event = dataclasses.replace(
                 instance._reasoning.input_event.with_data_and_id(
@@ -1824,15 +1834,23 @@ class Cognition(ability.Ability[InputData, OutputData]):
         instance: "Cognition",
         event: hsm.Event[typing.Any],
     ) -> bool:
-        """Intuition takes the turn: it is composed, and the turn perceives no handed-back failure of intuition,
-        which only reasoning can perceive (D-R-30)."""
+        """Intuition takes the turn: it is composed, the decision layer's pass did not choose reasoning for it (R-23),
+        and the turn perceives no handed-back failure of intuition, which only reasoning can perceive (D-R-30)."""
 
         del ctx
         data = event.data
         cognition_input = (
             data.turn.input if isinstance(data, types.CompletionData | types.FailureData | _AssociatedData) else data
         )
-        return instance._intuition is not None and not _perceives_failure(cognition_input, ("intuition",))
+        hand_to = (
+            data.turn.hand_to if isinstance(data, types.CompletionData | types.FailureData | _AssociatedData) else None
+        )
+        # The decision layer's pass is the bot's own choice of tier (R-23); every other hand-on keeps intuition.
+        return (
+            instance._intuition is not None
+            and hand_to != "reasoning"
+            and not _perceives_failure(cognition_input, ("intuition",))
+        )
 
     @staticmethod
     def _has_input(

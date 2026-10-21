@@ -221,6 +221,15 @@ class TurnData(pydantic.BaseModel):
             "What memory surfaced for this turn; None when the bot has no associative memory or association failed."
         ),
     )
+    hand_to: processing.HandOn | None = pydantic.Field(
+        default=None,
+        description=(
+            "The later tier the decision layer's pass chose for this turn (R-23): intuition, to answer it in words "
+            "now, or reasoning, to think it through first. None when no choice was made (no decision layer, an "
+            "empty or unsure selection, a failure), and the turn goes on to intuition when it is composed."
+        ),
+        examples=["reasoning"],
+    )
     acted: ActedData | None = pydantic.Field(
         default=None,
         description=(

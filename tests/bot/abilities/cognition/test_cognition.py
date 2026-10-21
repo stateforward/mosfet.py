@@ -372,7 +372,8 @@ class RecordingDecisionProcessor(processing.DecisionProcessor):
         self.calls.append(input)
         if isinstance(self.output, cognition.decision.OutputData):
             if self.output.result is None:
-                return _processor_events(processing.Result[processing.Events].unhandled())
+                # The pass, as a decision provider answers it: the envelope, with the tier it hands the turn to.
+                return typing.cast(processing.Events, typing.cast(object, self.output))
             return _as_events(self.output.result)
         return self.output
 
@@ -3006,6 +3007,7 @@ def _intuited(
     intuition_answer: cognition.types.OutputData,
     *,
     intuition_processor: processing.Processor | None = None,
+    decided: cognition.decision.OutputData | None = None,
 ) -> tuple[
     cognition.types.OutputData,
     list[processing.InputData],
@@ -3025,7 +3027,7 @@ def _intuited(
         intuition_processor_ = intuition_processor or RecordingReasoningProcessor(intuition_answer)
         reasoning_processor = RecordingReasoningProcessor(ignore_output("deliberated"))
         ability = RecordingCognition(
-            decision_processor=RecordingDecisionProcessor(cognition.decision.OutputData(result=None)),
+            decision_processor=RecordingDecisionProcessor(decided or cognition.decision.OutputData(result=None)),
             intuition=cognition.Intuition(processor=intuition_processor_),
             reasoning_processor=reasoning_processor,
         )
@@ -3047,6 +3049,83 @@ def _intuited(
 
 def _show(text: str) -> cognition.types.OutputData:
     return (cognition.types.EventData(target="desk", event=_ShowEvent.name, data={"text": text}),)
+
+
+def test_a_decision_model_choosing_reasoning_lands_the_turn_in_reasoning_with_recall_and_skips_intuition() -> None:
+    """R-23: the fallback reflex chooses the tier its pass hands the turn to. Choosing reasoning, the turn is
+    associated first (recall runs before either tier) and reasoning takes it; intuition is never asked."""
+
+    async def run() -> tuple[
+        cognition.types.OutputData, list[processing.InputData], list[processing.InputData], list[processing.InputData]
+    ]:
+        store = memory.Memory()
+        decision_processor = RecordingDecisionProcessor(
+            cognition.decision.OutputData(result=None, hand_to="reasoning", reason="it needs thought")
+        )
+        intuition_processor = RecordingReasoningProcessor(no_output("intuited"))
+        reasoning_processor = RecordingReasoningProcessor(no_output("reasoned"))
+        ability = RecordingCognition(
+            decision_processor=decision_processor,
+            intuition=cognition.Intuition(processor=intuition_processor),
+            reasoning_processor=reasoning_processor,
+            store=store,
+            associative=memory.Associative(memory=store),
+        )
+        ctx = await start_cognition_ability_for_test(ability)
+        await wait_until(lambda: ability.state().endswith("/idle"))
+        await _remember_by_message(
+            ctx,
+            store,
+            memory.EpisodeData(
+                turn_id="earlier",
+                parts=(text.TextPart(text="Ada asked for a call at noon."),),
+                participants=(_ADA,),
+                outcome=memory.Outcome.COMPLETED,
+            ),
+        )
+        turn = (await started_cognition_input(ctx)).model_copy(update={"participants": (_ADA,)})
+        result = await dispatch_ability_for_test(ability, ctx, turn)
+        await wait_until(lambda: ability.state().endswith("/idle"))
+        return result, decision_processor.calls, intuition_processor.calls, reasoning_processor.calls
+
+    result, decision_calls, intuition_calls, reasoning_calls = asyncio.run(run())
+
+    assert result == no_output("reasoned")
+    (decided,) = decision_calls
+    assert decided.hand_ons == ("intuition", "reasoning")
+    assert intuition_calls == []
+    (reasoned,) = reasoning_calls
+    assert isinstance(reasoned.recalled, memory.AssociationsData)
+    assert [item.text for item in reasoned.recalled.items] == ["Ada asked for a call at noon."]
+
+
+@pytest.mark.parametrize("chosen", ["intuition", None], ids=["chose-intuition", "no-choice-keeps-intuition"])
+def test_a_pass_to_intuition_or_without_a_choice_lands_the_turn_in_intuition(
+    chosen: typing.Literal["intuition"] | None,
+) -> None:
+    """R-23: choosing intuition, or a hand-on that names no tier (an empty product, low confidence), keeps intuition."""
+
+    result, intuition_calls, reasoning_calls, _, _ = _intuited(
+        _show("Hello."), decided=cognition.decision.OutputData(result=None, hand_to=chosen)
+    )
+
+    assert len(intuition_calls) == 1
+    assert reasoning_calls == []
+    assert result == _show("Hello.")
+
+
+def test_the_decision_layer_is_offered_reasoning_alone_when_no_intuition_is_composed() -> None:
+    async def run() -> list[processing.InputData]:
+        decision_processor = RecordingDecisionProcessor(cognition.decision.OutputData(result=None))
+        ability = RecordingCognition(decision_processor=decision_processor)
+        ctx = await start_cognition_ability_for_test(ability)
+        _ = await dispatch_ability_for_test(ability, ctx, await started_cognition_input(ctx))
+        await wait_until(lambda: ability.state().endswith("/idle"))
+        return decision_processor.calls
+
+    (decided,) = asyncio.run(run())
+
+    assert decided.hand_ons == ("reasoning",)
 
 
 def test_intuition_takes_up_what_reflex_hands_on_and_settles_the_turn_in_words() -> None:
