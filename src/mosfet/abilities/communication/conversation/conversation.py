@@ -340,8 +340,9 @@ class Message(pydantic.BaseModel):
         default=(),
         max_length=_MAX_PARTICIPANTS,
         description=(
-            "Who produced or was addressed by this message, stamped by its producer and never inferred: Speaking "
-            "stamps the bot's own voice ref on what it said."
+            "Who produced or was addressed by this message, stamped by its producer and never inferred: an inbound "
+            "message carries the participants stamped on the turn it was built from (who spoke, and to whom), and "
+            "Speaking stamps the bot's own voice ref on what it said."
         ),
         examples=[[], [{"ref": "voice:tts:warm", "role": "source"}]],
     )
@@ -414,6 +415,12 @@ def _message_for_turn(
     attachments: tuple[media.Image, ...],
     provenance: MessageProvenance,
 ) -> Message:
+    """The inbound message a turn commits, carrying the participants its producers stamped on the turn.
+
+    The message is what a model reads of the turn, so who is speaking rides on it, by the same refs the
+    turn's producers stamped (a speech turn's ``voice:`` refs): copied, never inferred.
+    """
+
     return Message(
         direction="inbound",
         source_ids=data.source_ids,
@@ -421,6 +428,7 @@ def _message_for_turn(
         content=content,
         content_type=content_type,
         attachments=attachments,
+        participants=turn_participants(data),
         provenance=provenance,
     )
 

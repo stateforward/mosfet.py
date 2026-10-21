@@ -176,7 +176,7 @@ def test_message_content_recursive_alias_preserves_schema_and_validation() -> No
 
     schema = conversation.Message.model_json_schema()
     schema_hash = hashlib.sha256(json.dumps(schema, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-    assert schema_hash == "98b0e966322fa11815fd8eb5a36964b2a2c18022740224c9cec0f52f434e58c8"
+    assert schema_hash == "efb5d54c9030659d446ffa6ac30edc91c714bbec3874fb6710568c0f4165e4cf"
 
     payload = {
         "direction": "inbound",
@@ -1941,3 +1941,30 @@ def test_only_what_the_bot_said_is_written_to_short_term_memory() -> None:
     assert (said.direction, said.text, said.speakers) == ("said", "and this", (_OWN_VOICE,))
     assert said.id
     assert said.conversation == conversation_id
+
+
+def test_the_inbound_message_shows_the_model_who_is_speaking() -> None:
+    """eval-4: the stimulus a model reads names its speaker by the same ref the recent turns' ``who`` carries.
+
+    Conversation copies the participants its producers stamped on the turn onto the inbound message it
+    builds from it, so the speaker is in the exchange itself and not only in the handoff's envelope.
+    """
+
+    turn, (_, heard) = _speech_turn("3f2a9c")
+    target, context = started_conversation()
+
+    handoff = _handoff(run_terminal(target, context, turn))
+    assert isinstance(handoff.stimulus, hsm.Event)
+    exchange = handoff.stimulus.data
+    assert isinstance(exchange, conversation.Exchange)
+    (inbound,) = exchange.messages
+    prompt = "".join(
+        part.text
+        for part in cognition_event.model_facing_content(handoff, capacity=media.ImageCapacity())
+        if isinstance(part, text.TextPart)
+    )
+
+    assert inbound.participants == conversation.conversation.turn_participants(turn)
+    assert heard in inbound.participants
+    message = prompt[prompt.index("<communication:message") :]
+    assert f'ref="{heard.ref}" role="source"' in message
