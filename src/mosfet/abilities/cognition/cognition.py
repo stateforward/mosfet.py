@@ -1197,10 +1197,12 @@ class Cognition(ability.Ability[InputData, OutputData]):
 
         Associative (long-term memory) and the short-term register answer in parallel, each within the
         step timeout. Either one absent, failing or late leaves the turn without what it would have
-        given; neither fails the turn. Both leave out the turns this turn already shows: every turn
-        whose id is this turn's stimulus's (or one of the percepts' of its ``bot.perceived`` batch) or
-        one of the causal parents' each carries. Associative leaves out their episodes
-        (``CueData.exclude``); the recent turns are filtered here.
+        given; neither fails the turn. Associative leaves out the episodes of the turns this turn already
+        shows (``CueData.exclude``): every turn whose id is this turn's stimulus's (or one of the percepts'
+        of its ``bot.perceived`` batch) or one of the causal parents' each carries, so the turn being
+        answered is never recalled as an earlier memory. The recent turns keep them, in the order they
+        were heard and said: the conversation reads as one timeline whose newest line is, as a rule, what
+        was just said, and a turn heard or said after it shows where it fell.
         """
 
         with span.operation(
@@ -1216,10 +1218,10 @@ class Cognition(ability.Ability[InputData, OutputData]):
             child_timeout = instance._child_operation_timeout
             timeout = child_timeout if child_timeout is not None else types.STEP_TIMEOUT
             metadata = _public_metadata(dict(event.metadata))
-            # The ids this turn already shows: its stimulus's, or each percept's of its batch, and
-            # the causal parents each carries. Speech admitted through Conversation carries the heard
-            # speech two parents up: Listening wrote its heard turn under that speech's id, and
-            # cognition remembered the turn that admitted it there.
+            # The ids this turn already shows, which association leaves out: its stimulus's, or each
+            # percept's of its batch, and the causal parents each carries. Speech admitted through
+            # Conversation carries the heard speech two parents up: cognition remembered the turn that
+            # admitted it there.
             own, causes = _shown(cognition_input.stimulus)
             shown = {*own, *causes}
 
@@ -1274,7 +1276,7 @@ class Cognition(ability.Ability[InputData, OutputData]):
                     return ()
                 if not isinstance(terminal.data, memory.stm.RecentTurnsOutputData):
                     return ()
-                return tuple(turn for turn in terminal.data.turns if turn.id not in shown)
+                return terminal.data.turns
 
             associations, recent = await asyncio.gather(associate(), recall_recent())
             active.set_attribute("bot.cognition.associated", associations is not None)

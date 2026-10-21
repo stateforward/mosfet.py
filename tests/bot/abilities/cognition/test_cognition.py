@@ -4695,12 +4695,13 @@ def _heard_now(turn_id: str) -> hsm.Event[mosfet.InputEventData]:
     )
 
 
-def test_recent_turns_reach_reasoning_oldest_first_without_the_turn_being_answered() -> None:
-    """R-20 C3: what was heard and said before this turn reaches reasoning from short-term memory.
+def test_recent_turns_reach_reasoning_oldest_first_ending_with_the_turn_being_answered() -> None:
+    """R-20 C3: what was heard and said up to this turn reaches reasoning from short-term memory.
 
     The register's turns ride the turn beside what memory associates, render one compact line each
     (when, which way, who by their ref, the words), oldest first, and the turn that is this turn's own
-    stimulus is left out, so the stimulus is never shown twice.
+    stimulus is among them where it was heard, so the conversation reads as one timeline whose newest
+    line is what was just said; the stimulus itself still closes the prompt.
     """
 
     async def run() -> tuple[list[processing.InputData], list[processing.InputData]]:
@@ -4741,7 +4742,11 @@ def test_recent_turns_reach_reasoning_oldest_first_without_the_turn_being_answer
     (frame,) = reasoning_calls
     recalled = frame.recalled
     assert isinstance(recalled, cognition.RecalledData)
-    assert [(turn.id, turn.direction) for turn in recalled.recent] == [("earlier", "heard"), ("reply", "said")]
+    assert [(turn.id, turn.direction) for turn in recalled.recent] == [
+        ("earlier", "heard"),
+        ("reply", "said"),
+        ("now", "heard"),
+    ]
     assert recalled.associations is None
     # Reflex chooses without recall (D-R-52): the recent turns are read after it, for the tiers that answer.
     (decided,) = decision_calls
@@ -4751,18 +4756,20 @@ def test_recent_turns_reach_reasoning_oldest_first_without_the_turn_being_answer
     )
     heard = prompt.index('direction="heard" who="voice:maya">Hi Willy, I\'m Maya.</memory:turn>')
     said = prompt.index('direction="said" who="voice:willy">Nice to meet you, Maya.</memory:turn>')
-    assert heard < said
-    assert prompt.count("What did I just tell you?") == 0
+    now = prompt.index('direction="heard" who="voice:maya">What did I just tell you?</memory:turn>')
+    # One timeline, its newest line what was just said: the very next line closes the recent turns.
+    assert heard < said < now
+    assert prompt[now:].split("\n")[1].strip() == "</recent>"
     assert 'id="earlier"' not in prompt and "conversation=" not in prompt and "cut=" not in prompt
     # R-20 C5: recalled, then the situation (the world block), then the stimulus; the system message is not repeated.
     assert frame.situation is not None and frame.situation in prompt
-    assert said < prompt.index(frame.situation) < prompt.index('stimulus:id="now"')
+    assert now < prompt.index(frame.situation) < prompt.index('stimulus:id="now"')
     assert "instructions=" not in prompt
 
 
 def test_recent_turns_reach_intuition_as_they_reach_reasoning() -> None:
     """R-20 C3, D-R-52: the recent turns are read after reflex, so intuition, the tier that answers in words now,
-    is given them as reasoning is, without the turn being answered."""
+    is given them as reasoning is, ending with the turn being answered."""
 
     async def run() -> list[processing.InputData]:
         register = memory.StmMemory()
@@ -4804,7 +4811,11 @@ def test_recent_turns_reach_intuition_as_they_reach_reasoning() -> None:
     (frame,) = asyncio.run(run())
 
     assert isinstance(frame.recalled, cognition.RecalledData)
-    assert [(turn.id, turn.direction) for turn in frame.recalled.recent] == [("earlier", "heard"), ("reply", "said")]
+    assert [(turn.id, turn.direction) for turn in frame.recalled.recent] == [
+        ("earlier", "heard"),
+        ("reply", "said"),
+        ("now", "heard"),
+    ]
 
 
 def _speech_now() -> hsm.Event[listening.SpeechData]:
@@ -4836,13 +4847,14 @@ def _exchange_now() -> hsm.Event[communication.conversation.Exchange]:
 
 
 @pytest.mark.parametrize("stimulus", [_speech_now, _exchange_now], ids=["raw-speech", "conversation-exchange"])
-def test_the_turn_listening_heard_for_this_stimulus_is_left_out_of_recent_while_earlier_turns_appear(
+def test_the_turn_listening_heard_for_this_stimulus_is_the_newest_recent_turn_after_earlier_ones(
     stimulus: collections.abc.Callable[[], hsm.Event[typing.Any]],
 ) -> None:
     """R-20: Listening writes every utterance it hears under its speech event's id, identified or not.
 
     Whether that speech reaches cognition raw (a voice nobody identified) or through Conversation (whose
-    exchange carries it as a causal parent), this turn's own heard turn is not shown again as recent.
+    exchange carries it as a causal parent), this turn's own heard turn is the newest of the recent turns,
+    after the earlier ones, so what was just said reads as the latest line of the conversation.
     """
 
     async def run() -> list[processing.InputData]:
@@ -4878,7 +4890,11 @@ def test_the_turn_listening_heard_for_this_stimulus_is_left_out_of_recent_while_
     (frame,) = asyncio.run(run())
 
     assert isinstance(frame.recalled, cognition.RecalledData)
-    assert [(turn.id, turn.direction) for turn in frame.recalled.recent] == [("earlier", "heard"), ("reply", "said")]
+    assert [(turn.id, turn.direction) for turn in frame.recalled.recent] == [
+        ("earlier", "heard"),
+        ("reply", "said"),
+        ("now", "heard"),
+    ]
 
 
 @pytest.mark.parametrize("stimulus", [_speech_now, _exchange_now], ids=["raw-speech", "conversation-exchange"])

@@ -191,9 +191,10 @@ class ActedData(pydantic.BaseModel):
 class RecalledData(pydantic.BaseModel):
     """What the bot has in mind beside a turn's stimulus: the recent conversation, then what memory associates.
 
-    ``recent`` is what short-term memory holds of the turns just before this one, oldest first, each
-    one compact line, without the turn that is this turn's own stimulus. A prompt that cannot hold
-    them all keeps the newest. ``associations`` is what long-term memory surfaced, which keeps its
+    ``recent`` is what short-term memory holds of the conversation up to this turn, oldest first, each
+    one compact line, the turn that is this turn's own stimulus among them where it was heard: one
+    timeline whose newest line is, as a rule, what was just said. A prompt that cannot hold them all
+    keeps the newest. ``associations`` is what long-term memory surfaced, which keeps its
     own ranking and trimming.
     """
 
@@ -210,8 +211,8 @@ class RecalledData(pydantic.BaseModel):
     recent: tuple[stm.Turn, ...] = pydantic.Field(
         default=(),
         description=(
-            "What was heard and said just before this turn, oldest first, from short-term memory; this turn's "
-            "own stimulus is never among them."
+            "What was heard and said up to this turn, oldest first, from short-term memory; this turn's own "
+            "stimulus is among them where it was heard, so the newest line is, as a rule, what was just said."
         ),
     )
     associations: memory.AssociationsData | None = pydantic.Field(
@@ -257,8 +258,8 @@ class TurnData(pydantic.BaseModel):
     recent: tuple[stm.Turn, ...] = pydantic.Field(
         default=(),
         description=(
-            "What short-term memory holds of the turns just before this one, oldest first, without this turn's own "
-            "stimulus; empty when the bot has no short-term register or the read failed."
+            "What short-term memory holds of the turns up to this one, oldest first, this turn's own stimulus among "
+            "them where it was heard; empty when the bot has no short-term register or the read failed."
         ),
     )
     hand_to: processing.HandOn | None = pydantic.Field(
