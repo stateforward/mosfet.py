@@ -626,3 +626,18 @@ def test_memory_of_a_perceived_batch_within_its_bound_keeps_every_percept() -> N
     assert 'omitted="size"' not in kept
     positions = [kept.index(f'text="{index}:') for index in range(8)]
     assert positions == sorted(positions)
+
+
+def test_a_carried_upstream_event_renders_its_id_source_and_target() -> None:
+    participant = mosfet.Participant(ref="person-42", role=mosfet.ParticipantRole.SOURCE)
+    typed = computer.TextEnteredData(device_id="desk", person_id="person-42", participants=(participant,), text="hi")
+    upstream = dataclasses.replace(
+        computer.TextEnteredEvent.with_data_and_id(typed, "line-1"), source="desk", target="reading-1"
+    )
+    stimulus = mosfet.InputEventData(observation=mosfet.StimulusData.from_event(upstream), participants=(participant,))
+
+    rendered = _text(cognition.event.model_facing_content(stimulus, capacity=_TEXT_ONLY))
+
+    assert 'stimulus:id="line-1"' in rendered
+    assert 'stimulus:source="desk"' in rendered
+    assert 'stimulus:target="reading-1"' in rendered
