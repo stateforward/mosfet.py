@@ -97,7 +97,12 @@ class Expression(pydantic.BaseModel):
     )
     emphasis: bool = pydantic.Field(default=False, description="Stress the words of this part.")
     sound: Sound | None = pydantic.Field(
-        default=None, description="A non-verbal sound made with this part's words; one sound per part."
+        default=None,
+        description=(
+            "A non-verbal sound (a laugh, sigh, gasp and the like) made with this part, one per part, placed by "
+            "sound_at. This is the only way to make one: the voice would read a written 'sigh' or '*sigh*' in the "
+            "words aloud as speech. A voice that cannot make the sound ignores it."
+        ),
     )
     sound_at: typing.Literal["before", "after"] = pydantic.Field(
         default="before",
@@ -138,7 +143,8 @@ class Part(pydantic.BaseModel):
         json_schema_extra={
             "description": (
                 "One stretch of your reply and, optionally, how to say it. Split the reply into parts only where the "
-                "way you say it changes. A sound belongs to the part whose words it is made with."
+                "way you say it changes. The words are only what is spoken; a laugh, sigh or other non-verbal sound "
+                "is made with the part's expression.sound, never written into the words."
             )
         },
     )
@@ -153,8 +159,11 @@ class Part(pydantic.BaseModel):
         min_length=1,
         max_length=2000,
         description=(
-            "The words of this part, read aloud literally. Continue the reply exactly, including any space or "
-            "punctuation that joins this part to the one before it."
+            "The words of this part. The voice speaks every character exactly as written, so this is speech only: no "
+            "stage directions, actions in asterisks, emotes, markup or tags, because they would be read aloud. For a "
+            "laugh, sigh or other sound use expression.sound; for how to say the words use expression (instructions, "
+            "style, emphasis, as the voice offers). Continue the reply exactly, including any space or punctuation "
+            "that joins this part to the one before it."
         ),
     )
 
