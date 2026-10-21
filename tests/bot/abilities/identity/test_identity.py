@@ -687,3 +687,20 @@ def test_a_memory_that_never_answers_leaves_the_bot_nameless_once_its_bring_up_b
     # One failure for the recall that ran out of budget, one for the name it then could not write down.
     assert len(failures) == 2
     assert state.endswith(_LISTENING)
+
+
+def test_the_adopt_tool_says_whose_name_it_takes() -> None:
+    """eval-4: a visitor said who they were and the bot took their name as its own.
+
+    The adopt schema is the tool a model reads: it says the name becomes the bot's own, that a name
+    someone gives for themselves names them and is not offered to the bot, and still shows no example name.
+    """
+
+    schema = identity.AdoptData.model_json_schema()
+    described = schema["description"]
+    name = schema["properties"]["name"]
+
+    assert "your own name" in described
+    assert "introduces themselves" in described and "names them, not you" in described
+    assert "for you" in name["description"] and "not the speaker's" in name["description"]
+    assert "examples" not in name

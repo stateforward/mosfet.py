@@ -55,11 +55,14 @@ class AdoptData(pydantic.BaseModel):
         extra="forbid",
         json_schema_extra={
             "description": (
-                "Adopt a name as your own. Select this when a name has been offered to you and you choose "
-                "to answer to it. You are not required to: hearing a name offered is not the same as "
-                "taking it, and declining leaves you nameless, which is a normal state. Adopting replaces "
-                "any name you already answer to. Once adopted, you can tell when you are being addressed "
-                "by that name; until then you only hear words. This does not speak, answer, or act on "
+                "Take a name as your own name: the name you, the bot making this selection, answer to from "
+                "now on. Select this when someone offers a name for you (they call you by it, or ask you to "
+                "take it) and you choose to answer to it. A name is someone's: when a person introduces themselves "
+                "or says who they are, that name names them, not you, and it stays theirs; this is never how to "
+                "remember someone else's name. You are not required to take a name offered to you: hearing one "
+                "is not the same as taking it, and declining leaves you nameless, which is a normal state. "
+                "Adopting replaces any name you already answer to. Once adopted, you can tell when you are being "
+                "addressed by that name; until then you only hear words. This does not speak, answer, or act on "
                 "anything else."
             ),
         },
@@ -69,10 +72,11 @@ class AdoptData(pydantic.BaseModel):
         min_length=1,
         max_length=64,
         description=(
-            "The name to answer to, exactly as it was given: the name itself and nothing around it — not "
-            "the sentence it arrived in, not a greeting or title attached to it, and not a description of "
-            "it. It can only come from what was actually said to you, because a name you were not given "
-            "names nobody and answering to it makes you answer to the wrong thing."
+            "The name for you to answer to — yours from now on, not the speaker's — exactly as it was given: "
+            "the name itself and nothing around it — not the sentence it arrived in, not a greeting or title "
+            "attached to it, and not a description of it. It can only come from what was actually said to you, "
+            "because a name you were not given names nobody and answering to it makes you answer to the wrong "
+            "thing."
         ),
     )
     reason: str | None = pydantic.Field(
