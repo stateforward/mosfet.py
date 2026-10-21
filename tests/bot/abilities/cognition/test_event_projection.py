@@ -368,6 +368,49 @@ def test_budgeted_item_over_a_scalar_budget_is_omitted_not_raised() -> None:
     assert '<entries count="2" omitted="1">' in rendered
 
 
+class _Sparse(pydantic.BaseModel):
+    """A payload whose collections may all be empty."""
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(frozen=True)
+
+    name: str
+    tags: tuple[str, ...] = ()
+    labels: dict[str, str] = pydantic.Field(default_factory=dict[str, str])
+    rows: tuple[tuple[str, ...], ...] = ()
+
+
+def test_an_empty_collection_field_renders_nothing() -> None:
+    for project in (cognition.event.model_facing_content, cognition.event.memory_content):
+        rendered = _text(project(_Sparse(name="ada"), capacity=_TEXT_ONLY))
+
+        assert "ada" in rendered
+        assert "<tags" not in rendered and "<labels" not in rendered and "<rows" not in rendered
+        assert 'count="0"' not in rendered
+
+
+def test_an_empty_item_keeps_its_place_so_the_count_holds() -> None:
+    rendered = _text(cognition.event.model_facing_content(_Sparse(name="ada", rows=((), ("a",))), capacity=_TEXT_ONLY))
+
+    assert '<rows count="2">' in rendered
+    assert rendered.count("<item") == 3
+
+
+def test_an_empty_budgeted_field_renders_nothing() -> None:
+    for project in (cognition.event.model_facing_content, cognition.event.memory_content):
+        rendered = _text(project(_Ranked(items=()), capacity=_TEXT_ONLY))
+
+        assert "<items" not in rendered
+
+
+def test_a_budgeted_field_trimmed_to_nothing_still_says_what_it_omitted() -> None:
+    chronicle = _Chronicle(entries=("z" * 70_000,), stimulus="now")
+
+    rendered = _text(cognition.event.model_facing_content(chronicle, capacity=_TEXT_ONLY))
+
+    assert "now" in rendered
+    assert '<entries count="0" omitted="1" />' in rendered
+
+
 def test_budgeted_fields_never_hide_a_stimulus_that_alone_overflows() -> None:
     chronicle = _Chronicle(entries=("small",), stimulus="s" * 20_000)
 

@@ -11,8 +11,11 @@ rest of the stimulus leaves, so recalled context never makes a prompt fail.
 
 ``memory_content`` renders what memory keeps of a stimulus through the same projection. A payload
 that declares ``__memory_fields__`` contributes only those fields, typed causal parents included
-(the prompt projection skips them); memory never fails a turn, so an unrenderable or oversized
+(the prompt projection skips them). Memory never fails a turn, so an unrenderable or oversized
 stimulus is kept as its bare element marked ``omitted``.
+
+Both projections leave out a sequence or mapping field with no items; a budgeted field trimmed to
+no item still renders its ``omitted`` count.
 
 Metrics (scope ``bot.abilities.processing``; the image metrics count model prompts only, never
 ``memory_content``):
@@ -85,6 +88,7 @@ _RECALLED_OMITTED = metrics.get_meter(_METRIC_SCOPE).create_counter(
 class _BudgetedField:
     """A budgeted sequence field whose items render after the rest of the payload."""
 
+    parent: ElementTree.Element
     element: ElementTree.Element
     name: str
     keep: typing.Literal["head", "tail"]
@@ -420,15 +424,25 @@ def _fill_field(
     *,
     keep: typing.Literal["head", "tail"] | None = None,
     counted: bool = True,
+    as_item: bool = False,
 ) -> None:
     """Place one canonical JSON field on ``element`` as a presentation detail.
 
     A sequence field with ``keep`` set is budgeted: its element is placed now and its items are
     deferred to ``_render_budgeted``. A sequence field renders ``count="<n>"`` unless ``counted``
-    is false.
+    is false. A sequence or mapping field with no items renders nothing; one placed ``as_item``
+    (an entry of an enclosing collection) renders even when empty, so it keeps its place under
+    that collection's count.
     """
 
     if serialized is None:
+        return
+    if (
+        not as_item
+        and isinstance(serialized, collections.abc.Mapping | list | tuple)
+        and not serialized
+        and not isinstance(value, pydantic.BaseModel | hsm.Event)
+    ):
         return
     if isinstance(value, bytes | bytearray | memoryview):
         raise TypeError("raw media must be excluded by its owning Data model before XML rendering")
@@ -470,7 +484,7 @@ def _fill_field(
                 continue
             entry = _subelement(child, "entry", budget)
             _set_attribute(entry, "key", key, budget)
-            _fill_field(entry, "value", item, serialized_mapping[key], budget)
+            _fill_field(entry, "value", item, serialized_mapping[key], budget, as_item=True)
         return
     if isinstance(value, collections.abc.Set | collections.abc.Sequence):
         items = tuple(typing.cast(collections.abc.Collection[object], value))
@@ -483,6 +497,7 @@ def _fill_field(
             _set_attribute(container, "omitted", str(len(items)), budget)
             budget.deferred.append(
                 _BudgetedField(
+                    parent=element,
                     element=container,
                     name=name,
                     keep=keep,
@@ -506,7 +521,7 @@ def _fill_field(
                 _subelement(child, "item", budget).text = text
             elif isinstance(serialized_item, collections.abc.Mapping | list | tuple):
                 # A JSON object or list among the items (a selection's untyped data) renders as one item.
-                _fill_field(child, "item", item, serialized_items[index], budget)
+                _fill_field(child, "item", item, serialized_items[index], budget, as_item=True)
         return
     if isinstance(value, enum.Enum):
         _set_attribute(element, name, str(serialized), budget)
@@ -521,8 +536,11 @@ def _render_budgeted(root: ElementTree.Element, budget: _ProjectionBudget) -> No
     stimulus alone overflows. An item that would exceed any budget dimension is not rendered;
     its field records how many it left out as ``omitted="<n>"``. ``head`` fields offer their items
     first to last (ranked), ``tail`` fields last to first (chronological); kept items keep their
-    order. Sizes are measured as rendered and indented, and every image placeholder reserves the
-    attribute bytes ``_attach_images`` may add, so the rendered text fits the budget exactly.
+    order. A field left with no item kept and none omitted (its items were not renderable) is
+    removed, like any empty collection; one trimmed to no item still renders, its ``omitted``
+    saying what was left out. Sizes are measured as rendered and indented, and every image
+    placeholder reserves the attribute bytes ``_attach_images`` may add, so the rendered text fits
+    the budget exactly.
     """
 
     if not budget.deferred:
@@ -574,6 +592,9 @@ def _render_budgeted(root: ElementTree.Element, budget: _ProjectionBudget) -> No
         for index in sorted(kept):
             field.element.append(kept[index])
         omitted = len(field.items) - len(kept) - skipped
+        if not kept and not omitted:
+            field.parent.remove(field.element)
+            continue
         if field.counted:
             field.element.set("count", str(len(kept)))
         if omitted:
@@ -636,6 +657,11 @@ def model_facing_content(
     ``__model_facing_uncounted_fields__``, a set of field names: a field that grows turn over
     turn (the recent conversation) then opens the same way each turn, so a server's prefix cache
     holds through the items it already rendered.
+
+    A sequence or mapping field with no items renders nothing: an empty collection tells the
+    model nothing its absence does not. A budgeted field trimmed to no item still renders, with
+    ``omitted="<n>"``, so the model knows recalled context was left out. An empty collection
+    nested as an item of another collection still renders, keeping that collection's count true.
 
     Raises ``TypeError`` for raw bytes outside a ``media.Image`` or a malformed
     ``__model_facing_budgeted_fields__``, and ``ValueError`` when the payload without its
