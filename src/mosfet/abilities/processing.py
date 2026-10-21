@@ -1880,7 +1880,10 @@ class DraftData(pydantic.BaseModel):
     )
 
     text: str = pydantic.Field(
-        description="The unescaped text newly written into the field, in order.",
+        description=(
+            "The unescaped text newly written into the field, in order; empty only on the one draft of an element "
+            "of the marker's ``within`` array that ended with nothing written into its field."
+        ),
         examples=[" I can help"],
     )
     offset: int = pydantic.Field(
@@ -1930,8 +1933,10 @@ class Draft:
 
     Read by Processing only, never shown to the model: the selected event's schema and payload are unchanged.
     Without ``within``, ``field`` is in the event's data; with it, the drafted string is ``data.<within>[i].<field>``
-    for each element ``i`` of that array, drafted part by part. ``leading`` names sibling fields in the same object
-    as ``field`` that ride its first draft when the model finishes writing them before ``field`` begins; the schema
+    for each element ``i`` of that array, drafted part by part; an element that ends with nothing written into
+    ``field`` (it omits it) is still drafted once, with empty text, so every element opens in order. ``leading``
+    names sibling fields in the same object as ``field`` that ride its first draft when the model finishes writing
+    them before ``field`` begins; the schema
     should declare them before ``field`` so a model tends to write them first. The final selection follows the
     drafts under the same event id, and it is what counts.
 
@@ -2070,6 +2075,7 @@ class _Frame:
     part: int | None = None
     event: str | None = None
     unresolved: bool = False
+    drafted: bool = False
     leading: dict[str, pydantic.JsonValue] = dataclasses.field(default_factory=dict[str, pydantic.JsonValue])
 
 
@@ -2096,8 +2102,9 @@ class DraftParser:
     when the marker names an array), at its offset, for each item whose offered event carries a :class:`Draft`
     marker for that field. An item is drafted only when its ``event`` string ended before that field's string (or
     that array) began; otherwise it is counted ``unresolved``. The marker's ``leading`` sibling fields, in the same
-    object as the field, whose values close before the field's string begins are decoded and ride its first draft.
-    Malformed arguments stop drafting for the request and are counted ``unparsed``; nothing ever raises into the
+    object as the field, whose values close before the field's string begins are decoded and ride its first draft;
+    an element of a ``within`` array that closes with nothing written into the field is drafted once as it closes,
+    with empty text and its leading fields, so its part still opens in order. Malformed arguments stop drafting for the request and are counted ``unparsed``; nothing ever raises into the
     processor.
     """
 
@@ -2159,6 +2166,7 @@ class DraftParser:
                 leading=leading,
             )
         )
+        frame.drafted = True
         self._emitted = len(self._text)
         self._offset += len(delta)
         self._seq += 1
@@ -2183,10 +2191,25 @@ class DraftParser:
         self._stack.append(_Frame(kind=kind, role=role, item=item, part=part))
         self._mode = "key" if kind == "object" else "value"
 
-    def _close(self, kind: typing.Literal["object", "array"]) -> bool:
+    def _close(self, kind: typing.Literal["object", "array"], drafts: list[DraftData]) -> bool:
         if not self._stack or self._stack[-1].kind != kind:
             return False
-        _ = self._stack.pop()
+        frame = self._stack.pop()
+        if frame.role == "element" and not frame.drafted and (held := self._holder(frame)) is not None:
+            # An element that ends with nothing written into its field still opens its part, in order, with what it
+            # carries: its index never silently disappears from the stream.
+            drafts.append(
+                DraftData(
+                    text="",
+                    offset=0,
+                    event=held[1],
+                    item=frame.item,
+                    part=frame.part,
+                    seq=self._seq,
+                    leading=frame.leading,
+                )
+            )
+            self._seq += 1
         self._value_done()
         return True
 
@@ -2358,7 +2381,7 @@ class DraftParser:
             elif character == "[":
                 self._open("array")
             elif character == "]" and self._stack and self._stack[-1].kind == "array" and not self._stack[-1].count:
-                return self._close("array")
+                return self._close("array", drafts)
             elif character in _LITERAL:
                 self._mode = "literal"
             else:
@@ -2370,7 +2393,7 @@ class DraftParser:
                 self._mode = "string"
                 self._start_string()
                 return True
-            return character == "}" and not self._stack[-1].count and self._close("object")
+            return character == "}" and not self._stack[-1].count and self._close("object", drafts)
         if mode == "colon":
             if character != ":":
                 return False
@@ -2383,9 +2406,9 @@ class DraftParser:
                 self._mode = "key" if frame.kind == "object" else "value"
                 return True
             if character == "}":
-                return self._close("object")
+                return self._close("object", drafts)
             if character == "]":
-                return self._close("array")
+                return self._close("array", drafts)
             return False
         return False
 

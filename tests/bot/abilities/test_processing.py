@@ -2403,6 +2403,34 @@ def test_draft_parser_leaves_out_a_leading_field_written_after_its_part_began_in
     assert after - before == collections.Counter({"captured": 1, "late": 1})
 
 
+def test_draft_parser_drafts_an_element_written_without_its_field_as_one_opening_in_order() -> None:
+    """A part with no words (a sound or a pause of its own) still opens in order, with what it carries."""
+
+    arguments = (
+        '{"events": [{"event": "tests.processing.lines", "data": {"parts": [{"words": "Oh, "}, '
+        '{"how": {"sound": "chuckle"}}, {"how": {"pause": "short"}, "words": "So."}, {"how": {"pause": "long"}}]}}]}'
+    )
+    name = _LINES_EVENT.name
+    expected: dict[int, tuple[str, dict[str, pydantic.JsonValue]]] = {
+        0: ("Oh, ", {}),
+        1: ("", {"how": {"sound": "chuckle"}}),
+        2: ("So.", {"how": {"pause": "short"}}),
+        3: ("", {"how": {"pause": "long"}}),
+    }
+    whole = _drafted(processing.DraftParser((_LINES_EVENT,)), (arguments,))
+    assert whole == [
+        processing.DraftData(text=text, offset=0, event=name, item=0, part=part, seq=part, leading=leading)
+        for part, (text, leading) in expected.items()
+    ]
+    for cut in range(len(arguments) + 1):
+        drafts = _drafted(processing.DraftParser((_LINES_EVENT,)), (arguments[:cut], arguments[cut:]))
+        openings = [draft for draft in drafts if draft.offset == 0]
+        assert [draft.part for draft in openings] == [0, 1, 2, 3], cut
+        assert [draft.leading for draft in openings] == [leading for _, leading in expected.values()], cut
+        written = {part: "".join(draft.text for draft in drafts if draft.part == part) for part in expected}
+        assert written == {part: text for part, (text, _) in expected.items()}, cut
+
+
 def test_draft_parser_drafts_no_part_of_a_within_array_written_before_the_event_name(
     tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
