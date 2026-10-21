@@ -25,9 +25,33 @@ def test_a_part_is_words_verbatim_and_an_optional_expression_and_its_schema_has_
         _ = speech.Part.model_validate({"words": "Hi", "sound": "laugh"})
     schema = speech.Part.model_json_schema()
     assert "examples" not in json.dumps(schema)
-    assert "Split the reply into parts only where the way you say it changes" in schema["description"]
+    assert "Split the reply into parts where the way you say it changes" in schema["description"]
     # The model writes a part's fields in schema order: how to say it comes before the words, so it rides the first draft.
     assert tuple(schema["properties"]) == ("expression", "words")
+
+
+def test_a_part_without_words_is_a_sound_of_its_own_and_a_part_is_never_empty() -> None:
+    chuckle = speech.Part.model_validate({"expression": {"sound": "chuckle"}})
+
+    assert chuckle.words is None
+    assert chuckle.expression == speech.Expression(sound="chuckle")
+    for empty in ({}, {"expression": {"emotion": "amused"}}, {"words": None}):
+        with pytest.raises(pydantic.ValidationError, match="words or a sound"):
+            _ = speech.Part.model_validate(empty)
+    schema = speech.Part.model_json_schema()
+    assert "words" not in schema.get("required", [])
+    assert "a part of its own" in schema["description"]
+
+
+def test_words_refuse_the_characters_of_stage_directions_and_markup_in_the_schema_too() -> None:
+    for marked in ("*chuckles* Hi.", "Hi <laugh>", "[pause] Hi.", "Hi {sigh}", "</div>", "}}"):
+        with pytest.raises(pydantic.ValidationError, match="pattern"):
+            _ = speech.Part(words=marked)
+    assert speech.Part(words="Well — “quoted”, (aside) & 50% — ok?!").words is not None
+    words = speech.Part.model_json_schema()["properties"]["words"]
+    assert words["pattern"] == r"^[^*<>\[\]{}]+$"
+    # Omitted, never null: the model sees a string or nothing.
+    assert (words["type"], "anyOf" in words) == ("string", False)
 
 
 def test_an_expression_directs_at_least_one_cue_within_its_bounds() -> None:
@@ -93,8 +117,6 @@ def test_the_canonical_cues_and_sounds_are_closed_vocabularies() -> None:
         "breath",
         "cough",
         "clear_throat",
-        "pause_short",
-        "pause_long",
     }
 
 

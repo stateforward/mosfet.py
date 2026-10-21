@@ -135,8 +135,8 @@ class RespondData(pydantic.BaseModel):
         max_length=64,
         description=(
             "The reply, as one or more parts said in order in your own voice. Their words, joined exactly as "
-            "written, are the reply, and are read aloud literally; how a part is said belongs in its expression, "
-            "never in its words."
+            "written, are the reply, and are read aloud literally; how a part is said, and any sound, belongs in its "
+            "expression, never in its words."
         ),
     )
 
@@ -408,8 +408,8 @@ class Communication(ability.Ability[TurnData, object]):
 
     @staticmethod
     def _is_response_text(event: hsm.Event[typing.Any]) -> bool:
-        """A respond, or a draft of one with words newly written into one of its parts: the two ways a response's
-        words arrive."""
+        """A respond, or a draft of one with words newly written into one of its parts or a part with none opening
+        with its expression: the two ways a response arrives."""
 
         data = event.data
         if isinstance(data, RespondData):
@@ -418,7 +418,7 @@ class Communication(ability.Ability[TurnData, object]):
             isinstance(data, processing.DraftData)
             and data.event == RespondEvent.name
             and data.part is not None
-            and bool(data.text)
+            and (bool(data.text) or "expression" in data.leading)
         )
 
     @staticmethod

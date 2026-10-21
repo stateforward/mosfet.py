@@ -564,6 +564,61 @@ def test_a_part_streamed_in_schema_order_reaches_speakings_first_draft_with_its_
     assert (first[2].part, first[2].offset, first[2].expression) == (0, 0, amused)
 
 
+def test_a_part_that_is_only_a_sound_reaches_speaking_as_its_own_draft_in_order() -> None:
+    chuckle = vocal.speech.Expression(sound="chuckle")
+    final = (
+        vocal.speech.Part(words="Oh, "),
+        vocal.speech.Part(expression=chuckle),
+        vocal.speech.Part(words=" you got me."),
+    )
+    arguments = json.dumps(
+        {
+            "events": [
+                {
+                    "event": communication.RespondEvent.name,
+                    "data": communication.RespondData(parts=final).model_dump(mode="json", exclude_defaults=True),
+                }
+            ]
+        }
+    )
+    parser = processing.DraftParser((communication.RespondEvent,))
+    drafts = [draft for character in arguments for draft in parser.feed(character)]
+
+    async def run() -> tuple[list[tuple[str, str, object]], list[hsm.Event[typing.Any]]]:
+        ctx = Environment()
+        voice = ForwardRecordingSpeaking(Script())
+        comm = communication.Communication(active_conversation=_conversation(), speaking=voice)
+        collector = await _owned(ctx, voice, comm)
+        for draft in drafts:
+            _ = await hsm.dispatch(ctx, comm, communication.DraftEvent.with_data_and_id(draft, "op-1"))
+        _ = await hsm.dispatch(ctx, comm, _reply(final, "op-1"))
+        await _wait_until(lambda: bool(_spoken(collector)))
+        return _forwarded(voice), _spoken(collector)
+
+    forwarded, spoken = asyncio.run(run())
+    openings = [
+        (data.part, data.words, data.expression)
+        for _, _, data in forwarded
+        if isinstance(data, speaking.DraftData) and data.offset == 0
+    ]
+    assert openings[1] == (1, "", chuckle)
+    assert [part for part, _, _ in openings] == [0, 1, 2]
+    output = spoken[0].data
+    assert isinstance(output, speaking.OutputData)
+    # The sound was never words: the text of record is the words alone.
+    assert (output.text, output.spoken, output.outcome) == ("Oh,  you got me.", "Oh,  you got me.", "completed")
+
+
+def test_the_dispatch_tool_offers_respond_with_optional_words_that_refuse_markup() -> None:
+    tool = processing.dispatch_tool((communication.RespondEvent,), targets_by_event={})
+    parameters = typing.cast(dict[str, typing.Any], tool["function"])["parameters"]
+    [branch] = parameters["properties"]["events"]["items"]["anyOf"]
+    data = branch["properties"]["data"]
+    part = data["properties"]["parts"]["items"]
+    assert "words" not in part.get("required", [])
+    assert part["properties"]["words"]["pattern"] == r"^[^*<>\[\]{}]+$"
+
+
 def test_an_invalid_drafted_expression_is_forwarded_without_it_and_counted(
     tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

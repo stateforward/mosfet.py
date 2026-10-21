@@ -1502,6 +1502,52 @@ def test_a_reply_of_parts_goes_to_the_encoder_part_by_part_each_opening_with_its
     assert (outputs[0].text, outputs[0].spoken, outputs[0].unspoken) == ("Oh, you got me.", "Oh, you got me.", "")
 
 
+def test_a_part_that_is_only_a_sound_is_spoken_in_its_place_and_is_never_words() -> None:
+    chuckle = vocal.speech.Expression(sound="chuckle")
+
+    async def run() -> tuple[Stage, list[speaking.OutputData]]:
+        voice = await stage(Script(expressiveness=EXPRESSIVE))
+        await voice.say("Oh, ", vocal.speech.Part(expression=chuckle), " you got me.")
+        await wait_until(lambda: bool(voice.outputs()))
+        return voice, voice.outputs()
+
+    voice, outputs = asyncio.run(run())
+
+    assert voice.encoder.pieces == [
+        [
+            vocal.speech.Piece(part=0, words="Oh, "),
+            vocal.speech.Piece(part=1, expression=chuckle),
+            vocal.speech.Piece(part=2, words=" you got me."),
+        ]
+    ]
+    assert (outputs[0].text, outputs[0].spoken) == ("Oh,  you got me.", "Oh,  you got me.")
+    assert outputs[0].expression == (
+        speaking.PartReport(),
+        speaking.PartReport(unsupported=("sound",)),
+        speaking.PartReport(),
+    )
+
+
+def test_a_reply_drafted_from_a_sound_of_its_own_opens_with_it() -> None:
+    laugh = vocal.speech.Expression(sound="laugh")
+
+    async def run() -> tuple[Stage, list[vocal.speech.Piece], list[speaking.OutputData]]:
+        voice = await stage()
+        await voice.draft("", 0, expression=laugh)
+        await voice.draft("Ha, yes.", 0, part=1)
+        await wait_until(lambda: bool(voice.encoder.pieces) and len(voice.encoder.pieces[0]) == 2)
+        drafted = list(voice.encoder.pieces[0])
+        await voice.say(vocal.speech.Part(expression=laugh), "Ha, yes.")
+        await wait_until(lambda: bool(voice.outputs()))
+        return voice, drafted, voice.outputs()
+
+    voice, drafted, outputs = asyncio.run(run())
+
+    assert drafted == [vocal.speech.Piece(part=0, expression=laugh), vocal.speech.Piece(part=1, words="Ha, yes.")]
+    assert voice.encoder.pieces[0] == drafted
+    assert (outputs[0].text, outputs[0].spoken, outputs[0].outcome) == ("Ha, yes.", "Ha, yes.", "completed")
+
+
 def test_drafts_write_each_part_as_it_is_written_and_a_draft_for_the_next_part_opens_it() -> None:
     async def run() -> tuple[Stage, list[vocal.speech.Piece], list[speaking.OutputData]]:
         voice = await stage()

@@ -5,7 +5,8 @@ streamed through the SDK's ``with_streaming_response``. The endpoint takes one w
 the reply as one request per run of consecutive parts with the same direction (the provider merge rule): a run
 closes when a part with another direction begins, or when the reply ends, and only then is its request sent, in
 order; closing the stream before the first run closes sends none. Each request is built from typed data only: the
-run's style tag, then each part's words with its sound tag before or after them (:class:`Markup`), one
+run's style tag, then each part's words with its sound tag before or after them, or the tag alone where a part
+with no words sits (:class:`Markup`), one
 ``instructions`` rendered from the run's natural-language cues after the voice's description, and ``speed`` from a
 declared pace range. Words are sent exactly as written, and nothing is ever searched for in them. The raw s16le body
 is yielded as it arrives, re-cut to whole frames, with alignment emulated per request: every chunk carries ``""``
@@ -235,7 +236,7 @@ class SpeechEncoder(vocal.speech.SpeechEncoder):
                 async for run, direction in runs:
                     words = "".join(word for said in run for word in said.words)
                     chars += len(words)
-                    if not words.strip():
+                    if not self._sayable(run):
                         # Only the reply's last run can have nothing to say; earlier ones join the run after them.
                         if held is None:
                             break
@@ -275,8 +276,9 @@ class SpeechEncoder(vocal.speech.SpeechEncoder):
     ) -> collections.abc.AsyncGenerator[tuple[list[_Said], _Direction], None]:
         """The reply's runs, each once it closes: consecutive parts said with one direction, in order.
 
-        A run closes when a part with another direction begins, or when the reply ends. A run with no words to
-        say yet takes the direction of the part that follows it, so a blank part never sends a request.
+        A run closes when a part with another direction begins, or when the reply ends. A run with nothing to say
+        yet (no words and no sound) takes the direction of the part that follows it, so a blank part never sends a
+        request.
 
         Raises:
             encoding.Error: ``invalid_input`` when the pieces break the stream's invariants.
@@ -289,10 +291,10 @@ class SpeechEncoder(vocal.speech.SpeechEncoder):
             if piece.part == opened:
                 opened += 1
                 following = self._direction(piece.expression)
-                if _spoken(run) and following != direction:
+                if self._sayable(run) and following != direction:
                     yield run, direction
                     run = []
-                if not _spoken(run):
+                if not self._sayable(run):
                     direction = following
                 run.append(_Said(expression=piece.expression))
             elif piece.part != opened - 1 or piece.expression is not None:
@@ -329,8 +331,7 @@ class SpeechEncoder(vocal.speech.SpeechEncoder):
         text: list[str] = [] if direction.style is None else [self._markup.styles[direction.style]]
         for said in run:
             words = "".join(said.words)
-            sound = None if said.expression is None else said.expression.sound
-            tag = self._markup.sounds.get(sound) if sound is not None and words.strip() else None
+            tag = self._tag(said)
             if tag is None:
                 text.append(words)
             elif typing.cast(vocal.speech.Expression, said.expression).sound_at == "after":
@@ -390,6 +391,17 @@ class SpeechEncoder(vocal.speech.SpeechEncoder):
                 "invalid_response", "OpenAI-compatible speech encoding returned PCM that ends mid-frame."
             )
 
+    def _tag(self, said: _Said) -> str | None:
+        """The markup of the sound ``said`` makes, when it makes one this server declares."""
+
+        sound = None if said.expression is None else said.expression.sound
+        return None if sound is None else self._markup.sounds.get(sound)
+
+    def _sayable(self, run: collections.abc.Iterable[_Said]) -> bool:
+        """Whether ``run`` has anything to say: words that are not blank, or a sound this server makes."""
+
+        return any("".join(said.words).strip() or self._tag(said) is not None for said in run)
+
     def _check_format(self, headers: collections.abc.Mapping[str, str]) -> None:
         rate = headers.get("x-sample-rate")
         if rate is not None and rate.strip() != str(self.format.sample_rate_hz):
@@ -399,12 +411,6 @@ class SpeechEncoder(vocal.speech.SpeechEncoder):
         sample_format = headers.get("x-sample-format")
         if sample_format is not None and sample_format.strip().lower() != "s16le":
             raise encoding.Error("invalid_response", "The speech server's X-Sample-Format is not s16le PCM.")
-
-
-def _spoken(run: collections.abc.Iterable[_Said]) -> bool:
-    """Whether any part of ``run`` has words to say."""
-
-    return any("".join(said.words).strip() for said in run)
 
 
 class SpeechDecoder(hearing.speech.SpeechDecoder):

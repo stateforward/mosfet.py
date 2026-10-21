@@ -438,6 +438,27 @@ def test_a_sound_after_its_words_is_placed_after_them_inside_the_merged_input() 
     assert [sent["input"] for sent in _sent(requests)] == ["Oh, <laugh><sigh>you got me. Again.<giggle>"]
 
 
+def test_a_part_that_is_only_a_sound_writes_its_tag_where_the_part_sits() -> None:
+    requests: list[httpx.Request] = []
+    encoder = _lab(_pcm(requests, (b"\x01\x00",), (b"\x02\x00",)))
+
+    chunks = asyncio.run(
+        _all_audio(
+            encoder.encode(
+                _parts(
+                    ("Oh,", None),
+                    ("", speech.Expression(sound="chuckle")),
+                    (" you got me.", None),
+                    ("", speech.Expression(sound="laugh", sound_at="after")),
+                )
+            )
+        )
+    )
+
+    assert [sent["input"] for sent in _sent(requests)] == ["Oh,<chuckle> you got me.<laugh>"]
+    assert "".join(chunk.text for chunk in chunks) == "Oh, you got me."
+
+
 def test_every_declared_sound_maps_to_its_angle_tag_and_undeclared_sounds_change_nothing() -> None:
     for sound, tag in openai_compat.ANGLE_TAGS.sounds.items():
         requests: list[httpx.Request] = []
@@ -445,7 +466,7 @@ def test_every_declared_sound_maps_to_its_angle_tag_and_undeclared_sounds_change
             _all_audio(_lab(_pcm(requests, (b"\x01\x00",))).encode(_parts(("Hi.", speech.Expression(sound=sound)))))
         )
         assert _sent(requests)[0]["input"] == f"{tag}Hi.", sound
-    undeclared: tuple[speech.Sound, ...] = ("breath", "cough", "clear_throat", "pause_short", "pause_long")
+    undeclared: tuple[speech.Sound, ...] = ("breath", "cough", "clear_throat")
     for sound in undeclared:
         requests = []
         chunks = asyncio.run(
@@ -554,14 +575,14 @@ def test_a_blank_part_says_nothing_of_its_own_and_its_words_stay_aligned() -> No
     requests: list[httpx.Request] = []
     encoder = _lab(_pcm(requests, (b"\x01\x00",), (b"\x02\x00",)))
     pieces = [
-        speech.Piece(part=0, words=" ", expression=speech.Expression(sound="laugh")),
+        speech.Piece(part=0, words=" ", expression=speech.Expression(emphasis=True)),
         speech.Piece(part=1, words="Hi.", expression=speech.Expression(emotion="calm")),
-        speech.Piece(part=2, words="\n", expression=speech.Expression(emotion="sad", sound="sigh")),
+        speech.Piece(part=2, words="\n", expression=speech.Expression(emotion="sad")),
     ]
 
     chunks = asyncio.run(_all_audio(encoder.encode(contract.text(pieces))))
 
-    # The blank opening part takes the direction of the part after it, and no tag rides blank words.
+    # The blank opening part takes the direction of the part after it, and the blank last one joins the run before.
     assert [sent["input"] for sent in _sent(requests)] == [" Hi."]
     assert chunks == [speech.Audio(pcm=b"\x01\x00", text=" Hi.\n")]
 

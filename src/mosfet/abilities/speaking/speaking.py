@@ -175,8 +175,9 @@ class InputData(pydantic.BaseModel):
             "this is selected; it cannot be taken back once heard. Their words, joined exactly as written, are the "
             "reply. Words are plain spoken language — what a listener would hear, not markup, not a stage direction, "
             "not a label for an utterance and not a description of one, because every one of those is read out "
-            "loud just as literally; how a part is said belongs in its expression. Required: there is no way to send "
-            "this and stay silent, so the choice not to speak is made by not selecting speech at all."
+            "loud just as literally; how a part is said, and any sound, belongs in its expression. Required: there "
+            "is no way to send this and stay silent, so the choice not to speak is made by not selecting speech at "
+            "all."
         ),
     )
 
@@ -330,7 +331,10 @@ class DraftData(pydantic.BaseModel):
         examples=[0],
     )
     words: str = pydantic.Field(
-        description="The characters newly written into that part's words, in order.",
+        description=(
+            "The characters newly written into that part's words, in order; empty on the opening draft of a part "
+            "with no words (a sound of its own)."
+        ),
         examples=[" I can help"],
     )
     offset: int = pydantic.Field(
@@ -1133,15 +1137,15 @@ class Speaking(ability.Ability[InputData, OutputData]):
 
     @staticmethod
     def _is_new_draft(ctx: hsm.Context, instance: "Speaking", event: hsm.Event[typing.Any]) -> bool:
-        """The first words written for an utterance not already said; a later delta, or a later part, cannot open
-        one."""
+        """The opening of an utterance not already said: its first words, or a first part that has none and opens
+        with its expression (a sound of its own). A later delta, or a later part, cannot open one."""
 
         del ctx
         return (
             isinstance(event.data, DraftData)
             and event.data.part == 0
             and event.data.offset == 0
-            and bool(event.data.words)
+            and (bool(event.data.words) or event.data.expression is not None)
             and bool(event.id)
             and event.id not in instance._finished
         )
@@ -1242,7 +1246,7 @@ class Speaking(ability.Ability[InputData, OutputData]):
         )
         if isinstance(data, InputData):
             for part in data.parts:
-                Speaking._open(utterance, part.words, part.expression)
+                Speaking._open(utterance, part.words or "", part.expression)
             utterance.parts, utterance.final = data.parts, True
             pipe.close()
         else:
@@ -1284,9 +1288,9 @@ class Speaking(ability.Ability[InputData, OutputData]):
         if len(drafted) > len(parts):
             return False
         *closed, last = drafted
-        return all(words == part.words for words, part in zip(closed, parts, strict=False)) and parts[
-            len(closed)
-        ].words.startswith(last)
+        return all(words == (part.words or "") for words, part in zip(closed, parts, strict=False)) and (
+            parts[len(closed)].words or ""
+        ).startswith(last)
 
     @staticmethod
     def _finalized(ctx: hsm.Context, instance: "Speaking", event: hsm.Event[typing.Any]) -> None:
@@ -1307,12 +1311,12 @@ class Speaking(ability.Ability[InputData, OutputData]):
         if not utterance.final:
             if used:
                 last = len(utterance.words) - 1
-                rest = data.parts[last].words[len(utterance.words[last]) :]
+                rest = (data.parts[last].words or "")[len(utterance.words[last]) :]
                 if rest:
                     utterance.pipe.write(vocal.speech.Piece(part=last, words=rest))
                     utterance.words[last] += rest
                 for part in data.parts[last + 1 :]:
-                    Speaking._open(utterance, part.words, part.expression)
+                    Speaking._open(utterance, part.words or "", part.expression)
             utterance.pipe.close()
             utterance.final = True
         if utterance.drafted:

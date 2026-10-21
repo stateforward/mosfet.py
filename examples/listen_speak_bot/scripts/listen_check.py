@@ -52,7 +52,7 @@ def replies() -> dict[str, tuple[vocal.speech.Part, ...]]:
 
 async def _pieces(parts: tuple[vocal.speech.Part, ...]) -> collections.abc.AsyncIterator[vocal.speech.Piece]:
     for index, part in enumerate(parts):
-        yield vocal.speech.Piece(part=index, words=part.words, expression=part.expression)
+        yield vocal.speech.Piece(part=index, words=part.words or "", expression=part.expression)
 
 
 async def render(

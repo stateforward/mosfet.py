@@ -170,7 +170,7 @@ class SpeechEncoder(encoding.StreamEncoder[part.Piece, Audio], abc.ABC):
         expression, if any); the concatenation of their words is the text of record, and the iterable ending means
         the utterance is final. The encoder reads it at its own pace and decides alone when it has enough to speak.
         It applies each part's declared cues, clamps values to its declared ranges, renders a declared sound before
-        or after that part's words, and ignores every cue and sound it does not declare (Speaking reports them; the
+        or after that part's words (or in its place, for a part with no words), and ignores every cue and sound it does not declare (Speaking reports them; the
         encoder never does). It may say a run of consecutive parts with the same direction in one synthesis
         request, but never splits a part across requests or reorders parts. Each chunk's ``text`` is the words
         that chunk finishes saying, and over the stream those texts join to exactly the words read. Closing the
