@@ -695,6 +695,7 @@ class RecordingCognition(cognition.Cognition):
         reflection: cognition.Reflection | None = None,
         store: memory.Memory | None = None,
         associative: memory.Associative | None = None,
+        intuition: cognition.Intuition | None = None,
     ) -> None:
         if decision is None or reasoning is None:
             default_i, default_r = cognition_abilities(
@@ -709,6 +710,7 @@ class RecordingCognition(cognition.Cognition):
         )
         super().__init__(
             decision=decision,
+            intuition=intuition,
             reasoning=reasoning,
             autonomy=autonomy,
             reflection=reflection,
@@ -2638,9 +2640,13 @@ def test_cognition_continues_to_reasoning_when_decision_does_not_handle() -> Non
 
 
 def test_decision_low_confidence_escalates_to_reasoning_after_environment_actions() -> None:
-    """Self-tuning confidence: low reported confidence → environment dispatch then System 2 cascade."""
+    """Self-tuning confidence: low reported confidence → environment dispatch then System 2 cascade.
 
-    async def run() -> tuple[cognition.types.OutputData, int, float]:
+    D-R-52: what the decision layer dispatched before passing the turn on rides its ``acted``: reasoning is told
+    it as a fact of the turn, and the turn's output puts it first.
+    """
+
+    async def run() -> tuple[cognition.types.OutputData, list[processing.InputData], float]:
         # Pre-seed tuner so we are past warmup with a high baseline.
         tuner = cognition.decision.ConfidenceTuner(
             mean=85.0,
@@ -2662,12 +2668,13 @@ def test_decision_low_confidence_escalates_to_reasoning_after_environment_action
         )
         ctx = await start_cognition_ability_for_test(ability)
         result = await dispatch_ability_for_test(ability, ctx, await started_cognition_input(ctx))
-        return result, len(reasoning_processor.calls), tuner.threshold()
+        return result, reasoning_processor.calls, tuner.threshold()
 
     result, reasoning_calls, threshold = asyncio.run(run())
 
-    assert reasoning_calls == 1
-    assert result == focus_output("phone", "deliberate")
+    (frame,) = reasoning_calls
+    assert "tentative" in (frame.instructions or "")
+    assert result == (*focus_output("phone", "tentative"), *focus_output("phone", "deliberate"))
     assert 20 < threshold  # low confidence was below adaptive threshold
 
 
@@ -2711,7 +2718,8 @@ def test_decision_reads_confidence_from_patched_event_selections() -> None:
     result, reasoning_calls, threshold, n = asyncio.run(run())
     assert n >= 21  # observed patched confidence
     assert reasoning_calls == 1
-    assert result == focus_output("phone", "deliberate")
+    # The focus the decision layer dispatched before passing the turn on comes first (D-R-52).
+    assert [item.reason for item in result] == [None, "deliberate"]
     assert 22 < threshold
 
 
@@ -2936,6 +2944,105 @@ def test_the_decision_layer_is_offered_no_handoff_when_nothing_is_held() -> None
 
     assert cognition.Reasoning.input_event.name not in {schema.name for schema in frame.schemas}
     assert "<held" not in (frame.instructions or "")
+
+
+def _intuited(
+    intuition_answer: cognition.types.OutputData,
+    *,
+    intuition_processor: processing.Processor | None = None,
+) -> tuple[
+    cognition.types.OutputData,
+    list[processing.InputData],
+    list[processing.InputData],
+    list[str],
+    list[abilities.FailureData],
+]:
+    """A turn the decision layer passes, taken up by intuition answering ``intuition_answer`` at a desk."""
+
+    async def run() -> tuple[
+        cognition.types.OutputData,
+        list[processing.InputData],
+        list[processing.InputData],
+        list[str],
+        list[abilities.FailureData],
+    ]:
+        intuition_processor_ = intuition_processor or RecordingReasoningProcessor(intuition_answer)
+        reasoning_processor = RecordingReasoningProcessor(ignore_output("deliberated"))
+        ability = RecordingCognition(
+            decision_processor=RecordingDecisionProcessor(cognition.decision.OutputData(result=None)),
+            intuition=cognition.Intuition(processor=intuition_processor_),
+            reasoning_processor=reasoning_processor,
+        )
+        ctx = await start_cognition_ability_for_test(ability)
+        turn_input = await started_cognition_input(ctx)
+        desk = _DeskActor()
+        assert desk.model is not None
+        _ = await mosfet.started(ctx, desk, desk.model)
+        turn_input = turn_input.model_copy(update={"actors": {**turn_input.actors, "desk": desk}})
+        result = await dispatch_ability_for_test(ability, ctx, turn_input)
+        await wait_until(lambda: ability.state().endswith("/idle"))
+        calls = (
+            typing.cast(RecordingReasoningProcessor, intuition_processor_).calls if intuition_processor is None else []
+        )
+        return result, calls, reasoning_processor.calls, desk.shown, ability.failures
+
+    return asyncio.run(run())
+
+
+def _show(text: str) -> cognition.types.OutputData:
+    return (cognition.types.EventData(target="desk", event=_ShowEvent.name, data={"text": text}),)
+
+
+def test_intuition_takes_up_what_reflex_hands_on_and_settles_the_turn_in_words() -> None:
+    """D-R-52: reflex → intuition → reasoning; intuition selecting anything but the handoff settles the turn."""
+
+    result, intuition_calls, reasoning_calls, shown, failures = _intuited(_show("Hello."))
+
+    assert failures == []
+    assert shown == ["Hello."]
+    assert result == _show("Hello.")
+    (frame,) = intuition_calls
+    assert cognition.Reasoning.input_event.name in {schema.name for schema in frame.schemas}
+    assert reasoning_calls == []
+
+
+def test_intuition_selecting_the_handoff_says_its_words_first_and_reasoning_knows_it_did() -> None:
+    """D-R-52: the handoff runs intuition's other selections first; they ride the turn's ``acted`` to reasoning,
+    and the turn's output puts them first."""
+
+    handoff = cognition.types.EventData(target="cognition", event=cognition.Reasoning.input_event.name, data={})
+    result, _, reasoning_calls, shown, failures = _intuited((*_show("Let me think."), handoff))
+
+    assert failures == []
+    assert shown == ["Let me think."]
+    (frame,) = reasoning_calls
+    assert "Let me think." in (frame.instructions or "")
+    assert cognition.Reasoning.input_event.name not in {schema.name for schema in frame.schemas}
+    assert result == (*_show("Let me think."), *ignore_output("deliberated"))
+
+
+def test_a_failing_intuition_hands_its_turn_to_reasoning_in_the_same_turn(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D-R-52: an intuition that fails cascades to reasoning, counted as ``stage="intuition"`` cascaded."""
+
+    def cascaded(reader: metric_reader.Reader) -> float:
+        return sum(
+            point.value
+            for point in reader.points("bot.cognition.step.failure.count")
+            if point.attributes.get("stage") == "intuition" and point.attributes.get("outcome") == "cascaded"
+        )
+
+    with metric_reader.recording(tmp_path, monkeypatch) as reader:
+        before = cascaded(reader)
+        result, _, reasoning_calls, _, failures = _intuited((), intuition_processor=FailingReasoningProcessor())
+        after = cascaded(reader)
+
+    # Only intuition's own failure reached cognition; the turn did not fail.
+    assert [type(failure) for failure in failures] == [cognition.types.FailureData]
+    assert len(reasoning_calls) == 1
+    assert result == ignore_output("deliberated")
+    assert after - before == 1.0
 
 
 def test_decision_processor_receives_input() -> None:
@@ -5706,6 +5813,33 @@ def test_a_turn_perceiving_a_handed_back_reflex_failure_passes_the_decision_laye
         assert reasoning_calls == []
         (frame,) = decision_calls
         assert frame.input == turn.stimulus
+
+
+@pytest.mark.parametrize(("stage", "decider"), [("reflex", "intuition"), ("intuition", "reasoning")])
+def test_a_turn_perceiving_a_handed_back_failure_starts_at_the_first_stage_after_it(stage: str, decider: str) -> None:
+    """D-R-52: a turn perceiving a handed-back failure of stage S starts at the first stage after S."""
+
+    async def run() -> tuple[list[processing.InputData], list[processing.InputData], list[processing.InputData]]:
+        decision_processor = RecordingDecisionProcessor(cognition.decision.OutputData(result=no_output("fast")))
+        intuition_processor = RecordingReasoningProcessor(no_output("intuited"))
+        reasoning_processor = RecordingReasoningProcessor(no_output("reasoned"))
+        ability = RecordingCognition(
+            decision_processor=decision_processor,
+            intuition=cognition.Intuition(processor=intuition_processor),
+            reasoning_processor=reasoning_processor,
+        )
+        ctx = await start_cognition_ability_for_test(ability)
+        await wait_until(lambda: ability.state().endswith("/idle"))
+        base = await started_cognition_input(ctx)
+        failed = _failed_percept("failed-1", timed_out=True, stage=typing.cast(typing.Any, stage))
+        _ = await dispatch_ability_for_test(ability, ctx, base.model_copy(update={"stimulus": failed.stimulus}))
+        await wait_until(lambda: ability.state().endswith("/idle"))
+        return decision_processor.calls, intuition_processor.calls, reasoning_processor.calls
+
+    decision_calls, intuition_calls, reasoning_calls = asyncio.run(run())
+
+    assert decision_calls == []
+    assert (len(intuition_calls), len(reasoning_calls)) == ((1, 0) if decider == "intuition" else (0, 1))
 
 
 def _record_admitted(ctx: hsm.Context, instance: "_Communication", event: hsm.Event[typing.Any]) -> None:

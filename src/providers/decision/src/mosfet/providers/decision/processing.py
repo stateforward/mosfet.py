@@ -12,7 +12,7 @@ The mapping is structural, not behavioral:
 - The **event menu** is one choice question per turn (``selection``): its criteria are the offered
   event names, each described by the first line of its event schema's description, together with a
   reserved pass criterion ("none of these") that maps to the typed explicit decline (an unhandled
-  decision output), which the host cascades to deliberative reasoning, never a handled-empty
+  decision output), which the host hands on to the next tier, never a handled-empty
   selection.
 - **Payload fields are filled by selection over supplied options**, never authored. For each
   offered event's required payload keys, candidate values come mechanically from the turn's own
@@ -55,7 +55,7 @@ from . import client
 _PROVIDER: typing.Final = "decision"
 _SELECTION: typing.Final = "selection"
 _RESERVED_PASS_CRITERION: typing.Final = "__unhandled__"
-_DEFAULT_PASS_WORDING: typing.Final = "None of these fits: think the turn through first, with reasoning."
+_DEFAULT_PASS_WORDING: typing.Final = "None of these fits: take the turn up in words, with intuition."
 _SELECTION_INSTRUCTIONS: typing.Final = (
     "Choose the single criterion that answers this turn from the bot's own peripheral "
     "transducers: the criterion text names the situation. Choose the pass criterion when "
@@ -235,7 +235,7 @@ class Processor(processing.DecisionProcessor):
     async def process(
         self, input: processing.InputData, *, drafts: processing.DraftSink | None = None
     ) -> processing.Events:
-        """Decide this turn's one event, or decline it to reasoning.
+        """Decide this turn's one event, or pass it on to the next tier.
 
         Raises :class:`ProcessingError` when the server fails (its :class:`client.Error` is the
         cause) or answers outside the menu, and :class:`PayloadGroundingError` when a payload
@@ -331,7 +331,7 @@ class Processor(processing.DecisionProcessor):
         if chosen == _RESERVED_PASS_CRITERION:
             # Explicit unhandled, not a handled-empty selection: the pass criterion means "none offered
             # fits". The decision layer's own envelope for that is OutputData(result=None), which the host reads as
-            # unhandled and cascades to reasoning; an empty tuple would be a handled turn with no actions.
+            # unhandled and hands on to the next tier; an empty tuple would be a handled turn with no actions.
             # The abstract Processor protocol declares Events only, so the double cast marks that
             # runtime-declared shape as intentional at this one boundary.
             envelope = cognition_decision.OutputData(result=None, reason=self._pass_wording)

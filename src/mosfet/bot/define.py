@@ -62,7 +62,8 @@ _PROCESSOR: typing.Final = (
     "a `processing.Processor` (`from mosfet.abilities import processing`); in a test, the offline one is "
     + "`testing.Scripted()` (`from mosfet.bot import testing`)"
 )
-"""What ``bot.cognition``'s reasoning thinks with, and where it is imported from, for B0002, B0006 and B0024."""
+"""What ``bot.cognition``'s word-writing tiers think with, and where it is imported from, for B0002, B0006, B0024
+and B0026."""
 _DECISION: typing.Final = (
     "a `processing.DecisionProcessor`: `decision.Processor(...)` (`from mosfet.providers import decision`), "
     + "on any server that speaks the decisions wire format; in a test, the offline one is `testing.Decider()` "
@@ -251,12 +252,12 @@ class Validator(hsm.ModelValidator):
             wrong = written
         decider = member.reflex
         thinker = member.reasoning
+        # The tiers that write words: a decision processor given to one is B0026, any other non-processor B0006.
+        writers = {"reasoning": thinker, "intuition": member.intuition, "reflection": member.reflection}
         checks: tuple[tuple[int | str, object, bool, str], ...] = (
-            (
-                "reasoning",
-                thinker,
-                thinker is None or isinstance(thinker, processing.Processor),
-                "a `processing.Processor`",
+            *(
+                (keyword, given, given is None or isinstance(given, processing.Processor), "a `processing.Processor`")
+                for keyword, given in writers.items()
             ),
             (
                 "reflex",
@@ -284,6 +285,9 @@ class Validator(hsm.ModelValidator):
             model.findings.append(self._thoughtless(call))
         if isinstance(decider, processing.Processor) and not isinstance(decider, processing.DecisionProcessor):
             model.findings.append(self._chatting(call, decider))
+        for keyword, given in writers.items():
+            if isinstance(given, processing.DecisionProcessor):
+                model.findings.append(self._wordless(call, keyword, given))
         if seeds and stray is None and not member.autonomy:
             model.findings.append(self._unrun(call))
 
@@ -320,6 +324,23 @@ class Validator(hsm.ModelValidator):
                 + "confidence, so it decides on a decision model, never a chat model",
             ),
             help=diagnostics.Help(message=f"give `reflex=` {_DECISION}"),
+        )
+
+    def _wordless(self, call: diagnostics.Span, keyword: str, given: processing.Processor) -> diagnostics.Diagnostic:
+        """B0026: ``bot.cognition``, written at ``call``, is given ``given``, a decision processor, as ``keyword``."""
+
+        found = diagnostics.argument(call, keyword)
+        name = type(given).__name__
+        return diagnostics.Diagnostic(
+            code="B0026",
+            level="error",
+            message=f"`bot.cognition({keyword}=)` is given a decision processor, which cannot write words",
+            primary=(call if found is None else found[0]).model_copy(update={"label": f"this is a `{name}`"}),
+            notes=(
+                f"{keyword} writes the bot's words and selects its tools; a decision model only chooses among the "
+                + "offered events, so it serves reflex alone: give it to `reflex=`",
+            ),
+            help=diagnostics.Help(message=f"give `{keyword}=` {_PROCESSOR}"),
         )
 
     def _arguments(
@@ -361,7 +382,7 @@ class Validator(hsm.ModelValidator):
                     message=f"`{where}` takes {takes}, not `{type(value).__name__}`",
                     primary=primary.model_copy(update={"label": f"this is a `{type(value).__name__}`"}),
                     help=diagnostics.Help(
-                        message=f"pass {_PROCESSOR if key == 'reasoning' else _DECISION if key == 'reflex' else takes}"
+                        message=f"pass {_PROCESSOR if key in ('reasoning', 'intuition', 'reflection') else _DECISION if key == 'reflex' else takes}"
                     ),
                 )
             )

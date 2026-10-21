@@ -6,7 +6,7 @@ server with the same wire format works the same way, given its ``api_key``. It i
 tool-calling model and never authors a payload, so `Processor` is a
 `processing.DecisionProcessor`, the kind reflex's decision layer runs on: it chooses one of the offered events,
 fills payload keys only by choosing among values the turn's own evidence supplies, and declines a
-turn it cannot place to reasoning.
+turn it cannot place to the next tier.
 
 `Client` is the HTTP boundary, and `Request`, `Choice`, `Response` and `ChoiceAnswer` are the wire
 models it speaks. Every client failure is an `Error`, which `Processor` raises as a

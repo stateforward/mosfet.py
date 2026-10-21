@@ -104,7 +104,9 @@ class CognitionElement(Member, hsm.NamespaceElement, kind=CognitionKind):
 
     function: typing.ClassVar[str] = "bot.cognition"
     reasoning: object = None
+    intuition: object = None
     reflex: object = None
+    reflection: object = None
     memory: object = None
     registries: object = ()
     associative: bool = False
@@ -115,7 +117,7 @@ class CognitionElement(Member, hsm.NamespaceElement, kind=CognitionKind):
 
     def faculties(self) -> tuple[str, ...]:
         """The faculties this cognition has, in a fixed order: its tiers in the order a turn takes them up (reflex
-        when given, then reasoning), reflection, then each flag's."""
+        and intuition when given, then reasoning), reflection, then each flag's."""
 
         flags = (
             ("associative", self.associative),
@@ -123,7 +125,7 @@ class CognitionElement(Member, hsm.NamespaceElement, kind=CognitionKind):
             ("autonomy", self.autonomy),
             ("routines", self.routines is not None),
         )
-        tiers = ("reflex",) if self.reflex is not None else ()
+        tiers = (name for name, given in (("reflex", self.reflex), ("intuition", self.intuition)) if given is not None)
         return (*tiers, "reasoning", "reflection", *(name for name, given in flags if given))
 
 
@@ -629,7 +631,9 @@ class RedefinableCognition(_Single[CognitionElement]):
 
     function: typing.ClassVar[str] = "bot.cognition"
     reasoning: object = None
+    intuition: object = None
     reflex: object = None
+    reflection: object = None
     memory: object = None
     registries: object = ()
     associative: bool = False
@@ -643,7 +647,9 @@ class RedefinableCognition(_Single[CognitionElement]):
         member = CognitionElement(
             qualified_name=posixpath.join(model.qualified_name, ".cognition"),
             reasoning=self.reasoning,
+            intuition=self.intuition,
             reflex=self.reflex,
+            reflection=self.reflection,
             memory=self.memory,
             registries=self.registries,
             associative=self.associative,
@@ -919,7 +925,9 @@ def traits(*traits: persona.Trait) -> RedefinableTraits:
 def cognition(
     *faculties: Element[hsm.Element],
     reasoning: processing.Processor,
+    intuition: processing.Processor | None = None,
     reflex: processing.DecisionProcessor | None = None,
+    reflection: processing.Processor | None = None,
     memory: memory.Memory | None = None,
     registries: collections.abc.Sequence[identification.Registry] = (),
     associative: bool = False,
@@ -931,16 +939,21 @@ def cognition(
     """The bot's cognition, its tiers each named by the processor it thinks on (``bot.cognition(reasoning=model)``).
 
     A turn takes the tiers up in order: reflex (the behaviors autonomy runs, then the decision model on what they
-    leave unhandled), then reasoning. Every hand-on is the bot's own choice.
+    leave unhandled), intuition (a chat model answering without thinking first), then reasoning (thinking first).
+    Each tier is expected to take longer than the one before; every hand-on is the bot's own choice.
 
     Args:
         faculties: Faculty elements that take their own sub-elements; none exists yet.
-        reasoning: What reasons, reflects and consolidates: the model that selects the bot's events on a turn
-            reflex hands on, thinking it through. It is required; ``bot.define`` reports a cognition without one
-            (B0024).
+        reasoning: What reasons: the model that selects the bot's events on a turn the faster tiers hand on,
+            thinking it through, and reflects and consolidates unless ``reflection`` is given. It is required;
+            ``bot.define`` reports a cognition without one (B0024).
+        intuition: The chat model intuition answers on, without thinking first: offered what memory and the
+            bot's abilities up to effort M allow, and the handoff to reasoning. Without it, what reflex hands
+            on goes to reasoning.
         reflex: The decision processor (a ``processing.DecisionProcessor``) reflex falls back on for what no
             behavior handled: the bot's fast reflex choice, never a chat model; ``bot.define`` reports a chat
-            processor given here (B0025). Without it, what behaviors leave goes on to reasoning.
+            processor given here (B0025). Without it, what behaviors leave goes on to the next tier.
+        reflection: The chat model reflection and consolidation think on; reasoning's when omitted.
         memory: The memory every faculty shares; a fresh in-memory one when omitted.
         registries: The voice and face registries its ears and eyes own, at most one of each kind. What the
             bot remembers about who people are keeps their prints (a named person's) or erases them (a
@@ -957,7 +970,9 @@ def cognition(
 
     return RedefinableCognition(
         reasoning=reasoning,
+        intuition=intuition,
         reflex=reflex,
+        reflection=reflection,
         memory=memory,
         registries=registries,
         associative=associative,
@@ -980,7 +995,7 @@ def timeouts(
     """The bot's timeout overrides (``bot.timeouts(processing=datetime.timedelta(seconds=30))``); each positive.
 
     ``processing``, ``deactivation`` and ``attachment`` are the body's own bounds. ``step`` bounds each step
-    of a turn in cognition (each reflex layer, reasoning, ...; two minutes by default) and each step of its
+    of a turn in cognition (each reflex layer, intuition, reasoning, ...; two minutes by default) and each step of its
     reflection; a step that outlasts it fails only its turn, which the bot then perceives.
     """
 

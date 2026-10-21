@@ -32,6 +32,7 @@ from . import input
 # ``event`` names every callback's event parameter here, so the projection module goes by its role.
 from . import decision
 from . import event as projection
+from . import intuition
 from . import reasoning
 from . import reflection
 from . import routines
@@ -43,6 +44,7 @@ from .types import OUTPUT_SCHEMA_CONTRACT, EventData, OutputData, is_output
 _AUTONOMY_ID_SUFFIX = ":autonomy"
 _ASSOCIATE_ID_SUFFIX = ":associate"
 _DECISION_ID_SUFFIX = ":decision"
+_INTUITION_ID_SUFFIX = ":intuition"
 _REASONING_ID_SUFFIX = ":reasoning"
 _REFLECTION_ID_SUFFIX = ":reflection"
 _REMEMBER_ID_SUFFIX = ":remember"
@@ -396,7 +398,13 @@ def _parent_operation_id(event: hsm.Event[typing.Any]) -> str | None:
     child_id = event.id if event.id else None
     if child_id is None:
         return None
-    for suffix in (_AUTONOMY_ID_SUFFIX, _ASSOCIATE_ID_SUFFIX, _DECISION_ID_SUFFIX, _REASONING_ID_SUFFIX):
+    for suffix in (
+        _AUTONOMY_ID_SUFFIX,
+        _ASSOCIATE_ID_SUFFIX,
+        _DECISION_ID_SUFFIX,
+        _INTUITION_ID_SUFFIX,
+        _REASONING_ID_SUFFIX,
+    ):
         if child_id.endswith(suffix):
             parent = child_id[: -len(suffix)]
             return parent or None
@@ -404,18 +412,22 @@ def _parent_operation_id(event: hsm.Event[typing.Any]) -> str | None:
 
 
 class Cognition(ability.Ability[InputData, OutputData]):
-    """Cognitive ability: reflex (behaviors, then decision) → associating → reasoning, then reflection.
+    """Cognitive ability: reflex (behaviors, then decision) → associating → intuition → reasoning, then reflection.
 
     Chart states are lifecycle phases only. The active turn rides the child request
     and terminal event chain, not instance fields (HSM-COMPLETION-001).
 
     Reflex is one stage with two layers: the bot's behaviors (``autonomy``) meet the turn's
     percepts, and the decision model (``decision``, a ``processing.DecisionProcessor``) chooses on
-    what they left unhandled. Neither deliberates or recalls. Each stage is taken up only when
-    composed, and every hand-on is the bot's own: a behavior that leaves a percept unhandled, or
-    the decision model's pass. Reasoning is always composed and takes what reflex hands on.
+    what they left unhandled. Neither deliberates or recalls. Intuition (a chat model answering
+    without thinking first) then takes the turn up in words, and reasoning (thinking first) takes
+    what intuition hands on. Each stage is taken up only when composed, and every hand-on is the
+    bot's own: a behavior that leaves a percept unhandled, the decision model's pass, or intuition
+    selecting the deliberative handoff (``bot.ability.reasoning.input``), whose other selections run
+    first. What a stage dispatched before it handed on rides the turn's ``acted`` to the next stage,
+    and the turn's output puts it first. Reasoning is always composed.
 
-    Each step of a turn (a reflex layer, associating, reasoning) is bounded by the step
+    Each step of a turn (a reflex layer, associating, intuition, reasoning) is bounded by the step
     timeout, ``child_operation_timeout`` (``bot.timeouts(step=)``; two minutes by default, as one
     step of a local model can take half a minute and more). A step that outlasts it fails only its
     turn: the body gets the turn's ``StepTimedOutData`` failure and then a ``cognition.InputEvent``
@@ -426,22 +438,23 @@ class Cognition(ability.Ability[InputData, OutputData]):
     built for reasoning) is handed back the same way, as a ``cognition.InputEvent`` observing
     ``StepFailedEvent``. Both are bounded: a step that fails or outlasts its timeout on a turn
     taken up for a failed step is not handed back again (``bot.cognition.step.failure.count``
-    counts each, by stage, kind and outcome). A decision layer that fails, or whose frame cannot be
-    built, hands the same turn on instead (outcome ``cascaded``): nothing is handed back and the
-    next stage settles the turn. A turn taken up for a handed-back failure of stage S starts at the
+    counts each, by stage, kind and outcome). A decision layer or an intuition that fails, or whose
+    frame cannot be built, hands the same turn on instead (outcome ``cascaded``): nothing is handed
+    back and the next stage settles the turn. A turn taken up for a handed-back failure of stage S starts at the
     first stage after S, because only a later stage can perceive it: behaviors still run first, and
-    a turn perceiving a failure of reflex passes the decision layer.
+    a turn perceiving a failure of reflex passes the decision layer, and one perceiving a failure
+    of intuition passes intuition too.
 
     With ``memory`` composed, Cognition attaches it and remembers every turn it settles —
     completed, failed, or cancelled — as one ``memory.RememberEvent`` it does not wait on: what it
     perceived, then its own output (``OutputEvent``), so recall covers what it did as well. With
     ``associative`` composed too, a turn reflex hands on first asks it what memory associates with
-    the stimulus; the associations ride the turn to reasoning (as its frame's ``recalled`` context)
-    and to reflection. Reflex chooses without them. An association that fails or times out leaves
+    the stimulus; the associations ride the turn to intuition and reasoning (as their frames'
+    ``recalled`` context) and to reflection. Reflex chooses without them. An association that fails or times out leaves
     the turn without associations; it never fails the turn.
 
     Every frame Cognition builds also holds ``associative`` (under ``memory``), so a stage whose
-    effort ceiling admits it (Reasoning, not the decision layer) is offered ``bot.ability.memory.recall``,
+    effort ceiling admits it (intuition and reasoning, not the decision layer) is offered ``bot.ability.memory.recall``,
     ``bot.ability.memory.know`` and ``bot.ability.memory.forget``. What a recall brings to mind
     (``memory.RecollectedEvent``), what memory now knows of a person (``memory.KnownEvent``), or a
     typed failure, comes back to Cognition and goes to the body as a ``cognition.InputEvent``
@@ -480,6 +493,7 @@ class Cognition(ability.Ability[InputData, OutputData]):
     _composite_attachment_lifecycle: typing.ClassVar[bool] = True
     _autonomy: autonomy.Autonomy | None
     _decision: decision.Decision | None
+    _intuition: intuition.Intuition | None
     _reasoning: reasoning.Reasoning
     _reflection: reflection.Reflection
     _routines: routines.Routines | None
@@ -813,8 +827,7 @@ class Cognition(ability.Ability[InputData, OutputData]):
         """Reflex's fallback layer: the decision model chooses on what no behavior handled.
 
         Its frame carries what behaviors already did (``acted``) and no recalled associations: recall
-        comes after reflex. A frame that cannot be built passes the turn on, so the next stage takes the
-        same turn (D-R-36).
+        comes after reflex.
         """
 
         with span.operation(
@@ -826,43 +839,99 @@ class Cognition(ability.Ability[InputData, OutputData]):
             context=telemetry.event_context(event),
         ) as active:
             active.set_attribute("bot.cognition.entered_from", "input" if is_input(event.data) else "reflex")
-            cognition_input, base, associations, acted = Cognition._reached(event)
             decision_ability = instance._decision
             assert decision_ability is not None
-            public_metadata = _public_metadata(dict(event.metadata))
-            frame: processing.InputData | None = None
-            try:
-                frame = Cognition._build_processing_input(instance, cognition_input, acted=acted)
-            except Exception:
-                # The documented boundary: a decision frame that cannot be built passes the turn on, and the
-                # next stage's own frame build reports what failed if it fails too (D-R-36).
-                _HANDED_BACK.add(1, {"stage": "reflex", "kind": "failed", "outcome": "cascaded"})
-            if processing.active_operation(instance, base) is None:
-                _ = await processing.start_operation(instance, base)
-            turn = Cognition._turn(instance, cognition_input, base, associations=associations, acted=acted)
-            if frame is None:
-                Cognition._pass_stage(ctx, instance, turn, public_metadata)
-                return
-            hop_id = f"{base}{_DECISION_ID_SUFFIX}"
-            input_event = dataclasses.replace(
-                decision_ability.input_event.with_data_and_id(
-                    decision.InputData(turn=turn, processing_input=frame),
-                    hop_id,
-                ),
-                metadata=public_metadata,
-            )
-            # Route the decision child through the settled one-shot terminal operation so the
-            # child's reply_to echoes its correlated terminal back to the operation actor.
-            await Cognition._await_child_hop(
+            await Cognition._hop_or_pass(
                 ctx,
                 instance,
                 event,
                 child=decision_ability,
-                request=input_event,
-                hop_id=hop_id,
-                turn=turn,
+                request=decision.InputData,
+                suffix=_DECISION_ID_SUFFIX,
                 stage="reflex",
+                recalls=False,
             )
+
+    @staticmethod
+    async def _start_intuition(
+        ctx: hsm.Context,
+        instance: "Cognition",
+        event: hsm.Event[typing.Any],
+    ) -> None:
+        """Intuition, the fast words: its frame carries what memory surfaced and what earlier stages did."""
+
+        with span.operation(
+            "bot.cognition.stage",
+            scope="bot.abilities.cognition",
+            component="cognition",
+            stage="intuition",
+            context=telemetry.event_context(event),
+        ):
+            intuition_ability = instance._intuition
+            assert intuition_ability is not None
+            await Cognition._hop_or_pass(
+                ctx,
+                instance,
+                event,
+                child=intuition_ability,
+                request=intuition.InputData,
+                suffix=_INTUITION_ID_SUFFIX,
+                stage="intuition",
+                recalls=True,
+            )
+
+    @staticmethod
+    async def _hop_or_pass(
+        ctx: hsm.Context,
+        instance: "Cognition",
+        event: hsm.Event[typing.Any],
+        *,
+        child: ability.Ability[typing.Any, typing.Any],
+        request: type[decision.InputData] | type[intuition.InputData],
+        suffix: str,
+        stage: Stage,
+        recalls: bool,
+    ) -> None:
+        """Hop the turn to a stage that hands its failures on (the decision layer, intuition), or pass it on.
+
+        The stage's frame carries what earlier stages did (``acted``), and what memory surfaced when the stage
+        ``recalls``. A frame that cannot be built passes the turn on, so the next stage takes the same turn and its
+        own frame build reports what failed if it fails too (D-R-36).
+        """
+
+        cognition_input, base, associations, acted = Cognition._reached(event)
+        public_metadata = _public_metadata(dict(event.metadata))
+        frame: processing.InputData | None = None
+        try:
+            frame = Cognition._build_processing_input(
+                instance, cognition_input, recalled=associations if recalls else None, acted=acted
+            )
+        except Exception:
+            # The documented boundary: a frame that cannot be built passes the turn on (D-R-36).
+            _HANDED_BACK.add(1, {"stage": stage, "kind": "failed", "outcome": "cascaded"})
+        if processing.active_operation(instance, base) is None:
+            _ = await processing.start_operation(instance, base)
+        turn = Cognition._turn(instance, cognition_input, base, associations=associations, acted=acted)
+        if frame is None:
+            Cognition._pass_stage(ctx, instance, turn, public_metadata)
+            return
+        hop_id = f"{base}{suffix}"
+        input_event = dataclasses.replace(
+            child.input_event.with_data_and_id(request(turn=turn, processing_input=frame), hop_id),
+            metadata=public_metadata,
+        )
+        # Route the child through the settled one-shot terminal operation so the child's reply_to
+        # echoes its correlated terminal back to the operation actor.
+        await Cognition._await_child_hop(
+            ctx,
+            instance,
+            event,
+            child=child,
+            request=input_event,
+            hop_id=hop_id,
+            turn=turn,
+            stage=stage,
+        )
 
     @staticmethod
     def _pass_stage(ctx: hsm.Context, instance: "Cognition", turn: types.TurnData, metadata: dict[str, object]) -> None:
@@ -1207,6 +1276,67 @@ class Cognition(ability.Ability[InputData, OutputData]):
         )
 
     @staticmethod
+    def _matches_intuition_output(
+        ctx: hsm.Context,
+        instance: "Cognition",
+        event: hsm.Event[typing.Any],
+    ) -> bool:
+        del ctx
+        child = instance._intuition
+        if child is None:
+            return False
+        return Cognition._matches_child_terminal(
+            event,
+            owner=instance,
+            child=child,
+            suffix=_INTUITION_ID_SUFFIX,
+            data_type=types.CompletionData,
+        )
+
+    @staticmethod
+    def _matches_intuition_failure(
+        ctx: hsm.Context,
+        instance: "Cognition",
+        event: hsm.Event[typing.Any],
+    ) -> bool:
+        del ctx
+        child = instance._intuition
+        if child is None:
+            return False
+        return Cognition._matches_child_terminal(
+            event,
+            owner=instance,
+            child=child,
+            suffix=_INTUITION_ID_SUFFIX,
+            data_type=types.FailureData,
+        )
+
+    @staticmethod
+    def _intuition_is_handled(
+        ctx: hsm.Context,
+        instance: "Cognition",
+        event: hsm.Event[typing.Any],
+    ) -> bool:
+        return (
+            Cognition._matches_intuition_output(ctx, instance, event)
+            and isinstance(event.data, types.CompletionData)
+            and event.data.output is not None
+        )
+
+    @staticmethod
+    def _intuition_is_unhandled(
+        ctx: hsm.Context,
+        instance: "Cognition",
+        event: hsm.Event[typing.Any],
+    ) -> bool:
+        # Intuition selected the handoff: the turn goes on to reasoning, carrying what it said first.
+        return (
+            Cognition._matches_intuition_output(ctx, instance, event)
+            and isinstance(event.data, types.CompletionData)
+            and event.data.output is None
+        )
+
+    @staticmethod
     async def _start_reasoning(
         ctx: hsm.Context,
         instance: "Cognition",
@@ -1375,6 +1505,13 @@ class Cognition(ability.Ability[InputData, OutputData]):
 
         del ctx, instance, event
         _HANDED_BACK.add(1, {"stage": "reflex", "kind": "failed", "outcome": "cascaded"})
+
+    @staticmethod
+    def _cascade_intuition_failure(ctx: hsm.Context, instance: "Cognition", event: hsm.Event[typing.Any]) -> None:
+        """Count an intuition that failed: its turn goes on to reasoning, with nothing handed back (D-R-36)."""
+
+        del ctx, instance, event
+        _HANDED_BACK.add(1, {"stage": "intuition", "kind": "failed", "outcome": "cascaded"})
 
     @staticmethod
     def _open_turn(ctx: hsm.Context, instance: "Cognition", event: hsm.Event[typing.Any]) -> None:
@@ -1590,6 +1727,12 @@ class Cognition(ability.Ability[InputData, OutputData]):
         await Cognition._stop_step(ctx, instance, event, child, _DECISION_ID_SUFFIX)
 
     @staticmethod
+    async def _stop_intuition(ctx: hsm.Context, instance: "Cognition", event: hsm.Event[typing.Any]) -> None:
+        child = instance._intuition
+        assert child is not None
+        await Cognition._stop_step(ctx, instance, event, child, _INTUITION_ID_SUFFIX)
+
+    @staticmethod
     async def _stop_reasoning(ctx: hsm.Context, instance: "Cognition", event: hsm.Event[typing.Any]) -> None:
         await Cognition._stop_step(ctx, instance, event, instance._reasoning, _REASONING_ID_SUFFIX)
 
@@ -1669,6 +1812,22 @@ class Cognition(ability.Ability[InputData, OutputData]):
         data = event.data
         cognition_input = data.turn.input if isinstance(data, types.CompletionData) else data
         return instance._decision is not None and not _perceives_failure(cognition_input, ("reflex", "intuition"))
+
+    @staticmethod
+    def _takes_intuition(
+        ctx: hsm.Context,
+        instance: "Cognition",
+        event: hsm.Event[typing.Any],
+    ) -> bool:
+        """Intuition takes the turn: it is composed, and the turn perceives no handed-back failure of intuition,
+        which only reasoning can perceive (D-R-30)."""
+
+        del ctx
+        data = event.data
+        cognition_input = (
+            data.turn.input if isinstance(data, types.CompletionData | types.FailureData | _AssociatedData) else data
+        )
+        return instance._intuition is not None and not _perceives_failure(cognition_input, ("intuition",))
 
     @staticmethod
     def _has_input(
@@ -1798,6 +1957,12 @@ class Cognition(ability.Ability[InputData, OutputData]):
         await Cognition._dispatch_cancel_to_child(ctx, instance, event, child, _DECISION_ID_SUFFIX)
 
     @staticmethod
+    async def _cancel_intuition(ctx: hsm.Context, instance: "Cognition", event: hsm.Event[typing.Any]) -> None:
+        child = instance._intuition
+        assert child is not None
+        await Cognition._dispatch_cancel_to_child(ctx, instance, event, child, _INTUITION_ID_SUFFIX)
+
+    @staticmethod
     async def _cancel_reasoning(ctx: hsm.Context, instance: "Cognition", event: hsm.Event[typing.Any]) -> None:
         await Cognition._dispatch_cancel_to_child(ctx, instance, event, instance._reasoning, _REASONING_ID_SUFFIX)
 
@@ -1826,7 +1991,7 @@ class Cognition(ability.Ability[InputData, OutputData]):
         )
         return processing.active_operation(instance, cancellation_id) is not None and event.source in {
             hsm.id(child)
-            for child in (instance._autonomy, instance._decision, instance._reasoning)
+            for child in (instance._autonomy, instance._decision, instance._intuition, instance._reasoning)
             if child is not None
         }
 
@@ -2230,8 +2395,8 @@ class Cognition(ability.Ability[InputData, OutputData]):
                 hsm.on(types.IgnoreEvent),
                 hsm.effect(_accept_ignore),
             ),
-            # The handoff to deliberate reasoning: the decision layer is never offered it (its pass is
-            # the hand-on), and reasoning never offers it to itself.
+            # The handoff to deliberate reasoning, offered to intuition: the decision layer is never offered
+            # it (its pass is the hand-on), and reasoning never offers it to itself.
             hsm.transition(
                 hsm.on(reasoning.InputEvent),
                 hsm.effect(_accept_handoff),
@@ -2319,7 +2484,7 @@ class Cognition(ability.Ability[InputData, OutputData]):
                 hsm.target("/Cognition/ready/settling"),
             ),
             # A turn takes its stages in order: reflex (behaviors, then the decision layer on what they left),
-            # associating, then reasoning. Each stage is entered only when composed, and a turn perceiving a
+            # associating, intuition, then reasoning. Each stage is entered only when composed, and a turn perceiving a
             # handed-back failure of a stage starts after it (D-R-30); behaviors still run first.
             hsm.choice(
                 "starting",
@@ -2334,6 +2499,11 @@ class Cognition(ability.Ability[InputData, OutputData]):
             hsm.choice(
                 "after_reflex",
                 hsm.transition(hsm.guard(_has_associative), hsm.target("/Cognition/processing/associating")),
+                hsm.transition(hsm.target("/Cognition/processing/after_associating")),
+            ),
+            hsm.choice(
+                "after_associating",
+                hsm.transition(hsm.guard(_takes_intuition), hsm.target("/Cognition/processing/intuition")),
                 hsm.transition(hsm.target("/Cognition/processing/reasoning")),
             ),
             # Reflex: the bot's behaviors, then the decision model as the fallback reflex. Neither deliberates.
@@ -2427,7 +2597,47 @@ class Cognition(ability.Ability[InputData, OutputData]):
                 hsm.transition(
                     hsm.on(_AssociatedEvent),
                     hsm.guard(_matches_associated),
+                    hsm.target("/Cognition/processing/after_associating"),
+                ),
+            ),
+            # Intuition: the fast words. Selecting the handoff hands the turn on to reasoning.
+            hsm.state(
+                "intuition",
+                hsm.activity(_start_intuition),
+                hsm.transition(
+                    hsm.on(CancelEvent),
+                    hsm.guard(_is_cancel_request),
+                    hsm.target("/Cognition/processing/cancelling/intuition"),
+                ),
+                hsm.transition(
+                    hsm.on(intuition.OutputEvent),
+                    hsm.guard(_intuition_is_unhandled),
                     hsm.target("/Cognition/processing/reasoning"),
+                ),
+                hsm.transition(
+                    hsm.on(_StagePassedEvent),
+                    hsm.guard(_is_stage_passed),
+                    hsm.target("/Cognition/processing/reasoning"),
+                ),
+                hsm.transition(
+                    hsm.on(intuition.OutputEvent),
+                    hsm.guard(_intuition_is_handled),
+                    hsm.effect(_complete_processing),
+                    hsm.effect(_finish_turn),
+                    hsm.target("/Cognition/ready/settling"),
+                ),
+                # A failing intuition hands the same turn to reasoning (D-R-36); a timed-out one is stopped below.
+                hsm.transition(
+                    hsm.on(ability.FailedEvent),
+                    hsm.guard(_matches_intuition_failure),
+                    hsm.effect(_cascade_intuition_failure),
+                    hsm.target("/Cognition/processing/reasoning"),
+                ),
+                hsm.transition(
+                    hsm.on(_ChildHopTimedOutEvent),
+                    hsm.guard(_is_child_hop_timeout),
+                    hsm.effect(_fail_timed_out_step),
+                    hsm.target("/Cognition/processing/stopping/intuition"),
                 ),
             ),
             hsm.state(
@@ -2486,6 +2696,7 @@ class Cognition(ability.Ability[InputData, OutputData]):
                 ),
                 hsm.state("behaviors", hsm.activity(_stop_autonomy)),
                 hsm.state("decision", hsm.activity(_stop_decision)),
+                hsm.state("intuition", hsm.activity(_stop_intuition)),
                 hsm.state("reasoning", hsm.activity(_stop_reasoning)),
             ),
             hsm.state(
@@ -2534,6 +2745,7 @@ class Cognition(ability.Ability[InputData, OutputData]):
                 # acknowledges through _CancelPendingEvent exactly like autonomy.
                 hsm.state("associating", hsm.entry(_acknowledge_associating_cancel)),
                 hsm.state("decision", hsm.activity(_cancel_decision)),
+                hsm.state("intuition", hsm.activity(_cancel_intuition)),
                 hsm.state("reasoning", hsm.activity(_cancel_reasoning)),
                 hsm.state(
                     "acknowledging",
@@ -2604,6 +2816,7 @@ class Cognition(ability.Ability[InputData, OutputData]):
         reflection: reflection.Reflection,
         autonomy: autonomy.Autonomy | None = None,
         decision: decision.Decision | None = None,
+        intuition: intuition.Intuition | None = None,
         routines: routines.Routines | None = None,
         memory: memory.Memory | None = None,
         associative: memory.Associative | None = None,
@@ -2627,6 +2840,7 @@ class Cognition(ability.Ability[InputData, OutputData]):
             raise ValueError("rest_after must be positive.")
         self._autonomy = autonomy
         self._decision = decision
+        self._intuition = intuition
         self._reasoning = reasoning
         self._reflection = reflection
         self._routines = routines
@@ -2645,6 +2859,8 @@ class Cognition(ability.Ability[InputData, OutputData]):
             children.append(autonomy)
         if decision is not None:
             children.append(decision)
+        if intuition is not None:
+            children.append(intuition)
         children.append(reasoning)
         children.append(reflection)
         if memory is not None:

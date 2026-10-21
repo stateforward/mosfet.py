@@ -21,7 +21,7 @@ bot.cognition(reasoning=processor, reflex=decision.Processor(base_url="http://12
   schema's enum options). The answer label *is* the value, so a payload can never leave the menu,
   and an event with a required key that has no grounded value is left unoffered, before any
   request. Only the option the question chose is returned, with its probability as the
-  confidence; the pass criterion leaves the turn unhandled, so reasoning takes it.
+  confidence; the pass criterion leaves the turn unhandled, so the next tier (intuition, then reasoning) takes it.
 - `Client` sends one request and returns the answer. It opens an `httpx.AsyncClient` per request,
   so cancelling a turn closes its request. Every failure is a `decision.Error` that names the HTTP
   status or the error type and never a body.
@@ -49,7 +49,7 @@ blocks, which are context assembly. They keep as many leading whole lines as fit
 comes first), and when not even one fits, the question's own default instructions are sent
 instead. The state (the turn's stimuli) and the menu are never cut, ranked or dropped. A request
 that still does not fit is sent as it is, and the server's refusal is the decision layer's failure, which
-cognition hands to reasoning in the same turn. `None` sends every request whole.
+cognition hands on to the next tier in the same turn. `None` sends every request whole.
 
 ## Wire format
 
@@ -59,7 +59,7 @@ cognition hands to reasoning in the same turn. `None` sends every request whole.
 {"state": {"turn": "<environment:sound kind=\"phone.ringing\" stimulus:event=\"environment.sound\" />"},
  "questions": {"selection": {"type": "choice", "instructions": "...",
                              "criteria": {"phone.answer_call": "Answer the ringing call.",
-                                          "__unhandled__": "None of these fits: think the turn through first, with reasoning."}}}}
+                                          "__unhandled__": "None of these fits: take the turn up in words, with intuition."}}}}
 ```
 
 answered by

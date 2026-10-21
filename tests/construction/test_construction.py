@@ -51,6 +51,17 @@ class _Processor(processing.DecisionProcessor):
         return ()
 
 
+class _Chat(processing.Processor):
+    """A chat model's processor that selects nothing; it exists only to be handed to a constructor."""
+
+    @typing.override
+    async def process(
+        self, input: processing.InputData, *, drafts: processing.DraftSink | None = None
+    ) -> processing.Events:
+        del input, drafts
+        return ()
+
+
 @dataclasses.dataclass(frozen=True, kw_only=True)
 class _Embedder(embedding.Embedder):
     """An embedder that is never asked to embed."""
@@ -198,7 +209,7 @@ def test_defining_a_bot_does_no_io_and_starts_nothing(tmp_path: pathlib.Path) ->
                 "greeter",
                 bot.traits("curious"),
                 bot.cognition(
-                    reasoning=_Processor(),
+                    reasoning=_Chat(),
                     reflex=_Processor(),
                     memory=store,
                     associative=True,

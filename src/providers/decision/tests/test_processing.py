@@ -278,13 +278,14 @@ def test_a_criterion_is_the_first_line_of_its_event_schemas_description_or_its_n
     assert sent["questions"]["selection"]["criteria"] == {
         "phone.answer_call": described.strip().splitlines()[0],
         "probe.undescribed": "probe.undescribed",
-        _PASS: "None of these fits: think the turn through first, with reasoning.",
+        _PASS: "None of these fits: take the turn up in words, with intuition.",
     }
 
 
-def test_the_default_pass_criterion_says_the_turn_goes_on_to_reasoning() -> None:
+def test_the_default_pass_criterion_says_the_turn_goes_on_to_intuition() -> None:
     """D-R-42 (Willy live check): worded "leave the turn unhandled", passing read like ignoring, so the decision
-    model ignored a stranger's greeting rather than hand it on. Passing is how a turn reaches deliberation."""
+    model ignored a stranger's greeting rather than hand it on. Passing is how a turn reaches the next tier, which
+    takes it up in words (D-R-52)."""
 
     server = _Decide({"selection": (_PASS, {_PASS: 1.0})})
 
@@ -292,7 +293,8 @@ def test_the_default_pass_criterion_says_the_turn_goes_on_to_reasoning() -> None
 
     (sent,) = server.requests
     wording = sent["questions"]["selection"]["criteria"][_PASS]
-    assert "reason" in wording
+    assert "intuition" in wording
+    assert "words" in wording
     assert "unhandled" not in wording
 
 

@@ -351,7 +351,8 @@ EXPLANATIONS: tuple[Explanation, ...] = (
         title="an element is given something it does not take",
         meaning=(
             "`bot.attach` takes a device or an ability; `bot.input` and `bot.output` take an ability; "
-            "`bot.register` takes a `memory.StmMemory`; `bot.cognition`'s `reasoning=` takes a `processing.Processor`, "
+            "`bot.register` takes a `memory.StmMemory`; `bot.cognition`'s `reasoning=`, `intuition=` and `reflection=` take "
+            "a `processing.Processor`, "
             "`reflex=` takes a `processing.DecisionProcessor`, `memory=` takes a `memory.Memory` and `seeds=` "
             "takes `behavior.Seed`s; `bot.voice` takes a `vocal.voice.Catalog` first, `designer=` takes a `vocal.voice.Designer`, "
             "`languages=` takes language tags and `allowed=` takes the keys of the voices of a source without a "
@@ -695,6 +696,29 @@ EXPLANATIONS: tuple[Explanation, ...] = (
             'model = bot.define("greeter", bot.cognition(reasoning=processor, reflex=processor), bot.attach(phone.Phone()))'
         ),
         right='model = bot.define("greeter", bot.cognition(reasoning=processor, reflex=decider), bot.attach(phone.Phone()))',
+    ),
+    Explanation(
+        code="B0026",
+        level="error",
+        title="`bot.cognition` is given a decision processor where words are written",
+        meaning=(
+            "`reasoning=`, `intuition=` and `reflection=` each take a chat model's `processing.Processor`, such as "
+            "`openai_compat.Processor(...)` (`from mosfet.providers import openai_compat`); in a test, "
+            "`testing.Scripted()`. A `processing.DecisionProcessor` is reflex's: it is given as `reflex=`."
+        ),
+        why=(
+            "Intuition and reasoning write the bot's words and select its tools, and reflection writes what the bot "
+            "learns. A decision model only chooses among the offered events, with a confidence for each: it can "
+            "write none of that."
+        ),
+        wrong=(
+            'model = bot.define("greeter", bot.cognition(reasoning=processor, intuition=decider), '
+            "bot.attach(phone.Phone()))"
+        ),
+        right=(
+            'model = bot.define("greeter", bot.cognition(reasoning=processor, intuition=processor, reflex=decider), '
+            "bot.attach(phone.Phone()))"
+        ),
     ),
     Explanation(
         code="B0101",

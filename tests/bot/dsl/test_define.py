@@ -116,7 +116,9 @@ def test_a_definition_error_is_hsms_validation_error_and_the_bots() -> None:
     assert str(error).endswith("error: could not define bot `greeter`: 1 error")
 
 
-@pytest.mark.parametrize("code", ["B0001", "B0002", "B0010", "B0011", "B0021", "B0022", "B0023", "B0024", "B0025"])
+@pytest.mark.parametrize(
+    "code", ["B0001", "B0002", "B0010", "B0011", "B0021", "B0022", "B0023", "B0024", "B0025", "B0026"]
+)
 def test_each_validator_error_renders_its_golden(code: str, here: pathlib.Path) -> None:
     path = support.copy(code, here)
 
@@ -272,6 +274,40 @@ def test_a_cognition_without_reflex_defines_and_hands_what_behaviors_leave_to_re
     """D-R-52: reflex's decision layer is optional; a cognition is only required to reason."""
 
     model = bot.define("greeter", bot.cognition(reasoning=support.Silent()), bot.attach(phone.Phone()))
+
+    assert model.findings == []
+
+
+@pytest.mark.parametrize("keyword", ["intuition", "reasoning", "reflection"])
+def test_a_decision_processor_given_where_words_are_written_is_b0026(keyword: str) -> None:
+    """D-R-52: intuition, reasoning and reflection write words, which a decision model cannot."""
+
+    given: dict[str, processing.Processor] = {"reasoning": support.Silent(), keyword: support.Undecided()}
+    with pytest.raises(bot.DefinitionError) as caught:
+        _ = bot.define("greeter", bot.cognition(**typing.cast(typing.Any, given)), bot.attach(phone.Phone()))
+
+    (deciding,) = caught.value.diagnostics
+    assert (deciding.code, deciding.message) == (
+        "B0026",
+        f"`bot.cognition({keyword}=)` is given a decision processor, which cannot write words",
+    )
+    assert deciding.primary.label == "this is a `Undecided`"
+    assert deciding.help is not None
+    for named in _PROCESSORS:
+        assert named in deciding.help.message
+
+
+def test_a_cognition_with_every_tier_defines() -> None:
+    model = bot.define(
+        "greeter",
+        bot.cognition(
+            reasoning=support.Silent(),
+            intuition=support.Silent(),
+            reflex=support.Undecided(),
+            reflection=support.Silent(),
+        ),
+        bot.attach(phone.Phone()),
+    )
 
     assert model.findings == []
 

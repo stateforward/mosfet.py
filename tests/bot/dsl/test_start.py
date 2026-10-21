@@ -371,12 +371,48 @@ def test_reflex_decides_on_its_decision_processor_and_every_other_faculty_thinks
     }
 
 
-def test_a_cognition_without_reflex_starts_with_no_decision_layer(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_each_tier_thinks_on_its_own_processor_and_reflection_on_the_one_it_is_given(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """D-R-52: intuition thinks on ``intuition=``; reflection and consolidation on ``reflection=`` when given."""
+
+    thinking, fast, reflecting, deciding = support.Silent(), support.Silent(), support.Silent(), support.Undecided()
+    model = bot.define(
+        "greeter",
+        bot.cognition(reasoning=thinking, intuition=fast, reflex=deciding, reflection=reflecting, consolidation=True),
+        bot.attach(phone.Phone()),
+    )
+    found: Built = []
+    for owner, cls in (
+        (cognition, cognition.Decision),
+        (cognition, cognition.Intuition),
+        (cognition, cognition.Reasoning),
+        (cognition, cognition.Reflection),
+        (memory, memory.Consolidation),
+    ):
+        monkeypatch.setattr(owner, cls.__name__, _recorded(cls, found))
+
+    async def run() -> None:
+        started, _ = await _started(model)
+        await bot.stop(started)
+
+    asyncio.run(run())
+
+    assert {name: given["processor"] for name, given in found} == {
+        "Decision": deciding,
+        "Intuition": fast,
+        "Reasoning": thinking,
+        "Reflection": reflecting,
+        "Consolidation": reflecting,
+    }
+
+
+def test_a_cognition_given_only_reasoning_starts_with_no_other_tier(monkeypatch: pytest.MonkeyPatch) -> None:
     """D-R-52: each tier is built only when given; reasoning is the one a cognition always has."""
 
     model = bot.define("greeter", bot.cognition(reasoning=support.Silent()), bot.attach(phone.Phone()))
     found: Built = []
-    for cls in (cognition.Decision, cognition.Reasoning):
+    for cls in (cognition.Decision, cognition.Intuition, cognition.Reasoning):
         monkeypatch.setattr(cognition, cls.__name__, _recorded(cls, found))
 
     async def run() -> None:

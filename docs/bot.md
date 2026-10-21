@@ -89,7 +89,7 @@ what each bot is made of, and never a value given to a part:
 | Element | What it gives the bot |
 |---|---|
 | `bot.traits(*traits)` | The owner's fixed seed of the bot's nature: short descriptors such as `"curious"`, never instructions. With traits, the bot has a persona that it develops itself. At most one. |
-| `bot.cognition(*, reasoning, reflex=None, memory=None, associative=False, consolidation=False, autonomy=False, seeds=(), routines=None)` | Its mind: reasoning and reflection on `reasoning`, a `processing.Processor`, and its reflex's decision layer on `reflex`, a `processing.DecisionProcessor` (see [Reflex decides on a decision model](#reflex-decides-on-a-decision-model)), plus each faculty switched on, all on one memory (a fresh in-memory `memory.Memory()` when none is given). `seeds` are native behaviors its autonomy runs, and need `autonomy=True`. `routines` is the wall clock routines keep time on. Exactly one. |
+| `bot.cognition(*, reasoning, intuition=None, reflex=None, reflection=None, memory=None, associative=False, consolidation=False, autonomy=False, seeds=(), routines=None)` | Its mind, in tiers a turn takes up in order: its reflex's decision layer on `reflex`, a `processing.DecisionProcessor` (see [Reflex decides on a decision model](#reflex-decides-on-a-decision-model)), intuition on `intuition` and reasoning on `reasoning`, each a `processing.Processor`, with reflection and consolidation on `reflection` (reasoning's when omitted), plus each faculty switched on, all on one memory (a fresh in-memory `memory.Memory()` when none is given). `seeds` are native behaviors its autonomy runs, and need `autonomy=True`. `routines` is the wall clock routines keep time on. Exactly one. |
 | `bot.voice(catalog, /, *, designer=None, languages=("en",), allowed=())` | The source it is given its voice from when it is born, and the voices of it the bot may be born as (see [Hearing, speaking and a voice](#hearing-speaking-and-a-voice)). At most one. |
 | `bot.attach(instance)` | A device it holds, keyed by its `id`, or an ability it acquires. |
 | `bot.input(ability)` | A sense organ: the body fans every environment stimulus out to its input abilities, in parallel. |
@@ -123,10 +123,12 @@ and `sandbox.Spec` gives `HOME` the workspace.
 
 Reflex is the bot's fast first decision on every turn: its behaviors (the ones autonomy runs) match the turn first,
 and its decision layer chooses among the events the turn offers for what they leave unhandled, each with its
-confidence, and hands what it does not decide to reasoning. The decision layer runs on a decision model, never a chat
-model, so `bot.cognition` takes it apart from reasoning: `reflex=` is a `processing.DecisionProcessor`. Reasoning,
-reflection, consolidation and the voice inception stay on `reasoning=`. Without `reflex=`, what the behaviors leave
-goes on to reasoning. The decision processor is
+confidence, and hands what it does not decide on: to intuition, a chat model that answers without thinking first and
+may hand the turn on to reasoning, which thinks first. The decision layer runs on a decision model, never a chat
+model, so `bot.cognition` takes it apart from the others: `reflex=` is a `processing.DecisionProcessor`, and
+`intuition=`, `reasoning=` and `reflection=` are chat models' `processing.Processor`s. Reflection and consolidation
+think on `reflection=`, or on `reasoning=` when it is not given; the voice inception stays on `reasoning=`. Without
+`reflex=` or `intuition=`, the turn goes on to the next tier given. The decision processor is
 `decision.Processor(...)` (`from mosfet.providers import decision`), on any server that speaks the decisions wire
 format (`POST /v1/systemone`), given as `base_url=`:
 
@@ -138,8 +140,8 @@ the turn's instructions to their leading lines, never its stimuli or the offered
 [`src/providers/decision/README.md`](../src/providers/decision/README.md).
 
 In a test, the offline one is `testing.Decider()`, which makes only the choices the test writes down and otherwise
-hands the turn to reasoning. A cognition without `reasoning=` is `B0024`; a chat processor given as `reflex=` is
-`B0025`.
+hands the turn on. A cognition without `reasoning=` is `B0024`; a chat processor given as `reflex=` is `B0025`; a
+decision processor given as `intuition=`, `reasoning=` or `reflection=` is `B0026`.
 
 ## Objects and placements
 

@@ -836,8 +836,14 @@ class Decision(processing.Processing):
             except Exception as error:
                 next_event = _ApplyFailedEvent.with_data(types.FailureData(message=str(error), turn=data.request.turn))
             else:
+                # Actions dispatched before passing the turn on ride its ``acted`` to the next stage (D-R-52).
+                turn = (
+                    data.request.turn
+                    if data.terminal is not None
+                    else types.with_acts(data.request.turn, data.selections)
+                )
                 next_event = _PublishReadyEvent.with_data(
-                    _PublishData(completion=types.CompletionData(turn=data.request.turn, output=data.terminal))
+                    _PublishData(completion=types.CompletionData(turn=turn, output=data.terminal))
                 )
             await hsm.dispatch(
                 ctx,

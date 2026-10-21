@@ -5,7 +5,8 @@
 devices by id, its abilities in their roles, its sensory register and timeouts, and a cognition
 built once from ``bot.cognition``'s processors, flags and seeds on one shared memory (a fresh in-memory
 ``memory.Memory()`` when none was given), each tier only when given: reflex's decision layer decides on
-``reflex=``'s decision processor while reasoning, reflection and consolidation think on ``reasoning=``,
+``reflex=``'s decision processor, intuition and reasoning think on ``intuition=`` and ``reasoning=``, and
+reflection and consolidation on ``reflection=`` (reasoning's when not given),
 with a persona when the model has traits and, with ``bot.voice``, the inception that gives the bot its
 voice: conceived on reasoning's processor from the traits, said by the one ``speaking.Speaking`` given to
 ``bot.output``, and kept in that memory. The body takes the bot's name, so it runs as ``/<name>`` and its devices as ``/<name><DeviceClass>``. It then starts
@@ -434,8 +435,10 @@ def _mind(
     """Cognition, its faculties, its persona and the ``voice`` it is given at inception, all on ``store``.
 
     ``declared`` is ``bot.cognition`` as written, ``processor`` its reasoning processor, and ``nature`` the
-    traits of ``bot.traits``, which give the bot a persona. Reflex's decision layer is built only when
-    ``declared.reflex`` is given, and decides on it; every other faculty thinks on ``processor``. ``step`` is
+    traits of ``bot.traits``, which give the bot a persona. Reflex's decision layer and intuition are built
+    only when ``declared.reflex`` and ``declared.intuition`` are given, each on its own; reflection and
+    consolidation think on ``declared.reflection``, or on ``processor`` when it is not given, and reasoning on
+    ``processor``. ``step`` is
     ``bot.timeouts(step=)``, the step timeout of cognition and of its reflection; ``None`` keeps cognition's own
     step timeout for both.
 
@@ -446,13 +449,17 @@ def _mind(
     decider = declared.reflex
     if decider is not None and not isinstance(decider, processing.DecisionProcessor):
         raise TypeError(f"bot.cognition(reflex=) is a processing.DecisionProcessor, not a {type(decider).__name__}.")
+    # bot.define's validator has checked each given processor's type; the element keeps them as written.
+    fast = typing.cast(processing.Processor | None, declared.intuition)
+    reflecting = typing.cast(processing.Processor | None, declared.reflection) or processor
     now = typing.cast(schedule.WallClock | None, declared.routines)
     self_knowledge = None if nature is None else persona.Persona(traits=nature, memory=store)
     return cognition.Cognition(
         decision=None if decider is None else cognition.Decision(processor=decider),
+        intuition=None if fast is None else cognition.Intuition(processor=fast),
         reasoning=cognition.Reasoning(processor=processor),
         reflection=cognition.Reflection(
-            processor=processor, memory=store, persona=self_knowledge, child_operation_timeout=step
+            processor=reflecting, memory=store, persona=self_knowledge, child_operation_timeout=step
         ),
         autonomy=cognition.Autonomy(
             memory=store, seeded_behaviors=tuple(typing.cast(collections.abc.Sequence[behavior.Seed], declared.seeds))
@@ -467,7 +474,7 @@ def _mind(
         )
         if declared.associative
         else None,
-        consolidation=memory.Consolidation(memory=store, processor=processor) if declared.consolidation else None,
+        consolidation=memory.Consolidation(memory=store, processor=reflecting) if declared.consolidation else None,
         persona=self_knowledge,
         voice=voice,
         child_operation_timeout=step,

@@ -97,6 +97,7 @@ def test_describe_lists_the_voice_among_the_faculties_and_the_seeds_by_name() ->
         bot.voice(support.Shelf()),
         bot.cognition(
             reasoning=support.Silent(),
+            intuition=support.Silent(),
             reflex=support.Undecided(),
             autonomy=True,
             seeds=(communication.speech_heard_seed(),),
@@ -107,7 +108,7 @@ def test_describe_lists_the_voice_among_the_faculties_and_the_seeds_by_name() ->
 
     (outline,) = bot.describe(model).bots
 
-    assert outline.faculties == ("reflex", "reasoning", "reflection", "autonomy", "voice")
+    assert outline.faculties == ("reflex", "intuition", "reasoning", "reflection", "autonomy", "voice")
     assert outline.seeds == ("SpeechHeard",)
     assert [(part.id, part.roles) for part in outline.parts] == [("speaking", ("output",)), ("phone", ("attach",))]
 

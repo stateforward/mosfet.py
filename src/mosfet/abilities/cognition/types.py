@@ -146,12 +146,13 @@ def without_ignore_selections(selections: processing.Events) -> processing.Event
 
 
 class ActedData(pydantic.BaseModel):
-    """What behaviors already did on this turn's percepts, before deliberation took the turn up.
+    """What earlier stages already did on this turn, before the stage that takes the turn up next.
 
     A ``bot.perceived`` batch is handled by autonomy only when every percept was. When some
     were not, the selections the handling behaviors made were already dispatched; they ride
-    the turn so the turn's one episode and its output carry them first, and deliberation
-    knows them as a fact of the turn, never as an instruction.
+    the turn so the turn's one episode and its output carry them first, and the stages after
+    know them as a fact of the turn, never as an instruction. So does what a stage dispatched
+    before it handed the turn on (the decision layer's actions, intuition's words), after them.
     """
 
     model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
@@ -160,8 +161,8 @@ class ActedData(pydantic.BaseModel):
         extra="forbid",
         json_schema_extra={
             "description": (
-                "What the bot's behaviors already did on this turn, before deliberation: the percepts they "
-                "handled and the events they selected and dispatched."
+                "What the bot already did on this turn, before the stage that takes it up next: the percepts its "
+                "earlier stages acted on and the events they selected and dispatched."
             ),
             "examples": [
                 {
@@ -174,11 +175,14 @@ class ActedData(pydantic.BaseModel):
 
     percepts: tuple[int, ...] = pydantic.Field(
         min_length=1,
-        description="Arrival positions, from 0, of the batch's percepts that behaviors handled, in arrival order.",
+        description=(
+            "Arrival positions, from 0, of the percepts earlier stages acted on, in arrival order: those behaviors "
+            "handled, or every percept of the turn when only a later stage acted."
+        ),
         examples=[[0], [0, 2]],
     )
     acts: OutputData = pydantic.Field(
-        description="What those behaviors selected and the bot already dispatched, in the percepts' arrival order.",
+        description="What those stages selected and the bot already dispatched, in the order they were dispatched.",
         examples=[[{"target": "communication", "event": "bot.ability.communication.input"}]],
     )
 
@@ -220,10 +224,32 @@ class TurnData(pydantic.BaseModel):
     acted: ActedData | None = pydantic.Field(
         default=None,
         description=(
-            "What behaviors already did on this turn's percepts when autonomy handled only some of them; None "
-            "when no behavior acted. The stages that follow carry it, and the turn's output and episode put it first."
+            "What earlier stages already did on this turn: behaviors on the percepts they handled when autonomy "
+            "handled only some of them, then what a stage dispatched before it handed the turn on; None when "
+            "nothing acted. The stages that follow carry it, and the turn's output and episode put it first."
         ),
     )
+
+
+def with_acts(turn: TurnData, acts: OutputData) -> TurnData:
+    """``turn`` carrying ``acts``, which a stage dispatched before it handed the turn on, after what earlier stages did.
+
+    With nothing acted yet, the acts are on every percept of the turn: each of a ``bot.perceived`` batch, or its
+    one stimulus. A turn given no acts is returned as it is.
+    """
+
+    if not acts:
+        return turn
+    acted = turn.acted
+    if acted is None:
+        perceived = turn.input.stimulus
+        count = (
+            len(perceived.data.percepts)
+            if isinstance(perceived, hsm.Event) and isinstance(perceived.data, mosfet.PerceivedData)
+            else 1
+        )
+        return turn.model_copy(update={"acted": ActedData(percepts=tuple(range(count)), acts=acts)})
+    return turn.model_copy(update={"acted": acted.model_copy(update={"acts": (*acted.acts, *acts)})})
 
 
 class CompletionData(pydantic.BaseModel):
@@ -265,13 +291,14 @@ class FailureData(ability.FailureData):
 STEP_TIMEOUT: typing.Final = datetime.timedelta(seconds=120)
 """How long one step of the bot's cognition may take when the composition gives no ``bot.timeouts(step=)``.
 
-Cognition's steps (each reflex layer, associating, reasoning) and reflection's (its select step, its revision
-child, and stopping either) are each bounded by the same step timeout. One step of a local model with thinking
-on takes 30 s and more, and reflex and reasoning together still fit the body's 5-minute turn bound."""
+Cognition's steps (each reflex layer, associating, intuition, reasoning) and reflection's (its select step, its
+revision child, and stopping either) are each bounded by the same step timeout. One step of a local model with
+thinking on takes 30 s and more, and reflex, intuition and reasoning together still fit the body's 5-minute turn
+bound."""
 
 MAX_SELECTION_REPAIRS: typing.Final[int] = 2
-"""How many times a cognition stage (decision, reasoning, reflection) asks its model again after a rejected
-selection, before the rejection fails the turn; the same rejection twice running fails it at once."""
+"""How many times a cognition stage (decision, intuition, reasoning, reflection) asks its model again after a
+rejected selection, before the rejection fails the turn; the same rejection twice running fails it at once."""
 
 
 def selection_rejection_key(normalized: str) -> str:
@@ -511,6 +538,7 @@ __all__ = [
     "is_output",
     "selection_rejection_key",
     "selection_rejection_message",
+    "with_acts",
     "with_selection_feedback",
     "without_ignore_selections",
 ]
