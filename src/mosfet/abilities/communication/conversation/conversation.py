@@ -269,7 +269,16 @@ class MessageProvenance(pydantic.BaseModel):
 
 
 class Message(pydantic.BaseModel):
-    """One immutable, model-safe inbound or outbound message of the current exchange."""
+    """One immutable, model-safe inbound or outbound message of the current exchange.
+
+    A model reads who said it (``participants``), which way, and what was said (``content`` and its
+    ``attachments``). ``provenance`` and the opaque ``source_ids`` / ``target_ids`` are correlation:
+    they stay on the typed data and are left out of what a model is shown.
+    """
+
+    __model_facing_excluded_fields__: typing.ClassVar[frozenset[str]] = frozenset(
+        {"provenance", "source_ids", "target_ids"}
+    )
 
     model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
         frozen=True,

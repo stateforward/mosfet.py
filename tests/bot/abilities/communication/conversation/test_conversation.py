@@ -176,7 +176,7 @@ def test_message_content_recursive_alias_preserves_schema_and_validation() -> No
 
     schema = conversation.Message.model_json_schema()
     schema_hash = hashlib.sha256(json.dumps(schema, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-    assert schema_hash == "54b056371520d33756f9c8a7a366a020d3dc4d2cf7444da05c665ae3894ce9f5"
+    assert schema_hash == "98b0e966322fa11815fd8eb5a36964b2a2c18022740224c9cec0f52f434e58c8"
 
     payload = {
         "direction": "inbound",
@@ -1260,6 +1260,36 @@ def test_memory_keeps_the_inbound_turn_behind_an_exchange_emission_not_the_excha
     assert "a line of the exchange" not in kept
     assert "a line of the exchange" in prompt
     assert "call me back at noon" not in prompt
+
+
+def test_a_message_shows_the_model_who_said_what_without_its_correlation_ids() -> None:
+    """R-20: a message renders who (participants), its words and attachments; provenance and the identity sets
+    are correlation that stays on the typed data, never prompt text."""
+
+    caller = mosfet.Participant(ref="+15555550100", role=mosfet.ParticipantRole.SOURCE)
+    message = conversation.Message(
+        direction="inbound",
+        source_ids=frozenset({"source-identity"}),
+        target_ids=frozenset({"target-identity"}),
+        content="call me back at noon",
+        content_type="text/plain",
+        participants=(caller,),
+        provenance=conversation.MessageProvenance(event="test.provenance.event", id="provenance-id"),
+    )
+    emitted = conversation.OutputEvent.with_data(conversation.Exchange(parent=None, messages=(message,)))
+
+    prompt = "".join(
+        part.text
+        for part in cognition_event.model_facing_content(emitted, capacity=media.ImageCapacity())
+        if isinstance(part, text.TextPart)
+    )
+
+    assert "call me back at noon" in prompt
+    assert 'ref="+15555550100"' in prompt
+    for hidden in ("provenance", "test.provenance.event", "provenance-id", "source-identity", "target-identity"):
+        assert hidden not in prompt
+    assert message.provenance.id == "provenance-id"
+    assert message.source_ids == frozenset({"source-identity"})
 
 
 def test_conversation_takes_no_memory() -> None:
