@@ -10,6 +10,7 @@ phone offers them alongside the phone's own call commands under one domain.
 
 from mosfet.devices import phone
 
+import datetime
 import typing
 
 import hsm
@@ -203,6 +204,129 @@ class NotificationNotFoundData(pydantic.BaseModel):
     )
 
 
+MessageId = typing.Annotated[
+    str,
+    pydantic.Field(
+        min_length=1,
+        description=(
+            "The id of one message in a thread on this phone, exactly as a phone.thread page listed it: the "
+            "messaging service's own id when it reported one, otherwise the number the handset gave it."
+        ),
+        examples=["message-3"],
+    ),
+]
+
+
+class ReadThreadData(pydantic.BaseModel):
+    """Command from the holder: open the conversation with one correspondent and read a page of it.
+
+    Like opening a thread in a phone's messages app: the handset keeps every text it received from
+    and sent to each correspondent, and nothing about a thread reaches the holder until the holder
+    opens it. The phone answers with one page, ``phone.thread`` — the newest messages first time,
+    and older ones by naming the oldest message already read as ``before``, which is scrolling back.
+    Reading a thread changes nothing on the handset: it does not read or dismiss a notification
+    and the correspondent is never told. There is no example correspondent, deliberately, as for a
+    recipient: a concrete address in a tool schema acts as a default.
+    """
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
+        frozen=True,
+        extra="forbid",
+    )
+
+    with_: SmsAddress = pydantic.Field(
+        alias="with",
+        description=(
+            "Whose conversation to read: the address of the other party, written exactly as the phone reported "
+            "the sender of a text you received or the recipient of one you sent. A correspondent this phone has "
+            "never texted with has an empty thread."
+        ),
+    )
+    before: MessageId | None = pydantic.Field(
+        default=None,
+        description=(
+            "Read the messages older than this one. Null (the default) reads the newest messages. To scroll "
+            "back, name the oldest message on the page you already have; a message the phone no longer keeps "
+            "has nothing older on the handset."
+        ),
+        examples=[None, "message-3"],
+    )
+    limit: int = pydantic.Field(
+        default=20,
+        ge=1,
+        le=50,
+        description="Most messages to read on this page, from 1 to 50. Defaults to 20.",
+        examples=[20],
+    )
+
+
+class ThreadMessageData(pydantic.BaseModel):
+    """One message in a thread: who wrote it is ``direction``, from the handset's side."""
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
+        frozen=True,
+        json_schema_extra={
+            "examples": [
+                {"id": "message-1", "at": "2026-10-20T09:00:00Z", "direction": "received", "text": "Book me the 10:15."}
+            ]
+        },
+    )
+
+    id: MessageId
+    at: datetime.datetime = pydantic.Field(
+        description="When the handset received the message, or when the service accepted it for sending.",
+        examples=["2026-10-20T09:00:00Z"],
+    )
+    direction: typing.Literal["received", "sent"] = pydantic.Field(
+        description="received: the correspondent sent it to this phone. sent: this phone sent it to them.",
+        examples=["received", "sent"],
+    )
+    text: SmsText
+
+
+class ThreadData(pydantic.BaseModel):
+    """One page of the conversation with one correspondent, as the phone keeps it.
+
+    The answer to ``phone.read_thread``: the newest ``limit`` messages before the one it named,
+    oldest first, the way a thread reads down the screen. ``more`` says whether older messages
+    remain on the handset to scroll back to. An empty page is an answer, not a failure: nobody
+    has texted with that correspondent on this phone, or nothing older is kept.
+    """
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
+        frozen=True,
+        json_schema_extra={
+            "examples": [
+                {
+                    "correspondent": "+15555550101",
+                    "messages": [
+                        {
+                            "id": "message-1",
+                            "at": "2026-10-20T09:00:00Z",
+                            "direction": "received",
+                            "text": "Book me the 10:15.",
+                        },
+                        {"id": "message-2", "at": "2026-10-20T09:01:00Z", "direction": "sent", "text": "Done."},
+                    ],
+                    "more": False,
+                }
+            ]
+        },
+    )
+
+    correspondent: SmsAddress
+    messages: tuple[ThreadMessageData, ...] = pydantic.Field(
+        description="The page's messages, oldest first; empty when there is nothing to read.",
+    )
+    more: bool = pydantic.Field(
+        description=(
+            "Whether older messages remain on the handset. Read them with phone.read_thread, naming the first "
+            "message on this page as before."
+        ),
+        examples=[False],
+    )
+
+
 class NotificationData(pydantic.BaseModel):
     """The phone event a notification ding announces, carried whole on the ding.
 
@@ -330,6 +454,16 @@ NotificationNotFoundEvent = hsm.Event[NotificationNotFoundData](
     name="phone.notification_not_found",
     schema=NotificationNotFoundData,
 )
+ReadThreadEvent = hsm.Event[ReadThreadData](
+    name="phone.read_thread",
+    kind=event.EventKind,
+    schema=ReadThreadData,
+)
+ThreadEvent = hsm.Event[ThreadData](
+    name="phone.thread",
+    schema=ThreadData,
+)
+"""One page of a thread, in the hand of whoever read it: the answer to :data:`ReadThreadEvent`."""
 
 
 # Messaging is independent of calls: request out to the service, the service's verdict back in,

@@ -1,10 +1,13 @@
 from mosfet.devices import phone, smart_phone
 
+import datetime
 import typing
 
 import hsm
 import pydantic
 import pytest
+
+from mosfet.abilities import processing
 
 from tests.type_helpers import object_dict
 
@@ -15,6 +18,8 @@ MESSAGING_EVENTS = (
     smart_phone.ReadNotificationEvent,
     smart_phone.DismissNotificationEvent,
     smart_phone.NotificationNotFoundEvent,
+    smart_phone.ReadThreadEvent,
+    smart_phone.ThreadEvent,
     smart_phone.ServiceTextMessageSendRequestedEvent,
     smart_phone.ServiceTextMessageSentEvent,
     smart_phone.ServiceTextMessageSendFailedEvent,
@@ -85,4 +90,64 @@ def test_a_notification_names_what_caused_it() -> None:
     with pytest.raises(pydantic.ValidationError):
         _ = smart_phone.NotificationData.model_validate(
             {"id": "x", "name": "phone.ringing", "data": {"text": "Book me the 10:15."}}
+        )
+
+
+def test_reading_a_thread_is_a_model_callable_command_named_by_correspondent() -> None:
+    """The command is offered as a tool; ``with`` is its wire name, the way a model writes it."""
+
+    schema = smart_phone.ReadThreadData.model_json_schema()
+    properties = _schema_properties(schema)
+    read = smart_phone.ReadThreadData.model_validate({"with": "+15555550101"})
+
+    assert smart_phone.ReadThreadEvent.name == "phone.read_thread"
+    assert smart_phone.ReadThreadEvent.kind == processing.EventKind
+    assert smart_phone.ThreadEvent.name == "phone.thread"
+    assert smart_phone.ThreadEvent.kind != processing.EventKind
+    assert schema["required"] == ["with"]
+    assert set(properties) == {"with", "before", "limit"}
+    for name in ("with", "before", "limit"):
+        assert object_dict(properties[name]).get("description"), name
+    # No example correspondent, as for a recipient: a concrete address would act as a default.
+    assert "examples" not in object_dict(properties["with"])
+    assert (read.with_, read.before, read.limit) == ("+15555550101", None, 20)
+    assert (
+        smart_phone.ReadThreadData.model_validate({"with": "+15555550101", "before": "message-3", "limit": 50}).limit
+        == 50
+    )
+    for invalid in (
+        {"with": ""},
+        {"with": "+15555550101", "limit": 0},
+        {"with": "+15555550101", "limit": 51},
+        {"with": "+15555550101", "before": ""},
+        {"with": "+15555550101", "unread": True},
+        # One spelling only: the wire name a model writes.
+        {"with_": "+15555550101"},
+    ):
+        with pytest.raises(pydantic.ValidationError):
+            _ = smart_phone.ReadThreadData.model_validate(invalid)
+
+
+def test_a_thread_page_carries_its_messages_oldest_first() -> None:
+    page = smart_phone.ThreadData.model_validate(
+        {
+            "correspondent": "+15555550101",
+            "messages": [
+                {
+                    "id": "message-1",
+                    "at": "2026-10-20T09:00:00Z",
+                    "direction": "received",
+                    "text": "Book me the 10:15.",
+                },
+                {"id": "message-2", "at": "2026-10-20T09:01:00Z", "direction": "sent", "text": "Done."},
+            ],
+            "more": False,
+        }
+    )
+
+    assert [message.direction for message in page.messages] == ["received", "sent"]
+    assert page.messages[0].at == datetime.datetime(2026, 10, 20, 9, tzinfo=datetime.UTC)
+    with pytest.raises(pydantic.ValidationError):
+        _ = smart_phone.ThreadMessageData.model_validate(
+            {"id": "message-1", "at": "2026-10-20T09:00:00Z", "direction": "draft", "text": "Hi."}
         )

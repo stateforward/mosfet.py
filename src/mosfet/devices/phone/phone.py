@@ -1411,7 +1411,18 @@ class Phone(mosfet.device.Device):
             display=resolved_display,
             answer_timeout=answer_timeout,
             transfer_timeout=transfer_timeout,
+            **self._firmware_options(),
         )
+
+    def _firmware_options(self) -> dict[str, typing.Any]:
+        """Construction arguments a handset's own firmware takes beyond a phone's call firmware.
+
+        A phone's call firmware takes none. A handset that installs firmware doing more than calls
+        (``_firmware_type``) returns what that firmware is built with; it is read once, while this
+        handset is being built.
+        """
+
+        return {}
 
     @typing.override
     async def stop(self, ctx: hsm.Context) -> None:

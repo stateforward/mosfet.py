@@ -1,7 +1,8 @@
 """Smart phone: a phone that also texts.
 
 Every call contract is the phone's own (:mod:`mosfet.devices.phone`); this package adds only
-messaging — incoming texts, notifications on the lock screen, and sending texts.
+messaging — incoming texts, notifications on the lock screen, sending texts, and the
+conversation kept with each correspondent, which the holder reads back when it chooses to.
 """
 
 from . import display, smart_phone
@@ -11,11 +12,14 @@ from mosfet.devices.smart_phone.events import (
     DismissNotificationEvent,
     NotificationData,
     NotificationEvent,
+    MessageId,
     NotificationId,
     NotificationNotFoundData,
     NotificationNotFoundEvent,
     ReadNotificationData,
     ReadNotificationEvent,
+    ReadThreadData,
+    ReadThreadEvent,
     SendTextMessageData,
     SendTextMessageEvent,
     ServiceTextMessageSendFailedEvent,
@@ -30,6 +34,9 @@ from mosfet.devices.smart_phone.events import (
     TextMessageSendFailedEvent,
     TextMessageSentData,
     TextMessageSentEvent,
+    ThreadData,
+    ThreadEvent,
+    ThreadMessageData,
 )
 from mosfet.devices.smart_phone.smart_phone import NOTIFICATION_DB, NOTIFICATION_WAV, Firmware, SmartPhone
 
@@ -44,6 +51,7 @@ __all__ = [
     "Firmware",
     "NotificationData",
     "NotificationEvent",
+    "MessageId",
     "NotificationId",
     "NotificationNotFoundData",
     "NotificationNotFoundEvent",
@@ -51,6 +59,8 @@ __all__ = [
     "NotificationsEvent",
     "ReadNotificationData",
     "ReadNotificationEvent",
+    "ReadThreadData",
+    "ReadThreadEvent",
     "SendTextMessageData",
     "SendTextMessageEvent",
     "ServiceTextMessageSendFailedEvent",
@@ -66,4 +76,7 @@ __all__ = [
     "TextMessageSendFailedEvent",
     "TextMessageSentData",
     "TextMessageSentEvent",
+    "ThreadData",
+    "ThreadEvent",
+    "ThreadMessageData",
 ]

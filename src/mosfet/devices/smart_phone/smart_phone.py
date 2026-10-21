@@ -1,6 +1,8 @@
-from mosfet.devices import phone
+from mosfet.devices import audio, phone
 
+import collections.abc
 import dataclasses
+import datetime
 import importlib.resources
 import typing
 import uuid
@@ -8,7 +10,8 @@ import uuid
 import hsm
 import pydantic
 
-from mosfet.environment import SoundEvent, Environment
+import mosfet.device
+from mosfet.environment import SoundEvent, Environment, space
 
 # Flat symbol imports (not `from . import display`), as in the phone package: SmartPhone accepts
 # a `display` constructor parameter, which would shadow a `display` module import.
@@ -22,6 +25,8 @@ from .events import (
     NotificationNotFoundEvent,
     ReadNotificationData,
     ReadNotificationEvent,
+    ReadThreadData,
+    ReadThreadEvent,
     SendTextMessageData,
     SendTextMessageEvent,
     ServiceTextMessageSendFailedEvent,
@@ -33,6 +38,9 @@ from .events import (
     TextMessageSendFailedEvent,
     TextMessageSentData,
     TextMessageSentEvent,
+    ThreadData,
+    ThreadEvent,
+    ThreadMessageData,
 )
 
 NOTIFICATION_DB = 70.0
@@ -48,18 +56,99 @@ Across a room it is audible and easy to miss, which is what a notification is.
 NOTIFICATION_WAV = (importlib.resources.files(__package__) / "assets" / "notification.wav").read_bytes()
 """Notification ding: the one short chime a handset plays for any notification."""
 
+THREAD_CAPACITY = 500
+"""How many messages a handset keeps in each thread by default; the oldest go first beyond it."""
+
+
+def _utc_now() -> datetime.datetime:
+    return datetime.datetime.now(datetime.UTC)
+
+
+class _Timeouts(typing.TypedDict, total=False):
+    """The phone's own timeouts, passed through to it unchanged; an omitted one is the phone's default."""
+
+    service_timeout: datetime.timedelta
+    answer_timeout: datetime.timedelta
+    transfer_timeout: datetime.timedelta
+
 
 class Firmware(phone.Firmware):
     """Smart-phone firmware: the phone's call firmware plus messaging and the lock screen.
 
     Every call transition is the phone's own, defined once in :class:`mosfet.devices.phone.Firmware`;
-    this firmware adds only what a smart phone does besides calls.
+    this firmware adds only what a smart phone does besides calls: texting, the lock screen, and
+    the messages app that keeps each correspondent's thread.
     """
 
     # The lock screen's pending list, oldest first. Firmware owns it and drives the display from
     # it; the display only shows what it is sent. Rebound, never mutated, so the empty default is
     # every new handset's own empty lock screen.
     _notifications: tuple[NotificationData, ...] = ()
+    # The messages app: every text received from and sent to each correspondent, oldest first,
+    # at most ``_thread_capacity`` per thread. Durable handset state, owned here (HSM-STATE-001).
+    _threads: dict[str, tuple[ThreadMessageData, ...]]
+    # How many messages each thread has ever filed: numbers the ones the service gave no id.
+    _filed: dict[str, int]
+    _thread_capacity: int
+    _now: collections.abc.Callable[[], datetime.datetime]
+
+    def __init__(
+        self,
+        *,
+        device: hsm.Instance,
+        service: hsm.Instance | None = None,
+        speaker: audio.Speaker | None = None,
+        microphone: audio.Microphone | None = None,
+        display: phone.Display | None = None,
+        answer_timeout: datetime.timedelta,
+        transfer_timeout: datetime.timedelta,
+        thread_capacity: int = THREAD_CAPACITY,
+        now: collections.abc.Callable[[], datetime.datetime] | None = None,
+    ) -> None:
+        """Build smart-phone firmware: the phone's call firmware plus a messages app.
+
+        The call arguments are the phone firmware's own, passed through as :class:`SmartPhone`
+        builds it. ``thread_capacity`` bounds each correspondent's thread, the oldest message going
+        first; ``now`` is the wall clock a message is stamped with as the handset files it (UTC
+        system time when omitted).
+
+        Raises:
+            ValueError: If ``thread_capacity`` is below one, or a timeout is not positive.
+        """
+
+        if thread_capacity < 1:
+            raise ValueError("thread_capacity must be at least one message.")
+        super().__init__(
+            device=device,
+            service=service,
+            speaker=speaker,
+            microphone=microphone,
+            display=display,
+            answer_timeout=answer_timeout,
+            transfer_timeout=transfer_timeout,
+        )
+        self._threads = {}
+        self._filed = {}
+        self._thread_capacity = thread_capacity
+        self._now = now if now is not None else _utc_now
+
+    @staticmethod
+    def _file(
+        instance: "Firmware",
+        correspondent: str,
+        direction: typing.Literal["received", "sent"],
+        text: str,
+        message_id: str | None,
+    ) -> None:
+        """Put one message at the end of its thread, numbering it when the service named it not."""
+
+        filed = instance._filed.get(correspondent, 0) + 1
+        instance._filed[correspondent] = filed
+        message = ThreadMessageData(
+            id=message_id or f"message-{filed}", at=instance._now(), direction=direction, text=text
+        )
+        thread = (*instance._threads.get(correspondent, ()), message)
+        instance._threads[correspondent] = thread[-instance._thread_capacity :]
 
     @staticmethod
     def _publish_text_message_send_requested(ctx: hsm.Context, instance: "Firmware", event: hsm.Event) -> None:
@@ -69,8 +158,10 @@ class Firmware(phone.Firmware):
 
     @staticmethod
     def _publish_text_message_sent(ctx: hsm.Context, instance: "Firmware", event: hsm.Event) -> None:
+        # What the service accepted is what went, so that is what the thread keeps.
         data = event.data
         assert isinstance(data, TextMessageSentData)
+        Firmware._file(instance, data.to, "sent", data.text, None)
         Firmware._report(ctx, instance, event, TextMessageSentEvent.with_data(data))
 
     @staticmethod
@@ -94,6 +185,34 @@ class Firmware(phone.Firmware):
         assert isinstance(data, NotificationData)
         instance._notifications = (*instance._notifications, data)
         Firmware._show_notifications(ctx, instance, event)
+
+    @staticmethod
+    def _file_received(ctx: hsm.Context, instance: "Firmware", event: hsm.Event) -> None:
+        """A text joins its sender's thread; one with no reported sender belongs to no thread."""
+
+        del ctx
+        data = event.data
+        assert isinstance(data, NotificationData)
+        if data.data.sender is not None:
+            Firmware._file(instance, data.data.sender, "received", data.data.text, data.data.id)
+
+    @staticmethod
+    def _publish_thread(ctx: hsm.Context, instance: "Firmware", event: hsm.Event) -> None:
+        """Answer a read with one page: the newest ``limit`` messages before ``before``, oldest first.
+
+        An unknown correspondent, or a ``before`` the thread no longer keeps, is an empty page.
+        """
+
+        data = event.data
+        assert isinstance(data, ReadThreadData)
+        thread = instance._threads.get(data.with_, ())
+        end = len(thread)
+        if data.before is not None:
+            ids = [message.id for message in thread]
+            end = len(ids) - 1 - ids[::-1].index(data.before) if data.before in ids else 0
+        start = max(0, end - data.limit)
+        page = ThreadData(correspondent=data.with_, messages=thread[start:end], more=start > 0)
+        Firmware._report(ctx, instance, event, ThreadEvent.with_data(page))
 
     @staticmethod
     def _is_pending_notification(ctx: hsm.Context, instance: "Firmware", event: hsm.Event) -> bool:
@@ -136,7 +255,7 @@ class Firmware(phone.Firmware):
         hsm.transition(hsm.on(ServiceTextMessageSendFailedEvent), hsm.effect(_publish_text_message_send_failed)),
         # The lock screen is independent of the call too. Reading and dismissing are the holder's
         # own acts on it; replying to a message is not reading it.
-        hsm.transition(hsm.on(NotificationEvent), hsm.effect(_add_notification)),
+        hsm.transition(hsm.on(NotificationEvent), hsm.effect(_add_notification, _file_received)),
         hsm.transition(
             hsm.on(ReadNotificationEvent), hsm.guard(_is_pending_notification), hsm.effect(_remove_notification)
         ),
@@ -153,6 +272,8 @@ class Firmware(phone.Firmware):
             hsm.guard(_is_unknown_notification),
             hsm.effect(_publish_notification_not_found),
         ),
+        # Opening a thread is independent of the call and of the lock screen alike.
+        hsm.transition(hsm.on(ReadThreadEvent), hsm.effect(_publish_thread)),
     )
 
 
@@ -160,7 +281,9 @@ class SmartPhone(phone.Phone):
     """A phone that also texts: every call behavior of :class:`mosfet.devices.phone.Phone`, plus messaging.
 
     Incoming texts ding into the room, reach the holder as a notification, and wait on the lock
-    screen until read or dismissed; outgoing texts go through the same service as calls.
+    screen until read or dismissed; outgoing texts go through the same service as calls. Every
+    text received and every text that went is kept in its correspondent's thread, which the
+    holder reads back a page at a time with :data:`ReadThreadEvent` when it chooses to.
     """
 
     firmware_model: typing.ClassVar[hsm.Model] = Firmware.model
@@ -171,7 +294,54 @@ class SmartPhone(phone.Phone):
         SendTextMessageData,
         ReadNotificationData,
         DismissNotificationData,
+        ReadThreadData,
     )
+    # How its messages app is built, handed to its firmware at construction and never rewritten.
+    _thread_capacity: int
+    _now: collections.abc.Callable[[], datetime.datetime] | None
+
+    def __init__(
+        self,
+        *,
+        thread_capacity: int = THREAD_CAPACITY,
+        now: collections.abc.Callable[[], datetime.datetime] | None = None,
+        id: mosfet.device.DeviceId | None = None,
+        clock: hsm.Clock | None = None,
+        microphone: audio.Microphone | None = None,
+        speaker: audio.Speaker | None = None,
+        display: phone.Display | None = None,
+        peripherals: collections.abc.Iterable[mosfet.device.Device] = (),
+        placement: space.Placement | None = None,
+        service: hsm.Instance | None = None,
+        **timeouts: typing.Unpack[_Timeouts],
+    ) -> None:
+        """Build a smart phone: a handset (every argument after ``now`` is the phone's own) with a messages app.
+
+        ``thread_capacity`` is how many messages the handset keeps with each correspondent
+        (:data:`THREAD_CAPACITY` by default), the oldest going first; ``now`` is the wall clock
+        it stamps each message with (UTC system time when omitted).
+
+        Raises:
+            ValueError: If ``thread_capacity`` is below one, or as :class:`mosfet.devices.phone.Phone`.
+        """
+
+        self._thread_capacity = thread_capacity
+        self._now = now
+        super().__init__(
+            id=id,
+            clock=clock,
+            microphone=microphone,
+            speaker=speaker,
+            display=display,
+            peripherals=peripherals,
+            placement=placement,
+            service=service,
+            **timeouts,
+        )
+
+    @typing.override
+    def _firmware_options(self) -> dict[str, typing.Any]:
+        return {"thread_capacity": self._thread_capacity, "now": self._now}
 
     @typing.override
     def _observe(self, ctx: hsm.Context, event: hsm.Event[typing.Any]) -> None:
@@ -186,9 +356,12 @@ class SmartPhone(phone.Phone):
 
         A read or dismiss that named no pending notification is plain to the hand in the same way;
         one that worked is visible on the display the holder is looking at, and nothing more.
+
+        A thread the holder opened is in the hand that opened it: the page is the answer to the
+        read, and only a read puts a thread there — the phone never pushes one.
         """
 
-        if isinstance(event.data, TextMessageSendFailedData | NotificationNotFoundData):
+        if isinstance(event.data, TextMessageSendFailedData | NotificationNotFoundData | ThreadData):
             self._tell_holders(ctx, event)
             return
         super()._observe(ctx, event)

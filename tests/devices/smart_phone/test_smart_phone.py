@@ -39,8 +39,12 @@ from tests.hsm_model import transition_map
 
 async def _smart_phone_in_a_hand(
     environment: Environment,
+    phone: smart_phone.SmartPhone | None = None,
 ) -> tuple[phone_device.Phone, phone_device.Firmware, PhoneHolder, RoomOccupant]:
-    return await phone_in_a_hand(environment, smart_phone.SmartPhone(answer_timeout=datetime.timedelta(milliseconds=1)))
+    return await phone_in_a_hand(
+        environment,
+        phone if phone is not None else smart_phone.SmartPhone(answer_timeout=datetime.timedelta(milliseconds=1)),
+    )
 
 
 def test_smart_phone_sms_text_routes_to_display() -> None:
@@ -423,10 +427,14 @@ def test_replying_to_a_text_does_not_read_its_notification() -> None:
     assert asyncio.run(run()) == ["message-id"]
 
 
-def test_the_smart_phone_offers_its_holder_read_and_dismiss_whatever_its_call_is_doing() -> None:
+def test_the_smart_phone_offers_its_holder_the_lock_screen_and_its_threads_whatever_its_call_is_doing() -> None:
     transitions = transition_map(smart_phone.SmartPhone.firmware_model)
 
-    for command in (smart_phone.ReadNotificationEvent.name, smart_phone.DismissNotificationEvent.name):
+    for command in (
+        smart_phone.ReadNotificationEvent.name,
+        smart_phone.DismissNotificationEvent.name,
+        smart_phone.ReadThreadEvent.name,
+    ):
         for state in ("/Phone/hung_up", "/Phone/ringing", "/Phone/answered/media_ready"):
             assert command in transitions[state], (command, state)
 
@@ -530,6 +538,7 @@ def test_smart_phone_offers_the_phone_call_menu_plus_messaging_in_every_state() 
         smart_phone.SendTextMessageEvent.name,
         smart_phone.ReadNotificationEvent.name,
         smart_phone.DismissNotificationEvent.name,
+        smart_phone.ReadThreadEvent.name,
     ]
 
     async def run() -> list[list[str]]:
@@ -623,7 +632,7 @@ def test_every_messaging_transition_is_observed_once_and_bound_to_its_event_trac
     transitions = _messaging_transitions()
     observations = [name for name, member in smart_model.members.items() if isinstance(member, hsm.ObservationElement)]
 
-    assert len(transitions) == 8
+    assert len(transitions) == 9
     assert len(observations) == 1
     for name, transition in transitions.items():
         observed = [effect for effect in transition.effect if effect.startswith(f"{observations[0]}/")]
@@ -721,3 +730,201 @@ def test_messaging_transitions_run_once_each_in_the_trace_of_their_event(
             (smart_phone.SendTextMessageEvent.name, format(traces["send"], "032x")),
         ]
     )
+
+
+_ALICE = "+15555550101"
+_BOB = "+15555550102"
+
+
+class _Ticks:
+    """A wall clock that moves one minute every time the handset reads it."""
+
+    _at: datetime.datetime
+
+    def __init__(self) -> None:
+        self._at = datetime.datetime(2026, 10, 20, 9, tzinfo=datetime.UTC)
+
+    def __call__(self) -> datetime.datetime:
+        at = self._at
+        self._at = at + datetime.timedelta(minutes=1)
+        return at
+
+
+def _minute(minute: int) -> datetime.datetime:
+    return datetime.datetime(2026, 10, 20, 9, minute, tzinfo=datetime.UTC)
+
+
+async def _receive(phone: phone_device.Phone, sender: str, text: str, message_id: str | None = None) -> None:
+    await phone.dispatch(
+        phone.context(),
+        smart_phone.SmsTextEvent.with_data(smart_phone.SmsTextData(id=message_id, sender=sender, text=text)),
+    )
+
+
+async def _read_thread(
+    phone: phone_device.Phone, holder: PhoneHolder, request_id: str, data: dict[str, object]
+) -> tuple[str | None, smart_phone.ThreadData]:
+    """Press read on one thread, the way a model's tool call arrives (JSON), and take the page from the hand."""
+
+    await phone.dispatch(phone.context(), dataclasses.replace(smart_phone.ReadThreadEvent, id=request_id, data=data))
+    await wait_until(lambda: any(occasion.id == request_id for occasion in holder.occasions))
+    occasion = next(occasion for occasion in holder.occasions if occasion.id == request_id)
+    assert occasion.target == "holder"
+    assert isinstance(occasion.data, mosfet.InputEventData)
+    assert occasion.data.observation is not None
+    page = occasion.data.observation.data
+    assert isinstance(page, smart_phone.ThreadData)
+    return occasion.data.observation.event, page
+
+
+def test_a_smart_phone_keeps_each_conversation_on_the_handset_and_reads_it_back_to_the_holder() -> None:
+    """Texts in and texts that went are kept per correspondent; reading one thread hands its page to the hand.
+
+    Nothing about the thread reaches the holder until the holder reads it: the phone keeps the
+    conversation the way a messaging app does, and the bot scrolls it when it chooses to.
+    """
+
+    async def run() -> tuple[list[str | None], tuple[str | None, smart_phone.ThreadData], smart_phone.ThreadData]:
+        phone, _firmware, holder, _bystander = await _smart_phone_in_a_hand(
+            Environment(), smart_phone.SmartPhone(now=_Ticks())
+        )
+        await _receive(phone, _ALICE, "Book me the 10:15.", "provider-1")
+        await _receive(phone, _BOB, "Running late.")
+        await phone.dispatch(
+            phone.context(),
+            dataclasses.replace(
+                smart_phone.SendTextMessageEvent.with_data(smart_phone.SendTextMessageData(to=_ALICE, text="Done.")),
+                id="send-1",
+            ),
+        )
+        await emit_service_event(
+            phone,
+            dataclasses.replace(
+                smart_phone.ServiceTextMessageSentEvent.with_data(
+                    smart_phone.TextMessageSentData(to=_ALICE, text="Done.")
+                ),
+                id="send-1",
+            ),
+        )
+        # A text that did not go is not part of the conversation.
+        await emit_service_event(
+            phone,
+            dataclasses.replace(
+                smart_phone.ServiceTextMessageSendFailedEvent.with_data(
+                    smart_phone.TextMessageSendFailedData(to=_ALICE, text="Hello?", failure_kind="remote_unavailable")
+                ),
+                id="send-2",
+            ),
+        )
+        await wait_until(lambda: smart_phone.TextMessageSendFailedEvent.name in occasion_sources(holder))
+        told = occasion_sources(holder)
+        alice = await _read_thread(phone, holder, "read-alice", {"with": _ALICE})
+        bob = await _read_thread(phone, holder, "read-bob", {"with": _BOB})
+        return told, alice, bob[1]
+
+    told, (name, alice), bob = asyncio.run(run())
+
+    # Before any read the hand had only the two notifications and the failed send.
+    assert told == [
+        smart_phone.NotificationEvent.name,
+        smart_phone.NotificationEvent.name,
+        smart_phone.TextMessageSendFailedEvent.name,
+    ]
+    assert name == smart_phone.ThreadEvent.name == "phone.thread"
+    assert alice == smart_phone.ThreadData(
+        correspondent=_ALICE,
+        messages=(
+            smart_phone.ThreadMessageData(
+                id="provider-1", at=_minute(0), direction="received", text="Book me the 10:15."
+            ),
+            smart_phone.ThreadMessageData(id="message-2", at=_minute(2), direction="sent", text="Done."),
+        ),
+        more=False,
+    )
+    # The service gave no id for Bob's text, so the handset numbered it within his thread.
+    assert bob == smart_phone.ThreadData(
+        correspondent=_BOB,
+        messages=(
+            smart_phone.ThreadMessageData(id="message-1", at=_minute(1), direction="received", text="Running late."),
+        ),
+        more=False,
+    )
+
+
+def test_reading_a_thread_pages_back_from_the_newest_message() -> None:
+    """Each page is the newest ``limit`` messages before ``before``, oldest first; ``more`` says older ones remain."""
+
+    async def run() -> list[smart_phone.ThreadData]:
+        phone, _firmware, holder, _bystander = await _smart_phone_in_a_hand(Environment())
+        for number in range(1, 6):
+            await _receive(phone, _ALICE, f"Text {number}.")
+        await wait_until(lambda: occasion_sources(holder).count(smart_phone.NotificationEvent.name) == 5)
+        pages = [(await _read_thread(phone, holder, "page-1", {"with": _ALICE, "limit": 2}))[1]]
+        pages.append(
+            (
+                await _read_thread(
+                    phone, holder, "page-2", {"with": _ALICE, "limit": 2, "before": pages[-1].messages[0].id}
+                )
+            )[1]
+        )
+        pages.append(
+            (
+                await _read_thread(
+                    phone, holder, "page-3", {"with": _ALICE, "limit": 2, "before": pages[-1].messages[0].id}
+                )
+            )[1]
+        )
+        pages.append((await _read_thread(phone, holder, "everything", {"with": _ALICE}))[1])
+        return pages
+
+    first, second, third, everything = asyncio.run(run())
+
+    assert [message.text for message in first.messages] == ["Text 4.", "Text 5."]
+    assert first.more is True
+    assert [message.text for message in second.messages] == ["Text 2.", "Text 3."]
+    assert second.more is True
+    assert [message.text for message in third.messages] == ["Text 1."]
+    assert third.more is False
+    assert [message.id for message in everything.messages] == [f"message-{number}" for number in range(1, 6)]
+    assert everything.more is False
+
+
+def test_a_thread_keeps_only_its_newest_messages_up_to_the_handset_capacity() -> None:
+    async def run() -> tuple[smart_phone.ThreadData, smart_phone.ThreadData]:
+        phone, _firmware, holder, _bystander = await _smart_phone_in_a_hand(
+            Environment(), smart_phone.SmartPhone(thread_capacity=3)
+        )
+        for number in range(1, 6):
+            await _receive(phone, _ALICE, f"Text {number}.")
+        await _receive(phone, _BOB, "Running late.")
+        await wait_until(lambda: occasion_sources(holder).count(smart_phone.NotificationEvent.name) == 6)
+        alice = (await _read_thread(phone, holder, "read-alice", {"with": _ALICE}))[1]
+        # Paging from a message the handset no longer keeps finds nothing older.
+        evicted = (await _read_thread(phone, holder, "read-evicted", {"with": _ALICE, "before": "message-1"}))[1]
+        return alice, evicted
+
+    alice, evicted = asyncio.run(run())
+
+    assert [(message.id, message.text) for message in alice.messages] == [
+        ("message-3", "Text 3."),
+        ("message-4", "Text 4."),
+        ("message-5", "Text 5."),
+    ]
+    assert alice.more is False
+    assert evicted == smart_phone.ThreadData(correspondent=_ALICE, messages=(), more=False)
+
+
+def test_reading_a_thread_with_nobody_the_phone_has_texted_is_an_empty_page() -> None:
+    async def run() -> tuple[str | None, smart_phone.ThreadData]:
+        phone, _firmware, holder, _bystander = await _smart_phone_in_a_hand(Environment())
+        return await _read_thread(phone, holder, "read-stranger", {"with": "+15555550199"})
+
+    name, page = asyncio.run(run())
+
+    assert name == smart_phone.ThreadEvent.name
+    assert page == smart_phone.ThreadData(correspondent="+15555550199", messages=(), more=False)
+
+
+def test_a_smart_phone_rejects_a_thread_capacity_below_one() -> None:
+    with pytest.raises(ValueError, match="thread_capacity"):
+        _ = smart_phone.SmartPhone(thread_capacity=0)
