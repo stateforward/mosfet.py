@@ -43,6 +43,9 @@ MAX_EPISODE_TEXT_BYTES: typing.Final = 262_144
 MAX_PARTICIPANTS: typing.Final = 32
 """Most participants one episode or search carries."""
 
+MAX_HEARD: typing.Final = 32
+"""Most heard utterances one episode keeps as words (``EpisodeData.heard``)."""
+
 MAX_EXCLUDED_TURNS: typing.Final = 128
 """Most turn ids one cue leaves out, or one episode goes on with: a turn's stimulus, or each percept of its batch,
 and their causal parents."""
@@ -241,6 +244,18 @@ class EpisodeData(pydantic.BaseModel):
         max_length=32,
         description="What the bot chose to do on this turn, in order; empty when it did nothing.",
     )
+    heard: tuple[typing.Annotated[str, pydantic.StringConstraints(min_length=1)], ...] | None = pydantic.Field(
+        default=None,
+        max_length=MAX_HEARD,
+        description=(
+            "The words the stimulus carried, in order, as the payloads holding them declared them, stamped by the "
+            "turn's producer; empty when it carried none (a ring, a link coming up, audio not yet decoded). A "
+            "recollection says these plainly instead of the turn's rendering. None when the producer recorded no "
+            "words at all: the episode is then recalled as it was kept. Text totals at most "
+            f"{MAX_EPISODE_TEXT_BYTES} UTF-8 bytes."
+        ),
+        examples=[["Ada: can you call me back at noon?"]],
+    )
     outcome: Outcome = pydantic.Field(
         description="How the turn ended.",
         examples=["completed"],
@@ -255,7 +270,8 @@ class EpisodeData(pydantic.BaseModel):
                 "admitted through a conversation is first a turn of its own, kept under the speech's id, and then "
                 "the exchange that carries that speech as a parent: one experience. When memory keeps an episode "
                 "under one of these turn ids (the first such, in this order), this turn extends that episode in "
-                "place: its parts follow the episode's, its acts follow the episode's acts, its participants and "
+                "place: its parts follow the episode's, its acts follow the episode's acts, the words it heard follow "
+                "the episode's (each once), its participants and "
                 "focus candidates join the episode's, its focus (when it chose one) and outcome become the "
                 "episode's, and the episode is embedded again. Otherwise, or when the extended episode would "
                 "exceed what one episode may hold, the turn is kept as an episode of its own under turn_id."
@@ -267,6 +283,8 @@ class EpisodeData(pydantic.BaseModel):
     @pydantic.model_validator(mode="after")
     def _validate_parts(self) -> typing.Self:
         _check_parts(self.parts)
+        if sum(len(words.encode("utf-8")) for words in self.heard or ()) > MAX_EPISODE_TEXT_BYTES:
+            raise ValueError(f"heard words exceed {MAX_EPISODE_TEXT_BYTES} UTF-8 bytes")
         return self
 
 
@@ -339,6 +357,14 @@ class Episode(pydantic.BaseModel):
     focus: str | None = pydantic.Field(default=None, description="What cognition attended to on that turn.")
     focus_candidates: tuple[str, ...] = pydantic.Field(default=(), description="What cognition could have attended to.")
     acts: tuple[Act, ...] = pydantic.Field(default=(), description="What the bot chose to do on that turn.")
+    heard: tuple[str, ...] | None = pydantic.Field(
+        default=None,
+        description=(
+            "The words the episode's stimuli carried, in order (see EpisodeData.heard); None for an episode kept "
+            "without them, which is recalled as it was kept."
+        ),
+        examples=[["Ada: can you call me back at noon?"]],
+    )
     outcome: Outcome = pydantic.Field(description="How the turn ended.", examples=["completed"])
     turn_id: str = pydantic.Field(description="The cognition operation id of the turn.", examples=["turn-7c1e"])
     continued: tuple[str, ...] = pydantic.Field(
@@ -1300,7 +1326,15 @@ class CueData(pydantic.BaseModel):
 
 
 class Association(pydantic.BaseModel):
-    """One memory surfaced for the current turn."""
+    """One memory surfaced for the current turn.
+
+    Its ``text`` is the memory's prose and renders as a ``<text>`` element's text, never an attribute: an
+    episode kept with the words it heard reads as a recollection — ``heard:`` each utterance, then
+    ``did:`` the acts the bot chose by name (``perceived:`` the stimulus label when nothing was heard) —
+    so the model is shown what happened, not the turn's rendering; its ``ref`` recalls it in full.
+    """
+
+    __model_facing_text_field__: typing.ClassVar[str] = "text"
 
     model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
         frozen=True,
@@ -1327,7 +1361,11 @@ class Association(pydantic.BaseModel):
     )
     kind: NodeKind = pydantic.Field(description="What the memory is.", examples=["episode"])
     text: str = pydantic.Field(
-        description="What the memory says, as it was kept.", examples=["Ada: can you call me back at noon?"]
+        description=(
+            "What the memory says: an episode kept with the words it heard as a recollection (what was heard, then "
+            "what the bot did); any other memory as it was kept."
+        ),
+        examples=["heard: Ada: can you call me back at noon?\ndid: bot.ability.communication.respond"],
     )
     images: tuple[media.ReleasedImage, ...] = pydantic.Field(
         default=(),
@@ -1503,6 +1541,7 @@ __all__ = [
     "MAX_ASSOCIATIONS",
     "MAX_EPISODE_PARTS",
     "MAX_EPISODE_TEXT_BYTES",
+    "MAX_HEARD",
     "MAX_PARTICIPANTS",
     "MAX_PERSONS",
     "MAX_PERSON_REFS",

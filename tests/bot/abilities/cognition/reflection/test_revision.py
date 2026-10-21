@@ -131,7 +131,7 @@ def test_change_write_input_preserves_public_constructor_and_model_schema() -> N
     canonical_schema = json.dumps(schema, sort_keys=True, separators=(",", ":")).encode()
     assert (
         hashlib.sha256(canonical_schema).hexdigest()
-        == "dcdc0f301d385971392534de4c7c5ef312b6c22e9a2b537716d09bad489d5b18"
+        == "caffde43e13e0f538a7e119adff05432754dd8e8932b810bef50713d9c7f7250"
     )
 
 

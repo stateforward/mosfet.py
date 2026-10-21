@@ -228,14 +228,27 @@ def _ranked(found: payload.FoundData, *, weights: payload.Weights, now: datetime
 
 
 def _association(candidate: payload.Candidate) -> payload.Association:
-    """One candidate as an association: its images as memory placeholders, who it involves."""
+    """One candidate as an association: what it says, its images as memory placeholders, who it involves.
+
+    An episode kept with the words it heard says it as a recollection, one line each: ``heard:`` every
+    utterance (or ``perceived:`` the stimulus label when nothing was heard), then ``did:`` the acts the bot
+    chose, by name. Its full rendering stays the node's, recalled by ``ref``; anything else says its text.
+    """
 
     node = candidate.node
     episode = node.episode
+    said = node.text
+    if episode is not None and episode.heard is not None:
+        lines = [f"heard: {words}" for words in episode.heard]
+        if not lines and episode.stimulus is not None:
+            lines.append(f"perceived: {episode.stimulus}")
+        if episode.acts:
+            lines.append("did: " + ", ".join(act.event for act in episode.acts))
+        said = "\n".join(lines)
     return payload.Association(
         ref=node.node_id,
         kind=node.kind,
-        text=node.text,
+        text=said,
         images=() if episode is None else tuple(_released(image) for image in episode.images),
         at=node.created_at,
         lanes=candidate.lanes,
@@ -253,18 +266,19 @@ def _associations(
     count_tokens: collections.abc.Callable[[str], int],
     now: datetime.datetime,
 ) -> payload.AssociationsData:
-    """Rank candidates by score and admit them, best first, while their text fits ``budget_tokens``."""
+    """Rank candidates by score and admit them, best first, while what they say fits ``budget_tokens``."""
 
     items: list[payload.Association] = []
     used = 0
     omitted = 0
     for candidate in _ranked(found, weights=weights, now=now):
-        tokens = count_tokens(candidate.node.text)
+        association = _association(candidate)
+        tokens = count_tokens(association.text)
         if len(items) >= payload.MAX_ASSOCIATIONS or used + tokens > budget_tokens:
             omitted += 1
             continue
         used += tokens
-        items.append(_association(candidate))
+        items.append(association)
     return payload.AssociationsData(
         you=found.you, people=found.people, persons=found.persons, items=tuple(items), omitted=omitted
     )

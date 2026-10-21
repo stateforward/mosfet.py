@@ -676,7 +676,8 @@ class Cognition(ability.Ability[InputData, OutputData]):
         perceived, then, when the turn selected anything, its own output (``OutputEvent``: what it
         showed, said and asked of its tools), then, when the turn failed with a typed failure, that
         failure (``failed_event``), so what it did and what became of it are recalled with what it
-        perceived; a tool's result is perceived on a later turn and kept as that turn's. The episode
+        perceived; the words its stimulus carried (``projection.memory_words``) are stamped as what it
+        heard, which a recollection of the episode says plainly; a tool's result is perceived on a later turn and kept as that turn's. The episode
         names the turns whose stimuli its stimulus carries as causal parents (``continues``): when
         memory keeps one of them, this turn extends that episode (speech, then the exchange
         Conversation returns for it, is one experience); otherwise it is an episode of its own. Memory's
@@ -706,6 +707,14 @@ class Cognition(ability.Ability[InputData, OutputData]):
         perceived = projection.memory_content(
             cognition_input.stimulus, capacity=_MEMORY_IMAGES, budget_bytes=memory.MAX_EPISODE_TEXT_BYTES - spent
         )
+        # The words the stimulus carried, as its payloads declare them: what a recollection says was heard.
+        heard: list[str] = []
+        room = memory.MAX_EPISODE_TEXT_BYTES
+        for words in projection.memory_words(cognition_input.stimulus)[: memory.MAX_HEARD]:
+            room -= len(words.encode())
+            if room < 0:
+                break
+            heard.append(words)
         last = perceived[-1] if perceived else None
         parts = (
             (*perceived[:-1], text.TextPart(text="\n".join(part.text for part in (last, *did) if part.kind == "text")))
@@ -721,6 +730,7 @@ class Cognition(ability.Ability[InputData, OutputData]):
                 focus=cognition_input.focus,
                 focus_candidates=cognition_input.focus_candidates[:_MAX_ACTS],
                 acts=tuple(_act(selection) for selection in acts),
+                heard=tuple(heard),
                 outcome=outcome,
                 # The earlier turns this one goes on with: whose stimuli its stimulus carries as causal
                 # parents. Memory extends the episode one of them began, so one experience is one episode.

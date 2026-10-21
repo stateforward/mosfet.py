@@ -180,6 +180,14 @@ class TurnData(pydantic.BaseModel):
         description="Images the source participant attached to this turn (a photo with or without a caption).",
     )
 
+    def __memory_words__(self) -> str | None:
+        """The words of this turn, when it carries them as text: what memory recalls the bot heard.
+
+        Audio, structured content, and a turn with no content carry no words; nothing is transcribed here.
+        """
+
+        return self.content if isinstance(self.content, str) else None
+
     @pydantic.model_validator(mode="before")
     @classmethod
     def rehydrate_audio_content(cls, raw_value: object) -> object:

@@ -4586,7 +4586,76 @@ def test_cognition_remembers_what_it_did_alongside_what_it_perceived_and_recalls
     assert isinstance(later.recalled, cognition.RecalledData)
     assert isinstance(later.recalled.associations, memory.AssociationsData)
     (recalled,) = later.recalled.associations.items
-    assert recalled.text == kept.text
+    # A ring carries no words: its recollection names what was perceived, then what the bot did.
+    assert kept.heard == ()
+    assert recalled.text == f"perceived: {mosfet.InputEvent.name}\ndid: {mosfet.FocusDeviceEvent.name}"
+
+
+def test_a_recalled_episode_reads_as_when_who_what_was_heard_and_what_the_bot_did_never_as_markup() -> None:
+    """An association is a compact recollection: the words heard and the acts named, never the turn's projection.
+
+    The episode keeps its full projection (what it is embedded and recalled in full from); the association a
+    later turn is shown says when, who, what was heard, and what the bot did, as plain words, so the model never
+    reads its own earlier events as escaped markup it might echo back.
+    """
+
+    words = 'Hey anyone home? I just popped in to say "hi" & <wave>'
+
+    async def run() -> tuple[tuple[memory.Episode, ...], list[processing.InputData]]:
+        store = memory.Memory()
+        reasoning_processor = RecordingReasoningProcessor(focus_output("phone", "answer Ada"))
+        ability = RecordingCognition(
+            decision_processor=RecordingDecisionProcessor(cognition.decision.OutputData(result=None)),
+            reasoning_processor=reasoning_processor,
+            reflection=cognition.Reflection(processor=FixedProcessor(no_output("observed")), memory=store),
+            store=store,
+            associative=memory.Associative(memory=store),
+        )
+        ctx = await start_cognition_ability_for_test(ability)
+        await wait_until(lambda: ability.state().endswith("/idle"))
+        base = await started_cognition_input(ctx)
+        turn = communication.InputEvent.with_data(
+            communication.conversation.TurnData(
+                content=words, content_type="text/plain", source_ids=frozenset({"voice:ada"}), target_ids=frozenset()
+            )
+        )
+        exchange = dataclasses.replace(
+            communication.conversation.OutputEvent.with_data(
+                communication.conversation.Exchange(parent=mosfet.StimulusData.from_event(turn))
+            ),
+            id="said-1",
+        )
+        _ = await dispatch_ability_for_test(
+            ability, ctx, base.model_copy(update={"stimulus": exchange, "participants": (_ADA,)})
+        )
+        await wait_until(lambda: ability.state().endswith("/idle"))
+        episodes = await _remembered(ctx, store)
+        _ = await dispatch_ability_for_test(ability, ctx, await started_cognition_input(ctx))
+        await wait_until(lambda: ability.state().endswith("/idle"))
+        return episodes, reasoning_processor.calls
+
+    episodes, reasoning_calls = asyncio.run(run())
+
+    (kept,) = episodes
+    assert kept.heard == (words,)
+    assert "communication:exchange" in kept.text
+    _, later = reasoning_calls
+    assert isinstance(later.recalled, cognition.RecalledData)
+    assert isinstance(later.recalled.associations, memory.AssociationsData)
+    (recalled,) = later.recalled.associations.items
+    assert recalled.text == f"heard: {words}\ndid: {mosfet.FocusDeviceEvent.name}"
+    rendered = "".join(
+        part.text
+        for part in cognition.event.model_facing_content(later.recalled, capacity=media.ImageCapacity())
+        if isinstance(part, text.TextPart)
+    )
+    association = rendered[rendered.index("<memory:association ") : rendered.index("</memory:association>")]
+    for markup in ("&quot;", "&lt;communication", "cognition:event", "stimulus:", "said-1"):
+        assert markup not in association
+    assert 'heard: Hey anyone home? I just popped in to say "hi" &amp; &lt;wave&gt;' in association
+    assert f"did: {mosfet.FocusDeviceEvent.name}" in association
+    assert _ADA.ref in association
+    assert f'at="{kept.created_at.isoformat().replace("+00:00", "Z")}"' in association
 
 
 def test_an_association_that_fails_leaves_the_turn_without_associations_not_failed() -> None:

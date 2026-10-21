@@ -15,7 +15,12 @@ that declares ``__memory_fields__`` contributes only those fields, typed causal 
 stimulus is kept as its bare element marked ``omitted``.
 
 Both projections leave out a sequence or mapping field with no items; a budgeted field trimmed to
-no item still renders its ``omitted`` count.
+no item still renders its ``omitted`` count. A payload that names one string field
+``__model_facing_text_field__`` renders that field as the text of a child element of that name instead
+of an attribute, so prose (a recollection, with its quotes and line breaks) reads as prose.
+
+``memory_words`` reads the words a stimulus carries, as each payload that holds words declares them
+(``__memory_words__``): what memory keeps as heard, so a recollection can say it in plain words.
 
 Metrics (scope ``bot.abilities.processing``; the image metrics count model prompts only, never
 ``memory_content``):
@@ -375,6 +380,7 @@ def _model_element(
     root: ElementTree.Element | None = None
     current: ElementTree.Element | None = None
     rendered: set[str] = set()
+    text_field = getattr(type(model), "__model_facing_text_field__", None)
     for level in _payload_ancestry(type(model)):
         element = _element(_payload_tag(level), budget)
         if current is None:
@@ -390,6 +396,11 @@ def _model_element(
                 continue
             rendered.add(name)
             value = getattr(model, name, None)
+            if name == text_field and isinstance(value, str):
+                # The payload's prose: a child element's text, escaped like any value, never an attribute.
+                budget.consume_scalar(value)
+                _subelement(element, name, budget).text = value
+                continue
             if (
                 kept is None
                 and name == "parent"
@@ -753,4 +764,51 @@ def _project(
     return tuple(parts)
 
 
-__all__ = ["memory_content", "model_facing_content"]
+_MAX_WORDS_DEPTH: typing.Final = 8
+"""Deepest nesting ``memory_words`` reads into a stimulus (envelopes, batches, and causal parents)."""
+
+
+def memory_words(value: object) -> tuple[str, ...]:
+    """The words a stimulus carries, in the order it carries them, each said once.
+
+    A payload that holds words declares them with ``__memory_words__()``, returning its words or None
+    (audio not yet transcribed, structured content). Those words are the payload's own: nothing below
+    it is read, so a turn and the speech it was built from are not heard twice. Any other payload is
+    read through its model-facing fields — only its ``__memory_fields__`` when it declares them (the
+    causal parent memory keeps of an emission), never its ``__model_facing_excluded_fields__`` — and
+    through event envelopes and sequences, at most ``_MAX_WORDS_DEPTH`` deep. Nothing is parsed or
+    inferred: a stimulus with no payload that declares words carries none.
+    """
+
+    found: list[str] = []
+
+    def read(item: object, depth: int) -> None:
+        if depth > _MAX_WORDS_DEPTH:
+            return
+        if isinstance(item, hsm.Event):
+            read(typing.cast(hsm.Event[object], item).data, depth + 1)
+            return
+        if isinstance(item, list | tuple):
+            for each in typing.cast(collections.abc.Sequence[object], item):
+                read(each, depth + 1)
+            return
+        if not isinstance(item, pydantic.BaseModel):
+            return
+        said = getattr(item, "__memory_words__", None)
+        if callable(said):
+            words = said()
+            if isinstance(words, str) and words.strip():
+                found.append(words)
+            return
+        kept = _field_names(type(item), "__memory_fields__")
+        excluded = frozenset(name for level in _payload_ancestry(type(item)) for name in _excluded_field_names(level))
+        for name in type(item).model_fields:
+            if name in excluded or (kept is not None and name not in kept):
+                continue
+            read(typing.cast(object, getattr(item, name, None)), depth + 1)
+
+    read(value, 0)
+    return tuple(dict.fromkeys(found))
+
+
+__all__ = ["memory_content", "memory_words", "model_facing_content"]

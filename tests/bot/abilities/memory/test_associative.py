@@ -297,6 +297,42 @@ def test_the_token_budget_admits_best_first_and_counts_what_it_left_out() -> Non
     assert surfaced.omitted == 1
 
 
+def test_the_token_budget_counts_what_a_recollection_says_not_the_rendering_it_was_kept_as() -> None:
+    """An episode kept with its heard words is admitted by its recollection's size; one that says too much is not."""
+
+    rendering = "<communication:exchange>" + "x" * 400 + "</communication:exchange>"
+
+    def kept(turn_id: str, words: str) -> memory.EpisodeData:
+        return memory.EpisodeData(
+            turn_id=turn_id,
+            stimulus="bot.ability.conversation.output",
+            parts=(text.TextPart(text=rendering),),
+            participants=(_ADA,),
+            acts=(memory.Act(event="bot.ability.communication.respond", data={"parts": [{"words": "Hello!"}]}),),
+            heard=(words,),
+            outcome=memory.Outcome.COMPLETED,
+        )
+
+    times = iter((_NOW - datetime.timedelta(minutes=2), _NOW - datetime.timedelta(minutes=1)))
+
+    async def scenario() -> memory.AssociationsData:
+        harness = await _harness(times=times, budget_tokens=40)
+        await harness.attach_memory()
+        await harness.remember(kept("short", "Hi"))
+        await harness.remember(kept("long", "y" * 200))
+        await harness.attach()
+        await harness.send(memory.CueData(), "a-1")
+        reply = await harness.reply("a-1")
+        assert isinstance(reply.data, memory.AssociationsData)
+        return reply.data
+
+    surfaced = asyncio.run(scenario())
+
+    (item,) = surfaced.items
+    assert item.text == "heard: Hi\ndid: bot.ability.communication.respond"
+    assert surfaced.omitted == 1
+
+
 def test_episodes_of_the_turns_the_cue_excludes_never_surface_nor_count_as_omitted() -> None:
     """The turn being answered is not an earlier memory: its episodes are left out before ranking."""
 

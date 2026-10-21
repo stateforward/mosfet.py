@@ -218,10 +218,15 @@ gives an undecided unit back unreviewed. Consolidation tells its owner what beca
 Cognition owns the bot's memory: it attaches `memory.Memory` and remembers every turn it settles
 (completed, failed, or cancelled) with one `RememberEvent` it does not wait on, rendering the
 stimulus through `cognition.event.memory_content` (a payload's `__memory_fields__` choose what is
-kept; `conversation.Exchange` keeps its causal turn). With `memory.Associative` composed, a turn
-reflex hands on (what its behaviors leave unhandled, then the decision model's pass) first asks it
-what memory associates with the stimulus: candidates from every search lane, scored by injected
-`memory.Weights` and fit to a token budget. Recall comes after reflex, so the decision model
+kept; `conversation.Exchange` keeps its causal turn), and stamping the words it carried as the
+episode's `heard` (`cognition.event.memory_words`: the payloads that hold words declare them with
+`__memory_words__`, as `conversation.TurnData` and `listening.SpeechData` do). With
+`memory.Associative` composed, a turn reflex hands on (what its behaviors leave unhandled, then the
+decision model's pass) first asks it what memory associates with the stimulus: candidates from every
+search lane, scored by injected `memory.Weights` and fit to a token budget. An episode with `heard`
+is shown as a recollection, not its rendering: `heard:` each utterance (or `perceived:` the stimulus
+label), then `did:` the acts by name, as the association's `<text>` element; its `ref` recalls it in
+full, and the budget counts what the recollection says. Recall comes after reflex, so the decision model
 chooses without associations. They ride the turn to intuition and reasoning (their frames'
 `processing.InputData.recalled`, rendered after the turn's situation and before the stimulus,
 trimmed, never a failure) and to reflection; a failed association leaves the turn without them.

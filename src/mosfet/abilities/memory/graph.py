@@ -405,6 +405,8 @@ def _load(
                 focus=content.get("focus"),
                 focus_candidates=tuple(content.get("focus_candidates", ())),
                 acts=tuple(payload.Act.model_validate(act) for act in content.get("acts", ())),
+                # Absent for an episode kept before its producer stamped the words heard: recalled as kept.
+                heard=None if content.get("heard") is None else tuple(content["heard"]),
                 outcome=payload.Outcome(content["outcome"]),
                 turn_id=content["turn_id"],
                 continued=tuple(content.get("continued", ())),
@@ -596,9 +598,9 @@ def write_episode(engine: Engine, idx: index.Index, data: payload.EpisodeData, *
 
     An episode node is keyed by the turn id it began with. When an episode is keyed by one of the turns
     ``data.continues`` names (the first such, in that order), the turn extends it in place: its parts follow the
-    episode's, its acts follow the episode's acts, its participants and focus candidates join the episode's, its
-    focus (when it chose one) and outcome become the episode's, and its turn id is appended to the episode's
-    ``continued``. The extended episode is unreviewed again, and its vectors and failed index attempts are
+    episode's, its acts follow the episode's acts, the words it heard follow the episode's (each once), its
+    participants and focus candidates join the episode's, its focus (when it chose one) and outcome become the
+    episode's, and its turn id is appended to the episode's ``continued``. The extended episode is unreviewed again, and its vectors and failed index attempts are
     dropped (from ``idx`` too) so it is embedded again from everything it now holds. When nothing is keyed by
     those turns, or the extended episode would exceed what one episode may hold, the turn is a node of its own,
     keyed by its turn id unless an episode already holds that key (then it is kept apart, unkeyed).
@@ -633,6 +635,9 @@ def write_episode(engine: Engine, idx: index.Index, data: payload.EpisodeData, *
                         focus=episode.focus if data.focus is None else data.focus,
                         focus_candidates=tuple(dict.fromkeys((*episode.focus_candidates, *data.focus_candidates))),
                         acts=(*episode.acts, *data.acts),
+                        heard=None
+                        if episode.heard is None and data.heard is None
+                        else tuple(dict.fromkeys((*(episode.heard or ()), *(data.heard or ())))),
                         outcome=data.outcome,
                     )
                     root = (found[0], found[1], episode)
@@ -644,6 +649,7 @@ def write_episode(engine: Engine, idx: index.Index, data: payload.EpisodeData, *
             "focus": kept.focus,
             "focus_candidates": list(kept.focus_candidates),
             "acts": [act.model_dump(mode="json") for act in kept.acts],
+            "heard": None if kept.heard is None else list(kept.heard),
             "outcome": kept.outcome.value,
             "participants": [participant.model_dump(mode="json") for participant in kept.participants],
             "continued": [] if root is None else [*root[2].continued, data.turn_id],

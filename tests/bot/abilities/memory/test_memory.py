@@ -498,6 +498,37 @@ def test_a_turn_that_continues_a_kept_episode_extends_that_one_node_and_re_index
     ]
 
 
+def test_the_words_a_continued_episode_heard_follow_its_own_each_once_and_an_unstamped_one_has_none() -> None:
+    """``heard`` merges like acts do (each utterance once); an episode nobody stamped words for reads back None."""
+
+    async def scenario() -> tuple[memory.EpisodesData, memory.EpisodesData]:
+        harness = await _harness(FakeEmbedder())
+        await harness.attached()
+        _ = await harness.ask(
+            memory.RememberEvent, _episode("Ada: noon?", turn_id="heard").model_copy(update={"heard": ("noon?",)})
+        )
+        _ = await harness.ask(
+            memory.RememberEvent,
+            _continuation("Ada: noon?", turn_id="heard:autonomy", continues=("heard",)).model_copy(
+                update={"heard": ("noon?", "or one?")}
+            ),
+        )
+        merged = await harness.ask(memory.RecentEvent, memory.RecentData(limit=4))
+        _ = await harness.ask(memory.RememberEvent, _episode("Ada: later", turn_id="unstamped"))
+        both = await harness.ask(memory.RecentEvent, memory.RecentData(limit=4))
+        assert isinstance(merged.data, memory.EpisodesData) and isinstance(both.data, memory.EpisodesData)
+        return merged.data, both.data
+
+    merged, both = _run(scenario)
+
+    (kept,) = merged.episodes
+    assert kept.heard == ("noon?", "or one?")
+    assert {episode.turn_id: episode.heard for episode in both.episodes} == {
+        "heard": ("noon?", "or one?"),
+        "unstamped": None,
+    }
+
+
 def test_a_turn_whose_continued_turns_were_never_kept_is_an_episode_of_its_own() -> None:
     async def scenario() -> tuple[memory.RememberedData, memory.RememberedData, memory.EpisodesData]:
         harness = await _harness()

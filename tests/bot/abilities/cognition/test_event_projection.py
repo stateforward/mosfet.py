@@ -641,3 +641,55 @@ def test_a_carried_upstream_event_renders_its_id_source_and_target() -> None:
     assert 'stimulus:id="line-1"' in rendered
     assert 'stimulus:source="desk"' in rendered
     assert 'stimulus:target="reading-1"' in rendered
+
+
+def test_memory_words_reads_the_words_a_stimulus_carries_once_and_never_parses_anything() -> None:
+    """Words come from payloads that declare them: an exchange's turn says them once, PCM says none."""
+
+    from mosfet.abilities import communication, listening
+    from mosfet.abilities.hearing import voice
+
+    def heard(content: str | bytes, content_type: str) -> listening.SpeechData:
+        return listening.SpeechData(
+            content=content,
+            content_type=content_type,
+            voice_detection=voice.detection.ApplyData(segments=()),
+            sample_rate_hz=16_000,
+            channels=1,
+            media_type="audio/pcm",
+            source_ids=frozenset({"voice:a"}),
+        )
+
+    speech = listening.SpeechEvent.with_data(heard("Hey anyone home?", "text/plain"))
+    turn = communication.InputEvent.with_data(
+        communication.conversation.TurnData(
+            parent=mosfet.StimulusData.from_event(speech),
+            content="Hey anyone home?",
+            content_type="text/plain",
+            source_ids=frozenset({"voice:a"}),
+            target_ids=frozenset(),
+        )
+    )
+    exchange = communication.conversation.OutputEvent.with_data(
+        communication.conversation.Exchange(parent=mosfet.StimulusData.from_event(turn))
+    )
+    pcm = listening.SpeechEvent.with_data(heard(b"\x00\x01" * 160, "audio/pcm"))
+
+    assert cognition.event.memory_words(exchange) == ("Hey anyone home?",)
+    assert cognition.event.memory_words(speech) == ("Hey anyone home?",)
+    assert cognition.event.memory_words(pcm) == ()
+    assert cognition.event.memory_words(SoundEvent.with_data(SoundData(audio=b"ring", kind="phone.ringing"))) == ()
+
+
+def test_a_text_field_renders_as_a_child_elements_text_never_as_an_attribute() -> None:
+    at = datetime.datetime(2026, 10, 21, 13, 24, tzinfo=datetime.UTC)
+    words = 'heard: say "hi"\ndid: bot.ability.communication.respond'
+    association = memory.Association(
+        ref="node-1", kind=memory.NodeKind.EPISODE, text=words, at=at, lanes=(memory.Lane.RECENT,)
+    )
+
+    (part,) = cognition.event.model_facing_content(association, capacity=media.ImageCapacity())
+
+    assert isinstance(part, text.TextPart)
+    assert f"<text>{words}</text>" in part.text
+    assert "text=" not in part.text and "&quot;" not in part.text

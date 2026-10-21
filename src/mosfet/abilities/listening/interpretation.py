@@ -407,6 +407,11 @@ class SpeechData(pydantic.BaseModel):
         examples=[1],
     )
 
+    def __memory_words__(self) -> str | None:
+        """The decoded words, once speech decoding has rewritten this observation into text; PCM carries none."""
+
+        return self.content if isinstance(self.content, str) else None
+
     @property
     def duration_seconds(self) -> float:
         """Duration of PCM content using the stream's signed 16-bit sample convention, in seconds.
