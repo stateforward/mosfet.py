@@ -199,6 +199,9 @@ class RecalledData(pydantic.BaseModel):
     # Uncounted, so ``recent`` opens the same way every turn and the next prompt extends this one's turns
     # (R-20 C5: a server's prefix cache holds through them).
     __model_facing_uncounted_fields__: typing.ClassVar[frozenset[str]] = frozenset({"recent"})
+    # Append-only, so ``recent`` renders before the turn's situation and the associations after it: a prompt is
+    # laid out most stable first and a server's prefix cache holds through the situation when the world is unchanged.
+    __model_facing_stable_fields__: typing.ClassVar[frozenset[str]] = frozenset({"recent"})
 
     recent: tuple[stm.Turn, ...] = pydantic.Field(
         default=(),

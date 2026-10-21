@@ -1143,8 +1143,10 @@ class InputData(pydantic.BaseModel):
 
     What a model is shown is laid out stable first, per turn last (R-20 C5): ``instructions`` is the
     system channel (static policy and the bot's persona, byte-identical across turns while they do not
-    change, so a server's prefix cache holds), and the user content is ``recalled``, then the
-    ``situation`` (the world as it is this turn), then the stimulus, then any repair ``feedback``. A
+    change, so a server's prefix cache holds), and the user content is most stable first: the stable
+    fields of ``recalled`` (the recent turns, which only grow), then the ``situation`` (the world as it
+    is this turn, often unchanged), then the rest of ``recalled`` (what memory associated with this
+    turn), then the stimulus, then any repair ``feedback``. A
     stage that nests this frame in its own stimulus does not show ``instructions``, ``situation`` or
     ``feedback`` again (``__model_facing_excluded_fields__``): they reach the model once, where they belong.
     """
@@ -1214,8 +1216,9 @@ class InputData(pydantic.BaseModel):
         min_length=1,
         description=(
             "The turn's situation: the world as the bot finds it this turn (its devices' live state) and what its "
-            "behaviors already did on the turn. Per turn, so it renders in the user content after what is recalled "
-            "and before the stimulus, never in the system prompt; never trimmed."
+            "behaviors already did on the turn. Per turn, so it renders in the user content after the recent turns "
+            "and before what memory associated with the turn and the stimulus, never in the system prompt; never "
+            "trimmed."
         ),
         examples=['<environment id="home"><self state="/Bot/active"/></environment>'],
     )
@@ -1233,8 +1236,9 @@ class InputData(pydantic.BaseModel):
         exclude=True,
         repr=False,
         description=(
-            "Recalled memory the host attached to this pass; rendered after the stimulus as its own element and "
-            "trimmed to the remaining budget; never a reason to fail."
+            "Recalled memory the host attached to this pass; its stable fields render before the situation and the "
+            "rest after it, before the stimulus, each as its own element trimmed to the remaining budget; never a "
+            "reason to fail."
         ),
     )
     patch: SkipJsonSchema[SchemaPatch | None] = pydantic.Field(
@@ -1258,11 +1262,17 @@ class InputData(pydantic.BaseModel):
     def model_facing_content(
         self, capacity: media.ImageCapacity, *, budget_bytes: int | None = None
     ) -> tuple[text.ContentPart, ...]:
-        """Project this turn exactly as a model may see it: recalled, situation, stimulus, feedback, as content parts.
+        """Project this turn as a model may see it, most stable first, as content parts.
 
-        The text parts carry, in order, ``recalled`` (its own element), the ``situation`` block, the
-        stimulus as one pseudo-XML element, and the repair ``feedback``, joined by newlines; each is
-        left out when absent. The stimulus is the root element of its own block — nothing wraps it.
+        The text parts carry, in order, the stable part of ``recalled`` (its own element), the
+        ``situation`` block, the rest of ``recalled`` (its own element), the stimulus as one
+        pseudo-XML element, and the repair ``feedback``, joined by newlines; each is left out when
+        absent. A recalled payload class names its stable fields in ``__model_facing_stable_fields__``,
+        a set of field names: fields that only grow turn over turn (the recent conversation), so a
+        server's prefix cache holds through them and, while the world is unchanged, through the
+        situation. Each part renders the recalled payload with the other part's fields at their
+        defaults, and a part whose own fields are all at their defaults renders nothing; a payload
+        that names no stable field renders whole after the situation. The stimulus is the root element of its own block — nothing wraps it.
         Typed causal parents are retained in runtime and canonical event data but omitted from this
         prompt projection. Its envelope (event name, and the ``id`` / ``source`` / ``target`` it was
         stamped with) rides on that same root under the ``stimulus:`` prefix. Instructions are the
@@ -1291,8 +1301,9 @@ class InputData(pydantic.BaseModel):
         budget. Recalled context a stimulus carries in budgeted fields
         (``__model_facing_budgeted_fields__``) is trimmed to fit rather than failing the turn.
 
-        ``recalled`` renders first, as its own element, into the bytes everything else leaves; its
-        budgeted fields trim to fit, and when not even its frame fits it is left out. Images it
+        ``recalled`` renders into the bytes everything else leaves, its stable part first; the rest
+        gets what the stable part leaves. Their budgeted fields trim to fit, and a part whose frame
+        does not fit is left out. Images it
         carries render as placeholders only: the stimulus's images are the ones this pass attaches.
 
         ``budget_bytes`` is the receiving model's fitted budget for this content's text (a
@@ -1322,22 +1333,42 @@ class InputData(pydantic.BaseModel):
         parts = model_facing_content(
             self.input, capacity=capacity, budget_bytes=_MAX_MODEL_PROMPT_BYTES - reserved - beside
         )
-        before: list[str] = []
+        stable: list[str] = []
+        varying: list[str] = []
         if self.recalled is not None:
             stimulus = sum(len(part.text.encode("utf-8")) for part in parts if isinstance(part, text.TextPart))
             available = _MAX_MODEL_PROMPT_BYTES - reserved
             if budget_bytes is not None:
                 available = min(available, budget_bytes)
-            # A newline joins the recalled element to what follows it.
-            remaining = available - stimulus - beside - len("\n")
-            try:
-                recalled = model_facing_content(self.recalled, capacity=media.ImageCapacity(), budget_bytes=remaining)
-            except ValueError:
-                recalled = ()
-            if recalled:
-                before.append("".join(part.text for part in recalled if isinstance(part, text.TextPart)))
-        if self.situation:
-            before.append(self.situation)
+            remaining = available - stimulus - beside
+            defaults: dict[str, object] = {
+                name: field.get_default(call_default_factory=True)
+                for name, field in type(self.recalled).model_fields.items()
+            }
+            stable_names = typing.cast(
+                collections.abc.Collection[str],
+                getattr(type(self.recalled), "__model_facing_stable_fields__", frozenset[str]()),
+            )
+            # The stable fields render before the situation and claim the budget first; the rest after it.
+            for leading, rendered in ((True, stable), (False, varying)):
+                kept = [name for name in defaults if (name in stable_names) == leading]
+                if all(getattr(self.recalled, name) == defaults[name] for name in kept):
+                    continue
+                cleared = {name: default for name, default in defaults.items() if name not in kept}
+                # A newline joins each recalled element to what follows it.
+                remaining -= len("\n")
+                try:
+                    recalled = model_facing_content(
+                        self.recalled.model_copy(update=cleared),
+                        capacity=media.ImageCapacity(),
+                        budget_bytes=remaining,
+                    )
+                except ValueError:
+                    recalled = ()
+                if recalled:
+                    rendered.append("".join(part.text for part in recalled if isinstance(part, text.TextPart)))
+                    remaining -= len(rendered[-1].encode("utf-8"))
+        before = [*stable, *((self.situation,) if self.situation else ()), *varying]
         if before:
             prefix = "\n".join(before) + "\n"
             first = parts[0] if parts else None

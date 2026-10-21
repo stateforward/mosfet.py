@@ -790,7 +790,8 @@ def _fits(reader: metric_reader.Reader) -> dict[str, float]:
 
 def test_processor_sends_the_stable_instructions_as_system_and_the_situation_before_the_stimulus() -> None:
     """R-20 C5: the system message carries only the stable instructions, byte-identical across turns whose world
-    differs; the user message is recalled, then the situation, then the stimulus, then any repair feedback."""
+    differs; the user message is the situation, then what was recalled (it names no stable field), then the stimulus,
+    then any repair feedback."""
 
     client = _answering_client()
     processor = Processor(client=client, stream=False)
@@ -806,7 +807,7 @@ def test_processor_sends_the_stable_instructions_as_system_and_the_situation_bef
     assert [system["role"] for system in systems] == ["system", "system"]
     assert systems[0]["content"] == systems[1]["content"] == "Select events."
     sent = _sent_user_text(client, 1)
-    order = [sent.index(marker) for marker in ("memory-0-", '<environment state="b"/>', _SAID, "Selection rejected.")]
+    order = [sent.index(marker) for marker in ('<environment state="b"/>', "memory-0-", _SAID, "Selection rejected.")]
     assert order == sorted(order)
     assert 'state="a"' not in sent
 

@@ -218,7 +218,7 @@ kept; `conversation.Exchange` keeps its causal turn). With `memory.Associative` 
 autonomy leaves unhandled first asks it what memory associates with the stimulus: candidates from
 every search lane, scored by injected `memory.Weights` and fit to a token budget. The associations
 ride the turn to intuition and reasoning (their frame's `processing.InputData.recalled`, rendered
-after the stimulus and trimmed, never a failure) and to reflection; a failed association leaves
+after the turn's situation and before the stimulus, trimmed, never a failure) and to reflection; a failed association leaves
 the turn without them. Reasoning, Reflection, and Conversation never read or write episodes.
 
 Reasoning can also recall a memory deliberately. Cognition adds `memory.Associative` to every

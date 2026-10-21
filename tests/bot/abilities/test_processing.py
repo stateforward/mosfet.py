@@ -1896,9 +1896,10 @@ def _recent(count: int, *, size: int = 400) -> tuple[stm.Turn, ...]:
     )
 
 
-def test_user_content_is_recalled_then_situation_then_stimulus_then_feedback() -> None:
-    """R-20 C5: stable first, per-turn last. The system channel holds only ``instructions``; the user content
-    holds what is recalled (recent turns, then associations), the situation, the stimulus, then repair feedback."""
+def test_user_content_is_recent_then_situation_then_associations_then_stimulus_then_feedback() -> None:
+    """R-20 C5: most stable first, per-turn last. The system channel holds only ``instructions``; the user content
+    holds the recent turns (append-only), the situation (the world, often unchanged turn to turn), what memory
+    associated with this turn, the stimulus, then repair feedback."""
 
     input = processing.InputData(
         input="incoming speech",
@@ -1917,8 +1918,8 @@ def test_user_content_is_recalled_then_situation_then_stimulus_then_feedback() -
         for marker in (
             "turn-0-",
             "turn-1-",
-            "association-0-",
             '<environment id="world"/>',
+            "association-0-",
             "incoming speech",
             "Selection rejected: try again.",
         )
@@ -1947,6 +1948,49 @@ def test_the_next_turn_extends_the_recent_turns_so_the_prefix_cache_holds() -> N
 
     through = first.index("</memory:turn>", first.index("turn-2-")) + len("</memory:turn>")
     assert second.startswith(first[:through])
+
+
+def test_a_turn_in_the_same_world_shares_the_recent_turns_and_the_situation_as_its_prefix() -> None:
+    """R-20 C5: a turn that adds nothing to short-term memory (a ring, a timer) in a world that did not change
+    shares the recent turns and the situation with the previous prompt; only what memory associated, the stimulus
+    and the feedback differ, so a server's prefix cache holds through the situation."""
+
+    situation = '<environment id="world"><self state="/Bot/active"/></environment>'
+
+    def user_content(said: str, associated: int) -> str:
+        input = processing.InputData(
+            input=said,
+            situation=situation,
+            recalled=cognition_types.RecalledData(
+                recent=_recent(3, size=5), associations=_associations(associated, size=5)
+            ),
+        )
+        parts = input.model_facing_content(media.ImageCapacity())
+        return "".join(part.text for part in parts if isinstance(part, text.TextPart))
+
+    first = user_content("the phone rings", 1)
+    second = user_content("the timer fires", 2)
+
+    through = first.index(situation) + len(situation)
+    assert second.startswith(first[:through])
+
+
+def test_recalled_without_stable_fields_renders_after_the_situation() -> None:
+    """Recalled context that declares nothing stable is per-turn: it renders after the situation, never before."""
+
+    class _Recalled(pydantic.BaseModel):
+        model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(frozen=True)
+
+        items: tuple[str, ...]
+
+    input = processing.InputData(
+        input="incoming speech", situation='<environment id="world"/>', recalled=_Recalled(items=("memory-0",))
+    )
+    rendered = "".join(
+        part.text for part in input.model_facing_content(media.ImageCapacity()) if isinstance(part, text.TextPart)
+    )
+
+    assert rendered.index('<environment id="world"/>') < rendered.index("memory-0") < rendered.index("incoming speech")
 
 
 def test_processing_input_never_repeats_instructions_or_situation_in_its_projection() -> None:
