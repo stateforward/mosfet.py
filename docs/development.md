@@ -343,6 +343,17 @@ outcome}, `bot.voice.inception.duration` {outcome}, `bot.voice.recall.count` {ou
 `bot.voice.conceive` / `.create` / `.check` / `.voicing` spans; no ref, key, description or
 trait is ever an attribute.
 
+`identity.Identity` (an input ability in `bot.input`; `bot.start` gives the one it finds to
+`Cognition(identity=...)` as a peer, never a child) tells the name the bot answers to with
+`identity.NamedEvent` (`identity.NameData`): to whoever asks with `identity.AskEvent`, once it has
+recalled the name it woke up with (an ask while recalling or adopting waits), and to whoever
+selected an adoption (the adopt request's source, the bot's cognition) once the name is taken;
+a detached Identity answers an ask with a typed failure. Cognition asks on entering `ready` until
+it is told, so an Identity not yet started is simply asked again after the next turn, and keeps the
+latest name its own Identity told it. The self block then leads with `<name taken_by="you">` or
+`<no_name_yet/>`, so the bot can tell its own name from a visitor's; without an Identity it says
+nothing about a name. The block stays byte-identical between turns; only a rename changes it.
+
 ## Observability
 
 Every HSM-visible behavior is observed at runtime boundaries that opt in

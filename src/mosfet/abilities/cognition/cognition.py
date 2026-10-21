@@ -1,4 +1,5 @@
 from .. import ability
+from .. import identity
 from .. import memory
 from .. import persona
 from .. import processing
@@ -522,6 +523,12 @@ class Cognition(ability.Ability[InputData, OutputData]):
     voice can do with an expression; the self block shows it from then on. Inception is the bot's
     making, never a turn: what it fails at (a voice estranged or lost, a source or model that cannot
     answer) goes to the body as a ``cognition.InputEvent`` observing it, never silently dropped.
+
+    With ``identity`` given (the bot's ``identity.Identity``, a peer the body attaches as an input
+    ability), Cognition asks it the name the bot answers to (``identity.AskEvent``) whenever it is
+    ready and has not been told, and keeps what it is told (``identity.NamedEvent``: on asking, and
+    after an adoption the bot selected); the self block shows the name, or that it has none yet, from
+    then on. Without one, the self block says nothing of a name.
     """
 
     input_data_type: typing.ClassVar[type[object] | tuple[type[object], ...] | None] = InputData
@@ -550,6 +557,10 @@ class Cognition(ability.Ability[InputData, OutputData]):
     _voice: "vocal.voice.Inception | None"
     # The voice inception told Cognition the bot speaks in, by event: durable self-knowledge.
     _voice_told: vocal.voice.VoiceData | None
+    # The bot's Identity, injected: a peer the body attaches as an input ability, reached only by message.
+    _identity_peer: "identity.Identity | None"
+    # The name Identity last told Cognition the bot answers to (or none yet), by event; None until told.
+    _name_told: identity.NameData | None
     _rest_after: datetime.timedelta
     # Injected operation bounds (None = live module default, so tests may still tune
     # the module constants around construction). Never hardcode per-caller durations.
@@ -614,12 +625,15 @@ class Cognition(ability.Ability[InputData, OutputData]):
         associative = instance._associative
         told = instance._persona_told
         voiced = instance._voice_told
+        named = instance._name_told
         frame = input.build_processing_input(
             cognition_input,
             # Deliberate recall: offered to a stage whose effort ceiling admits the associative.
             extra_actors=None if associative is None else {"memory": associative},
             authority=instance,
-            known=None if told is None and voiced is None else input.SelfData(persona=told, voice=voiced),
+            known=None
+            if told is None and voiced is None and named is None
+            else input.SelfData(name=named, persona=told, voice=voiced),
         )
         if acted is not None:
             fact = "".join(
@@ -2431,6 +2445,52 @@ class Cognition(ability.Ability[InputData, OutputData]):
         instance._voice_told = told
 
     @staticmethod
+    def _ask_name(ctx: hsm.Context, instance: "Cognition", event: hsm.Event[typing.Any]) -> None:
+        """Ask the bot's Identity the name it answers to, until told; an Identity not yet started is asked again
+        the next time Cognition is ready."""
+
+        del event
+        peer = instance._identity_peer
+        if peer is None or instance._name_told is not None:
+            return
+        ask = dataclasses.replace(
+            identity.AskEvent.with_data_and_id(identity.AskData(), uuid.uuid4().hex),
+            source=hsm.id(instance),
+            target=hsm.id(peer),
+        )
+        _ = hsm.dispatch_to(ctx, ask, hsm.id(peer))
+
+    @staticmethod
+    def _is_name_told(
+        ctx: hsm.Context,
+        instance: "Cognition",
+        event: hsm.Event[typing.Any],
+    ) -> bool:
+        """The name the bot answers to, told by its own Identity peer (by source and payload type)."""
+
+        del ctx
+        return (
+            instance._identity_peer is not None
+            and event.source == hsm.id(instance._identity_peer)
+            and isinstance(event.data, identity.NameData)
+        )
+
+    @staticmethod
+    def _know_name(
+        ctx: hsm.Context,
+        instance: "Cognition",
+        event: hsm.Event[typing.Any],
+    ) -> None:
+        """Keep the name Identity told: every frame built from now on shows it in the self block."""
+
+        del ctx
+        told = event.data
+        if not isinstance(told, identity.NameData):
+            # Unreachable: paired with hsm.guard(_is_name_told), which narrows this payload.
+            return
+        instance._name_told = told
+
+    @staticmethod
     def _is_inception_failure(
         ctx: hsm.Context,
         instance: "Cognition",
@@ -2538,6 +2598,8 @@ class Cognition(ability.Ability[InputData, OutputData]):
         # these shared transitions, which wakes it.
         hsm.state(
             "ready",
+            # Not yet told its name: ask its Identity on every return to ready until it answers.
+            hsm.entry(_ask_name),
             hsm.initial(hsm.target("/Cognition/ready/idle")),
             hsm.choice(
                 "settling",
@@ -2940,6 +3002,13 @@ class Cognition(ability.Ability[InputData, OutputData]):
             hsm.guard(_is_voice_told),
             hsm.effect(_know_voice),
         ),
+        # Identity tells the bot's name when asked and after an adoption, in whatever phase Cognition is
+        # then; keeping it is internal and never moves a phase.
+        hsm.transition(
+            hsm.on(identity.NamedEvent),
+            hsm.guard(_is_name_told),
+            hsm.effect(_know_name),
+        ),
         hsm.transition(
             hsm.on(ability.FailedEvent),
             hsm.guard(_is_inception_failure),
@@ -2984,6 +3053,7 @@ class Cognition(ability.Ability[InputData, OutputData]):
         consolidation: memory.Consolidation | None = None,
         persona: persona.Persona | None = None,
         voice: "vocal.voice.Inception | None" = None,
+        identity: "identity.Identity | None" = None,
         rest_after: datetime.timedelta = _DEFAULT_REST_AFTER,
         child_operation_timeout: datetime.timedelta | None = None,
         reflex_timeout: datetime.timedelta | None = None,
@@ -3022,6 +3092,8 @@ class Cognition(ability.Ability[InputData, OutputData]):
         self._persona_told = None
         self._voice = voice
         self._voice_told = None
+        self._identity_peer = identity
+        self._name_told = None
         self._rest_after = rest_after
         self._child_operation_timeout = child_operation_timeout
         self._tier_timeouts = tier_timeouts

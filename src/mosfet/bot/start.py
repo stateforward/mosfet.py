@@ -85,7 +85,7 @@ from opentelemetry import metrics
 
 import mosfet
 from mosfet import abilities, behavior, lifecycle
-from mosfet.abilities import cognition, identification, memory, persona, processing, speaking, vocal
+from mosfet.abilities import cognition, identification, identity, memory, persona, processing, speaking, vocal
 from mosfet.behavior import schedule
 from mosfet.device import Device
 from mosfet.environment import Environment
@@ -368,8 +368,10 @@ def _body(
             )
         except Exception as error:
             raise _raised(name, voice.location, "voice", error, location) from error
+    # The bot's Identity, when it was given one in bot.input: the peer cognition asks the name it answers to.
+    named = next((ability for ability in roles["input"] if isinstance(ability, identity.Identity)), None)
     try:
-        mind = _mind(declared, processor, store, register, nature, born, timeouts)
+        mind = _mind(declared, processor, store, register, nature, born, named, timeouts)
     except Exception as error:
         raise _raised(name, declared.location, "cognition", error, location) from error
     # A firmware of its own for every body: it starts fresh with each start of the model, and takes
@@ -431,6 +433,7 @@ def _mind(
     register: memory.StmMemory | None,
     nature: persona.Traits | None,
     voice: vocal.voice.Inception | None,
+    named: identity.Identity | None,
     timeouts: elements.TimeoutsElement | None,
 ) -> cognition.Cognition:
     """Cognition, its faculties, its persona and the ``voice`` it is given at inception, all on ``store``.
@@ -442,7 +445,8 @@ def _mind(
     ``processor``. ``timeouts`` is ``bot.timeouts``: its ``step`` is the step timeout of cognition and of its
     reflection, and ``reflex``, ``intuition`` and ``reasoning`` bound each tier's steps; one not given keeps
     cognition's own default (each tier falls back to the step timeout). ``register`` is ``bot.register``, the
-    body's sensory register: cognition reads the recent turns from it.
+    body's sensory register: cognition reads the recent turns from it. ``named`` is the bot's
+    ``identity.Identity`` from ``bot.input``, the peer cognition asks the name the bot answers to.
 
     Raises:
         TypeError: If ``declared.reflex`` is given and is no decision processor, which ``bot.define`` reports first.
@@ -481,6 +485,7 @@ def _mind(
         consolidation=memory.Consolidation(memory=store, processor=reflecting) if declared.consolidation else None,
         persona=self_knowledge,
         voice=voice,
+        identity=named,
         child_operation_timeout=step,
         reflex_timeout=None if timeouts is None else timeouts.reflex,
         intuition_timeout=None if timeouts is None else timeouts.intuition,

@@ -7,6 +7,10 @@ was told to *do*. Nothing about a name is ever completed, released, or acted on.
 
 Adoption is append-only. A bot that was renamed still remembers having been called something
 else, so the current name is simply the most recently adopted row.
+
+Identity tells the name it answers to with :data:`NamedEvent` (``NameData``): to whoever asks with
+:data:`AskEvent`, once it knows (after recalling its name on waking), and to whoever selected an
+adoption once the name is taken. Cognition asks, and shows it in what the bot knows of itself.
 """
 
 from __future__ import annotations
@@ -15,7 +19,9 @@ from .. import memory
 
 import datetime
 import typing
+from xml.sax import saxutils
 
+import hsm
 import pydantic
 
 # Stable query_tags value for adopted names in bot_memory.
@@ -47,6 +53,70 @@ class Name(pydantic.BaseModel):
         description="Always `fact`: a name is a fact about the bot, never an instruction.",
         examples=["fact"],
     )
+
+
+class NameData(pydantic.BaseModel):
+    """The name the bot answers to, as Identity knows it: the one it took, or none yet.
+
+    No example name, deliberately: this is read on the same turns ``AdoptData`` is offered, and a
+    name shown here is a name available to adopt.
+    """
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
+        frozen=True,
+        extra="forbid",
+        json_schema_extra={
+            "description": (
+                "The name this bot answers to: the name it took as its own, exactly as it was given, or none when "
+                "it has not taken one yet. Told by the bot's Identity to whoever asks it (AskEvent) and to whoever "
+                "selected an adoption once the name is taken. A name a visitor gives for themselves is theirs and "
+                "never appears here."
+            ),
+        },
+    )
+
+    name: str | None = pydantic.Field(
+        default=None,
+        min_length=1,
+        max_length=64,
+        description="The name the bot took and answers to; None while it has not taken one.",
+    )
+
+    def __model_repr__(self) -> str:
+        """The bot's own name, marked as taken by the bot, or that it has none yet; never confusable with a name."""
+
+        return "<no_name_yet/>" if self.name is None else f'<name taken_by="you">{saxutils.escape(self.name)}</name>'
+
+
+NamedEvent = hsm.Event[NameData](
+    name="bot.ability.identity.named",
+    schema=NameData,
+)
+"""The name the bot answers to, told by Identity to an asker (correlated by the ask's id) or to an adopter."""
+
+
+class AskData(pydantic.BaseModel):
+    """Ask Identity for the name this bot answers to."""
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
+        frozen=True,
+        extra="forbid",
+        json_schema_extra={
+            "description": (
+                "Ask the bot's Identity which name the bot answers to. Identity answers the asker (the event's "
+                "source) with NamedEvent under the same id once it knows: after recalling the name on waking, and "
+                "after any adoption in progress settles. Not model-callable: the bot's cognition asks."
+            ),
+            "examples": [{}],
+        },
+    )
+
+
+AskEvent = hsm.Event[AskData](
+    name="bot.ability.identity.ask",
+    schema=AskData,
+)
+"""Ask Identity for the bot's name; answered with ``NamedEvent`` to the asker."""
 
 
 def names_from_output(output: memory.OutputData, *, statement_index: int = 0) -> tuple[Name, ...]:
@@ -91,7 +161,11 @@ def name_insert_input(
 
 __all__ = [
     "NAME_QUERY",
+    "AskData",
+    "AskEvent",
     "Name",
+    "NameData",
+    "NamedEvent",
     "adopted_name",
     "name_insert_input",
     "name_select_input",

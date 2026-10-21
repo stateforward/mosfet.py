@@ -6,6 +6,7 @@ from mosfet import media
 from mosfet.abilities import ability as ability_module
 from mosfet.abilities import cognition
 from mosfet.abilities import communication
+from mosfet.abilities import identity
 from mosfet.abilities import listening
 from mosfet.abilities import memory
 from mosfet.abilities import persona
@@ -15,7 +16,7 @@ from mosfet.abilities import speaking
 from mosfet.abilities import vocal
 from mosfet.abilities.cognition import cognition as cognition_module
 from mosfet.abilities.language import text
-from mosfet.abilities.hearing import voice
+from mosfet.abilities.hearing import speech, voice
 from mosfet.abilities.cognition import reflection as reflection_module
 from mosfet.behavior import instance as behavior_instance
 from mosfet.devices import audio
@@ -5741,6 +5742,118 @@ def test_cognition_without_persona_shows_no_self_block() -> None:
     (frame,) = asyncio.run(run())
 
     assert _self_block(frame) is None
+
+
+class _EchoDecoder(speech.SpeechDecoder):
+    """Stands in for STT: the bytes are the words."""
+
+    @typing.override
+    async def decode(self, input: bytes) -> bytes:
+        return input
+
+
+def _name_line(frame: processing.InputData) -> str | None:
+    """The bot's own name as the self block shows it: the name, ``none yet``, or None when it says nothing."""
+
+    block = _self_block(frame)
+    if block is None:
+        return None
+    named = block.find("name")
+    if named is not None:
+        assert named.get("taken_by") == "you"
+        return named.text
+    return "none yet" if block.find("no_name_yet") is not None else None
+
+
+def test_cognition_shows_the_name_its_identity_tells_it_none_yet_before_one_is_taken_and_again_after_a_restart() -> (
+    None
+):
+    """The bot knows its own name (P-7): Identity tells Cognition, by event, on waking and after an adoption.
+
+    The adoption is dispatched by the test itself, standing in for the bot's selection (the selection's source is
+    the bot's cognition): this pins the capacity to know its name, never a choice to take one.
+    """
+
+    async def life(store: memory.Memory, *, adopt: str | None) -> list[processing.InputData]:
+        ears = identity.Identity(recognizer=identity.SpeechNameRecognizer(decoder=_EchoDecoder()), memory=store)
+        reasoning_processor = RecordingReasoningProcessor(focus_output("phone", "reasoned focus"))
+        decision, reasoning = cognition_abilities(
+            decision_processor=RecordingDecisionProcessor(cognition.decision.OutputData(reason="think it over")),
+            reasoning_processor=reasoning_processor,
+        )
+        mind = cognition.Cognition(
+            decision=decision,
+            reasoning=reasoning,
+            reflection=cognition.Reflection(processor=FixedProcessor(no_output("reflection")), memory=store),
+            memory=store,
+            identity=ears,
+        )
+        ctx = shared_hsm_context()
+        await start_abilities_for_test(ctx, ears)
+        ctx = await start_cognition_ability_for_test(mind, ctx)
+        await wait_until(lambda: mind.state().endswith("/idle") and ears.state().endswith("/knowing/listening"))
+        for _ in range(50):
+            await asyncio.sleep(0)
+        _ = await dispatch_ability_for_test(mind, ctx, await started_cognition_input(ctx))
+        if adopt is not None:
+            _ = await hsm.dispatch(
+                ctx,
+                ears,
+                dataclasses.replace(identity.AdoptEvent.with_data(identity.AdoptData(name=adopt)), source=hsm.id(mind)),
+            )
+            await wait_until(lambda: ears.state().endswith("/knowing/listening"))
+            for _ in range(50):
+                await asyncio.sleep(0)
+            _ = await dispatch_ability_for_test(mind, ctx, await started_cognition_input(ctx))
+        await mind.stop(ctx)
+        await hsm.stop(ears, ctx)
+        return reasoning_processor.calls
+
+    async def run() -> tuple[list[processing.InputData], list[processing.InputData]]:
+        connection = sqlite3.connect(":memory:", check_same_thread=False)
+        try:
+            engine = memory.store.open_sqlite_engine(connection=connection)
+            first = await life(memory.Memory(engine=engine), adopt="Bob")
+            # A new body over the same database: the name was written down when it was taken.
+            again = await life(memory.Memory(engine=engine), adopt=None)
+            return first, again
+        finally:
+            connection.close()
+
+    first, again = asyncio.run(run())
+
+    assert [_name_line(frame) for frame in first] == ["none yet", "Bob"]
+    assert [_name_line(frame) for frame in again] == ["Bob"]
+    # Stable between turns: only a rename changes the self block.
+    assert len({frame.instructions for frame in again}) == 1
+
+
+def test_cognition_without_identity_shows_no_name_at_all() -> None:
+    """A bot with no Identity cannot know a name either way, so its self block claims nothing about one."""
+
+    async def run() -> list[processing.InputData]:
+        self_ = persona.Persona(traits=_TRAITS)
+        reasoning_processor = RecordingReasoningProcessor(focus_output("phone", "reasoned focus"))
+        decision, reasoning = cognition_abilities(
+            decision_processor=RecordingDecisionProcessor(cognition.decision.OutputData(reason="think it over")),
+            reasoning_processor=reasoning_processor,
+        )
+        ability = cognition.Cognition(
+            decision=decision,
+            reasoning=reasoning,
+            reflection=cognition.Reflection(processor=FixedProcessor(no_output("reflection")), memory=memory.Memory()),
+            persona=self_,
+        )
+        ctx = await start_cognition_ability_for_test(ability)
+        await _until_persona(lambda: ability.state().endswith("/idle") and self_.state().endswith("/knowing"))
+        _ = await dispatch_ability_for_test(ability, ctx, await started_cognition_input(ctx))
+        await ability.stop(ctx)
+        return reasoning_processor.calls
+
+    (frame,) = asyncio.run(run())
+
+    assert _self_block(frame) is not None
+    assert _name_line(frame) is None
 
 
 def test_cognition_keeps_only_what_its_own_persona_told() -> None:

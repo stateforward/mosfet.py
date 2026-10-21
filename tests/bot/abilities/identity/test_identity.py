@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import collections.abc
+import dataclasses
 import datetime
 import sqlite3
 import typing
@@ -704,3 +705,88 @@ def test_the_adopt_tool_says_whose_name_it_takes() -> None:
     assert "introduces themselves" in described and "names them, not you" in described
     assert "for you" in name["description"] and "not the speaker's" in name["description"]
     assert "examples" not in name
+
+
+class Asker(hsm.Instance):
+    """Stands in for cognition asking its Identity peer: records every event addressed to it."""
+
+    heard: list[hsm.Event[typing.Any]]
+
+    @staticmethod
+    def _record(ctx: hsm.Context, instance: "Asker", event: hsm.Event[typing.Any]) -> None:
+        del ctx
+        instance.heard.append(event)
+
+    model: typing.ClassVar[hsm.Model] = mosfet.define(
+        "IdentityTestAsker",
+        hsm.initial(hsm.target("recording")),
+        hsm.state("recording", hsm.transition(hsm.on(hsm.AnyEvent), hsm.effect(_record))),
+    )
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.heard = []
+
+    def told(self) -> list[tuple[str, str | None]]:
+        return [
+            (event.id, event.data.name)
+            for event in self.heard
+            if event.name == identity.NamedEvent.name and isinstance(event.data, identity.NameData)
+        ]
+
+
+async def ask(ctx: hsm.Context, asker: Asker, ears: identity.Identity, request_id: str) -> None:
+    await hsm.dispatch(
+        ctx,
+        ears,
+        dataclasses.replace(identity.AskEvent.with_data_and_id(identity.AskData(), request_id), source=hsm.id(asker)),
+    )
+    await wait_until(lambda: any(told_id == request_id for told_id, _ in asker.told()))
+
+
+def test_identity_tells_whoever_asks_and_whoever_adopted_the_name_the_bot_answers_to() -> None:
+    """Before any adoption the bot has no name; the adopter is told the name it took; a later waking recalls it."""
+
+    async def run() -> tuple[list[tuple[str, str | None]], list[tuple[str, str | None]]]:
+        store, connection = open_store()
+        try:
+            ctx = shared_hsm_context()
+            asker = Asker()
+            _ = await mosfet.started(ctx, asker, Asker.model)
+            first = await start_identity(ctx, store=store)
+            await ask(ctx, asker, first, "ask-1")
+            await hsm.dispatch(
+                ctx,
+                first,
+                dataclasses.replace(
+                    identity.AdoptEvent.with_data_and_id(identity.AdoptData(name="Bob"), "adopt-1"),
+                    source=hsm.id(asker),
+                ),
+            )
+            await wait_until(lambda: any(told_id == "adopt-1" for told_id, _ in asker.told()))
+            await hsm.stop(first, ctx)
+
+            woken = Asker()
+            _ = await mosfet.started(ctx, woken, Asker.model)
+            second = RecordingIdentity(
+                recognizer=identity.SpeechNameRecognizer(decoder=RecordingSpeechDecoder()), memory=store
+            )
+            await start_abilities_for_test(ctx, second)
+            # Asked while it is still recalling: the ask waits for the name it wakes up with.
+            await ask(ctx, woken, second, "ask-2")
+            return asker.told(), woken.told()
+        finally:
+            connection.close()
+
+    first, second = asyncio.run(run())
+
+    assert first == [("ask-1", None), ("adopt-1", "Bob")]
+    assert second == [("ask-2", "Bob")]
+
+
+def test_the_name_the_bot_answers_to_reads_as_its_own_or_as_none_yet() -> None:
+    """Shown to the model in the self block: never confusable with a name, and no example name anywhere."""
+
+    assert identity.NameData(name="Bob & <Co>").__model_repr__() == '<name taken_by="you">Bob &amp; &lt;Co&gt;</name>'
+    assert identity.NameData().__model_repr__() == "<no_name_yet/>"
+    assert "examples" not in identity.NameData.model_json_schema()["properties"]["name"]

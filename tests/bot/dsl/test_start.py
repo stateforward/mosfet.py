@@ -20,10 +20,10 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanE
 import mosfet
 from mosfet import bot, lifecycle
 from mosfet import abilities
-from mosfet.abilities import cognition, communication, listening, memory, persona, speaking, vocal
+from mosfet.abilities import cognition, communication, identity, listening, memory, persona, speaking, vocal
 from mosfet.abilities.communication import conversation
 from mosfet.abilities.communication.conversation import turn_detector
-from mosfet.abilities.hearing import voice
+from mosfet.abilities.hearing import speech, voice
 from mosfet.behavior import schedule
 from mosfet.bot import body, diagnostics, elements, testing
 from mosfet.device import Device
@@ -528,6 +528,40 @@ def test_without_traits_there_is_no_persona(built: Built) -> None:
     assert [name for name, _ in built if name == "Persona"] == []
     ((_, reflection),) = [entry for entry in built if entry[0] == "Reflection"]
     assert reflection["persona"] is None
+
+
+class _Ears(speech.SpeechDecoder):
+    """Stands in for STT: the bytes are the words."""
+
+    @typing.override
+    async def decode(self, input: bytes) -> bytes:
+        return input
+
+
+@pytest.mark.parametrize("given", [True, False])
+def test_the_bots_identity_is_the_peer_its_cognition_asks_its_name(
+    monkeypatch: pytest.MonkeyPatch, given: bool
+) -> None:
+    """The Identity given in ``bot.input`` is the one cognition asks the bot's name; without one, there is none."""
+
+    found: Built = []
+    ears = identity.Identity(recognizer=identity.SpeechNameRecognizer(decoder=_Ears()))
+    model = bot.define(
+        "greeter",
+        bot.cognition(reasoning=support.Silent(), reflex=support.Undecided()),
+        *((bot.input(ears),) if given else ()),
+        bot.attach(phone.Phone()),
+    )
+    monkeypatch.setattr(cognition, "Cognition", _recorded(cognition.Cognition, found))
+
+    async def run() -> None:
+        started, _ = await _started(model)
+        await bot.stop(started)
+
+    asyncio.run(run())
+
+    ((_, mind),) = found
+    assert mind["identity"] is (ears if given else None)
 
 
 # Seeds and the voice given at inception (W8-10)

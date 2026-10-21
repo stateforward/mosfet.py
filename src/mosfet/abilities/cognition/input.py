@@ -23,6 +23,7 @@ from .. import vocal
 
 # SelfData's field is named ``persona``, which would shadow the package in the class body (these
 # annotations are resolved there), so the package goes by its role in this module.
+from .. import identity
 from .. import persona as self_knowledge
 from ..ability import Effort, effort_within
 
@@ -106,10 +107,12 @@ class InputData(pydantic.BaseModel):
 class SelfData(pydantic.BaseModel):
     """What the bot knows of itself on a turn, shown to the model in the system prompt (P-7).
 
-    Cognition builds it from what its own children last told it, by event; nothing here reads a
-    peer's state. The traits are its owner's, the description is the bot's own and is shown as it
-    wrote it: marked self-written, never filtered. The voice was given to it at inception and is
-    shown with what it can do with an expression, so the bot knows its capacity before it speaks.
+    Cognition builds it from what its own children and its Identity peer last told it, by event;
+    nothing here reads a peer's state. The name is the one the bot took, or that it has none yet, so
+    it can tell its own name from a visitor's. The traits are its owner's, the description is the bot's
+    own and is shown as it wrote it: marked self-written, never filtered. The voice was given to it at
+    inception and is shown with what it can do with an expression, so the bot knows its capacity before
+    it speaks.
     """
 
     model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
@@ -117,13 +120,20 @@ class SelfData(pydantic.BaseModel):
         extra="forbid",
         json_schema_extra={
             "description": (
-                "What the bot knows of itself this turn: the traits its owner gave it, the description of "
-                "itself it wrote (or none when it has not written one), and the voice it was given when it was "
-                "made, with what that voice can do."
+                "What the bot knows of itself this turn: the name it took as its own (or that it has none yet), "
+                "the traits its owner gave it, the description of itself it wrote (or none when it has not written "
+                "one), and the voice it was given when it was made, with what that voice can do."
             ),
         },
     )
 
+    name: identity.NameData | None = pydantic.Field(
+        default=None,
+        description=(
+            "The name the bot answers to as its Identity told it, or that it has none yet; None when the bot has "
+            "no Identity (or has not been told), so nothing is claimed about a name."
+        ),
+    )
     persona: self_knowledge.OutputData | None = pydantic.Field(
         default=None,
         description="The bot's owner-given traits and its self-written description; None without a persona.",
@@ -134,12 +144,13 @@ class SelfData(pydantic.BaseModel):
     )
 
     def __model_repr__(self) -> str:
-        """The self block: ``<persona>`` holding the traits (given by the owner), the description (by you),
-        and the voice (given at inception)."""
+        """The self block: ``<persona>`` holding the name (taken by you, or none yet), the traits (given by the
+        owner), the description (by you), and the voice (given at inception)."""
 
+        named = "" if self.name is None else self.name.__model_repr__()
         known = "" if self.persona is None else self.persona.__model_repr__()
         voiced = "" if self.voice is None else self.voice.__model_repr__()
-        return f"<persona>{known}{voiced}</persona>"
+        return f"<persona>{named}{known}{voiced}</persona>"
 
 
 def stimulus_name(stimulus: mosfet.InputData) -> str | None:

@@ -13,6 +13,10 @@ an interrupt may request attention while its meaning stays in cognition.
 
 A bot that is told a name and does not adopt it is working correctly, and so is a bot that hears
 its name and does nothing. Both are decisions this ability makes available and never makes.
+
+The name the bot answers to is self-knowledge too: Identity tells it (:data:`NamedEvent`) to whoever
+asks (:data:`AskEvent`) once it knows, and to whoever selected an adoption once the name is taken,
+so cognition can tell its own name from a visitor's.
 """
 
 from __future__ import annotations
@@ -20,7 +24,16 @@ from __future__ import annotations
 from .. import ability
 from .. import memory
 from . import recognition
-from .name import Name, adopted_name, name_insert_input, name_select_input
+from .name import (
+    AskData,
+    AskEvent,
+    Name,
+    NameData,
+    NamedEvent,
+    adopted_name,
+    name_insert_input,
+    name_select_input,
+)
 
 import dataclasses
 import datetime
@@ -230,6 +243,13 @@ def _has_adoption(ctx: hsm.Context, instance: "Identity", event: hsm.Event[typin
     return isinstance(event.data, _AdoptedData)
 
 
+def _is_ask(ctx: hsm.Context, instance: "Identity", event: hsm.Event[typing.Any]) -> bool:
+    """An ask Identity can answer: it carries an ask and names who asked."""
+
+    del ctx, instance
+    return isinstance(event.data, AskData) and bool(event.source)
+
+
 def _has_failure(ctx: hsm.Context, instance: "Identity", event: hsm.Event[typing.Any]) -> bool:
     del ctx, instance
     return isinstance(event.data, ability.FailureData)
@@ -259,6 +279,8 @@ class Identity(ability.Ability[SoundData, cognition.InputData]):
 
     input_event: typing.ClassVar[hsm.Event[SoundData]] = SoundEvent
     output_event: typing.ClassVar[hsm.Event[cognition.InputData]] = cognition.InputEvent
+    # An ask that reaches a detached Identity is answered with a typed failure, never dropped silently.
+    detached_requests: typing.ClassVar[tuple[hsm.Event[typing.Any], ...]] = (AskEvent,)
 
     _recognizer: recognition.NameRecognizer
     _memory: memory.MemoryStore | None
@@ -424,12 +446,37 @@ class Identity(ability.Ability[SoundData, cognition.InputData]):
 
     @staticmethod
     def _remember_adopted(ctx: hsm.Context, instance: "Identity", event: hsm.Event[typing.Any]) -> None:
-        del ctx
+        """Answer to the name taken, and tell whoever selected the adoption (the request's source) that it is so."""
+
         data = event.data
         if not isinstance(data, _AdoptedData):
             # Unreachable: paired with hsm.guard(_has_adoption), which narrows this payload.
             return
         instance._name = data.name
+        if event.source:
+            Identity._tell_name(ctx, instance, event.source, event)
+
+    @staticmethod
+    def _tell_name(ctx: hsm.Context, instance: "Identity", to: str, source: hsm.Event[typing.Any]) -> None:
+        """Tell ``to`` the name the bot answers to, under ``source``'s id: a reply, never a broadcast."""
+
+        known = instance._name
+        told = dataclasses.replace(
+            NamedEvent.with_data_and_id(
+                NameData(name=None if known is None else known.text), source.id if source.id else uuid.uuid4().hex
+            ),
+            source=hsm.id(instance),
+            target=to,
+            metadata=dict(source.metadata),
+        )
+        _ = hsm.dispatch_to(ctx, told, to)
+
+    @staticmethod
+    def _answer_ask(ctx: hsm.Context, instance: "Identity", event: hsm.Event[typing.Any]) -> None:
+        """Tell the asker the name the bot answers to, or that it has none yet."""
+
+        assert event.source, "paired with hsm.guard(_is_ask), which requires an asker"
+        Identity._tell_name(ctx, instance, event.source, event)
 
     @staticmethod
     def _dispatch_addressed(ctx: hsm.Context, instance: "Identity", event: hsm.Event[typing.Any]) -> None:
@@ -461,7 +508,8 @@ class Identity(ability.Ability[SoundData, cognition.InputData]):
         hsm.state(
             "recalling",
             hsm.initial(hsm.target("/Identity/recalling/asking")),
-            hsm.defer(input_event, AdoptEvent),
+            # An ask waits for the name the bot woke up with, so it is never answered "none" too early.
+            hsm.defer(input_event, AdoptEvent, AskEvent),
             # Memory is a peer attached by its own owner, possibly alongside this ability. It has
             # the same bring-up budget this ability was attached with to start answering.
             hsm.transition(
@@ -499,6 +547,7 @@ class Identity(ability.Ability[SoundData, cognition.InputData]):
                 hsm.guard(_is_adoption),
                 hsm.target("/Identity/adopting"),
             ),
+            hsm.transition(hsm.on(AskEvent), hsm.guard(_is_ask), hsm.effect(_answer_ask)),
             hsm.state(
                 "listening",
                 # Sound with no name to look for has no transition here at all: a nameless bot
@@ -536,7 +585,7 @@ class Identity(ability.Ability[SoundData, cognition.InputData]):
         ),
         hsm.state(
             "adopting",
-            hsm.defer(input_event, AdoptEvent),
+            hsm.defer(input_event, AdoptEvent, AskEvent),
             hsm.activity(_adopt_name),
             hsm.transition(
                 hsm.on(_AdoptedEvent),

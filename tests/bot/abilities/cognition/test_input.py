@@ -8,6 +8,7 @@ import xml.etree.ElementTree
 
 import mosfet
 import mosfet.lifecycle
+from mosfet.abilities import identity
 from mosfet.abilities import persona
 from mosfet.abilities import processing
 from mosfet.abilities import vocal
@@ -443,6 +444,23 @@ def test_self_data_renders_the_voice_given_at_inception_after_the_persona() -> N
 
     assert known.__model_repr__() == f"{_KNOWN.__model_repr__().removesuffix('</persona>')}{voice_block}</persona>"
     assert cognition_input.SelfData(voice=_VOICE).__model_repr__() == f"<persona>{voice_block}</persona>"
+
+
+def test_self_data_renders_the_bots_own_name_first_or_that_it_has_none_yet_and_nothing_without_identity() -> None:
+    """The bot can tell its own name from a visitor's: its name leads the self block, or the block says it has none.
+
+    Without an Identity the bot cannot know a name either way, so the block says nothing about one.
+    """
+
+    named = cognition_input.SelfData(persona=_KNOWN.persona, name=identity.NameData(name="Bob"))
+    nameless = cognition_input.SelfData(persona=_KNOWN.persona, name=identity.NameData())
+    persona_block = _KNOWN.__model_repr__().removeprefix("<persona>")
+
+    assert named.__model_repr__() == f'<persona><name taken_by="you">Bob</name>{persona_block}'
+    assert nameless.__model_repr__() == f"<persona><no_name_yet/>{persona_block}"
+    assert cognition_input.SelfData().name is None
+    assert "name" not in _KNOWN.__model_repr__()
+    assert cognition_input.SelfData(name=identity.NameData()).__model_repr__() == "<persona><no_name_yet/></persona>"
 
 
 def test_build_processing_input_shows_what_the_bot_knows_of_itself_as_its_instructions() -> None:
