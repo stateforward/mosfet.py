@@ -58,7 +58,7 @@ else:
 _REQUIRED = {
     "BOT_OPENAI_API_KEY": "openai-key-5d1a",
     "BOT_GEMINI_API_KEY": "gemini-key-8e3f",
-    # The decision server intuition decides on: a closed port, since nothing in these tests asks it.
+    # The decision server reflex decides on: a closed port, since nothing in these tests asks it.
     "DECISION_BASE_URL": "http://127.0.0.1:9",
 }
 _DECISION_KEY = "decision-key-9b07"
@@ -205,7 +205,7 @@ def test_the_dial_plan_is_optional_number_to_identity_aliases() -> None:
         _ = example.Settings.model_validate({**_REQUIRED, "BOT_LIVEKIT_DIAL_PLAN": "5550142"})
 
 
-def test_intuition_needs_a_decision_server_and_its_key_is_sent_only_when_given() -> None:
+def test_reflex_needs_a_decision_server_and_its_key_is_sent_only_when_given() -> None:
     undecided = {name: given for name, given in _REQUIRED.items() if name != "DECISION_BASE_URL"}
     with pytest.raises(pydantic.ValidationError) as missing:
         _ = example.Settings.model_validate(undecided)
@@ -245,7 +245,7 @@ def test_the_env_example_is_the_local_line_and_every_setting_in_it_is_valid() ->
             assignments[name] = value
     settings = example.Settings.model_validate({**assignments, **_REQUIRED})
 
-    # Intuition decides on the lab's decide, whose context is 2048 tokens.
+    # Reflex decides on the lab's decide, whose context is 2048 tokens.
     assert (assignments["DECISION_BASE_URL"], assignments["DECISION_MAX_CONTEXT_TOKENS"]) == (
         "http://127.0.0.1:8102",
         "2048",
@@ -396,8 +396,8 @@ def test_the_bot_file_thinks_with_one_model_decides_on_another_and_shares_one_me
 
     # One processor (D-W8-8): the example keeps its reasoning model; cognition owns the one memory.
     assert main.count("openai_compat.Processor(") == 1
-    # Its intuition is never a chat model (R-6): it decides on the decision server DECISION_BASE_URL names.
-    assert main.count("intuition=decision.Processor(") == 1
+    # Its reflex is never a chat model (R-6): it decides on the decision server DECISION_BASE_URL names.
+    assert main.count("reflex=decision.Processor(") == 1
     # Asked with the decision server's key only when one is given, and fitted to its model's context.
     assert "api_key=settings.decision_key()" in main
     assert "max_context_tokens=settings.decision_max_context_tokens" in main
@@ -406,7 +406,7 @@ def test_the_bot_file_thinks_with_one_model_decides_on_another_and_shares_one_me
     for faculty in ("associative=True", "consolidation=True", "autonomy=True"):
         assert faculty in main
     # The example writes no prompts of its own: every ability's instructions are its defaults.
-    for prompt in ("instructions=", "intuition_instructions", "reasoning_instructions"):
+    for prompt in ("instructions=", "decision_instructions", "reasoning_instructions"):
         assert prompt not in main
 
 
@@ -789,7 +789,7 @@ def test_a_bot_spoken_to_or_not_is_offered_its_phone_and_the_mouth_it_speaks_thr
         model = testing.Scripted()
         listener = bot.define(
             example.NAME,
-            bot.cognition(model, intuition=testing.Decider()),
+            bot.cognition(reasoning=model, reflex=testing.Decider()),
             bot.attach(handset),
             bot.output(speaking.Speaking(encoder=_Silent(), speaker=mouth)),
         )
@@ -846,7 +846,9 @@ def test_speech_in_the_room_reaches_the_bot_from_a_voice_it_does_not_know_and_it
     model = testing.Scripted()
     listener = bot.define(
         example.NAME,
-        bot.cognition(model, intuition=testing.Decider(), autonomy=True, seeds=(communication.speech_heard_seed(),)),
+        bot.cognition(
+            reasoning=model, reflex=testing.Decider(), autonomy=True, seeds=(communication.speech_heard_seed(),)
+        ),
         bot.attach(_handset()),
         bot.input(hearing),
         bot.output(mouth),
@@ -898,7 +900,7 @@ from mosfet.environment import Environment
 async def main():
     environment = Environment()
     started = [
-        await bot.start(environment, bot.define(name, bot.cognition(testing.Scripted(), intuition=testing.Decider()), bot.attach(phone.Phone())))
+        await bot.start(environment, bot.define(name, bot.cognition(reasoning=testing.Scripted(), reflex=testing.Decider()), bot.attach(phone.Phone())))
         for name in ("alice", "bob")
     ]
     print(json.dumps(sorted({(payload["name"], payload.get("owner")) for payload, url in published}, key=str)))
@@ -1030,7 +1032,7 @@ def test_phone_bot_e2e_cognition_wires_speech_event_to_conversation() -> None:
     listener = bot.define(
         "e2e_speech_wire",
         bot.cognition(
-            openai_compat.Processor(
+            reasoning=openai_compat.Processor(
                 client=openai_compat.ChatClient(
                     model=settings.reasoning_model,
                     api_key=settings.openai_api_key.get_secret_value(),
@@ -1038,7 +1040,7 @@ def test_phone_bot_e2e_cognition_wires_speech_event_to_conversation() -> None:
                 ),
                 provider="openai_terra_reasoning",
             ),
-            intuition=decision.Processor(
+            reflex=decision.Processor(
                 base_url=settings.decision_base_url,
                 api_key=settings.decision_key(),
                 max_context_tokens=settings.decision_max_context_tokens,

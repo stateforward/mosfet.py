@@ -27,7 +27,7 @@ processor, decider, server = object(), object(), object()
 
 greeter = bot.define(
     "greeter",
-    bot.cognition(processor, intuition=decider),
+    bot.cognition(reasoning=processor, reflex=decider),
     bot.attach(computer.Computer(id="desk", transport=server)),
     bot.attach(phone.Phone(id="desk")), bot.traits("sk-SENTINEL-SAME-LINE", 4242),
 )
@@ -215,8 +215,8 @@ def test_a_span_without_columns_underlines_its_whole_line(greeter: pathlib.Path)
 
     lines = diagnostics.render(diagnostic).splitlines()
 
-    assert "12 |     bot.cognition(processor, intuition=decider)," in lines
-    assert "   |     " + "^" * len("bot.cognition(processor, intuition=decider),") + " hsm says so" in lines
+    assert "12 |     bot.cognition(reasoning=processor, reflex=decider)," in lines
+    assert "   |     " + "^" * len("bot.cognition(reasoning=processor, reflex=decider),") + " hsm says so" in lines
 
 
 def test_without_source_only_the_header_and_location_print() -> None:
@@ -335,9 +335,9 @@ def test_the_explanation_of_a_missing_cognition_names_where_a_processor_comes_fr
     assert "`from mosfet.bot import testing`" in explained
 
 
-@pytest.mark.parametrize("code", ["B0002", "B0024", "B0025"])
-def test_the_explanations_of_intuition_name_the_decision_provider(code: str) -> None:
-    """D-R-33: intuition decides on ``decision.Processor``, on any server that speaks the decisions wire format."""
+@pytest.mark.parametrize("code", ["B0002", "B0025"])
+def test_the_explanations_of_reflex_name_the_decision_provider(code: str) -> None:
+    """D-R-33: reflex decides on ``decision.Processor``, on any server that speaks the decisions wire format."""
 
     explained = " ".join(bot.explain(code).split())  # the prose is wrapped
 

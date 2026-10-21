@@ -28,6 +28,7 @@ from ..ability import Effort, effort_within
 
 import collections.abc
 import typing
+from xml.sax import saxutils
 
 import hsm
 import pydantic
@@ -249,9 +250,9 @@ def without_handoff(frame: processing.InputData) -> processing.InputData:
     """``frame`` without the host's deliberative handoff (a schema marked ``__deliberative_handoff__``).
 
     The Cognition host offers ``bot.ability.reasoning.input`` as part of its call surface. A stage
-    narrows it away when it would hand reasoning nothing: reasoning never offers it to itself, and
-    intuition keeps it only when reasoning holds capacities above intuition's ceiling. A frame that
-    offers no handoff is returned as it is.
+    narrows it away when it is not that stage's hand-on: reasoning never offers it to itself, and
+    the decision layer hands a turn on by its pass instead. A frame that offers no handoff is
+    returned as it is.
     """
 
     dropped = {event.name for event in frame.schemas if processing.is_deliberative_handoff_schema(event.schema)}
@@ -265,12 +266,56 @@ def without_handoff(frame: processing.InputData) -> processing.InputData:
     )
 
 
+def held(frame: processing.InputData, narrowed: processing.InputData) -> tuple[hsm.Event[typing.Any], ...]:
+    """Offered events of the host's ``frame`` that a stage's ``narrowed`` frame no longer offers.
+
+    These are the capacities above the stage's effort ceiling (``within_effort`` dropped the actors
+    that enable them), which the turn reaches only through a later tier that holds them; that tier
+    offers them within its own ceiling. An event another admitted actor still enables stays offered
+    and is not held.
+    """
+
+    if narrowed is frame:
+        return ()
+    offered = {event.name for event in narrowed.schemas}
+    return tuple(event for event in frame.schemas if event.name not in offered)
+
+
+def with_held(
+    frame: processing.InputData, capacities: tuple[hsm.Event[typing.Any], ...], *, reached_by: str
+) -> processing.InputData:
+    """``frame`` with what a later tier holds (:func:`held`) after its instructions, as one ``<held>`` element.
+
+    Each capacity renders as its event name and the opening paragraph of its own schema description:
+    what the model knows of those capacities, whose tools stay off this turn's dispatch. ``reached_by``
+    says how the turn reaches them (the offered handoff's event name, or how the stage passes the turn
+    on). A frame that holds nothing is returned as it is.
+    """
+
+    if not capacities:
+        return frame
+    lines: list[str] = []
+    for event in capacities:
+        description = processing.model_facing_event_json_schema(event).get("description")
+        summary = description.strip().split("\n\n", 1)[0].strip() if isinstance(description, str) else ""
+        name = saxutils.quoteattr(event.name)
+        lines.append(
+            f"  <capacity event={name}>{saxutils.escape(summary)}</capacity>"
+            if summary
+            else f"  <capacity event={name}/>"
+        )
+    block = "\n".join((f"<held reached_by={saxutils.quoteattr(reached_by)}>", *lines, "</held>"))
+    return frame.model_copy(update={"instructions": "\n".join(part for part in (frame.instructions, block) if part)})
+
+
 __all__ = [
     "InputData",
     "SelfData",
     "build_processing_input",
+    "held",
     "is_input",
     "stimulus_name",
+    "with_held",
     "within_effort",
     "without_handoff",
 ]

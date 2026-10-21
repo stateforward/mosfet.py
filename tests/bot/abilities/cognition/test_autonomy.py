@@ -281,7 +281,7 @@ def test_autonomy_origin_and_candidate_outcomes_use_explicit_choices() -> None:
         assert routes[-1].guard is None
 
     owner = cognition.Autonomy()
-    child = cognition.Intuition(processor=testing.Decider())
+    child = cognition.Decision(processor=testing.Decider())
     candidate_run_type = typing.cast(_CandidateModelFactory, getattr(autonomy_module, "_CandidateRun"))
     capability_type = typing.cast(_CandidateCapabilityFactory, getattr(autonomy_module, "_CandidateCapability"))
     agenda_type = typing.cast(_AgendaFactory, getattr(autonomy_module, "_Agenda"))

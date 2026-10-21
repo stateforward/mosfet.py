@@ -652,7 +652,7 @@ def test_processor_rejects_a_number_sent_as_a_string() -> None:
 
 
 def test_processor_rejects_a_dispatched_event_the_turn_does_not_offer_as_a_selection() -> None:
-    # Live (builder check round 1, D2): intuition selected bot.ability.sandbox.write, which only reasoning
+    # Live (builder check round 1, D2): the decision layer selected bot.ability.sandbox.write, which only reasoning
     # holds; a malformed-answer failure ended the turn instead of letting the model choose again.
     with pytest.raises(processing.SelectionRejectionError) as rejected:
         _ = _dispatched({"events": [{"event": "bot.ability.sandbox.write", "data": {}}]})

@@ -58,7 +58,7 @@ class RecordingCognition(cognition.Cognition):
         self.input_events = []
         store = memory.Memory()
         super().__init__(
-            intuition=cognition.Intuition(processor=processor, max_effort=ability.Effort.M),
+            decision=cognition.Decision(processor=processor, max_effort=ability.Effort.M),
             reasoning=cognition.Reasoning(processor=Silent()),
             reflection=cognition.Reflection(processor=Silent(), memory=store),
             memory=store,

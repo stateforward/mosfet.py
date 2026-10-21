@@ -6,7 +6,6 @@ import dataclasses
 import math
 import typing
 import uuid
-from xml.sax import saxutils
 
 import hsm
 import mosfet
@@ -30,15 +29,15 @@ _DEFAULT_TUNER_VAR_FLOOR = 100.0
 _DEFAULT_TUNER_MEAN = 70.0
 # No static system prose: the model-facing system channel is only the per-turn world and self
 # blocks (``Environment.model_snapshot`` XML stamped on ``InputData.instructions``), followed by
-# the per-turn ``<reasoning_only>`` capacities above this stage's ceiling when there are any.
+# the per-turn ``<held>`` capacities above this layer's ceiling when there are any.
 # Tool schemas and the stimulus carry the rest of the contract.
 DEFAULT_INSTRUCTIONS = ""
-# How the turn reaches what only reasoning holds when no handoff event is offered: cascading.
-_ESCALATION = "escalating this turn to deliberate reasoning"
+# How the turn reaches what a later tier holds: the decision layer is never offered the handoff, so its pass.
+_PASSING_ON = "passing this turn on to a later tier of thinking"
 
 
 class EventPatch(pydantic.BaseModel):
-    """Intuition-only model-facing fields patched onto every offered event for this turn.
+    """Decision-layer model-facing fields patched onto every offered event for this turn.
 
     Processing applies this when ``InputData.patch is EventPatch``; other faculties may supply
     a different BaseModel patch or leave patch None.
@@ -61,19 +60,19 @@ class EventPatch(pydantic.BaseModel):
             "0–35 when you are guessing, the host likely cannot fulfill the request with this "
             "event, or slower deliberation should also run. "
             "The host compares this score to a self-tuned baseline: low confidence can keep "
-            "environment actions while escalating the turn to deliberate reasoning."
+            "environment actions while passing the turn on to a later tier of thinking."
         ),
         examples=[100, 86, 55, 20, 0],
     )
 
 
 _AppliedEvent = hsm.Event[types.CompletionData](
-    name="bot.ability.intuition.applied",
+    name="bot.ability.decision.applied",
     kind=hsm.CompletionEventKind,
     schema=types.CompletionData,
 )
 _ApplyFailedEvent = hsm.Event[types.FailureData](
-    name="bot.ability.intuition.apply.failed",
+    name="bot.ability.decision.apply.failed",
     kind=hsm.ErrorEventKind,
     schema=types.FailureData,
 )
@@ -103,7 +102,7 @@ class _SelectionRejectionData(pydantic.BaseModel):
         frozen=True,
     )
 
-    request: InputData = pydantic.Field(description="Original intuition request being retried.")
+    request: InputData = pydantic.Field(description="Original decision request being retried.")
     message: str = pydantic.Field(
         min_length=1,
         description="Redacted dispatch rejection diagnostic suitable for model repair feedback.",
@@ -125,7 +124,7 @@ class _SelectionRejectionData(pydantic.BaseModel):
 
 
 _SelectionRejectedEvent = hsm.Event[_SelectionRejectionData](
-    name="bot.ability.intuition.selection.rejected",
+    name="bot.ability.decision.selection.rejected",
     kind=hsm.ErrorEventKind,
     schema=_SelectionRejectionData,
 )
@@ -185,29 +184,29 @@ class _PublishData(pydantic.BaseModel):
 
 
 _InvocationCompletedEvent = hsm.Event[_InvocationCompletedData](
-    name="bot.ability.intuition.invocation.completed",
+    name="bot.ability.decision.invocation.completed",
     kind=hsm.CompletionEventKind,
     schema=_InvocationCompletedData,
 )
 _ClassificationReadyEvent = hsm.Event[_ClassificationData](
-    name="bot.ability.intuition.classification.ready",
+    name="bot.ability.decision.classification.ready",
     kind=hsm.CompletionEventKind,
     schema=_ClassificationData,
 )
 _DispatchPlannedEvent = hsm.Event[_DispatchPlanData](
-    name="bot.ability.intuition.dispatch.planned",
+    name="bot.ability.decision.dispatch.planned",
     kind=hsm.CompletionEventKind,
     schema=_DispatchPlanData,
 )
 _PublishReadyEvent = hsm.Event[_PublishData](
-    name="bot.ability.intuition.publish.ready",
+    name="bot.ability.decision.publish.ready",
     kind=hsm.CompletionEventKind,
     schema=_PublishData,
 )
 
 
 class OutputData(pydantic.BaseModel):
-    """Fast cognitive selection produced by an intuition processor.
+    """Reflex selection produced by a decision processor.
 
     Confidence is not on this envelope. Tool-calling processors patch ``confidence`` onto each
     offered event payload; the host unpatches into ``SelectedEvent.confidence`` and aggregates
@@ -218,7 +217,7 @@ class OutputData(pydantic.BaseModel):
         frozen=True,
         json_schema_extra={
             "description": (
-                "Fast cognitive selection produced by intuition. result is a list of selected modeled "
+                "Reflex selection produced by the decision layer. result is a list of selected modeled "
                 "events from the offered schemas (multi-select allowed). Confidence is reported on "
                 "each selected event's patched payload (not here). "
                 "Omit result / leave unhandled when no offered event should run."
@@ -243,7 +242,7 @@ class OutputData(pydantic.BaseModel):
                     "reason": "Recognized the stimulus without needing to deliberate.",
                 },
                 {
-                    "reason": "The intuition processor did not select an output.",
+                    "reason": "The decision processor did not select an output.",
                 },
             ],
         },
@@ -268,7 +267,7 @@ class OutputData(pydantic.BaseModel):
 
 @dataclasses.dataclass
 class ConfidenceTuner:
-    """Self-tuning confidence baseline for escalate-to-reasoning.
+    """Self-tuning confidence baseline for passing a turn on to a later tier.
 
     Scores are integers **0–100**. Tracks a running mean/variance of reported confidences
     (EMA-style, cortext-like local normalization). Escalate when confidence falls below an
@@ -307,7 +306,7 @@ class ConfidenceTuner:
         self.n += 1
 
     def threshold(self) -> float:
-        """Current escalate threshold on the 0–100 scale (confidence below this → System 2)."""
+        """Current escalate threshold on the 0–100 scale (confidence below this passes the turn on)."""
 
         if self.n < self.warmup:
             return float(self.floor)
@@ -375,7 +374,7 @@ def _product_from_processor_output(
     events, aggregate, per_event = _events_as_output(output)
     if events is not None:
         return events, aggregate, per_event
-    raise TypeError("Intuition processor produced output that does not match a cognitive output schema.")
+    raise TypeError("Decision processor produced output that does not match a cognitive output schema.")
 
 
 def _is_deliberative_input_event(
@@ -402,7 +401,7 @@ def _environment_actions(
     *,
     current_input: processing.InputData,
 ) -> types.OutputData:
-    """Action events safe to fire before handing an uncertain turn to deliberate reasoning.
+    """Action events safe to fire before passing an uncertain turn on to a later tier.
 
     Cognition ignore is internal (not an environment action) and is never pre-fired on escalate.
     """
@@ -415,28 +414,10 @@ def _environment_actions(
     )
 
 
-def _reasoning_only(
-    frame: processing.InputData,
-    narrowed: processing.InputData,
-) -> tuple[hsm.Event[typing.Any], ...]:
-    """Offered events of the host's ``frame`` that intuition's ``narrowed`` frame no longer offers.
-
-    These are the capacities above intuition's effort ceiling (``within_effort`` dropped the actors
-    that enable them), which the turn reaches only by escalating to deliberate reasoning; reasoning
-    then offers them within its own ceiling. An event another admitted actor still enables stays
-    offered here and is not held.
-    """
-
-    if narrowed is frame:
-        return ()
-    offered = {event.name for event in narrowed.schemas}
-    return tuple(event for event in frame.schemas if event.name not in offered)
-
-
 def _selections_from_output(
     output: types.OutputData,
 ) -> processing.Events:
-    """Build ordinary actor selections owned by this intuition result."""
+    """Build ordinary actor selections owned by this decision result."""
 
     selections: list[processing.SelectedEvent] = []
     for item in output:
@@ -452,27 +433,27 @@ def _selections_from_output(
     return tuple(selections)
 
 
-class Intuition(processing.Processing):
-    """Fast cognitive ability: multi-dispatch when handled; self-tuning confidence gates System 2.
+class Decision(processing.Processing):
+    """Reflex's fallback layer: the decision model, on what no behavior handled; multi-dispatch when handled.
 
     It decides on a ``processing.DecisionProcessor``, a decision model, never a chat model;
-    any other processor is a ``TypeError``. Processor-reported ``confidence`` updates a
-    per-instance baseline. When confidence is
-    low relative to that baseline, environment actions still dispatch, but the terminal is
-    unhandled so Cognition cascades to reasoning. High confidence non-empty terminals keep
-    the selection list (no cascade). Empty selections and explicit unhandled
-    (``result is None``) cascade to reasoning by default; deliberate pass uses
-    ``bot.ability.cognition.ignore``.
+    any other processor is a ``TypeError``. It is never offered the deliberative handoff: its pass
+    (an unhandled result) is how it hands the turn on. Processor-reported ``confidence`` updates a
+    per-instance baseline. When confidence is low relative to that baseline, environment actions
+    still dispatch, but the terminal is unhandled so Cognition passes the turn on to the next stage.
+    High confidence non-empty terminals keep the selection list (no hand-on). Empty selections and
+    explicit unhandled (``result is None``) hand the turn on as well; a deliberate pass on the
+    stimulus itself uses ``bot.ability.cognition.ignore``.
     """
 
     input_data_type: typing.ClassVar[type[object] | tuple[type[object], ...] | None] = InputData
     output_data_type: typing.ClassVar[type[object] | tuple[type[object], ...] | None] = types.CompletionData
     input_event: typing.ClassVar[hsm.Event[InputData]] = hsm.Event[InputData](
-        name="bot.ability.intuition.input",
+        name="bot.ability.decision.input",
         schema=InputData,
     )
     output_event: typing.ClassVar[hsm.Event[types.CompletionData]] = hsm.Event[types.CompletionData](
-        name="bot.ability.intuition.output",
+        name="bot.ability.decision.output",
         schema=types.CompletionData,
     )
     failed_event: typing.ClassVar[hsm.Event[types.FailureData]] = hsm.Event[types.FailureData](
@@ -488,24 +469,24 @@ class Intuition(processing.Processing):
     _max_effort: Effort | None
 
     @staticmethod
-    def _has_intuition_input(ctx: hsm.Context, instance: "Intuition", event: hsm.Event[typing.Any]) -> bool:
+    def _has_decision_input(ctx: hsm.Context, instance: "Decision", event: hsm.Event[typing.Any]) -> bool:
         del ctx, instance
         return isinstance(event.data, InputData)
 
     @staticmethod
-    def _has_intuition_applied(ctx: hsm.Context, instance: "Intuition", event: hsm.Event[typing.Any]) -> bool:
+    def _has_decision_applied(ctx: hsm.Context, instance: "Decision", event: hsm.Event[typing.Any]) -> bool:
         del ctx, instance
         return isinstance(event.data, types.CompletionData)
 
     @staticmethod
-    def _has_apply_failure(ctx: hsm.Context, instance: "Intuition", event: hsm.Event[typing.Any]) -> bool:
+    def _has_apply_failure(ctx: hsm.Context, instance: "Decision", event: hsm.Event[typing.Any]) -> bool:
         del ctx, instance
         return isinstance(event.data, types.FailureData)
 
     @staticmethod
     def _has_invocation_completed(
         ctx: hsm.Context,
-        instance: "Intuition",
+        instance: "Decision",
         event: hsm.Event[typing.Any],
     ) -> bool:
         del ctx, instance
@@ -514,7 +495,7 @@ class Intuition(processing.Processing):
     @staticmethod
     def _has_dispatch_plan(
         ctx: hsm.Context,
-        instance: "Intuition",
+        instance: "Decision",
         event: hsm.Event[typing.Any],
     ) -> bool:
         del ctx, instance
@@ -523,21 +504,21 @@ class Intuition(processing.Processing):
     @staticmethod
     def _has_classification_ready(
         ctx: hsm.Context,
-        instance: "Intuition",
+        instance: "Decision",
         event: hsm.Event[typing.Any],
     ) -> bool:
         del ctx, instance
         return isinstance(event.data, _ClassificationData)
 
     @staticmethod
-    def _has_publish_ready(ctx: hsm.Context, instance: "Intuition", event: hsm.Event[typing.Any]) -> bool:
+    def _has_publish_ready(ctx: hsm.Context, instance: "Decision", event: hsm.Event[typing.Any]) -> bool:
         del ctx, instance
         return isinstance(event.data, _PublishData)
 
     @staticmethod
     def _is_same_selection_rejection(
         ctx: hsm.Context,
-        instance: "Intuition",
+        instance: "Decision",
         event: hsm.Event[typing.Any],
     ) -> bool:
         del ctx, instance
@@ -547,7 +528,7 @@ class Intuition(processing.Processing):
     @staticmethod
     def _can_retry_selection_rejection(
         ctx: hsm.Context,
-        instance: "Intuition",
+        instance: "Decision",
         event: hsm.Event[typing.Any],
     ) -> bool:
         del ctx, instance
@@ -557,7 +538,7 @@ class Intuition(processing.Processing):
     @staticmethod
     def _dispatch_terminal_output(
         ctx: hsm.Context,
-        instance: "Intuition",
+        instance: "Decision",
         *,
         operation_id: str | None,
         metadata: dict[str, object],
@@ -578,7 +559,7 @@ class Intuition(processing.Processing):
     @staticmethod
     def _dispatch_terminal_failure(
         ctx: hsm.Context,
-        instance: "Intuition",
+        instance: "Decision",
         *,
         operation_id: str | None,
         metadata: dict[str, object],
@@ -597,56 +578,30 @@ class Intuition(processing.Processing):
             processing.finish_operation(ctx, instance, operation_id)
 
     @staticmethod
-    def _intuition_input_for_processor(
-        instance: "Intuition",
+    def _decision_input_for_processor(
+        instance: "Decision",
         narrowed: processing.InputData,
         held: tuple[hsm.Event[typing.Any], ...],
     ) -> processing.InputData:
-        """Stamp instructions, what only reasoning holds, and the EventPatch on the narrowed frame.
+        """Stamp instructions, what a later tier holds, and the EventPatch on the narrowed frame.
 
-        ``held`` (see :func:`_reasoning_only`) renders after the world and self blocks as one
-        ``<reasoning_only>`` element: each capacity's event name and the opening paragraph of its own
-        schema description. It is what the model knows of those capacities; their tools stay off
-        this turn's dispatch, and escalating the turn is how it reaches them. ``reached_by`` names
-        the offered deliberative handoff when the host offers one.
+        ``held`` (see :func:`cognition_input.held`) renders after the world and self blocks as one
+        ``<held>`` element (:func:`cognition_input.with_held`). The decision layer is never offered the
+        handoff: its pass is how the turn reaches them.
         """
 
-        stamped = processing.Processing._input_for_processor(instance, narrowed)
-        updates: dict[str, object] = {}
-        if held:
-            schemas = {event.name: event for event in narrowed.schemas}
-            handoff = next((name for name in schemas if _is_deliberative_input_event(name, schemas)), None)
-            capacities: list[str] = []
-            for event in held:
-                description = processing.model_facing_event_json_schema(event).get("description")
-                summary = description.strip().split("\n\n", 1)[0].strip() if isinstance(description, str) else ""
-                name = saxutils.quoteattr(event.name)
-                capacities.append(
-                    f"  <capacity event={name}>{saxutils.escape(summary)}</capacity>"
-                    if summary
-                    else f"  <capacity event={name}/>"
-                )
-            block = "\n".join(
-                (
-                    f"<reasoning_only reached_by={saxutils.quoteattr(handoff or _ESCALATION)}>",
-                    *capacities,
-                    "</reasoning_only>",
-                )
-            )
-            updates["instructions"] = "\n".join(part for part in (stamped.instructions, block) if part)
-        if stamped.patch is None:
-            updates["patch"] = EventPatch
-        if updates:
-            return stamped.model_copy(update=updates)
-        return stamped
+        stamped = cognition_input.with_held(
+            processing.Processing._input_for_processor(instance, narrowed), held, reached_by=_PASSING_ON
+        )
+        return stamped if stamped.patch is not None else stamped.model_copy(update={"patch": EventPatch})
 
     @staticmethod
-    async def _invoke_activity(ctx: hsm.Context, instance: "Intuition", event: hsm.Event[typing.Any]) -> None:
+    async def _invoke_activity(ctx: hsm.Context, instance: "Decision", event: hsm.Event[typing.Any]) -> None:
         with span.operation(
-            "bot.intuition.invoke",
+            "bot.reflex.invoke",
             scope="bot.abilities.cognition",
-            component="cognition.intuition",
-            stage="intuition_invoke",
+            component="cognition.decision",
+            stage="decision_invoke",
             context=telemetry.event_context(event),
         ) as active:
             retry = event.data if isinstance(event.data, _SelectionRejectionData) else None
@@ -666,12 +621,11 @@ class Intuition(processing.Processing):
             try:
                 # Narrowing reads live actor snapshots, so a frame that cannot be read fails the turn.
                 narrowed = cognition_input.within_effort(data.processing_input, instance._max_effort)
-                held = _reasoning_only(data.processing_input, narrowed)
-                if not held:
-                    # With nothing held, the handoff hands reasoning nothing intuition lacks.
-                    narrowed = cognition_input.without_handoff(narrowed)
-                active.set_attribute("bot.intuition.held.count", len(held))
-                input = Intuition._intuition_input_for_processor(instance, narrowed, held)
+                held = cognition_input.held(data.processing_input, narrowed)
+                # The decision layer is never offered the handoff: its pass is the hand-on.
+                narrowed = cognition_input.without_handoff(narrowed)
+                active.set_attribute("bot.reflex.held.count", len(held))
+                input = Decision._decision_input_for_processor(instance, narrowed, held)
                 if retry is not None:
                     input = types.with_selection_feedback(input, retry.message)
                 raw = await instance._processor.process(input)
@@ -735,7 +689,7 @@ class Intuition(processing.Processing):
             )
 
     @staticmethod
-    def _tune_confidence(ctx: hsm.Context, instance: "Intuition", event: hsm.Event[typing.Any]) -> None:
+    def _tune_confidence(ctx: hsm.Context, instance: "Decision", event: hsm.Event[typing.Any]) -> None:
         """Update the owned tuner during RTC and emit immutable classification input."""
 
         data = event.data
@@ -759,15 +713,15 @@ class Intuition(processing.Processing):
         )
 
     @staticmethod
-    async def _classify_activity(ctx: hsm.Context, instance: "Intuition", event: hsm.Event[typing.Any]) -> None:
+    async def _classify_activity(ctx: hsm.Context, instance: "Decision", event: hsm.Event[typing.Any]) -> None:
         classification = event.data
         assert isinstance(classification, _ClassificationData)
         data = classification.invocation
         with span.operation(
-            "bot.intuition.classify",
+            "bot.reflex.classify",
             scope="bot.abilities.cognition",
-            component="cognition.intuition",
-            stage="intuition_classify",
+            component="cognition.decision",
+            stage="decision_classify",
             context=telemetry.event_context(event),
         ) as active:
             escalate = classification.escalate
@@ -839,16 +793,16 @@ class Intuition(processing.Processing):
     @staticmethod
     async def _dispatch_selections_activity(
         ctx: hsm.Context,
-        instance: "Intuition",
+        instance: "Decision",
         event: hsm.Event[typing.Any],
     ) -> None:
         data = event.data
         assert isinstance(data, _DispatchPlanData)
         with span.operation(
-            "bot.intuition.dispatch",
+            "bot.reflex.dispatch",
             scope="bot.abilities.cognition",
-            component="cognition.intuition",
-            stage="intuition_dispatch",
+            component="cognition.decision",
+            stage="decision_dispatch",
             context=telemetry.event_context(event),
         ) as active:
             try:
@@ -898,7 +852,7 @@ class Intuition(processing.Processing):
             )
 
     @staticmethod
-    async def _publish_activity(ctx: hsm.Context, instance: "Intuition", event: hsm.Event[typing.Any]) -> None:
+    async def _publish_activity(ctx: hsm.Context, instance: "Decision", event: hsm.Event[typing.Any]) -> None:
         data = event.data
         assert isinstance(data, _PublishData)
         await hsm.dispatch(
@@ -914,10 +868,10 @@ class Intuition(processing.Processing):
         )
 
     @staticmethod
-    def _complete_apply(ctx: hsm.Context, instance: "Intuition", event: hsm.Event[typing.Any]) -> None:
+    def _complete_apply(ctx: hsm.Context, instance: "Decision", event: hsm.Event[typing.Any]) -> None:
         output = event.data
         assert isinstance(output, types.CompletionData)
-        Intuition._dispatch_terminal_output(
+        Decision._dispatch_terminal_output(
             ctx,
             instance,
             operation_id=event.id or None,
@@ -927,10 +881,10 @@ class Intuition(processing.Processing):
         )
 
     @staticmethod
-    def _fail_apply(ctx: hsm.Context, instance: "Intuition", event: hsm.Event[typing.Any]) -> None:
+    def _fail_apply(ctx: hsm.Context, instance: "Decision", event: hsm.Event[typing.Any]) -> None:
         failure = event.data
         assert isinstance(failure, types.FailureData)
-        Intuition._dispatch_terminal_failure(
+        Decision._dispatch_terminal_failure(
             ctx,
             instance,
             operation_id=event.id or None,
@@ -940,10 +894,10 @@ class Intuition(processing.Processing):
         )
 
     @staticmethod
-    def _fail_selection_rejection(ctx: hsm.Context, instance: "Intuition", event: hsm.Event[typing.Any]) -> None:
+    def _fail_selection_rejection(ctx: hsm.Context, instance: "Decision", event: hsm.Event[typing.Any]) -> None:
         data = event.data
         assert isinstance(data, _SelectionRejectionData)
-        Intuition._dispatch_terminal_failure(
+        Decision._dispatch_terminal_failure(
             ctx,
             instance,
             operation_id=event.id or None,
@@ -953,8 +907,8 @@ class Intuition(processing.Processing):
         )
 
     submodel: typing.ClassVar[hsm.Model | None] = mosfet.define(
-        "Intuition",
-        hsm.initial(hsm.target("/Intuition/idle")),
+        "Decision",
+        hsm.initial(hsm.target("/Decision/idle")),
         hsm.state(
             "idle",
             hsm.transition(
@@ -964,19 +918,19 @@ class Intuition(processing.Processing):
             ),
             hsm.transition(
                 hsm.on(input_event),
-                hsm.guard(_has_intuition_input),
-                hsm.target("/Intuition/workflow"),
+                hsm.guard(_has_decision_input),
+                hsm.target("/Decision/workflow"),
             ),
         ),
         hsm.state(
             "workflow",
-            hsm.initial(hsm.target("/Intuition/workflow/invoking")),
+            hsm.initial(hsm.target("/Decision/workflow/invoking")),
             hsm.defer(input_event),
             hsm.transition(
                 hsm.on(processing.CancelEvent),
                 hsm.guard(processing.Processing._is_cancel_request),
                 hsm.effect(processing.Processing._emit_cancelled),
-                hsm.target("/Intuition/idle"),
+                hsm.target("/Decision/idle"),
             ),
             hsm.state(
                 "invoking",
@@ -985,17 +939,17 @@ class Intuition(processing.Processing):
                     hsm.on(_InvocationCompletedEvent),
                     hsm.guard(_has_invocation_completed),
                     hsm.effect(_tune_confidence),
-                    hsm.target("/Intuition/workflow/tuning"),
+                    hsm.target("/Decision/workflow/tuning"),
                 ),
                 hsm.transition(
                     hsm.on(_SelectionRejectedEvent),
-                    hsm.target("/Intuition/workflow/routing_rejection"),
+                    hsm.target("/Decision/workflow/routing_rejection"),
                 ),
                 hsm.transition(
                     hsm.on(_ApplyFailedEvent),
                     hsm.guard(_has_apply_failure),
                     hsm.effect(_fail_apply),
-                    hsm.target("/Intuition/idle"),
+                    hsm.target("/Decision/idle"),
                 ),
             ),
             hsm.state(
@@ -1003,7 +957,7 @@ class Intuition(processing.Processing):
                 hsm.transition(
                     hsm.on(_ClassificationReadyEvent),
                     hsm.guard(_has_classification_ready),
-                    hsm.target("/Intuition/workflow/classifying"),
+                    hsm.target("/Decision/workflow/classifying"),
                 ),
             ),
             hsm.state(
@@ -1012,12 +966,12 @@ class Intuition(processing.Processing):
                 hsm.transition(
                     hsm.on(_DispatchPlannedEvent),
                     hsm.guard(_has_dispatch_plan),
-                    hsm.target("/Intuition/workflow/dispatching"),
+                    hsm.target("/Decision/workflow/dispatching"),
                 ),
                 hsm.transition(
                     hsm.on(_PublishReadyEvent),
                     hsm.guard(_has_publish_ready),
-                    hsm.target("/Intuition/workflow/publishing"),
+                    hsm.target("/Decision/workflow/publishing"),
                 ),
             ),
             hsm.state(
@@ -1026,17 +980,17 @@ class Intuition(processing.Processing):
                 hsm.transition(
                     hsm.on(_PublishReadyEvent),
                     hsm.guard(_has_publish_ready),
-                    hsm.target("/Intuition/workflow/publishing"),
+                    hsm.target("/Decision/workflow/publishing"),
                 ),
                 hsm.transition(
                     hsm.on(_SelectionRejectedEvent),
-                    hsm.target("/Intuition/workflow/routing_rejection"),
+                    hsm.target("/Decision/workflow/routing_rejection"),
                 ),
                 hsm.transition(
                     hsm.on(_ApplyFailedEvent),
                     hsm.guard(_has_apply_failure),
                     hsm.effect(_fail_apply),
-                    hsm.target("/Intuition/idle"),
+                    hsm.target("/Decision/idle"),
                 ),
             ),
             hsm.choice(
@@ -1044,15 +998,15 @@ class Intuition(processing.Processing):
                 hsm.transition(
                     hsm.guard(_is_same_selection_rejection),
                     hsm.effect(_fail_selection_rejection),
-                    hsm.target("/Intuition/idle"),
+                    hsm.target("/Decision/idle"),
                 ),
                 hsm.transition(
                     hsm.guard(_can_retry_selection_rejection),
-                    hsm.target("/Intuition/workflow/invoking"),
+                    hsm.target("/Decision/workflow/invoking"),
                 ),
                 hsm.transition(
                     hsm.effect(_fail_selection_rejection),
-                    hsm.target("/Intuition/idle"),
+                    hsm.target("/Decision/idle"),
                 ),
             ),
             hsm.state(
@@ -1060,9 +1014,9 @@ class Intuition(processing.Processing):
                 hsm.activity(_publish_activity),
                 hsm.transition(
                     hsm.on(_AppliedEvent),
-                    hsm.guard(_has_intuition_applied),
+                    hsm.guard(_has_decision_applied),
                     hsm.effect(_complete_apply),
-                    hsm.target("/Intuition/idle"),
+                    hsm.target("/Decision/idle"),
                 ),
             ),
         ),
@@ -1080,10 +1034,10 @@ class Intuition(processing.Processing):
         confidence_gate: int | None = None,
         max_effort: Effort | None = _DEFAULT_MAX_EFFORT,
     ) -> None:
-        # Precondition (R-6): intuition decides on a decision model, never a chat model. The checker
+        # Precondition (R-6): decision decides on a decision model, never a chat model. The checker
         # sees the annotation; this holds for a caller it cannot see.
         if processing.DecisionProcessor not in type(processor).__mro__:
-            raise TypeError(f"Intuition decides on a processing.DecisionProcessor, not a {type(processor).__name__}.")
+            raise TypeError(f"Decision decides on a processing.DecisionProcessor, not a {type(processor).__name__}.")
         if not 0 <= confidence_floor <= 100:
             raise ValueError("confidence_floor must be an integer between 0 and 100.")
         if confidence_gate is not None and not 0 <= confidence_gate <= 100:
@@ -1100,8 +1054,8 @@ class Intuition(processing.Processing):
         self._max_effort = max_effort
 
 
-InputEvent = Intuition.input_event
-OutputEvent = Intuition.output_event
+InputEvent = Decision.input_event
+OutputEvent = Decision.output_event
 
 __all__ = [
     "DEFAULT_INSTRUCTIONS",
@@ -1110,6 +1064,6 @@ __all__ = [
     "InputEvent",
     "InputData",
     "OutputEvent",
-    "Intuition",
+    "Decision",
     "OutputData",
 ]

@@ -90,7 +90,7 @@ class Settings(pydantic.BaseModel):
     """The owner's settings for the bot, read by ``__main__`` from the process environment and an env file.
 
     Each field is read from the first of its variables that is set; a variable set to the empty string is unset.
-    The Gemini key is required, and so is the decision server the bot's intuition decides on, whose key is optional
+    The Gemini key is required, and so is the decision server the bot's reflex decides on, whose key is optional
     (a local decide takes none). Each lab address is optional, and each one moves one part onto the lab: the
     streaming speech server hears instead of Silero, the voiceprint server knows voices apart instead of PyAnnote,
     and the lab's speech engine speaks, in the voice the bot is born with, instead of ``say``. A value is never shown
@@ -137,7 +137,7 @@ class Settings(pydantic.BaseModel):
         min_length=1,
         validation_alias=pydantic.AliasChoices("DECISION_BASE_URL"),
         description=(
-            "The decision server the bot's intuition decides on, which speaks the decisions wire format: anygame's"
+            "The decision server the bot's reflex decides on, which speaks the decisions wire format: anygame's"
             " decide, or a hosted server with the same format."
         ),
         examples=["http://127.0.0.1:8102"],
@@ -188,7 +188,7 @@ class Settings(pydantic.BaseModel):
         return data
 
     def decision_key(self) -> str | None:
-        """The key intuition's decision server is asked with: ``DECISION_API_KEY`` when given, else none at all."""
+        """The key reflex's decision server is asked with: ``DECISION_API_KEY`` when given, else none at all."""
 
         return None if self.decision_api_key is None else self.decision_api_key.get_secret_value()
 

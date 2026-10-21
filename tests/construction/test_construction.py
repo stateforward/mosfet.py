@@ -93,7 +93,7 @@ def _speaking() -> speaking.Speaking:
 def _cognition() -> cognition.Cognition:
     store = memory.Memory()
     return cognition.Cognition(
-        intuition=cognition.Intuition(processor=_Processor()),
+        decision=cognition.Decision(processor=_Processor()),
         reasoning=cognition.Reasoning(processor=_Processor()),
         reflection=cognition.Reflection(processor=_Processor(), memory=store),
         memory=store,
@@ -112,7 +112,7 @@ _CASES: dict[str, collections.abc.Callable[[pathlib.Path], object]] = {
     "memory.Consolidation": lambda tmp: memory.Consolidation(memory=memory.Memory(), processor=_Processor()),
     "embedding.Embedding": lambda tmp: embedding.Embedding(embedder=_Embedder()),
     "processing.Processing": lambda tmp: processing.Processing(processor=_Processor()),
-    "cognition.Intuition": lambda tmp: cognition.Intuition(processor=_Processor()),
+    "cognition.Decision": lambda tmp: cognition.Decision(processor=_Processor()),
     "cognition.Reasoning": lambda tmp: cognition.Reasoning(processor=_Processor()),
     "cognition.Reflection": lambda tmp: cognition.Reflection(processor=_Processor(), memory=memory.Memory()),
     "cognition.Cognition": lambda tmp: _cognition(),
@@ -198,8 +198,8 @@ def test_defining_a_bot_does_no_io_and_starts_nothing(tmp_path: pathlib.Path) ->
                 "greeter",
                 bot.traits("curious"),
                 bot.cognition(
-                    _Processor(),
-                    intuition=_Processor(),
+                    reasoning=_Processor(),
+                    reflex=_Processor(),
                     memory=store,
                     associative=True,
                     consolidation=True,

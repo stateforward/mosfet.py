@@ -312,7 +312,7 @@ class Source(pydantic.BaseModel):
     triggers: tuple[str, ...] = pydantic.Field(
         default=(),
         max_length=SOURCE_MAX_COLLECTION_ITEMS,
-        description="External event names that fast intuition may use to propose the behavior.",
+        description="External event names that the bot's reflex may use to propose the behavior.",
         examples=[["conversation.greeting.recognized"]],
     )
     description: str = pydantic.Field(

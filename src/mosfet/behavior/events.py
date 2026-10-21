@@ -58,7 +58,7 @@ class CreateData(pydantic.BaseModel):
     triggers: tuple[str, ...] = pydantic.Field(
         default=(),
         description=(
-            "External environment event names that may propose this behavior to fast intuition. "
+            "External environment event names that may propose this behavior to the bot's reflex. "
             "Installed on the inventory instance alongside the Starlark program's own triggers."
         ),
         examples=[["environment.sound"]],
@@ -126,7 +126,7 @@ class ChangeData(pydantic.BaseModel):
     triggers: tuple[str, ...] = pydantic.Field(
         default=(),
         description=(
-            "Replacement external event names that may propose this behavior to fast intuition. "
+            "Replacement external event names that may propose this behavior to the bot's reflex. "
             "Installed on the inventory instance alongside the revised Starlark program."
         ),
         examples=[["environment.sound", "conversation.greeting.recognized"]],

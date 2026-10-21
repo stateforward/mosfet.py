@@ -500,7 +500,7 @@ def test_live_behavior_forms_after_n_natural_calls_without_preload() -> None:
 
     max_calls = int(os.environ.get("BOT_BEHAVIOR_NATURAL_MAX_CALLS", "10"))
 
-    class _EscalateIntuition(processing.DecisionProcessor):
+    class _EscalateDecision(processing.DecisionProcessor):
         @typing.override
         async def process(
             self, input: processing.InputData, *, drafts: processing.DraftSink | None = None
@@ -555,7 +555,7 @@ def test_live_behavior_forms_after_n_natural_calls_without_preload() -> None:
         reflection = cognition.Reflection(processor=_openai_reflection_processor(), memory=store)
         ability = cognition.Cognition(
             autonomy=cognition.Autonomy(memory=store),
-            intuition=cognition.Intuition(processor=_EscalateIntuition()),
+            decision=cognition.Decision(processor=_EscalateDecision()),
             reasoning=cognition.Reasoning(processor=reasoning),
             reflection=reflection,
             memory=store,

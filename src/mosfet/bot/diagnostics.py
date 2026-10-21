@@ -273,8 +273,8 @@ EXPLANATIONS: tuple[Explanation, ...] = (
             "The name is the bot's topology name and a telemetry attribute, so it is bounded and spelled one "
             "way. The suggestion is the name in snake case."
         ),
-        wrong='model = bot.define("Greeter Bot", bot.cognition(processor, intuition=decider), bot.attach(phone.Phone()))',
-        right='model = bot.define("greeter_bot", bot.cognition(processor, intuition=decider), bot.attach(phone.Phone()))',
+        wrong='model = bot.define("Greeter Bot", bot.cognition(reasoning=processor, reflex=decider), bot.attach(phone.Phone()))',
+        right='model = bot.define("greeter_bot", bot.cognition(reasoning=processor, reflex=decider), bot.attach(phone.Phone()))',
     ),
     Explanation(
         code="B0002",
@@ -283,14 +283,14 @@ EXPLANATIONS: tuple[Explanation, ...] = (
         meaning="Every bot has exactly one `bot.cognition`, the mind that perceives and decides.",
         why=(
             "A body with no cognition can hold devices but can never choose anything to do with them. "
-            "`bot.cognition(processor, intuition=decider)` thinks with a `processing.Processor` (`from "
-            "mosfet.abilities import processing`), and its intuition decides with a `processing.DecisionProcessor`, "
+            "`bot.cognition(reasoning=processor, reflex=decider)` reasons with a `processing.Processor` (`from "
+            "mosfet.abilities import processing`), and its reflex may fall back on a `processing.DecisionProcessor`, "
             "such as `decision.Processor(...)` (`from mosfet.providers import decision`). In a test, the offline "
             "ones are `testing.Scripted()` and `testing.Decider()` (`from mosfet.bot import testing`), which make "
             "only the choices the test writes down."
         ),
         wrong='model = bot.define("greeter", bot.attach(phone.Phone()))',
-        right='model = bot.define("greeter", bot.cognition(processor, intuition=decider), bot.attach(phone.Phone()))',
+        right='model = bot.define("greeter", bot.cognition(reasoning=processor, reflex=decider), bot.attach(phone.Phone()))',
     ),
     Explanation(
         code="B0003",
@@ -306,11 +306,11 @@ EXPLANATIONS: tuple[Explanation, ...] = (
             "parts with one id would be one name for two things."
         ),
         wrong=(
-            'model = bot.define(\n    "greeter",\n    bot.cognition(processor, intuition=decider),\n    bot.attach(phone.Phone()),\n'
+            'model = bot.define(\n    "greeter",\n    bot.cognition(reasoning=processor, reflex=decider),\n    bot.attach(phone.Phone()),\n'
             "    bot.attach(phone.Phone()),\n)"
         ),
         right=(
-            'model = bot.define(\n    "greeter",\n    bot.cognition(processor, intuition=decider),\n    bot.attach(phone.Phone()),\n'
+            'model = bot.define(\n    "greeter",\n    bot.cognition(reasoning=processor, reflex=decider),\n    bot.attach(phone.Phone()),\n'
             '    bot.attach(phone.Phone(id="handset")),\n)'
         ),
     ),
@@ -327,8 +327,8 @@ EXPLANATIONS: tuple[Explanation, ...] = (
             "is given, so one may also be handed to another part's constructor. Constructing a part does "
             "nothing until the bot starts."
         ),
-        wrong='model = bot.define("greeter", bot.cognition(processor, intuition=decider), bot.attach(phone.Phone))',
-        right='model = bot.define("greeter", bot.cognition(processor, intuition=decider), bot.attach(phone.Phone(id="phone")))',
+        wrong='model = bot.define("greeter", bot.cognition(reasoning=processor, reflex=decider), bot.attach(phone.Phone))',
+        right='model = bot.define("greeter", bot.cognition(reasoning=processor, reflex=decider), bot.attach(phone.Phone(id="phone")))',
     ),
     Explanation(
         code="B0005",
@@ -341,9 +341,9 @@ EXPLANATIONS: tuple[Explanation, ...] = (
         ),
         wrong=(
             "handset = await mosfet.started(environment, phone.Phone(), phone.Phone.model)\n"
-            'model = bot.define("greeter", bot.cognition(processor, intuition=decider), bot.attach(handset))'
+            'model = bot.define("greeter", bot.cognition(reasoning=processor, reflex=decider), bot.attach(handset))'
         ),
-        right='model = bot.define("greeter", bot.cognition(processor, intuition=decider), bot.attach(phone.Phone()))',
+        right='model = bot.define("greeter", bot.cognition(reasoning=processor, reflex=decider), bot.attach(phone.Phone()))',
     ),
     Explanation(
         code="B0006",
@@ -351,8 +351,8 @@ EXPLANATIONS: tuple[Explanation, ...] = (
         title="an element is given something it does not take",
         meaning=(
             "`bot.attach` takes a device or an ability; `bot.input` and `bot.output` take an ability; "
-            "`bot.register` takes a `memory.StmMemory`; `bot.cognition` takes a `processing.Processor` first, "
-            "`intuition=` takes a `processing.DecisionProcessor`, `memory=` takes a `memory.Memory` and `seeds=` "
+            "`bot.register` takes a `memory.StmMemory`; `bot.cognition`'s `reasoning=` takes a `processing.Processor`, "
+            "`reflex=` takes a `processing.DecisionProcessor`, `memory=` takes a `memory.Memory` and `seeds=` "
             "takes `behavior.Seed`s; `bot.voice` takes a `vocal.voice.Catalog` first, `designer=` takes a `vocal.voice.Designer`, "
             "`languages=` takes language tags and `allowed=` takes the keys of the voices of a source without a "
             "`designer=`. The help names the element that takes what was given."
@@ -361,8 +361,8 @@ EXPLANATIONS: tuple[Explanation, ...] = (
             "Each element is one part of the body: a device is held, a sense organ is an input, a processor is "
             "cognition's. Giving a part to the wrong element would wire it where it cannot work."
         ),
-        wrong='model = bot.define("greeter", bot.cognition(processor, intuition=decider), bot.input(phone.Phone()))',
-        right='model = bot.define("greeter", bot.cognition(processor, intuition=decider), bot.attach(phone.Phone()))',
+        wrong='model = bot.define("greeter", bot.cognition(reasoning=processor, reflex=decider), bot.input(phone.Phone()))',
+        right='model = bot.define("greeter", bot.cognition(reasoning=processor, reflex=decider), bot.attach(phone.Phone()))',
     ),
     Explanation(
         code="B0007",
@@ -370,20 +370,20 @@ EXPLANATIONS: tuple[Explanation, ...] = (
         title="a device or ability uses a reserved id",
         meaning="The ids `bot`, `cognition` and `firmware` are the body's own.",
         why="Cognition addresses the body, its cognition and its firmware by those keys, so no part may take one.",
-        wrong='model = bot.define("greeter", bot.cognition(processor, intuition=decider), bot.attach(phone.Phone(id="bot")))',
-        right='model = bot.define("greeter", bot.cognition(processor, intuition=decider), bot.attach(phone.Phone(id="phone")))',
+        wrong='model = bot.define("greeter", bot.cognition(reasoning=processor, reflex=decider), bot.attach(phone.Phone(id="bot")))',
+        right='model = bot.define("greeter", bot.cognition(reasoning=processor, reflex=decider), bot.attach(phone.Phone(id="phone")))',
     ),
     Explanation(
         code="B0008",
         level="error",
         title="an element is written inside another element",
         meaning=(
-            "Every part of a bot is an argument of `bot.define` itself. `bot.cognition` takes a processor and "
+            "Every part of a bot is an argument of `bot.define` itself. `bot.cognition` takes its processors and "
             "keyword flags, not `bot.attach` or another element."
         ),
         why="A bot is one flat list of parts; nesting would suggest an ownership the body does not have.",
-        wrong='model = bot.define("greeter", bot.cognition(processor, bot.attach(phone.Phone()), intuition=decider))',
-        right='model = bot.define("greeter", bot.cognition(processor, intuition=decider), bot.attach(phone.Phone()))',
+        wrong='model = bot.define("greeter", bot.cognition(bot.attach(phone.Phone()), reasoning=processor, reflex=decider))',
+        right='model = bot.define("greeter", bot.cognition(reasoning=processor, reflex=decider), bot.attach(phone.Phone()))',
     ),
     Explanation(
         code="B0009",
@@ -396,11 +396,11 @@ EXPLANATIONS: tuple[Explanation, ...] = (
         why="Each is one thing about the bot. Merge the two into one, for example one `bot.traits` with every trait.",
         wrong=(
             'model = bot.define(\n    "greeter",\n    bot.traits("curious"),\n    bot.traits("patient"),\n'
-            "    bot.cognition(processor, intuition=decider),\n    bot.attach(phone.Phone()),\n)"
+            "    bot.cognition(reasoning=processor, reflex=decider),\n    bot.attach(phone.Phone()),\n)"
         ),
         right=(
             'model = bot.define(\n    "greeter",\n    bot.traits("curious", "patient"),\n'
-            "    bot.cognition(processor, intuition=decider),\n    bot.attach(phone.Phone()),\n)"
+            "    bot.cognition(reasoning=processor, reflex=decider),\n    bot.attach(phone.Phone()),\n)"
         ),
     ),
     Explanation(
@@ -412,9 +412,9 @@ EXPLANATIONS: tuple[Explanation, ...] = (
             "Traits are the owner's fixed seed of who the bot is. The bot grows its own description on top of "
             "them, so they stay few and short."
         ),
-        wrong='model = bot.define("greeter", bot.traits(), bot.cognition(processor, intuition=decider), bot.attach(phone.Phone()))',
+        wrong='model = bot.define("greeter", bot.traits(), bot.cognition(reasoning=processor, reflex=decider), bot.attach(phone.Phone()))',
         right=(
-            'model = bot.define("greeter", bot.traits("curious"), bot.cognition(processor, intuition=decider), bot.attach(phone.Phone()))'
+            'model = bot.define("greeter", bot.traits("curious"), bot.cognition(reasoning=processor, reflex=decider), bot.attach(phone.Phone()))'
         ),
     ),
     Explanation(
@@ -426,11 +426,11 @@ EXPLANATIONS: tuple[Explanation, ...] = (
         ),
         why="A timeout bounds how long the bot waits for something; zero or less would never wait at all.",
         wrong=(
-            'model = bot.define(\n    "greeter",\n    bot.cognition(processor, intuition=decider),\n    bot.attach(phone.Phone()),\n'
+            'model = bot.define(\n    "greeter",\n    bot.cognition(reasoning=processor, reflex=decider),\n    bot.attach(phone.Phone()),\n'
             "    bot.timeouts(processing=datetime.timedelta(0)),\n)"
         ),
         right=(
-            'model = bot.define(\n    "greeter",\n    bot.cognition(processor, intuition=decider),\n    bot.attach(phone.Phone()),\n'
+            'model = bot.define(\n    "greeter",\n    bot.cognition(reasoning=processor, reflex=decider),\n    bot.attach(phone.Phone()),\n'
             "    bot.timeouts(processing=datetime.timedelta(seconds=30)),\n)"
         ),
     ),
@@ -450,14 +450,14 @@ EXPLANATIONS: tuple[Explanation, ...] = (
         wrong=(
             "class SetData(pydantic.BaseModel):\n    minutes: int\n\n\n"
             'SetEvent = hsm.Event(name="timer.set", kind=mosfet.event.EventKind, schema=SetData)\n'
-            'model = bot.define(\n    "timer",\n    bot.cognition(processor, intuition=decider),\n    bot.initial(bot.target("idle")),\n'
+            'model = bot.define(\n    "timer",\n    bot.cognition(reasoning=processor, reflex=decider),\n    bot.initial(bot.target("idle")),\n'
             '    bot.state("idle", bot.transition(bot.on(SetEvent), bot.target("../idle"))),\n)'
         ),
         right=(
             "class SetData(pydantic.BaseModel):\n"
             '    minutes: int = pydantic.Field(description="Minutes until the timer rings.", examples=[10])\n\n\n'
             'SetEvent = hsm.Event(name="timer.set", kind=mosfet.event.EventKind, schema=SetData)\n'
-            'model = bot.define(\n    "timer",\n    bot.cognition(processor, intuition=decider),\n    bot.initial(bot.target("idle")),\n'
+            'model = bot.define(\n    "timer",\n    bot.cognition(reasoning=processor, reflex=decider),\n    bot.initial(bot.target("idle")),\n'
             '    bot.state("idle", bot.transition(bot.on(SetEvent), bot.target("../idle"))),\n)'
         ),
     ),
@@ -476,14 +476,14 @@ EXPLANATIONS: tuple[Explanation, ...] = (
         wrong=(
             'class DialData(pydantic.BaseModel):\n    """Dial the saved number."""\n\n\n'
             'DialEvent = hsm.Event(name="phone.dial", kind=mosfet.event.EventKind, schema=DialData)\n'
-            'model = bot.define(\n    "dialer",\n    bot.cognition(processor, intuition=decider),\n    bot.attach(phone.Phone()),\n'
+            'model = bot.define(\n    "dialer",\n    bot.cognition(reasoning=processor, reflex=decider),\n    bot.attach(phone.Phone()),\n'
             '    bot.initial(bot.target("idle")),\n'
             '    bot.state("idle", bot.transition(bot.on(DialEvent), bot.target("../idle"))),\n)'
         ),
         right=(
             'class DialData(pydantic.BaseModel):\n    """Dial the saved number."""\n\n\n'
             'DialEvent = hsm.Event(name="dialer.dial", kind=mosfet.event.EventKind, schema=DialData)\n'
-            'model = bot.define(\n    "dialer",\n    bot.cognition(processor, intuition=decider),\n    bot.attach(phone.Phone()),\n'
+            'model = bot.define(\n    "dialer",\n    bot.cognition(reasoning=processor, reflex=decider),\n    bot.attach(phone.Phone()),\n'
             '    bot.initial(bot.target("idle")),\n'
             '    bot.state("idle", bot.transition(bot.on(DialEvent), bot.target("../idle"))),\n)'
         ),
@@ -503,9 +503,9 @@ EXPLANATIONS: tuple[Explanation, ...] = (
             "relative to the state its transition is in (`../<state>` is a sibling), and `bot.on`/`bot.after` go "
             "inside a `bot.transition`."
         ),
-        wrong='model = bot.define("ticker", bot.cognition(processor, intuition=decider), bot.state("waiting"))',
+        wrong='model = bot.define("ticker", bot.cognition(reasoning=processor, reflex=decider), bot.state("waiting"))',
         right=(
-            'model = bot.define("ticker", bot.cognition(processor, intuition=decider), bot.initial(bot.target("waiting")), '
+            'model = bot.define("ticker", bot.cognition(reasoning=processor, reflex=decider), bot.initial(bot.target("waiting")), '
             'bot.state("waiting"))'
         ),
     ),
@@ -520,9 +520,9 @@ EXPLANATIONS: tuple[Explanation, ...] = (
         ),
         wrong=(
             "def log(ctx, instance, event):\n    print(event.name)\n\n\n"
-            'model = bot.define("greeter", bot.cognition(processor, intuition=decider), bot.attach(phone.Phone()), hsm.observe(log))'
+            'model = bot.define("greeter", bot.cognition(reasoning=processor, reflex=decider), bot.attach(phone.Phone()), hsm.observe(log))'
         ),
-        right='model = bot.define("greeter", bot.cognition(processor, intuition=decider), bot.attach(phone.Phone()))',
+        right='model = bot.define("greeter", bot.cognition(reasoning=processor, reflex=decider), bot.attach(phone.Phone()))',
     ),
     Explanation(
         code="B0016",
@@ -535,12 +535,12 @@ EXPLANATIONS: tuple[Explanation, ...] = (
         why="The id is how the bot addresses the device; a device without one cannot be held.",
         wrong=(
             "class Lamp(mosfet.device.Device):\n    def __init__(self):\n        pass\n\n\n"
-            'model = bot.define("greeter", bot.cognition(processor, intuition=decider), bot.attach(Lamp()))'
+            'model = bot.define("greeter", bot.cognition(reasoning=processor, reflex=decider), bot.attach(Lamp()))'
         ),
         right=(
             "class Lamp(mosfet.device.Device):\n    def __init__(self, *, id=None):\n"
             "        super().__init__(id=id)\n\n\n"
-            'model = bot.define("greeter", bot.cognition(processor, intuition=decider), bot.attach(Lamp()))'
+            'model = bot.define("greeter", bot.cognition(reasoning=processor, reflex=decider), bot.attach(Lamp()))'
         ),
     ),
     Explanation(
@@ -558,8 +558,8 @@ EXPLANATIONS: tuple[Explanation, ...] = (
             "takes it."
         ),
         why="Each element says what a part is to the body; a bare part has no place in it until it is given to one.",
-        wrong='model = bot.define("greeter", bot.cognition(processor, intuition=decider), phone.Phone())',
-        right='model = bot.define("greeter", bot.cognition(processor, intuition=decider), bot.attach(phone.Phone()))',
+        wrong='model = bot.define("greeter", bot.cognition(reasoning=processor, reflex=decider), phone.Phone())',
+        right='model = bot.define("greeter", bot.cognition(reasoning=processor, reflex=decider), bot.attach(phone.Phone()))',
     ),
     Explanation(
         code="B0018",
@@ -567,8 +567,8 @@ EXPLANATIONS: tuple[Explanation, ...] = (
         title="`bot.allow` names a lint that does not exist",
         meaning="Each name given to `bot.allow` is a lint's. The help names the nearest one.",
         why="Allowing a lint that does not exist allows nothing, so the warning it was meant for still shows.",
-        wrong='model = bot.define("greeter", bot.cognition(processor, intuition=decider), bot.allow("no_device"))',
-        right='model = bot.define("greeter", bot.cognition(processor, intuition=decider), bot.allow("no_devices"))',
+        wrong='model = bot.define("greeter", bot.cognition(reasoning=processor, reflex=decider), bot.allow("no_device"))',
+        right='model = bot.define("greeter", bot.cognition(reasoning=processor, reflex=decider), bot.allow("no_devices"))',
     ),
     Explanation(
         code="B0019",
@@ -585,12 +585,12 @@ EXPLANATIONS: tuple[Explanation, ...] = (
         ),
         wrong=(
             'desk = mosfet.environment.Object(id="desk")\n'
-            'model = bot.define(\n    "greeter",\n    bot.cognition(processor, intuition=decider),\n'
+            'model = bot.define(\n    "greeter",\n    bot.cognition(reasoning=processor, reflex=decider),\n'
             "    bot.attach(phone.Phone(placement=desk.surface())),\n    bot.attach(desk),\n)"
         ),
         right=(
             'desk = mosfet.environment.Object(id="desk")\n'
-            'model = bot.define(\n    "greeter",\n    bot.cognition(processor, intuition=decider),\n'
+            'model = bot.define(\n    "greeter",\n    bot.cognition(reasoning=processor, reflex=decider),\n'
             "    bot.attach(phone.Phone(placement=desk.surface())),\n)"
         ),
     ),
@@ -607,12 +607,12 @@ EXPLANATIONS: tuple[Explanation, ...] = (
         why="A seed nothing runs is machinery for nothing: the speech it was given for would never reach the conversation.",
         wrong=(
             'model = bot.define(\n    "listener",\n'
-            "    bot.cognition(processor, intuition=decider, seeds=(communication.speech_heard_seed(),)),\n"
+            "    bot.cognition(reasoning=processor, reflex=decider, seeds=(communication.speech_heard_seed(),)),\n"
             "    bot.attach(phone.Phone()),\n)"
         ),
         right=(
             'model = bot.define(\n    "listener",\n'
-            "    bot.cognition(processor, intuition=decider, autonomy=True, seeds=(communication.speech_heard_seed(),)),\n"
+            "    bot.cognition(reasoning=processor, reflex=decider, autonomy=True, seeds=(communication.speech_heard_seed(),)),\n"
             "    bot.attach(phone.Phone()),\n)"
         ),
     ),
@@ -630,12 +630,12 @@ EXPLANATIONS: tuple[Explanation, ...] = (
             "default; the bot keeps the voice it is given for life."
         ),
         wrong=(
-            'model = bot.define(\n    "greeter",\n    bot.voice(catalog),\n    bot.cognition(processor, intuition=decider),\n'
+            'model = bot.define(\n    "greeter",\n    bot.voice(catalog),\n    bot.cognition(reasoning=processor, reflex=decider),\n'
             "    bot.output(speaking.Speaking(encoder=voices)),\n    bot.attach(phone.Phone()),\n)"
         ),
         right=(
             'model = bot.define(\n    "greeter",\n    bot.traits("warm", "patient"),\n    bot.voice(catalog),\n'
-            "    bot.cognition(processor, intuition=decider),\n    bot.output(speaking.Speaking(encoder=voices)),\n"
+            "    bot.cognition(reasoning=processor, reflex=decider),\n    bot.output(speaking.Speaking(encoder=voices)),\n"
             "    bot.attach(phone.Phone()),\n)"
         ),
     ),
@@ -652,51 +652,49 @@ EXPLANATIONS: tuple[Explanation, ...] = (
         why="A bot has one voice, and one mouth says it; which of two Speakings would be the bot's is not the DSL's to guess.",
         wrong=(
             'model = bot.define(\n    "greeter",\n    bot.traits("warm", "patient"),\n    bot.voice(catalog),\n'
-            "    bot.cognition(processor, intuition=decider),\n    bot.attach(phone.Phone()),\n)"
+            "    bot.cognition(reasoning=processor, reflex=decider),\n    bot.attach(phone.Phone()),\n)"
         ),
         right=(
             'model = bot.define(\n    "greeter",\n    bot.traits("warm", "patient"),\n    bot.voice(catalog),\n'
-            "    bot.cognition(processor, intuition=decider),\n    bot.output(speaking.Speaking(encoder=voices)),\n"
+            "    bot.cognition(reasoning=processor, reflex=decider),\n    bot.output(speaking.Speaking(encoder=voices)),\n"
             "    bot.attach(phone.Phone()),\n)"
         ),
     ),
     Explanation(
         code="B0024",
         level="error",
-        title="`bot.cognition` has no intuition",
+        title="`bot.cognition` has no reasoning",
         meaning=(
-            "`bot.cognition` takes `intuition=`, the `processing.DecisionProcessor` its intuition decides on: "
-            "`decision.Processor(...)` (`from mosfet.providers import decision`), on the server given as its "
-            "`base_url` that speaks the decisions wire format, such as a local decide. In a test, the offline one "
-            "is `testing.Decider()` (`from mosfet.bot import testing`). The suggestion writes "
-            '`intuition=decision.Processor(base_url="http://127.0.0.1:8102")`, which may need your server\'s '
-            "address and key."
+            "`bot.cognition` takes `reasoning=`, the `processing.Processor` its reasoning thinks with: a chat model's "
+            "processor, such as `openai_compat.Processor(...)` (`from mosfet.providers import openai_compat`). In a "
+            "test, the offline one is `testing.Scripted()` (`from mosfet.bot import testing`)."
         ),
         why=(
-            "Intuition is the bot's fast first decision on every turn: it chooses among the offered events, each "
-            "with its confidence, and hands what it cannot decide to reasoning. A decision model does that; a chat "
-            "model does not, so intuition never runs on cognition's processor."
+            "Reasoning is the bot's deliberate thinking: every turn its faster tiers hand on ends there, and it "
+            "reflects on each turn and consolidates what the bot remembers. A cognition without it could not "
+            "think a turn through."
         ),
-        wrong='model = bot.define("greeter", bot.cognition(processor), bot.attach(phone.Phone()))',
-        right='model = bot.define("greeter", bot.cognition(processor, intuition=decider), bot.attach(phone.Phone()))',
+        wrong='model = bot.define("greeter", bot.cognition(reasoning=None), bot.attach(phone.Phone()))',
+        right='model = bot.define("greeter", bot.cognition(reasoning=processor), bot.attach(phone.Phone()))',
     ),
     Explanation(
         code="B0025",
         level="error",
-        title="`bot.cognition(intuition=)` is given a chat processor",
+        title="`bot.cognition(reflex=)` is given a chat processor",
         meaning=(
-            "`intuition=` takes a `processing.DecisionProcessor`, a decision model's processor, such as "
+            "`reflex=` takes a `processing.DecisionProcessor`, a decision model's processor, such as "
             "`decision.Processor(...)` (`from mosfet.providers import decision`); in a test, `testing.Decider()`. "
-            "Any other `processing.Processor` is a chat model's: it is cognition's processor, given first."
+            "Any other `processing.Processor` is a chat model's: it is given as `reasoning=`."
         ),
         why=(
-            "A chat model writes and calls tools; intuition chooses among the offered events with a confidence for "
-            "each. Intuition on a chat model would be slow reasoning wearing a fast decision's name."
+            "A chat model writes and calls tools; reflex's decision layer chooses among the offered events with a "
+            "confidence for each, and never deliberates. Reflex on a chat model would be slow thinking wearing a "
+            "reflex's name."
         ),
         wrong=(
-            'model = bot.define("greeter", bot.cognition(processor, intuition=processor), bot.attach(phone.Phone()))'
+            'model = bot.define("greeter", bot.cognition(reasoning=processor, reflex=processor), bot.attach(phone.Phone()))'
         ),
-        right='model = bot.define("greeter", bot.cognition(processor, intuition=decider), bot.attach(phone.Phone()))',
+        right='model = bot.define("greeter", bot.cognition(reasoning=processor, reflex=decider), bot.attach(phone.Phone()))',
     ),
     Explanation(
         code="B0101",
@@ -713,14 +711,14 @@ EXPLANATIONS: tuple[Explanation, ...] = (
             "time: `bot.stop` stops its parts, and then it starts again."
         ),
         wrong=(
-            'model = bot.define("greeter", bot.cognition(processor, intuition=decider), bot.attach(phone.Phone()))\n'
+            'model = bot.define("greeter", bot.cognition(reasoning=processor, reflex=decider), bot.attach(phone.Phone()))\n'
             "greeter = await bot.start(environment, model)\n"
             "again = await bot.start(environment, model)"
         ),
         right=(
-            'greeter = await bot.start(environment, bot.define("greeter", bot.cognition(processor, intuition=decider), '
+            'greeter = await bot.start(environment, bot.define("greeter", bot.cognition(reasoning=processor, reflex=decider), '
             "bot.attach(phone.Phone())))\n"
-            'helper = await bot.start(environment, bot.define("helper", bot.cognition(processor, intuition=decider), '
+            'helper = await bot.start(environment, bot.define("helper", bot.cognition(reasoning=processor, reflex=decider), '
             "bot.attach(phone.Phone())))"
         ),
     ),
@@ -738,11 +736,11 @@ EXPLANATIONS: tuple[Explanation, ...] = (
             "the element that declared it, with its cause, so it is fixed there."
         ),
         wrong=(
-            'model = bot.define("greeter", bot.cognition(processor, intuition=decider), bot.attach(phone.Phone()))\n'
+            'model = bot.define("greeter", bot.cognition(reasoning=processor, reflex=decider), bot.attach(phone.Phone()))\n'
             "greeter = await bot.start(environment, model)  # building its cognition raised"
         ),
         right=(
-            'model = bot.define("greeter", bot.cognition(processor, intuition=decider), bot.attach(phone.Phone()))\n'
+            'model = bot.define("greeter", bot.cognition(reasoning=processor, reflex=decider), bot.attach(phone.Phone()))\n'
             "greeter = await bot.start(environment, model)  # once what the cause names is fixed"
         ),
     ),
@@ -756,11 +754,11 @@ EXPLANATIONS: tuple[Explanation, ...] = (
             "`hsm.Context` is neither."
         ),
         wrong=(
-            'model = bot.define("greeter", bot.cognition(processor, intuition=decider), bot.attach(phone.Phone()))\n'
+            'model = bot.define("greeter", bot.cognition(reasoning=processor, reflex=decider), bot.attach(phone.Phone()))\n'
             "greeter = await bot.start(hsm.Context(), model)"
         ),
         right=(
-            'model = bot.define("greeter", bot.cognition(processor, intuition=decider), bot.attach(phone.Phone()))\n'
+            'model = bot.define("greeter", bot.cognition(reasoning=processor, reflex=decider), bot.attach(phone.Phone()))\n'
             "greeter = await bot.start(environment, model)"
         ),
     ),
@@ -777,13 +775,13 @@ EXPLANATIONS: tuple[Explanation, ...] = (
             "bots under one name could not be told apart."
         ),
         wrong=(
-            'greeter = bot.define("greeter", bot.cognition(processor, intuition=decider), bot.attach(phone.Phone()))\n'
-            'helper = bot.define("greeter", bot.cognition(processor, intuition=decider), bot.attach(phone.Phone()))\n'
+            'greeter = bot.define("greeter", bot.cognition(reasoning=processor, reflex=decider), bot.attach(phone.Phone()))\n'
+            'helper = bot.define("greeter", bot.cognition(reasoning=processor, reflex=decider), bot.attach(phone.Phone()))\n'
             "bot.run(greeter, helper)"
         ),
         right=(
-            'greeter = bot.define("greeter", bot.cognition(processor, intuition=decider), bot.attach(phone.Phone()))\n'
-            'helper = bot.define("helper", bot.cognition(processor, intuition=decider), bot.attach(phone.Phone()))\n'
+            'greeter = bot.define("greeter", bot.cognition(reasoning=processor, reflex=decider), bot.attach(phone.Phone()))\n'
+            'helper = bot.define("helper", bot.cognition(reasoning=processor, reflex=decider), bot.attach(phone.Phone()))\n'
             "bot.run(greeter, helper)"
         ),
     ),
@@ -797,11 +795,11 @@ EXPLANATIONS: tuple[Explanation, ...] = (
             "second model, with parts of its own."
         ),
         wrong=(
-            'greeter = bot.define("greeter", bot.cognition(processor, intuition=decider), bot.attach(phone.Phone()))\n'
+            'greeter = bot.define("greeter", bot.cognition(reasoning=processor, reflex=decider), bot.attach(phone.Phone()))\n'
             "bot.run(greeter, greeter)"
         ),
         right=(
-            'greeter = bot.define("greeter", bot.cognition(processor, intuition=decider), bot.attach(phone.Phone()))\nbot.run(greeter)'
+            'greeter = bot.define("greeter", bot.cognition(reasoning=processor, reflex=decider), bot.attach(phone.Phone()))\nbot.run(greeter)'
         ),
     ),
     Explanation(
@@ -818,11 +816,11 @@ EXPLANATIONS: tuple[Explanation, ...] = (
             "bot goes to that bot's `bot.define`, and a processor to its `bot.cognition`."
         ),
         wrong=(
-            'greeter = bot.define("greeter", bot.cognition(processor, intuition=decider), bot.attach(phone.Phone()))\n'
+            'greeter = bot.define("greeter", bot.cognition(reasoning=processor, reflex=decider), bot.attach(phone.Phone()))\n'
             "bot.run(greeter, actors=(processor,))"
         ),
         right=(
-            'greeter = bot.define("greeter", bot.cognition(processor, intuition=decider), bot.attach(phone.Phone()))\nbot.run(greeter)'
+            'greeter = bot.define("greeter", bot.cognition(reasoning=processor, reflex=decider), bot.attach(phone.Phone()))\nbot.run(greeter)'
         ),
     ),
     Explanation(
@@ -853,11 +851,11 @@ EXPLANATIONS: tuple[Explanation, ...] = (
         ),
         why="An acquired ability with no tools is almost always a sense or an effector given to the wrong element.",
         wrong=(
-            'model = bot.define(\n    "greeter",\n    bot.cognition(processor, intuition=decider),\n    bot.attach(phone.Phone()),\n'
+            'model = bot.define(\n    "greeter",\n    bot.cognition(reasoning=processor, reflex=decider),\n    bot.attach(phone.Phone()),\n'
             "    bot.attach(memory.StmMemory()),\n)"
         ),
         right=(
-            'model = bot.define(\n    "greeter",\n    bot.cognition(processor, intuition=decider),\n    bot.attach(phone.Phone()),\n'
+            'model = bot.define(\n    "greeter",\n    bot.cognition(reasoning=processor, reflex=decider),\n    bot.attach(phone.Phone()),\n'
             "    bot.register(memory.StmMemory()),\n)"
         ),
     ),
@@ -877,14 +875,14 @@ EXPLANATIONS: tuple[Explanation, ...] = (
             'class SetData(pydantic.BaseModel):\n    minutes: int = pydantic.Field(description="Minutes until it rings.")'
             "\n\n\n"
             'SetEvent = hsm.Event(name="timer.set", kind=mosfet.event.EventKind, schema=SetData)\n'
-            'model = bot.define(\n    "timer",\n    bot.cognition(processor, intuition=decider),\n    bot.initial(bot.target("idle")),\n'
+            'model = bot.define(\n    "timer",\n    bot.cognition(reasoning=processor, reflex=decider),\n    bot.initial(bot.target("idle")),\n'
             '    bot.state("idle", bot.transition(bot.on(SetEvent), bot.target("../idle"))),\n)'
         ),
         right=(
             "class SetData(pydantic.BaseModel):\n"
             '    minutes: int = pydantic.Field(description="Minutes until it rings.", examples=[10])\n\n\n'
             'SetEvent = hsm.Event(name="timer.set", kind=mosfet.event.EventKind, schema=SetData)\n'
-            'model = bot.define(\n    "timer",\n    bot.cognition(processor, intuition=decider),\n    bot.initial(bot.target("idle")),\n'
+            'model = bot.define(\n    "timer",\n    bot.cognition(reasoning=processor, reflex=decider),\n    bot.initial(bot.target("idle")),\n'
             '    bot.state("idle", bot.transition(bot.on(SetEvent), bot.target("../idle"))),\n)'
         ),
     ),
@@ -895,9 +893,9 @@ EXPLANATIONS: tuple[Explanation, ...] = (
         meaning="With no values, `bot.timeouts()` keeps every default, so it changes nothing.",
         why="An element that changes nothing reads as if it did something. Remove it, or set the timeout meant.",
         wrong=(
-            'model = bot.define("greeter", bot.cognition(processor, intuition=decider), bot.attach(phone.Phone()), bot.timeouts())'
+            'model = bot.define("greeter", bot.cognition(reasoning=processor, reflex=decider), bot.attach(phone.Phone()), bot.timeouts())'
         ),
-        right='model = bot.define("greeter", bot.cognition(processor, intuition=decider), bot.attach(phone.Phone()))',
+        right='model = bot.define("greeter", bot.cognition(reasoning=processor, reflex=decider), bot.attach(phone.Phone()))',
     ),
     Explanation(
         code="instruction_like_traits",
@@ -913,11 +911,11 @@ EXPLANATIONS: tuple[Explanation, ...] = (
         ),
         wrong=(
             'model = bot.define(\n    "greeter",\n    bot.traits("always reply in French"),\n'
-            "    bot.cognition(processor, intuition=decider),\n    bot.attach(phone.Phone()),\n)"
+            "    bot.cognition(reasoning=processor, reflex=decider),\n    bot.attach(phone.Phone()),\n)"
         ),
         right=(
             'model = bot.define(\n    "greeter",\n    bot.traits("curious", "speaks French"),\n'
-            "    bot.cognition(processor, intuition=decider),\n    bot.attach(phone.Phone()),\n)"
+            "    bot.cognition(reasoning=processor, reflex=decider),\n    bot.attach(phone.Phone()),\n)"
         ),
     ),
     Explanation(
@@ -932,8 +930,8 @@ EXPLANATIONS: tuple[Explanation, ...] = (
             "A bot that perceives nothing is allowed, and doing nothing is a choice it may make; but with nothing "
             "to perceive it was never given the choice. Attach what it should perceive, or allow the lint."
         ),
-        wrong='model = bot.define("greeter", bot.cognition(processor, intuition=decider))',
-        right='model = bot.define("greeter", bot.cognition(processor, intuition=decider), bot.attach(phone.Phone()))',
+        wrong='model = bot.define("greeter", bot.cognition(reasoning=processor, reflex=decider))',
+        right='model = bot.define("greeter", bot.cognition(reasoning=processor, reflex=decider), bot.attach(phone.Phone()))',
     ),
     Explanation(
         code="unreachable_state",
@@ -948,11 +946,11 @@ EXPLANATIONS: tuple[Explanation, ...] = (
             "misspelled target. Add the transition that enters it, or remove it."
         ),
         wrong=(
-            'model = bot.define(\n    "ticker",\n    bot.cognition(processor, intuition=decider),\n    bot.initial(bot.target("waiting")),\n'
+            'model = bot.define(\n    "ticker",\n    bot.cognition(reasoning=processor, reflex=decider),\n    bot.initial(bot.target("waiting")),\n'
             '    bot.state("waiting"),\n    bot.state("ringing"),\n)'
         ),
         right=(
-            'model = bot.define(\n    "ticker",\n    bot.cognition(processor, intuition=decider),\n    bot.initial(bot.target("waiting")),\n'
+            'model = bot.define(\n    "ticker",\n    bot.cognition(reasoning=processor, reflex=decider),\n    bot.initial(bot.target("waiting")),\n'
             '    bot.state("waiting", bot.transition(bot.on("ring"), bot.target("../ringing"))),\n'
             '    bot.state("ringing"),\n)'
         ),
@@ -967,11 +965,11 @@ EXPLANATIONS: tuple[Explanation, ...] = (
         ),
         why="The register is perception machinery; without a sense it is machinery for nothing.",
         wrong=(
-            'model = bot.define(\n    "greeter",\n    bot.cognition(processor, intuition=decider),\n    bot.register(memory.StmMemory()),\n'
+            'model = bot.define(\n    "greeter",\n    bot.cognition(reasoning=processor, reflex=decider),\n    bot.register(memory.StmMemory()),\n'
             '    bot.allow("no_devices"),\n)'
         ),
         right=(
-            'model = bot.define(\n    "greeter",\n    bot.cognition(processor, intuition=decider),\n    bot.attach(phone.Phone()),\n'
+            'model = bot.define(\n    "greeter",\n    bot.cognition(reasoning=processor, reflex=decider),\n    bot.attach(phone.Phone()),\n'
             "    bot.register(memory.StmMemory()),\n)"
         ),
     ),

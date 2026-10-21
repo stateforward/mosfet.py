@@ -3,7 +3,7 @@ from mosfet import abilities, media
 from mosfet.abilities import ability
 from mosfet.abilities import listening
 from mosfet.abilities import processing
-from mosfet.abilities.cognition import intuition
+from mosfet.abilities.cognition import decision
 from mosfet.abilities.communication import communication, conversation
 from mosfet.abilities.hearing import voice
 from mosfet.abilities.language import text
@@ -982,14 +982,14 @@ def test_model_facing_event_json_schema_includes_confidence_when_patched() -> No
 
 
 def test_patched_event_schema_keeps_event_and_field_descriptions() -> None:
-    """Patching intuition's confidence field onto an offered event keeps what the event says it does.
+    """Patching decision's confidence field onto an offered event keeps what the event says it does.
 
-    Live check P3: ``computer.show`` reached intuition as just ``"computer.show"`` because the patched
+    Live check P3: ``computer.show`` reached decision as just ``"computer.show"`` because the patched
     model dropped the ``ShowData`` docstring, so the model never read what showing a field is for.
     """
 
     pure = processing.model_facing_event_json_schema(computer.ShowEvent)
-    patched = processing.model_facing_event_json_schema(computer.ShowEvent, patch=intuition.EventPatch)
+    patched = processing.model_facing_event_json_schema(computer.ShowEvent, patch=decision.EventPatch)
 
     description = pure.get("description")
     assert isinstance(description, str) and description.strip()
@@ -1000,7 +1000,7 @@ def test_patched_event_schema_keeps_event_and_field_descriptions() -> None:
         assert object_dict(patched_properties[name]).get("description") == object_dict(field).get("description")
     assert "confidence" in patched_properties
 
-    tool = processing.dispatch_tool((computer.ShowEvent,), patch=intuition.EventPatch)
+    tool = processing.dispatch_tool((computer.ShowEvent,), patch=decision.EventPatch)
     (branch,) = typing.cast(
         list[object], _nested_dict(tool, "function", "parameters", "properties", "events", "items")["anyOf"]
     )

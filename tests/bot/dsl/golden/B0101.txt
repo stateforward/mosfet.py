@@ -1,8 +1,8 @@
 error[B0101]: bot `greeter` is already started
   --> greeter.py:15:19
    |
- 9 | model = bot.define("…", bot.cognition(support.Silent(), intuition=support.Undecided()), bot.attach(phone.Phone()))
-   |                                                                                         ------------------------- `phone` is already running
+ 9 | model = bot.define("…", bot.cognition(reasoning=support.Silent(), reflex=support.Undecided()), bot.attach(phone.Phone()))
+   |                                                                                                ------------------------- `phone` is already running
 ...
 15 |         _ = await bot.start(environment, model)
    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ started again here

@@ -22,7 +22,7 @@ from mosfet import environment
 from mosfet.abilities import listening, processing
 from mosfet.abilities.communication import communication, conversation
 from mosfet.abilities.hearing import voice
-from mosfet.abilities.cognition import intuition
+from mosfet.abilities.cognition import decision as cognition_decision
 from mosfet.devices import phone as phone_device
 from mosfet.providers import decision
 from mosfet.telemetry.configure import logger_provider
@@ -123,7 +123,7 @@ def _probe_event() -> tuple[hsm.Event[typing.Any], ...]:
 
 
 def test_the_processor_is_a_decision_processor_and_construction_opens_nothing() -> None:
-    """A decision model decides among the offered events: it is the processor intuition runs on (R-6)."""
+    """A decision model decides among the offered events: it is the processor reflex's decision layer runs on (R-6)."""
 
     server = _Decide({})
 
@@ -140,7 +140,7 @@ def test_the_pass_criterion_declines_unhandled_not_handled_empty() -> None:
 
     output = _run(_processor(server), input_payload="ring turn", schemas=_answer_call_offered())
 
-    assert isinstance(output, intuition.OutputData)
+    assert isinstance(output, cognition_decision.OutputData)
     assert output.result is None
     assert len(server.requests) == 1
 
@@ -407,7 +407,7 @@ def test_a_request_over_max_context_tokens_cuts_its_turn_instructions_to_their_l
 
 def test_what_someone_said_or_typed_reaches_the_decision_whole() -> None:
     """D-R-47 (Willy browser UI): the state dropped every string over 40 characters as prose, so a typed line or a
-    transcript reached decide as null and intuition judged a turn whose words it never saw. Text is the turn."""
+    transcript reached decide as null and the decision layer judged a turn whose words it never saw. Text is the turn."""
 
     line = "Hi Willy, this is a test from the browser. Can you hear me?"
     server = _Decide({"selection": (_PASS, {_PASS: 1.0})})
@@ -538,7 +538,7 @@ def test_a_request_that_cannot_fit_is_still_sent_and_its_refusal_is_the_processi
     tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """D-R-36: nothing is dropped to make a request fit. One that still overflows is sent as small as it can be,
-    and the server's refusal is intuition's failure, which cognition cascades to reasoning in the same turn."""
+    and the server's refusal is the decision layer's failure, which cognition cascades to reasoning in the same turn."""
 
     sent: list[dict[str, typing.Any]] = []
 

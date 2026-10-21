@@ -11,12 +11,12 @@ constructor, a timeout, a faculty or a firmware attribute appears in it:
 >>> from mosfet.devices import computer
 >>> model = bot.define(
 ...     "greeter",
-...     bot.cognition(testing.Scripted(), intuition=testing.Decider(), associative=True),
+...     bot.cognition(reasoning=testing.Scripted(), reflex=testing.Decider(), associative=True),
 ...     bot.attach(computer.Computer(id="desk")),
 ... )
 >>> outline = bot.describe(model).bots[0]
 >>> outline.faculties
-('intuition', 'reasoning', 'reflection', 'associative')
+('reflex', 'reasoning', 'reflection', 'associative')
 >>> outline.parts[0].model_dump()
 {'id': 'desk', 'kind': 'device', 'roles': ('attach',), 'constructor': 'Computer'}
 
@@ -93,12 +93,13 @@ class Outline(pydantic.BaseModel):
     )
     faculties: tuple[str, ...] = pydantic.Field(
         description=(
-            "Its cognition's faculties: intuition, reasoning and reflection, then each one it was given, and "
-            "`voice` last when `bot.voice` gives it a voice at inception."
+            "Its cognition's faculties: its tiers in the order a turn takes them up (reflex when given, then "
+            "reasoning), reflection, then each one it was given, and `voice` last when `bot.voice` gives it a "
+            "voice at inception."
         ),
         examples=[
-            ["intuition", "reasoning", "reflection", "associative"],
-            ["intuition", "reasoning", "reflection", "voice"],
+            ["reflex", "reasoning", "reflection", "associative"],
+            ["reasoning", "reflection", "voice"],
         ],
     )
     seeds: tuple[str, ...] = pydantic.Field(

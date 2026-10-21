@@ -190,7 +190,7 @@ class Minds:
 class Recorded(processing.Processor):
     """Willy's model, the lab's, with every call it is given and everything it chose recorded; it never steers it.
 
-    Intuition's decision model is recorded into the same ``calls`` (``Intuited``): a heard turn reaches whichever
+    Reflex's decision model is recorded into the same ``calls`` (``Decided``): a heard turn reaches whichever
     mind takes it, so what Willy perceived is read from the first call of the turn, on either.
     """
 
@@ -220,7 +220,7 @@ class Recorded(processing.Processor):
             woke=None if stimulus is None else stimulus.name,
             woke_id=None if stimulus is None else stimulus.id,
             woke_source=None if stimulus is None else stimulus.source,
-            # A decision model that passes answers intuition's own envelope, not events: it is reported by kind.
+            # A decision model that passes answers the decision layer's own envelope, not events: it is reported by kind.
             events=[
                 {
                     "event": selected.event,
@@ -237,7 +237,7 @@ class Recorded(processing.Processor):
     def turns(self, after: int) -> collections.abc.Iterator[processing.InputData]:
         """Every call of the turns heard speech woke, from call ``after`` on: what Willy perceived of each.
 
-        A heard turn may reach intuition first and then, if intuition hands it on, reasoning: both calls are
+        A heard turn may reach reflex's decision model first and then, if it hands it on, reasoning: both calls are
         the turn's, and only reasoning's frame offers what takes deliberation (``memory.know``).
         """
 
@@ -247,8 +247,8 @@ class Recorded(processing.Processor):
                 yield call
 
 
-class Intuited(Recorded, processing.DecisionProcessor):
-    """Willy's intuition, on the decision server, recorded into the model's ``calls`` the same way."""
+class Decided(Recorded, processing.DecisionProcessor):
+    """Willy's reflex decision model, on the decision server, recorded into the model's ``calls`` the same way."""
 
 
 class Microphone:
@@ -761,8 +761,8 @@ async def _live(
                 languages=willy_example.LANGUAGES,
             ),
             bot.cognition(
-                model,
-                intuition=Intuited(
+                reasoning=model,
+                reflex=Decided(
                     decision.Processor(
                         base_url=settings.decision_base_url,
                         api_key=None if decision_key is None else decision_key.get_secret_value() or None,
@@ -865,7 +865,7 @@ async def _knows_people(house: House, settings: willy_example.Settings, speech_u
         after = house.mark()
         await house.microphone.say(await _spoken(a, _A_ARRIVES))
         # Knowing who someone is takes deliberation (effort M): the turn's reasoning call offers it, when
-        # intuition hands the turn on. Whether it does is Willy's; the step waits for that call within its bound.
+        # reflex hands the turn on. Whether it does is Willy's; the step waits for that call within its bound.
         turn = await house.turn(
             after, "L3", lambda call: bool(_others(call)) and memory.KnowEvent.name in _offered(call)
         )

@@ -1,7 +1,7 @@
 [project]
 name = "mosfet-provider-decision"
 dynamic = ["version"]
-description = "Decision-model provider for stateforward.mosfet: intuition decides on any server that speaks the decisions wire format (POST /v1/systemone)."
+description = "Decision-model provider for stateforward.mosfet: reflex's decision layer decides on any server that speaks the decisions wire format (POST /v1/systemone)."
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [

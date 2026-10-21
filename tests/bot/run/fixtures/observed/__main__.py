@@ -18,7 +18,9 @@ if __name__ == "__main__":
             _ = written.write(typing.cast(dict[str, hsm.Event[typing.Any]], event.data)["event"].name + "\n")
 
     bot.run(
-        bot.define("quiet", bot.cognition(testing.Scripted(), intuition=testing.Decider()), bot.allow("no_devices")),
+        bot.define(
+            "quiet", bot.cognition(reasoning=testing.Scripted(), reflex=testing.Decider()), bot.allow("no_devices")
+        ),
         process=process,
         observe=(bot.observe(mosfet.ActivateEvent, mosfet.DeactivateEvent, watch),),
     )

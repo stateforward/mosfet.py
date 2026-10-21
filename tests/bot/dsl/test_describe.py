@@ -44,8 +44,8 @@ GREETER = bot.define(
     "greeter",
     bot.traits("curious", "patient"),
     bot.cognition(
-        support.Silent(),
-        intuition=support.Undecided(),
+        reasoning=support.Silent(),
+        reflex=support.Undecided(),
         memory=memory.Memory(database=f"/tmp/{_SECRET}-mind.sqlite3"),
         associative=True,
         routines=_clock,
@@ -69,7 +69,7 @@ def test_describe_shows_each_bot_its_traits_faculties_and_parts_in_order() -> No
 
 def test_a_bot_without_traits_memory_register_timeouts_or_allow_says_so() -> None:
     model = bot.define(
-        "plain", bot.cognition(support.Silent(), intuition=support.Undecided()), bot.attach(phone.Phone())
+        "plain", bot.cognition(reasoning=support.Silent(), reflex=support.Undecided()), bot.attach(phone.Phone())
     )
 
     (outline,) = bot.describe(model).bots
@@ -77,7 +77,7 @@ def test_a_bot_without_traits_memory_register_timeouts_or_allow_says_so() -> Non
     assert outline == bot.Outline(
         name="plain",
         traits=(),
-        faculties=("intuition", "reasoning", "reflection"),
+        faculties=("reflex", "reasoning", "reflection"),
         seeds=(),
         memory=None,
         parts=(bot.Part(id="phone", kind="device", roles=("attach",), constructor="Phone"),),
@@ -96,7 +96,10 @@ def test_describe_lists_the_voice_among_the_faculties_and_the_seeds_by_name() ->
         bot.traits("warm"),
         bot.voice(support.Shelf()),
         bot.cognition(
-            support.Silent(), intuition=support.Undecided(), autonomy=True, seeds=(communication.speech_heard_seed(),)
+            reasoning=support.Silent(),
+            reflex=support.Undecided(),
+            autonomy=True,
+            seeds=(communication.speech_heard_seed(),),
         ),
         bot.output(speaking.Speaking(encoder=support.Voices())),
         bot.attach(phone.Phone()),
@@ -104,7 +107,7 @@ def test_describe_lists_the_voice_among_the_faculties_and_the_seeds_by_name() ->
 
     (outline,) = bot.describe(model).bots
 
-    assert outline.faculties == ("intuition", "reasoning", "reflection", "autonomy", "voice")
+    assert outline.faculties == ("reflex", "reasoning", "reflection", "autonomy", "voice")
     assert outline.seeds == ("SpeechHeard",)
     assert [(part.id, part.roles) for part in outline.parts] == [("speaking", ("output",)), ("phone", ("attach",))]
 
@@ -116,7 +119,7 @@ def _minutes(ctx: hsm.Context, instance: bot.Firmware, event: hsm.Event[typing.A
 
 TIMER = bot.define(
     "timer",
-    bot.cognition(support.Silent(), intuition=support.Undecided()),
+    bot.cognition(reasoning=support.Silent(), reflex=support.Undecided()),
     bot.attach(phone.Phone()),
     bot.attribute("minutes", int, 17),
     bot.initial(bot.target("idle")),
@@ -158,10 +161,10 @@ def test_a_firmware_description_round_trips_and_carries_no_value() -> None:
 
 def test_describe_takes_many_models_in_order_and_none() -> None:
     first = bot.define(
-        "first", bot.cognition(support.Silent(), intuition=support.Undecided()), bot.attach(phone.Phone())
+        "first", bot.cognition(reasoning=support.Silent(), reflex=support.Undecided()), bot.attach(phone.Phone())
     )
     second = bot.define(
-        "second", bot.cognition(support.Silent(), intuition=support.Undecided()), bot.attach(phone.Phone())
+        "second", bot.cognition(reasoning=support.Silent(), reflex=support.Undecided()), bot.attach(phone.Phone())
     )
 
     assert [outline.name for outline in bot.describe(first, second).bots] == ["first", "second"]
@@ -183,7 +186,7 @@ def test_no_value_given_to_a_part_is_described() -> None:
 
 def test_describe_constructs_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
     model = bot.define(
-        "plain", bot.cognition(support.Silent(), intuition=support.Undecided()), bot.attach(phone.Phone())
+        "plain", bot.cognition(reasoning=support.Silent(), reflex=support.Undecided()), bot.attach(phone.Phone())
     )
 
     def refuse(self: object, **given: object) -> None:

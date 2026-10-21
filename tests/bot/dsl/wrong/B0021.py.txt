@@ -8,6 +8,6 @@ from tests.bot.dsl import support
 
 model = bot.define(
     "greeter",
-    bot.cognition(support.Silent(), intuition=support.Undecided(), seeds=(communication.speech_heard_seed(),)),
+    bot.cognition(reasoning=support.Silent(), reflex=support.Undecided(), seeds=(communication.speech_heard_seed(),)),
     bot.attach(phone.Phone()),
 )

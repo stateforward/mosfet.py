@@ -189,7 +189,7 @@ class Settings(pydantic.BaseModel):
         alias="DECISION_BASE_URL",
         min_length=1,
         description=(
-            "The decision server the bot's intuition decides on, which speaks the decisions wire format: anygame's"
+            "The decision server the bot's reflex decides on, which speaks the decisions wire format: anygame's"
             + " decide, or a hosted server with the same format."
         ),
         examples=["http://127.0.0.1:8102"],

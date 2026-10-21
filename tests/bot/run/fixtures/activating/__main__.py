@@ -11,7 +11,7 @@ if __name__ == "__main__":
     bot.run(
         bot.define(
             "slow",
-            bot.cognition(testing.Scripted(), intuition=testing.Decider()),
+            bot.cognition(reasoning=testing.Scripted(), reflex=testing.Decider()),
             bot.attach(doubles.MarkingDevice(marker)),
         ),
         process=process,

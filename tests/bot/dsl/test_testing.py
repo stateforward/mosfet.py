@@ -193,7 +193,9 @@ class _Shared(hsm.Instance):
 
 def test_running_yields_the_started_bot_and_its_environment_then_stops_both() -> None:
     model = bot.define(
-        "greeter", bot.cognition(testing.Scripted(), intuition=testing.Decider()), bot.attach(phone.Phone(id="desk"))
+        "greeter",
+        bot.cognition(reasoning=testing.Scripted(), reflex=testing.Decider()),
+        bot.attach(phone.Phone(id="desk")),
     )
     shared = _Shared()
 
@@ -215,7 +217,9 @@ def test_running_yields_the_started_bot_and_its_environment_then_stops_both() ->
 
 def test_running_stops_the_bot_and_its_actors_when_the_block_raises() -> None:
     model = bot.define(
-        "greeter", bot.cognition(testing.Scripted(), intuition=testing.Decider()), bot.attach(phone.Phone(id="desk"))
+        "greeter",
+        bot.cognition(reasoning=testing.Scripted(), reflex=testing.Decider()),
+        bot.attach(phone.Phone(id="desk")),
     )
     shared = _Shared()
     seen: list[mosfet.Bot] = []
@@ -234,7 +238,9 @@ def test_running_stops_the_bot_and_its_actors_when_the_block_raises() -> None:
 
 def test_running_stops_the_actors_it_started_when_the_bot_does_not_start() -> None:
     model = bot.define(
-        "greeter", bot.cognition(testing.Scripted(), intuition=testing.Decider()), bot.attach(phone.Phone(id="desk"))
+        "greeter",
+        bot.cognition(reasoning=testing.Scripted(), reflex=testing.Decider()),
+        bot.attach(phone.Phone(id="desk")),
     )
     shared = _Shared()
 
@@ -262,7 +268,9 @@ def test_running_starts_the_bot_with_the_observers_it_is_given() -> None:
         seen.append(typing.cast(dict[str, hsm.Event[typing.Any]], event.data)["event"].name)
 
     greeter = bot.define(
-        "greeter", bot.cognition(testing.Scripted(), intuition=testing.Decider()), bot.attach(phone.Phone(id="desk"))
+        "greeter",
+        bot.cognition(reasoning=testing.Scripted(), reflex=testing.Decider()),
+        bot.attach(phone.Phone(id="desk")),
     )
 
     async def run() -> str:
@@ -308,7 +316,7 @@ def test_running_runs_the_bot_and_its_parts_on_the_clock_it_is_given() -> None:
     alarm = _Alarm()
     model = bot.define(
         "greeter",
-        bot.cognition(testing.Scripted(), intuition=testing.Decider()),
+        bot.cognition(reasoning=testing.Scripted(), reflex=testing.Decider()),
         bot.attach(alarm),
         bot.allow("ability_without_tools", "no_devices"),
     )
@@ -347,7 +355,7 @@ def test_a_part_built_with_its_own_clock_keeps_time_on_it_while_its_siblings_kee
     near, far = _Alarm(id="near", clock=own), _Alarm(id="far")
     model = bot.define(
         "greeter",
-        bot.cognition(testing.Scripted(), intuition=testing.Decider()),
+        bot.cognition(reasoning=testing.Scripted(), reflex=testing.Decider()),
         bot.attach(near),
         bot.attach(far),
         bot.allow("ability_without_tools", "no_devices"),
@@ -371,7 +379,9 @@ def test_a_part_built_with_its_own_clock_keeps_time_on_it_while_its_siblings_kee
 
 def test_running_takes_actors_that_declare_their_model() -> None:
     greeter = bot.define(
-        "greeter", bot.cognition(testing.Scripted(), intuition=testing.Decider()), bot.attach(phone.Phone(id="desk"))
+        "greeter",
+        bot.cognition(reasoning=testing.Scripted(), reflex=testing.Decider()),
+        bot.attach(phone.Phone(id="desk")),
     )
 
     async def run() -> None:
@@ -384,7 +394,9 @@ def test_running_takes_actors_that_declare_their_model() -> None:
 
 def test_snapshot_is_the_bodys_own_snapshot_with_its_devices() -> None:
     greeter = bot.define(
-        "greeter", bot.cognition(testing.Scripted(), intuition=testing.Decider()), bot.attach(phone.Phone(id="desk"))
+        "greeter",
+        bot.cognition(reasoning=testing.Scripted(), reflex=testing.Decider()),
+        bot.attach(phone.Phone(id="desk")),
     )
 
     async def run() -> tuple[hsm.Snapshot, hsm.Snapshot]:
@@ -401,7 +413,7 @@ def test_snapshot_is_the_bodys_own_snapshot_with_its_devices() -> None:
 def test_a_run_is_the_bot_and_its_environment() -> None:
     environment = Environment()
     model = bot.define(
-        "greeter", bot.cognition(support.Silent(), intuition=support.Undecided()), bot.attach(phone.Phone())
+        "greeter", bot.cognition(reasoning=support.Silent(), reflex=support.Undecided()), bot.attach(phone.Phone())
     )
 
     async def run() -> testing.Run:

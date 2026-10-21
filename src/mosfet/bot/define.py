@@ -13,7 +13,7 @@ in the file, rendered the way rustc renders them. Each member is keyed like an h
 >>> model = bot.define(
 ...     "greeter",
 ...     bot.traits("curious"),
-...     bot.cognition(testing.Scripted(), intuition=testing.Decider()),
+...     bot.cognition(reasoning=testing.Scripted(), reflex=testing.Decider()),
 ...     bot.attach(computer.Computer(id="desk")),
 ... )
 >>> list(model.members)
@@ -62,15 +62,13 @@ _PROCESSOR: typing.Final = (
     "a `processing.Processor` (`from mosfet.abilities import processing`); in a test, the offline one is "
     + "`testing.Scripted()` (`from mosfet.bot import testing`)"
 )
-"""What ``bot.cognition`` thinks with, and where it is imported from, for the help of B0002 and B0006."""
+"""What ``bot.cognition``'s reasoning thinks with, and where it is imported from, for B0002, B0006 and B0024."""
 _DECISION: typing.Final = (
     "a `processing.DecisionProcessor`: `decision.Processor(...)` (`from mosfet.providers import decision`), "
     + "on any server that speaks the decisions wire format; in a test, the offline one is `testing.Decider()` "
     + "(`from mosfet.bot import testing`)"
 )
-"""What ``bot.cognition``'s intuition decides with, and where it is imported from, for B0002, B0006, B0024, B0025."""
-_INTUITION: typing.Final = 'intuition=decision.Processor(base_url="http://127.0.0.1:8102")'
-"""The intuition B0002 and B0024 write in: a local decision server, constructed without opening anything."""
+"""What ``bot.cognition``'s reflex decides with, and where it is imported from, for B0006 and B0025."""
 
 
 class Error(hsm.ErrorValidatingModel):
@@ -163,9 +161,8 @@ class Validator(hsm.ModelValidator):
                     primary=diagnostics.head(call, "no cognition"),
                     notes=("cognition is what perceives and decides; a bot without one is a body with no mind",),
                     help=diagnostics.Help(
-                        message=f"give it a cognition that thinks with {_PROCESSOR}. Its intuition decides "
-                        + f"with {_DECISION}",
-                        suggestion=diagnostics.append(call, f"bot.cognition(processor, {_INTUITION})"),
+                        message=f"give it a cognition whose reasoning thinks with {_PROCESSOR}",
+                        suggestion=diagnostics.append(call, "bot.cognition(reasoning=processor)"),
                     ),
                 )
             )
@@ -252,11 +249,17 @@ class Validator(hsm.ModelValidator):
             kinds.add(registry.kind())
         if registries is None:
             wrong = written
-        decider = member.intuition
+        decider = member.reflex
+        thinker = member.reasoning
         checks: tuple[tuple[int | str, object, bool, str], ...] = (
-            (0, member.processor, isinstance(member.processor, processing.Processor), "a `processing.Processor`"),
             (
-                "intuition",
+                "reasoning",
+                thinker,
+                thinker is None or isinstance(thinker, processing.Processor),
+                "a `processing.Processor`",
+            ),
+            (
+                "reflex",
                 decider,
                 decider is None or isinstance(decider, processing.Processor),
                 "a decision processor (`processing.DecisionProcessor`)",
@@ -277,46 +280,46 @@ class Validator(hsm.ModelValidator):
             ("seeds", stray, stray is None, "`behavior.Seed`s"),
         )
         self._arguments(model, call, "bot.cognition", checks)
-        if decider is None:
-            model.findings.append(self._undecided(call))
-        elif isinstance(decider, processing.Processor) and not isinstance(decider, processing.DecisionProcessor):
+        if thinker is None:
+            model.findings.append(self._thoughtless(call))
+        if isinstance(decider, processing.Processor) and not isinstance(decider, processing.DecisionProcessor):
             model.findings.append(self._chatting(call, decider))
         if seeds and stray is None and not member.autonomy:
             model.findings.append(self._unrun(call))
 
-    def _undecided(self, call: diagnostics.Span) -> diagnostics.Diagnostic:
-        """B0024: ``bot.cognition``, written at ``call``, is given no intuition to decide with."""
+    def _thoughtless(self, call: diagnostics.Span) -> diagnostics.Diagnostic:
+        """B0024: ``bot.cognition``, written at ``call``, is given no reasoning to think with."""
 
+        found = diagnostics.argument(call, "reasoning")
         return diagnostics.Diagnostic(
             code="B0024",
             level="error",
-            message="`bot.cognition` has no intuition",
-            primary=diagnostics.head(call, "no intuition"),
+            message="`bot.cognition` has no reasoning",
+            primary=(diagnostics.head(call, "no reasoning") if found is None else found[0]).model_copy(
+                update={"label": "no reasoning"}
+            ),
             notes=(
-                "intuition is the bot's fast first decision on every turn, and it decides on a decision model, "
-                + "never a chat model",
+                "reasoning is the bot's deliberate thinking: every turn its faster tiers hand on ends there, and "
+                + "it reflects and consolidates",
             ),
-            help=diagnostics.Help(
-                message=f"give it `intuition=`, {_DECISION}",
-                suggestion=diagnostics.append(call, _INTUITION),
-            ),
+            help=diagnostics.Help(message=f"give it `reasoning=`, {_PROCESSOR}"),
         )
 
     def _chatting(self, call: diagnostics.Span, given: processing.Processor) -> diagnostics.Diagnostic:
-        """B0025: ``bot.cognition``, written at ``call``, is given ``given``, a chat processor, as its intuition."""
+        """B0025: ``bot.cognition``, written at ``call``, is given ``given``, a chat processor, as its reflex."""
 
-        found = diagnostics.argument(call, "intuition")
+        found = diagnostics.argument(call, "reflex")
         name = type(given).__name__
         return diagnostics.Diagnostic(
             code="B0025",
             level="error",
-            message="`bot.cognition(intuition=)` is given a chat processor, not a decision processor",
+            message="`bot.cognition(reflex=)` is given a chat processor, not a decision processor",
             primary=(call if found is None else found[0]).model_copy(update={"label": f"this is a `{name}`"}),
             notes=(
-                "a chat model writes and calls tools; intuition chooses among the offered events, each with its "
+                "a chat model writes and calls tools; reflex chooses among the offered events, each with its "
                 + "confidence, so it decides on a decision model, never a chat model",
             ),
-            help=diagnostics.Help(message=f"give `intuition=` {_DECISION}"),
+            help=diagnostics.Help(message=f"give `reflex=` {_DECISION}"),
         )
 
     def _arguments(
@@ -358,7 +361,7 @@ class Validator(hsm.ModelValidator):
                     message=f"`{where}` takes {takes}, not `{type(value).__name__}`",
                     primary=primary.model_copy(update={"label": f"this is a `{type(value).__name__}`"}),
                     help=diagnostics.Help(
-                        message=f"pass {_PROCESSOR if key == 0 else _DECISION if key == 'intuition' else takes}"
+                        message=f"pass {_PROCESSOR if key == 'reasoning' else _DECISION if key == 'reflex' else takes}"
                     ),
                 )
             )

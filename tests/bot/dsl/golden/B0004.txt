@@ -1,14 +1,14 @@
 error[B0004]: `bot.attach` takes a constructed device or ability, not a class
- --> greeter.py:8:106
+ --> greeter.py:8:113
   |
-8 | model = bot.define("…", bot.cognition(support.Silent(), intuition=support.Undecided()), bot.attach(phone.Phone))
-  |                                                                                                    ^^^^^^^^^^^ this is the class `phone.Phone`
+8 | model = bot.define("…", bot.cognition(reasoning=support.Silent(), reflex=support.Undecided()), bot.attach(phone.Phone))
+  |                                                                                                           ^^^^^^^^^^^ this is the class `phone.Phone`
   |
   = note: the bot file builds its parts; the bot holds the very instances it is given
 help: construct it
   |
-8 | model = bot.define("…", bot.cognition(support.Silent(), intuition=support.Undecided()), bot.attach(phone.Phone(id="phone")))
-  |                                                                                                    ~~~~~~~~~~~~~~~~~~~~~~~
+8 | model = bot.define("…", bot.cognition(reasoning=support.Silent(), reflex=support.Undecided()), bot.attach(phone.Phone(id="phone")))
+  |                                                                                                           ~~~~~~~~~~~~~~~~~~~~~~~
   = explain: bot.explain("B0004")
 
 error: could not define bot `greeter`: 1 error

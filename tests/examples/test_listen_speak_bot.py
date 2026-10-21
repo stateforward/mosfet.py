@@ -68,7 +68,7 @@ else:
 
 _KEY = "gemini-key-5d1a"
 _DECISION_KEY = "decision-key-9b07"
-# The decision server intuition decides on: a closed port, since nothing in these tests asks it.
+# The decision server reflex decides on: a closed port, since nothing in these tests asks it.
 _DECIDER = "http://127.0.0.1:9"
 _WAIT = 10.0
 _RATE_HZ = 16_000
@@ -91,7 +91,7 @@ def test_the_required_settings_alone_take_every_default() -> None:
     settings = example.Settings.model_validate({"BOT_GEMINI_API_KEY": _KEY, "DECISION_BASE_URL": _DECIDER})
 
     assert settings.gemini_api_key.get_secret_value() == _KEY
-    # Intuition decides on the decision server, sent no key unless one is given, with requests sent whole.
+    # Reflex decides on the decision server, sent no key unless one is given, with requests sent whole.
     assert (settings.decision_base_url, settings.decision_key(), settings.decision_max_context_tokens) == (
         _DECIDER,
         None,
@@ -167,7 +167,7 @@ def test_an_empty_variable_is_unset() -> None:
     assert (settings.gemini_model, settings.tts_url) == (example.DEFAULT_GEMINI_MODEL, None)
 
 
-def test_intuition_needs_a_decision_server_and_its_key_is_sent_only_when_given() -> None:
+def test_reflex_needs_a_decision_server_and_its_key_is_sent_only_when_given() -> None:
     with pytest.raises(pydantic.ValidationError) as missing:
         _ = example.Settings.model_validate({"BOT_GEMINI_API_KEY": _KEY})
 
@@ -362,7 +362,7 @@ def test_speech_reaches_the_bot_from_a_voice_it_does_not_know_on_the_local_path(
     listener = bot.define(
         "listen_speak",
         bot.traits(*example.DEFAULT_TRAITS.traits),
-        bot.cognition(_Hanging(), intuition=testing.Decider()),
+        bot.cognition(reasoning=_Hanging(), reflex=testing.Decider()),
         bot.input(hearing),
     )
 
@@ -485,7 +485,7 @@ def _hear_on_the_lab(*choices: testing.Choice) -> _Ran:
                 "listen_speak",
                 bot.traits(*example.DEFAULT_TRAITS.traits),
                 bot.cognition(
-                    model, intuition=testing.Decider(), autonomy=True, seeds=(communication.speech_heard_seed(),)
+                    reasoning=model, reflex=testing.Decider(), autonomy=True, seeds=(communication.speech_heard_seed(),)
                 ),
                 bot.input(hearing),
                 bot.output(voiced),
@@ -552,7 +552,7 @@ class _Closing:
 def test_hear_closes_its_workers_when_the_run_never_settles() -> None:
     workers = (_Closing(), _Closing())
     listener = bot.define(
-        "listen_speak", bot.cognition(_Hanging(), intuition=testing.Decider()), bot.allow("no_devices")
+        "listen_speak", bot.cognition(reasoning=_Hanging(), reflex=testing.Decider()), bot.allow("no_devices")
     )
 
     async def run() -> None:
@@ -798,7 +798,7 @@ def test_on_the_lab_the_bot_is_given_its_voice_at_birth_and_keeps_it_for_life(tm
                     designer=speech_server.Designer("http://lab.test:8002", source=example.LAB_SOURCE, client=voices),
                     languages=example.LANGUAGES,
                 ),
-                bot.cognition(maker, intuition=testing.Decider(), memory=memory.Memory(database=str(database))),
+                bot.cognition(reasoning=maker, reflex=testing.Decider(), memory=memory.Memory(database=str(database))),
                 bot.output(speaking.Speaking(encoder=given)),
                 # Being born is all it does here: it has nothing to hear, and it is never woken.
                 bot.allow("no_devices"),

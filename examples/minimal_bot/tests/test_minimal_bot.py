@@ -20,7 +20,7 @@ from mosfet import bot
 from mosfet.abilities import memory
 from mosfet.bot import testing
 
-# The decision server intuition decides on is a closed local port too: nothing reaches the bot, so it never asks.
+# The decision server reflex decides on is a closed local port too: nothing reaches the bot, so it never asks.
 _ENDPOINT = {
     "OPENAI_BASE_URL": "http://127.0.0.1:9/v1",
     "OPENAI_MODEL": "any-model",
@@ -36,7 +36,9 @@ def test_a_device_free_bot_on_one_memory_starts_activates_and_stops_with_a_scrip
     model = testing.Scripted()
     minimal = bot.define(
         "minimal",
-        bot.cognition(model, intuition=testing.Decider(), memory=memory.Memory(), associative=True, consolidation=True),
+        bot.cognition(
+            reasoning=model, reflex=testing.Decider(), memory=memory.Memory(), associative=True, consolidation=True
+        ),
         bot.allow("no_devices"),
     )
 
@@ -45,7 +47,7 @@ def test_a_device_free_bot_on_one_memory_starts_activates_and_stops_with_a_scrip
             assert testing.snapshot(running.bot).State.startswith("/minimal/active")
 
     (outline,) = bot.describe(minimal).bots
-    assert outline.faculties == ("intuition", "reasoning", "reflection", "associative", "consolidation")
+    assert outline.faculties == ("reflex", "reasoning", "reflection", "associative", "consolidation")
     assert outline.parts == ()
     assert bot.check(minimal) == ()
     asyncio.run(run())
@@ -71,7 +73,7 @@ def _child(tmp_path: pathlib.Path, environ: dict[str, str], *flags: str) -> subp
     )
 
 
-# Intuition decides on the decision server DECISION_BASE_URL names. The decision_api_key secret is optional: a local
+# Reflex decides on the decision server DECISION_BASE_URL names. The decision_api_key secret is optional: a local
 # server takes none, and a hosted one with the same wire format is given its key. DECISION_MAX_CONTEXT_TOKENS is too.
 @pytest.mark.parametrize(
     ("decider", "keys"),

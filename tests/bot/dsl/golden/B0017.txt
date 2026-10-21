@@ -1,14 +1,14 @@
 error[B0017]: `bot.define` does not take a device
- --> greeter.py:8:95
+ --> greeter.py:8:102
   |
-8 | model = bot.define("…", bot.cognition(support.Silent(), intuition=support.Undecided()), phone.Phone())
-  |                                                                                         ^^^^^^^^^^^^^ this is a device
+8 | model = bot.define("…", bot.cognition(reasoning=support.Silent(), reflex=support.Undecided()), phone.Phone())
+  |                                                                                                ^^^^^^^^^^^^^ this is a device
   |
   = note: `bot.define` takes bot elements
 help: a device is given to `bot.attach`
   |
-8 | model = bot.define("…", bot.cognition(support.Silent(), intuition=support.Undecided()), bot.attach(phone.Phone()))
-  |                                                                                         ~~~~~~~~~~~~~~~~~~~~~~~~~
+8 | model = bot.define("…", bot.cognition(reasoning=support.Silent(), reflex=support.Undecided()), bot.attach(phone.Phone()))
+  |                                                                                                ~~~~~~~~~~~~~~~~~~~~~~~~~
   = explain: bot.explain("B0017")
 
 error: could not define bot `greeter`: 1 error

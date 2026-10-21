@@ -112,7 +112,7 @@ from mosfet.bot import testing
 
 
 def test_the_greeter_defines():
-    model = bot.define("greeter", bot.cognition(testing.Scripted(), intuition=testing.Decider()), bot.allow("no_devices"))
+    model = bot.define("greeter", bot.cognition(reasoning=testing.Scripted(), reflex=testing.Decider()), bot.allow("no_devices"))
     assert [outline.name for outline in bot.describe(model).bots] == ["greeter"]
 PY
   python -m pytest -q test_greeter.py')" || fail "a bot file test failed in a sandbox run"
@@ -125,7 +125,7 @@ explained="$(podman_remote run "${sandbox_run[@]}" '
 from mosfet import bot
 from mosfet.bot import testing
 
-model = bot.define("Greeter", bot.cognition(testing.Scripted(), intuition=testing.Decider()), bot.allow("no_devices"))
+model = bot.define("Greeter", bot.cognition(reasoning=testing.Scripted(), reflex=testing.Decider()), bot.allow("no_devices"))
 PY
   python greeter.py 2>&1; echo "exit=$?"')" || fail "the wrong bot file could not be run in a sandbox run"
 echo "$explained"

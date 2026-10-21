@@ -1,7 +1,7 @@
-"""Decision-model processor: intuition's reflex selection as one decision request.
+"""Decision-model processor: reflex's decision-layer selection as one decision request.
 
 `Processor` is a `processing.DecisionProcessor`: a decision model chooses among the offered
-events with a calibrated probability for each, so it is a processor intuition runs on.
+events with a calibrated probability for each, so it is a processor reflex's decision layer runs on.
 
 The mapping is structural, not behavioral:
 
@@ -12,7 +12,7 @@ The mapping is structural, not behavioral:
 - The **event menu** is one choice question per turn (``selection``): its criteria are the offered
   event names, each described by the first line of its event schema's description, together with a
   reserved pass criterion ("none of these") that maps to the typed explicit decline (an unhandled
-  intuition output), which the host cascades to deliberative reasoning, never a handled-empty
+  decision output), which the host cascades to deliberative reasoning, never a handled-empty
   selection.
 - **Payload fields are filled by selection over supplied options**, never authored. For each
   offered event's required payload keys, candidate values come mechanically from the turn's own
@@ -22,13 +22,13 @@ The mapping is structural, not behavioral:
   is left unoffered: fail-closed at the menu, before any request.
 - **Only the chosen option is returned** (D-R-28): one single-choice question chooses one event,
   returned with the chosen probability as its confidence and its grounded payload. The other options'
-  probabilities are not selections. Intuition's confidence gate still applies to the one returned.
+  probabilities are not selections. The decision layer's confidence gate still applies to the one returned.
 - **The request fits the model's context** (D-R-36): with ``max_context_tokens``, a request whose
   estimated size (a token per 3 UTF-8 bytes of its JSON body) is over it has the selection's
   instructions (the turn's world, self and acted blocks: context assembly) cut to their leading whole
   lines, down to the question's own default instructions. The state (the stimuli) and the menu are
   never cut, ranked or dropped; a request that still does not fit is sent, and the server's refusal is
-  intuition's failure.
+  the decision layer's failure.
 """
 
 from __future__ import annotations
@@ -46,7 +46,7 @@ import mosfet.telemetry
 from mosfet import media
 from mosfet.abilities import processing
 from mosfet.abilities.cognition import event as cognition_event
-from mosfet.abilities.cognition import intuition as cognition_intuition
+from mosfet.abilities.cognition import decision as cognition_decision
 from mosfet.abilities.language import text
 
 from . import _json
@@ -330,11 +330,11 @@ class Processor(processing.DecisionProcessor):
         chosen = selection.choice
         if chosen == _RESERVED_PASS_CRITERION:
             # Explicit unhandled, not a handled-empty selection: the pass criterion means "none offered
-            # fits". Intuition's own envelope for that is OutputData(result=None), which the host reads as
+            # fits". The decision layer's own envelope for that is OutputData(result=None), which the host reads as
             # unhandled and cascades to reasoning; an empty tuple would be a handled turn with no actions.
             # The abstract Processor protocol declares Events only, so the double cast marks that
             # runtime-declared shape as intentional at this one boundary.
-            envelope = cognition_intuition.OutputData(result=None, reason=self._pass_wording)
+            envelope = cognition_decision.OutputData(result=None, reason=self._pass_wording)
             return typing.cast(processing.Events, typing.cast(object, envelope))
         event = groundable.get(chosen)
         if event is None:

@@ -41,7 +41,7 @@ class Silent(processing.Processor):
 
 
 class Undecided(processing.DecisionProcessor):
-    """A decision processor that selects nothing: the intuition a bot is defined with, never asked to decide here."""
+    """A decision processor that selects nothing: the reflex a bot is defined with, never asked to decide here."""
 
     @typing.override
     async def process(

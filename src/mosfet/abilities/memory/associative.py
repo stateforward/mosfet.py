@@ -21,7 +21,7 @@ nothing to associate and is skipped.
 
 ``RecallEvent`` (``RecallData``) is the bot's deliberate recall, a model-callable tool offered
 while Associative is idle. Its effort is ``M``: a deliberate stage (Reasoning) is offered it, the
-reflex stage (Intuition) is not. Recall by ``node`` reads that memory in full; recall ``about``
+reflex stage's decision layer is not. Recall by ``node`` reads that memory in full; recall ``about``
 something searches with those words, ranks the candidates with the same ``Weights``, and reads the
 best ``limit`` in full. Either way Memory reads them with image bytes and reinforces them, and
 the owner Associative is attached to (Cognition, in a bot) is told with ``RecollectedEvent``

@@ -138,7 +138,7 @@ def test_a_firmware_sends_on_its_own_timer_to_a_device_and_an_ability_by_id() ->
     lamp, bell = Lamp(), Bell()
     model = bot.define(
         "kitchen",
-        bot.cognition(testing.Scripted(), intuition=testing.Decider()),
+        bot.cognition(reasoning=testing.Scripted(), reflex=testing.Decider()),
         bot.attach(lamp),
         bot.attach(bell),
         bot.allow("ability_without_tools"),
@@ -170,7 +170,7 @@ def test_each_start_of_a_model_with_firmware_runs_a_firmware_of_its_own_shown_li
 
     model = bot.define(
         "kitchen",
-        bot.cognition(testing.Scripted(), intuition=testing.Decider()),
+        bot.cognition(reasoning=testing.Scripted(), reflex=testing.Decider()),
         bot.attach(Lamp()),
         bot.attribute("minutes", int, 10),
         bot.initial(bot.target("idle")),
@@ -201,7 +201,7 @@ def test_a_report_wakes_cognition_and_its_choice_among_the_firmwares_commands_re
     decider = testing.Decider()
     model = bot.define(
         "kitchen",
-        bot.cognition(processor, intuition=decider),
+        bot.cognition(reasoning=processor, reflex=decider),
         bot.attach(Lamp()),
         bot.attribute("minutes", int, 0),
         bot.initial(bot.target("running")),
@@ -217,7 +217,7 @@ def test_a_report_wakes_cognition_and_its_choice_among_the_firmwares_commands_re
 
     world = asyncio.run(run())
 
-    # Intuition's frame, which offers the turn's events by actor; it decides nothing, so reasoning chose.
+    # The decision layer's frame, which offers the turn's events by actor; it decides nothing, so reasoning chose.
     (woken, *_) = decider.woken_by(RangEvent.name)
     assert processor.woken_by(RangEvent.name)
     assert {schema.name for schema in woken.schemas} >= {SetEvent.name}

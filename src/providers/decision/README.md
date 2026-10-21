@@ -1,17 +1,17 @@
 # mosfet-provider-decision
 
-Decision-model provider for stateforward.mosfet: the bot's intuition decides on any server that
+Decision-model provider for stateforward.mosfet: the bot's reflex decides on any server that
 speaks the decisions wire format, such as anygame's decide, or a hosted server that keeps to it.
 
 ```python
 from mosfet import bot
 from mosfet.providers import decision
 
-bot.cognition(processor, intuition=decision.Processor(base_url="http://127.0.0.1:8102"))
+bot.cognition(reasoning=processor, reflex=decision.Processor(base_url="http://127.0.0.1:8102"))
 ```
 
-- `Processor` is a decision processor (`processing.DecisionProcessor`), the kind intuition runs
-  on. It maps a cognition turn to one request. Its state is the turn as the model may see it: core's
+- `Processor` is a decision processor (`processing.DecisionProcessor`), the kind reflex's decision
+  layer runs on. It maps a cognition turn to one request. Its state is the turn as the model may see it: core's
   model-facing projection of the stimulus, the same text reasoning reads, with typed causal parents
   left out and media as a placeholder, never as bytes or base64; what someone said or typed is kept
   whole. It asks a choice question over the offered event menu
@@ -48,7 +48,7 @@ limit has the selection question's instructions cut: those are the turn's world,
 blocks, which are context assembly. They keep as many leading whole lines as fit (the world block
 comes first), and when not even one fits, the question's own default instructions are sent
 instead. The state (the turn's stimuli) and the menu are never cut, ranked or dropped. A request
-that still does not fit is sent as it is, and the server's refusal is intuition's failure, which
+that still does not fit is sent as it is, and the server's refusal is the decision layer's failure, which
 cognition hands to reasoning in the same turn. `None` sends every request whole.
 
 ## Wire format

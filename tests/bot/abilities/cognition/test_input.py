@@ -490,7 +490,7 @@ def test_build_processing_input_without_a_bot_actor_shows_no_self_block() -> Non
 def test_within_effort_narrows_a_frame_to_a_stage_ceiling() -> None:
     """A stage's ceiling drops effort-rated actors above it from the frame's offer and dispatch map.
 
-    Intuition's ceiling is S: the M-effort probe actor drops, and with it the events only it
+    The decision layer's ceiling is S: the M-effort probe actor drops, and with it the events only it
     enabled. The Device stays: it has no effort rating (peripheral transducer). The authority
     always stays. No ceiling, or a ceiling every actor fits, returns the frame unchanged.
     """

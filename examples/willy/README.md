@@ -30,7 +30,7 @@ with one `bot.define` that constructs every part inline, and runs it with `bot.r
   keeps only a voice's id and its description, and speaks every line from that description, so nothing in it is
   marked as Willy's: Willy knows its voice by the id its memory keeps (the `self_voice` row in the data dir) and
   checks on every start that the engine still holds it.
-- **Mind.** `bot.cognition` on the language model, its intuition on a decision model (`decision.Processor`
+- **Mind.** `bot.cognition` on the language model, its reflex on a decision model (`decision.Processor`
   on the decision server `DECISION_BASE_URL` names, never a chat model), with associations, consolidation, autonomy, routines
   and the speech seed that takes heard speech into a conversation. Its memory recalls by the
   embedding server's vectors.
@@ -205,7 +205,7 @@ person is an attribute.
 | `WILLY_ROOMS` | `living-room:shelf` | each room and what its computer sits on, `room:object,...`; rooms are placed 10 m apart in the order given |
 | `WILLY_CAMERA`, `WILLY_FACE_MODELS` | `0`, unset | `1` to see; the directory holding `face_detection_yunet_2023mar.onnx` and `face_recognition_sface_2021dec.onnx` |
 | `WILLY_TRAITS` | `warm,patient,curious,honest` | the owner's traits for Willy, comma separated |
-| `DECISION_BASE_URL` | required | the decision server Willy's intuition decides on, which speaks the decisions wire format |
+| `DECISION_BASE_URL` | required | the decision server Willy's reflex decides on, which speaks the decisions wire format |
 | `DECISION_MAX_CONTEXT_TOKENS` | unset | the decision model's context in tokens; each decision request is fitted to it by cutting the turn's context, never its stimuli |
 
 Every address is required: where the owner's model server is has no safe default. A room's name is the id of its

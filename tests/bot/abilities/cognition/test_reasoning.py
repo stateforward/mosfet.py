@@ -403,7 +403,7 @@ def test_reasoning_models_selection_repair_as_a_bounded_choice() -> None:
 def test_reasoning_asks_again_when_its_selection_is_rejected_and_dispatches_the_repair() -> None:
     """Live check round 2 (E2): a dispatch that did not decode failed reasoning's turn, with no repair.
 
-    Only intuition had the bounded selection repair. Reasoning now asks its model again with the diagnostic.
+    Only the decision layer had the bounded selection repair. Reasoning now asks its model again with the diagnostic.
     """
 
     processor = _AnsweringProcessor(_UNDECODABLE, _RECEIVE)

@@ -20,7 +20,7 @@ from . import input as cognition_input
 from . import types
 
 # No static system prose: deliberative turns use the same per-turn world XML on the system
-# channel as intuition (plus the deliberative user payload). Behavior create/change/break stay
+# channel as the decision layer (plus the deliberative user payload). Behavior create/change/break stay
 # on offered schemas and processor input fields, not a standing assistant policy.
 DEFAULT_INSTRUCTIONS = ""
 
@@ -48,13 +48,13 @@ _InitializingCompleteEvent = hsm.Event[_InitializingCompleteData](
 class CallData(pydantic.BaseModel):
     """Model-facing handoff of the current turn to deliberate (System-2) reasoning.
 
-    The Cognition host offers it to intuition when reasoning holds capacities above intuition's
-    ceiling. The host reuses the live processing frame (stimulus, tools, actors). Do not restate the
+    The Cognition host offers it on its call surface; reasoning never offers it to itself, and the
+    decision layer is never offered it. The host reuses the live processing frame (stimulus, tools, actors). Do not restate the
     stimulus, schemas, or instructions here — leave ``data`` empty / omit fields.
     """
 
     # Schema marker: selecting this event hands the turn to deliberate processing. Shared so
-    # intuition can detect handoff without importing this module (see processing.is_deliberative_handoff_schema).
+    # earlier stages can detect handoff without importing this module (see processing.is_deliberative_handoff_schema).
     __deliberative_handoff__: typing.ClassVar[bool] = True
 
     model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
@@ -63,7 +63,7 @@ class CallData(pydantic.BaseModel):
         json_schema_extra={
             "description": (
                 "Hand this turn to deliberate reasoning, which holds the capacities listed in "
-                "<reasoning_only> as well as the events offered here. Other events selected with it "
+                "<held> as well as the events offered here. Other events selected with it "
                 "run first. The host supplies the deliberative frame; do not include stimulus text, "
                 "tools, or schemas in data. Use an empty object as data."
             ),
@@ -330,7 +330,7 @@ class Reasoning(processing.Processing):
     )
     output_data_type: typing.ClassVar[type[object] | tuple[type[object], ...] | None] = types.CompletionData
     # CallData remains the model-facing schema; Cognition dispatches the full InputData frame
-    # only after autonomy and intuition leave the turn unhandled.
+    # only after reflex leaves the turn unhandled.
     input_event: typing.ClassVar[hsm.Event[CallData | InputData]] = hsm.Event[CallData | InputData](
         name=types.DELIBERATIVE_HANDOFF_EVENT_NAME,
         kind=event.EventKind,

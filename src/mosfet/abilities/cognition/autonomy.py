@@ -1781,7 +1781,7 @@ class Autonomy(ability.Ability[types.TurnData, types.CompletionData]):
         event: hsm.Event[typing.Any],
     ) -> None:
         with span.operation(
-            "bot.autonomy.match",
+            "bot.reflex.match",
             scope="bot.abilities.cognition",
             component="cognition.autonomy",
             stage="behavior_match",

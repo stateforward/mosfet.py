@@ -166,7 +166,7 @@ class House:
 
     run: testing.Run
     model: testing.Scripted
-    intuition: testing.Decider
+    reflex: testing.Decider
     mouth: Mouth
     prints: Prints
 
@@ -253,20 +253,20 @@ def _offered(call: processing.InputData) -> frozenset[str]:
 async def willy(
     *choices: testing.Choice,
     heard_before: tuple[tuple[str, int], ...] = (),
-    intuition: testing.Decider | None = None,
+    reflex: testing.Decider | None = None,
     rooms: tuple[computer.Computer, ...] = (),
     actors: tuple[hsm.Instance, ...] = (),
 ) -> collections.abc.AsyncGenerator[House]:
     """Run a Willy-shaped bot for the block, on wire fakes, with the model's ``choices`` scripted.
 
     ``heard_before`` gives voices Willy's registry already holds unnamed, as (id, voice) pairs, as a voice heard on an earlier
-    day would be: so a test can write a choice about that voice's ref before the bot runs. ``intuition`` is the
+    day would be: so a test can write a choice about that voice's ref before the bot runs. ``reflex`` is the
     decision model, a ``testing.Decider`` that chooses nothing when not given. ``rooms`` are computers attached to
     Willy, as the bot file attaches one per room, and ``actors`` the shared actors they need (their server).
     """
 
     model = testing.Scripted(*choices)
-    decider = intuition if intuition is not None else testing.Decider()
+    decider = reflex if reflex is not None else testing.Decider()
     prints = Prints()
     for id, voice in heard_before:
         _ = prints.enroll(
@@ -298,8 +298,8 @@ async def willy(
             "willy",
             bot.traits(*willy_example.DEFAULT_TRAITS.traits),
             bot.cognition(
-                model,
-                intuition=decider,
+                reasoning=model,
+                reflex=decider,
                 memory=store,
                 registries=(voices,),
                 associative=True,
@@ -312,11 +312,11 @@ async def willy(
             *(bot.attach(room) for room in rooms),
         )
         async with testing.running(defined, actors=actors) as run:
-            yield House(run=run, model=model, intuition=decider, mouth=mouth, prints=prints)
+            yield House(run=run, model=model, reflex=decider, mouth=mouth, prints=prints)
 
 
 class Busy(testing.Decider):
-    """Willy's intuition, scripted, holding the first turn it is given until the test lets it go."""
+    """Willy's reflex decision model, scripted, holding the first turn it is given until the test lets it go."""
 
     def __init__(self, release: asyncio.Event) -> None:
         super().__init__()
@@ -334,7 +334,7 @@ class Busy(testing.Decider):
 
 
 def _heard_count(calls: tuple[processing.InputData, ...]) -> int:
-    """How many conversation turns Willy's intuition perceived on ``calls``, alone or with what else queued."""
+    """How many conversation turns Willy's reflex decision model perceived on ``calls``, alone or with what else queued."""
 
     heard = 0
     for call in calls:
@@ -356,7 +356,7 @@ def test_speech_heard_while_willy_is_busy_still_reaches_the_conversation() -> No
     async def run() -> int:
         release = asyncio.Event()
         busy = Busy(release)
-        async with willy(intuition=busy) as house:
+        async with willy(reflex=busy) as house:
             await house.say(_SAM)
             async with asyncio.timeout(_WAIT):
                 _ = await busy.holding.wait()

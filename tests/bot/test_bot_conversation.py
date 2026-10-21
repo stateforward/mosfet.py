@@ -781,9 +781,10 @@ def test_a_heard_turn_offers_the_bot_who_is_speaking_and_who_it_is() -> None:
         communication_ability, conversation_ability, speaking_ability = _text_communication()
         processor = CountingProcessor()
         store = memory.Memory()
+        # Recall comes after reflex (R-21): the decision layer passes, and reasoning's frame carries the people.
         cognitive = cognition.Cognition(
-            intuition=cognition.Intuition(processor=processor),
-            reasoning=cognition.Reasoning(processor=CountingProcessor()),
+            decision=cognition.Decision(processor=CountingProcessor()),
+            reasoning=cognition.Reasoning(processor=processor),
             reflection=cognition.Reflection(processor=CountingProcessor(), memory=store),
             memory=store,
             associative=memory.Associative(memory=store),

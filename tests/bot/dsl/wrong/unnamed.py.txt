@@ -7,7 +7,7 @@ from tests.bot.dsl import support
 
 model = bot.define(
     "greeter",
-    bot.cognition(support.Silent(), intuition=support.Undecided()),
+    bot.cognition(reasoning=support.Silent(), reflex=support.Undecided()),
     bot.attach(audio.Speaker()),
     bot.attach(audio.Speaker()),
     bot.attach(audio.Microphone(id="cognition")),

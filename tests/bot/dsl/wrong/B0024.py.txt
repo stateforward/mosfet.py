@@ -1,8 +1,8 @@
-"""B0024: a cognition with no intuition."""
+"""B0024: a cognition with no reasoning."""
 
 from mosfet import bot
 from mosfet.devices import phone
 
 from tests.bot.dsl import support
 
-model = bot.define("greeter", bot.cognition(support.Silent()), bot.attach(phone.Phone()))
+model = bot.define("greeter", bot.cognition(reasoning=None), bot.attach(phone.Phone()))

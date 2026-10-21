@@ -9,7 +9,7 @@ API_KEY = "sk-SENTINEL-NEIGHBOUR"
 
 model = bot.define(
     "Greeter Bot",
-    bot.cognition(support.Silent(), intuition=support.Undecided()),
+    bot.cognition(reasoning=support.Silent(), reflex=support.Undecided()),
     bot.attach(phone.Phone(id="desk")),
     bot.attach(audio.Speaker(id="desk")),
     bot.attach(audio.Microphone),
