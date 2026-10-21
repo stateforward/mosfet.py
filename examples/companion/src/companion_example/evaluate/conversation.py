@@ -178,11 +178,11 @@ def _companion_note(
 ) -> str | None:
     notes: list[str] = []
     if not measures.replied:
-        notes.append(f"the companion said nothing within {timing.reply_timeout_seconds:g} s")
+        notes.append(f"{scenarios.COMPANION_NAME} said nothing within {timing.reply_timeout_seconds:g} s")
     if measures.talk_over:
-        notes.append(f"the companion began while {person} was still speaking")
+        notes.append(f"{scenarios.COMPANION_NAME} began while {person} was still speaking")
     if measures.cut_in_seconds is not None and exchange.cut_in_from is not None:
-        notes.append(f"the companion kept talking {measures.cut_in_seconds:.1f} s after {person} cut in")
+        notes.append(f"{scenarios.COMPANION_NAME} kept talking {measures.cut_in_seconds:.1f} s after {person} cut in")
     return "; ".join(notes) or None
 
 
@@ -294,7 +294,7 @@ async def run(
                         scenario=scenario.id,
                         exchange=turn,
                         speaker=record.COMPANION,
-                        name="Companion",
+                        name=scenarios.COMPANION_NAME,
                         text=reply,
                         note=_companion_note(measures, exchange, person.name, timing),
                         started_s=exchange.chunks[0].start - began if exchange.chunks else None,
@@ -309,7 +309,7 @@ async def run(
                             speaker=person.id,
                             name=person.name,
                             text=line.cut_in,
-                            note="cut in while the companion was answering",
+                            note=f"cut in while {scenarios.COMPANION_NAME} was answering",
                             started_s=exchange.cut_in_from - began,
                             ended_s=exchange.cut_in_until - began,
                         )

@@ -49,6 +49,10 @@ def test_the_built_in_scenarios_are_the_five_the_evaluator_holds_and_each_is_sho
     assert child.child and "child_appropriate" in by_id["curious-child"].criteria
     # The person cuts in over the companion at least once.
     assert by_id["interrupts"].interrupt_turns
+    # The people call the companion by the household's name for it, which the companion can only learn from them.
+    assert scenarios.COMPANION_NAME == "Jasper"
+    for scenario in held.scenarios:
+        assert scenarios.COMPANION_NAME in scenario.goal and "the companion" not in scenario.goal
 
 
 def test_a_scenario_is_refused_when_its_data_does_not_hold_together() -> None:

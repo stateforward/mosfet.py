@@ -172,7 +172,9 @@ perfectly echo-cancelled: the evaluator never hears the companion through it. Th
 evaluator also hears what the companion says to anyone else in the house: run it when the other rooms are quiet.
 
 The scenarios are data (`companion_example/evaluate/scenarios.json`), each a goal for the persona, the people (each
-with a catalog voice), at most 3 to 6 of their turns, the breaks and cut-ins, and the criteria graded:
+with a catalog voice), at most 3 to 6 of their turns, the breaks and cut-ins, and the criteria graded. The people
+call the companion Jasper (`scenarios.COMPANION_NAME`), the evaluator household's name for it: the companion is never
+told it, so it can only learn it from them, and the transcript shows its lines under it.
 
 | Id | What happens |
 |---|---|

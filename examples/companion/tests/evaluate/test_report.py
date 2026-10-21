@@ -54,7 +54,7 @@ def _results() -> record.Results:
                         scenario=child.id,
                         exchange=0,
                         speaker=record.COMPANION,
-                        name="Companion",
+                        name="Jasper",
                         text="Sunlight scatters in the air.",
                         started_s=3.5,
                         ended_s=6.0,

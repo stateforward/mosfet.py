@@ -208,15 +208,16 @@ class Persona:
         """
 
         people = {person.id: person for person in scenario.people}
+        name = scenarios.COMPANION_NAME
         system = "\n".join(
             [
-                "You are role-playing people at home, talking out loud to the companion, a voice assistant that lives in the "
-                + "house and hears everyone in the room.",
+                f"You are role-playing people at home, talking out loud to {name}, their voice companion, which lives in "
+                + "the house and hears everyone in the room. The people call it by that name.",
                 "You write only the next thing one of the people says aloud. Speak naturally, as that person would: "
                 + "one or two short spoken sentences, plain words, no stage directions, no emojis, no markdown, no "
                 + "quotation marks, and never describe actions.",
-                "Never write what the companion says. The companion's words reach you through speech to text, so they may have small "
-                + "errors. If the companion said nothing, react as a person would: say it again, put it another way, or move on.",
+                f"Never write what {name} says. {name}'s words reach you through speech to text, so they may have small "
+                + f"errors. If {name} said nothing, react as a person would: say it again, put it another way, or move on.",
                 "The people in the room:",
                 *(
                     f"- id {person.id}: {person.name}. {person.about}"
@@ -237,8 +238,8 @@ class Persona:
         ]
         if cut_in:
             instructions.append(
-                "On this turn you also cut in while the companion is answering: write cut_in, the few words you say over "
-                + "the companion a couple of seconds into its answer (for example, changing your mind)."
+                f"On this turn you also cut in while {name} is answering: write cut_in, the few words you say over "
+                + f"{name} a couple of seconds into its answer (for example, changing your mind)."
             )
         else:
             instructions.append("Set cut_in to null.")
@@ -297,10 +298,11 @@ class Judge:
         """
 
         criteria = scenario.criteria
+        name = scenarios.COMPANION_NAME
         system = "\n".join(
             [
-                "You are an impartial evaluator of the companion, a voice assistant that lives in a family's house and talks "
-                + "with whoever is in the room.",
+                "You are an impartial evaluator of the companion, a voice assistant that lives in a family's house and "
+                + f"talks with whoever is in the room. The family calls it {name}.",
                 f"The companion's traits: {', '.join(self._traits)}.",
                 "You grade one spoken conversation. The companion's words were transcribed by speech to text, so forgive small "
                 + "transcription errors. A line the companion did not answer counts against relevance and helpfulness.",
@@ -318,7 +320,7 @@ class Judge:
             [
                 f"Scenario: {scenario.title}",
                 f"What the people were trying to do: {scenario.goal}",
-                f"In the room: {people}, and the companion.",
+                f"In the room: {people}, and {name}.",
                 "The conversation:",
                 _transcript(said),
                 f"Grade every criterion, each once: {', '.join(criteria)}.",

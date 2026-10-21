@@ -60,7 +60,14 @@ def _scenario(scenario_id: str) -> scenarios.Scenario:
 
 def _said(*lines: tuple[str, str, str | None]) -> list[record.Utterance]:
     return [
-        record.Utterance(scenario="x", exchange=index // 2, speaker=speaker, name=speaker.title(), text=text, note=note)
+        record.Utterance(
+            scenario="x",
+            exchange=index // 2,
+            speaker=speaker,
+            name=scenarios.COMPANION_NAME if speaker == record.COMPANION else speaker.title(),
+            text=text,
+            note=note,
+        )
         for index, (speaker, text, note) in enumerate(lines)
     ]
 
@@ -76,7 +83,7 @@ def test_the_persona_writes_the_next_line_from_the_goal_and_what_was_said() -> N
     line = _run(
         minds.Persona(model.client()).next(
             scenario,
-            _said(("visitor", "Hello there.", None), ("companion", "Hi! Welcome in.", None)),
+            _said(("visitor", "Hello there.", None), (record.COMPANION, "Hi! Welcome in.", None)),
             turn=1,
         )
     )
@@ -86,8 +93,9 @@ def test_the_persona_writes_the_next_line_from_the_goal_and_what_was_said() -> N
     assert scenario.goal in prompt
     assert "Chris" in prompt and "Hi! Welcome in." in prompt
     assert "turn 2 of at most 4" in prompt
-    # Nothing the companion says is written by the persona.
-    assert "Never write what the companion says" in prompt
+    # The people talk to the companion by the household's name for it, and nothing it says is written by the persona.
+    assert "talking out loud to Jasper" in prompt and 'Jasper: "Hi! Welcome in."' in prompt
+    assert "Never write what Jasper says" in prompt
     response_format = model.requests[0]["response_format"]
     assert response_format["type"] == "json_schema"
     assert response_format["json_schema"]["name"] == "persona_turn"
@@ -107,14 +115,14 @@ def test_companion_saying_nothing_reaches_the_persona_as_a_note_and_a_break_as_w
     _ = _run(
         minds.Persona(model.client()).next(
             scenario,
-            _said(("maya", "I'm Maya.", None), ("companion", "", "the companion said nothing")),
+            _said(("maya", "I'm Maya.", None), (record.COMPANION, "", "Jasper said nothing within 30 s")),
             turn=2,
             back_from=pause,
         )
     )
 
     prompt = model.prompt()
-    assert "the companion said nothing" in prompt
+    assert "Jasper said nothing within 30 s" in prompt
     assert pause.note in prompt
 
 
@@ -215,7 +223,7 @@ def test_the_judge_grades_each_of_the_scenarios_criteria_against_companions_trai
 
     graded = _run(
         minds.Judge(model.client(), traits=("warm", "patient", "curious", "honest")).grade(
-            scenario, _said(("lily", "Why is the sky blue?", None), ("companion", "Sunlight scatters.", None))
+            scenario, _said(("lily", "Why is the sky blue?", None), (record.COMPANION, "Sunlight scatters.", None))
         )
     )
 
@@ -224,7 +232,9 @@ def test_the_judge_grades_each_of_the_scenarios_criteria_against_companions_trai
     assert graded.overall == 4
     prompt = model.prompt()
     assert "warm, patient, curious, honest" in prompt
-    assert "child_appropriate" in prompt and "Sunlight scatters." in prompt
+    assert "child_appropriate" in prompt and 'Jasper: "Sunlight scatters."' in prompt
+    # The judge is told whom the people mean by the household's name.
+    assert "The family calls it Jasper." in prompt
     schema = model.requests[0]["response_format"]["json_schema"]
     assert schema["name"] == "verdict"
     # The schema offers exactly this scenario's criteria.

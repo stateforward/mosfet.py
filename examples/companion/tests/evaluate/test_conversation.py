@@ -254,7 +254,9 @@ def test_an_evaluation_holds_each_scenario_with_companion_by_voice_grades_it_and
         ("companion", _HEARD),
         ("sam", "Wait, actually, waffles."),
     ]
-    assert lines[-1].note == "cut in while the companion was answering"
+    # The record shows the companion under the household's name for it.
+    assert {line.name for line in lines if line.speaker == record.COMPANION} == {"Jasper"}
+    assert lines[-1].note == "cut in while Jasper was answering"
     assert lines[5].note is not None and "kept talking" in lines[5].note
     for line in lines:
         assert line.started_s is not None and line.ended_s is not None and line.started_s <= line.ended_s

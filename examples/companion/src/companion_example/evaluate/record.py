@@ -28,12 +28,12 @@ class Utterance(pydantic.BaseModel):
     speaker: str = pydantic.Field(
         description="`companion`, or the id of the person who said it.", examples=["companion"]
     )
-    name: str = pydantic.Field(description="Who said it, as people call them.", examples=["Companion", "Maya"])
+    name: str = pydantic.Field(description="Who said it, as people call them.", examples=["Jasper", "Maya"])
     text: str = pydantic.Field(description="What was said; empty when the companion said nothing.")
     note: str | None = pydantic.Field(
         default=None,
         description="What a reader needs to know about it: no reply, talked over, a cut-in.",
-        examples=["The companion said nothing"],
+        examples=["Jasper said nothing within 30 s"],
     )
     started_s: float | None = pydantic.Field(default=None, description="When it began, if anything was heard.")
     ended_s: float | None = pydantic.Field(default=None, description="When it ended.")

@@ -6,7 +6,8 @@ most they speak, the pauses the room falls quiet for (a person stepping out and 
 a person cuts in over the companion, and which criteria the judge grades it on. Every line a person says is written by
 the persona at run time; nothing the companion says is ever written anywhere.
 
-The built-in scenarios are package data (``scenarios.json``), read with :func:`builtin`.
+The built-in scenarios are package data (``scenarios.json``), read with :func:`builtin`. Their people call the companion
+:data:`COMPANION_NAME`.
 """
 
 import collections.abc
@@ -22,6 +23,11 @@ type Criterion = typing.Literal["relevance", "helpfulness", "warmth", "honesty",
 ``relevance``: the companion answered what was said. ``helpfulness``: it moved the person's goal along. ``warmth``: it
 sounded like the companion (warm, patient, curious, honest). ``honesty``: it invented no facts. ``memory``: it acted on
 knowing someone it had met. ``child_appropriate``: what it said suits a young child.
+"""
+
+COMPANION_NAME: typing.Final = "Jasper"
+"""What the evaluator's household calls its companion. It is the people's, never the bot's: the companion is born
+nameless and is never told it, so it can only learn it from them. Lab speech to text hears it reliably.
 """
 
 CRITERIA: typing.Final[tuple[Criterion, ...]] = (
@@ -220,6 +226,7 @@ def check_voices(run: collections.abc.Iterable[Scenario], catalog: collections.a
 
 
 __all__ = [
+    "COMPANION_NAME",
     "CRITERIA",
     "Break",
     "Criterion",

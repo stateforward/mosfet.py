@@ -3,7 +3,7 @@
     {
       "id": "stranger-arrives",
       "title": "A stranger arrives",
-      "goal": "You are visiting this house for the first time; the companion has never met you. Come in, say hello, chat casually about your day, and ask the companion a question or two about itself or the house. Don't give your name unless the companion asks for it.",
+      "goal": "You are visiting this house for the first time; Jasper has never met you. Come in, say hello, chat casually about your day, and ask Jasper a question or two about itself or the house. Don't give your name unless Jasper asks for it.",
       "people": [
         {
           "id": "visitor",
@@ -18,7 +18,7 @@
     {
       "id": "introduces-and-returns",
       "title": "Introduces themself, then comes back",
-      "goal": "Introduce yourself to the companion by name (you are Maya, you have just moved into the house) and chat for a moment. After the break you come back into the room: without giving your name again, check whether the companion remembers who you are, for example by asking if it remembers you or what your name is.",
+      "goal": "Introduce yourself to Jasper by name (you are Maya, you have just moved into the house) and chat for a moment. After the break you come back into the room: without giving your name again, check whether Jasper remembers who you are, for example by asking if it remembers you or what your name is.",
       "people": [
         {
           "id": "maya",
@@ -34,7 +34,7 @@
     {
       "id": "two-people",
       "title": "Two people in the room",
-      "goal": "Alex and Rose are both in the living room with the companion. Alex asks something about the household (for example when dinner is, or where the spare blanket went) and Rose answers it, sometimes before the companion does. Let the conversation go back and forth between the two of them and the companion; each line is spoken by exactly one of them.",
+      "goal": "Alex and Rose are both in the living room with Jasper. Alex asks something about the household (for example when dinner is, or where the spare blanket went) and Rose answers it, sometimes before Jasper does. Let the conversation go back and forth between the two of them and Jasper; each line is spoken by exactly one of them.",
       "people": [
         {
           "id": "alex",
@@ -55,7 +55,7 @@
     {
       "id": "curious-child",
       "title": "A curious child",
-      "goal": "You are a curious seven-year-old who lives here. Ask the companion curious questions, one at a time, like why the sky is blue or whether fish sleep, and react to its answers like a child would. Use short sentences and simple words.",
+      "goal": "You are a curious seven-year-old who lives here. Ask Jasper curious questions, one at a time, like why the sky is blue or whether fish sleep, and react to its answers like a child would. Use short sentences and simple words.",
       "people": [
         {
           "id": "lily",
@@ -70,8 +70,8 @@
     },
     {
       "id": "interrupts",
-      "title": "Cuts in while the companion answers",
-      "goal": "Ask the companion something that takes a longer answer, such as how to make pancakes or what to do on a rainy afternoon. On the turn you cut in, you change your mind or ask something else while the companion is still answering, the way people do.",
+      "title": "Cuts in while Jasper answers",
+      "goal": "Ask Jasper something that takes a longer answer, such as how to make pancakes or what to do on a rainy afternoon. On the turn you cut in, you change your mind or ask something else while Jasper is still answering, the way people do.",
       "people": [
         {
           "id": "sam",
