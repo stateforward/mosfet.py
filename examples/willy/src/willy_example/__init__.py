@@ -55,6 +55,14 @@ EXPRESSIVENESS: typing.Final = vocal.speech.Expressiveness(
 """What the lab's speech engine does with an expression, written in its angle tags (``openai_compat.ANGLE_TAGS``)."""
 VOICING_TIMEOUT: typing.Final = datetime.timedelta(seconds=120)
 """How long speech waits for Willy's voice: on its first start the lab designs it."""
+INTUITION_BODY: typing.Final[dict[str, object]] = {"chat_template_kwargs": {"enable_thinking": False}}
+"""What every intuition request adds to its body: thinking off, which is what intuition is, so never a setting."""
+REFLEX_TIMEOUT: typing.Final = datetime.timedelta(seconds=5)
+"""How long each step of Willy's reflex may take: a behavior, or the decision model's choice."""
+INTUITION_TIMEOUT: typing.Final = datetime.timedelta(seconds=20)
+"""How long each step of Willy's intuition may take: a fast answer without thinking first."""
+REASONING_TIMEOUT: typing.Final = datetime.timedelta(seconds=180)
+"""How long each step of Willy's reasoning may take: it thinks first, within ``WILLY_THINKING_TOKENS``."""
 
 EMBEDDING_SPACE: typing.Final = embedding.Space(model="google/embeddinggemma-2", dimensions=768)
 """The space of the lab's EmbeddingGemma 2 vectors, which memory recalls by."""
@@ -120,14 +128,32 @@ class Settings(pydantic.BaseModel):
         frozen=True, extra="ignore", hide_input_in_errors=True
     )
 
-    llm_url: str = pydantic.Field(
-        alias="WILLY_LLM_URL",
+    intuition_url: str = pydantic.Field(
+        alias="WILLY_INTUITION_URL",
         min_length=1,
-        description="The OpenAI-compatible endpoint of Willy's language model.",
+        description="The OpenAI-compatible endpoint of the model Willy's intuition answers on, with thinking off.",
         examples=["http://192.168.2.2:8100/v1"],
     )
-    model: str = pydantic.Field(
-        alias="WILLY_MODEL", min_length=1, description="The model that endpoint serves.", examples=["gemma-4-26b-a4b"]
+    intuition_model: str = pydantic.Field(
+        alias="WILLY_INTUITION_MODEL",
+        min_length=1,
+        description="The model the intuition endpoint serves.",
+        examples=["gemma-4-26b-a4b"],
+    )
+    reasoning_url: str = pydantic.Field(
+        alias="WILLY_REASONING_URL",
+        min_length=1,
+        description=(
+            "The OpenAI-compatible endpoint of the model Willy's reasoning thinks on, which also reflects and"
+            + " consolidates."
+        ),
+        examples=["http://192.168.2.2:8100/v1"],
+    )
+    reasoning_model: str = pydantic.Field(
+        alias="WILLY_REASONING_MODEL",
+        min_length=1,
+        description="The model the reasoning endpoint serves.",
+        examples=["gemma-4-26b-a4b"],
     )
     decision_base_url: str = pydantic.Field(
         alias="DECISION_BASE_URL",
@@ -149,15 +175,15 @@ class Settings(pydantic.BaseModel):
         examples=[2048],
     )
     thinking_tokens: int = pydantic.Field(
-        default=256,
+        default=1024,
         alias="WILLY_THINKING_TOKENS",
         ge=0,
         description=(
-            "How many tokens Willy's language model may think for on a reasoning turn before it chooses what to"
-            + " do (its chat template's thinking channel, capped by the server's thinking token budget); 0 turns"
-            + " thinking off."
+            "How many tokens Willy's reasoning model may think for on a turn before it chooses what to do (its"
+            + " chat template's thinking channel, capped by the server's thinking token budget); 0 turns reasoning's"
+            + " thinking off. Intuition never thinks first."
         ),
-        examples=[256],
+        examples=[1024],
     )
     embed_url: str = pydantic.Field(
         alias="WILLY_EMBED_URL",
@@ -311,9 +337,13 @@ __all__ = [
     "EMBEDDING_SPACE",
     "EXPRESSIVENESS",
     "FACE_POLICY",
+    "INTUITION_BODY",
+    "INTUITION_TIMEOUT",
     "LANGUAGES",
     "MAX_ROOMS",
     "MAX_VOICE_IDS",
+    "REASONING_TIMEOUT",
+    "REFLEX_TIMEOUT",
     "ROOM_SPACING_M",
     "SFACE_FILE",
     "SPEECH_MODEL",

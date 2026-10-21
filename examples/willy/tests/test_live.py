@@ -29,13 +29,16 @@ reply, so whether Willy speaks is never the test's question. A turn speech woke 
 or speech heard while Willy was speaking (``listening.overlap``). Each step is bounded, and a failure says which step
 and its bound:
 
-* L1 preflight (10 s): the language model, asked with the ``openai_api_key`` its client sends, lists
-  ``WILLY_MODEL``, and ``/healthz`` answers 200 on speech to text, speech, voiceprints, tone, diarization and
+* L1 preflight (10 s): the intuition and reasoning model servers, asked with the ``openai_api_key`` their clients
+  send, list ``WILLY_INTUITION_MODEL`` and ``WILLY_REASONING_MODEL``, and ``/healthz`` answers 200 on speech to text, speech, voiceprints, tone, diarization and
   embeddings.
 * L2 birth (300 s): Willy is born with a voice. Speaking constructs its encoder from the voice inception gave
   it, and memory keeps that voice.
 * L3 unknown voice (60 s): A's utterance, through the room's far side, reaches the model as a ``source`` that is
-  a ``voice:`` ref nobody is known by (``known`` false), and ``memory.know`` is offered.
+  a ``voice:`` ref nobody is known by (``known`` false), and ``memory.know`` is offered. What Willy perceived is
+  read from the calls of the minds that took the line up in thought (intuition, reasoning): recall comes after
+  reflex. A line Willy does not take up within 20 s (reflex settled it on its own) is said again, as in L4, L5
+  and L7.
 * L4 knowing is a capacity (60 s): the test has Willy remember that A's ref is called Sam. A's next utterance is
   the same ref (a real voiceprint match through the persistent store), ``known`` true, and Sam; or, when that
   sentence's print falls below the match threshold, a new voice shown as resembling Sam's person (R-13).
@@ -94,12 +97,12 @@ from mosfet.abilities.communication import conversation
 from mosfet.abilities.listening import recognition
 from mosfet.bot import testing
 from mosfet.devices import audio, computer
-from mosfet.providers import decision
 from mosfet.providers import openai_compat
 from mosfet.providers import speech_server
 from mosfet.providers import sqlite_memory
 from mosfet.providers import websocket
 from willy_example import room
+from willy_example.tiers import Tiers
 
 pytestmark = [
     pytest.mark.live,
@@ -119,8 +122,9 @@ _TALKED_OVER_BOUND = 180.0
 _QUIET_SECONDS = 1.5
 # How long the room is silent after an utterance, so the speech server hears the turn end.
 _TRAILING_SILENCE_SECONDS = 1.5
-# How long the test waits, after the echo, for a turn before A speaks again to give Willy one.
-_ECHO_TURN_SECONDS = 20.0
+# How long a person waits for Willy to take up what was said in thought before saying it again, as people do when
+# nobody answers; and, after the echo, for a turn before A speaks again to give Willy one.
+_TURN_PATIENCE_SECONDS = 20.0
 _POLL_SECONDS = 0.1
 # A turn heard speech woke: a conversation's speech, or speech heard over Willy's own (an overlap), which wakes
 # listening.overlap instead.
@@ -190,8 +194,8 @@ class Minds:
 class Recorded(processing.Processor):
     """Willy's model, the lab's, with every call it is given and everything it chose recorded; it never steers it.
 
-    Reflex's decision model is recorded into the same ``calls`` (``Decided``): a heard turn reaches whichever
-    mind takes it, so what Willy perceived is read from the first call of the turn, on either.
+    Reflex's decision model (``Decided``) and intuition are recorded into the same ``calls``: a heard turn reaches
+    whichever mind takes it, so what Willy perceived is read from the first call of the turn, on any of them.
     """
 
     image_capacity: media.ImageCapacity
@@ -235,15 +239,19 @@ class Recorded(processing.Processor):
         return chosen
 
     def turns(self, after: int) -> collections.abc.Iterator[processing.InputData]:
-        """Every call of the turns heard speech woke, from call ``after`` on: what Willy perceived of each.
+        """Every call of the turns heard speech woke that Willy took up in thought, from call ``after`` on: what
+        Willy perceived of each.
 
-        A heard turn may reach reflex's decision model first and then, if it hands it on, reasoning: both calls are
-        the turn's, and only reasoning's frame offers what takes deliberation (``memory.know``).
+        A heard turn reaches reflex's decision model first and then, as each hands it on, intuition and reasoning.
+        Recall comes after reflex (D-R-52), so only intuition's and reasoning's calls carry what Willy perceived of
+        the people (``recalled``) and offer what takes thought (``memory.know``); reflex's call is not read. A turn
+        reflex settled on its own (a behavior took it, or the decision model chose) has no such call, which is
+        Willy's choice: the person waits, then says it again (``House.heard_saying``).
         """
 
         for index, call in enumerate(self.calls):
             stimulus = _stimulus(call)
-            if stimulus is not None and index >= after and _heard(stimulus):
+            if stimulus is not None and index >= after and _heard(stimulus) and call.recalled is not None:
                 yield call
 
 
@@ -521,11 +529,15 @@ async def _answers(
 async def _preflight(settings: willy_example.Settings, api_key: pydantic.SecretStr) -> None:
     async with httpx.AsyncClient(timeout=_PREFLIGHT) as client:
         # The model server is asked with the key Willy's model client sends; the speech units take none.
-        listed = await _answers(
-            client, "WILLY_LLM_URL", "mosfet-llm", _CT108, f"{settings.llm_url.rstrip('/')}/models", api_key
-        )
-        models = {model.id for model in _Models.model_validate_json(listed.content).data}
-        assert settings.model in models, f"L1 preflight: mosfet-llm does not serve WILLY_MODEL; it serves {models}"
+        for tier, url, model in (
+            ("INTUITION", settings.intuition_url, settings.intuition_model),
+            ("REASONING", settings.reasoning_url, settings.reasoning_model),
+        ):
+            listed = await _answers(
+                client, f"WILLY_{tier}_URL", "mosfet-llm", _CT108, f"{url.rstrip('/')}/models", api_key
+            )
+            models = {served.id for served in _Models.model_validate_json(listed.content).data}
+            assert model in models, f"L1 preflight: mosfet-llm does not serve WILLY_{tier}_MODEL; it serves {models}"
         urls = {
             "WILLY_STT_URL": settings.stt_url,
             "WILLY_TTS_URL": settings.tts_url,
@@ -570,7 +582,9 @@ class House:
 
         The speech server may hear one utterance as one turn or several; what was heard is every turn on it.
         Heard over Willy's voice, a voice nobody knows is never a new voice (D-R-37), so an utterance Willy talked
-        over is said again, as people do, once a turn on it shows it was not enough.
+        over is said again, as people do, once a turn on it shows it was not enough. So is one Willy did not take
+        up in thought within ``_TURN_PATIENCE_SECONDS`` (reflex settled it on its own, ignoring it, say): whether
+        Willy takes a line up is its own, and the person only says it again.
         """
 
         while True:
@@ -578,7 +592,14 @@ class House:
             after = self.mark()
             await self.microphone.say(pcm)
             talked_over = self.speaker.quiet_at > after.at
-            heard = await self.heard_since(after, step, lambda calls: enough(calls) or (talked_over and bool(calls)))
+            try:
+                heard = await asyncio.wait_for(
+                    self.heard_since(after, step, lambda calls: enough(calls) or (talked_over and bool(calls))),
+                    _TURN_PATIENCE_SECONDS,
+                )
+            except TimeoutError:
+                self.report.write("not_taken_up", step=step)
+                continue
             if enough(heard):
                 return heard
             self.report.write("talked_over", step=step)
@@ -740,16 +761,13 @@ async def _live(
             voicing_timeout=willy_example.VOICING_TIMEOUT,
         )
         minds = Minds()
-        model = Recorded(
-            openai_compat.Processor(
-                client=openai_compat.ChatClient(
-                    model=settings.model, base_url=settings.llm_url, api_key=api_key.get_secret_value()
-                ),
-                provider="willy",
-            ),
-            report,
-            minds,
+        # The bot file's own tiers (willy_example.tiers), each recorded into one shared log.
+        tiers = Tiers.of(
+            settings,
+            api_key=api_key.get_secret_value(),
+            decision_key=None if decision_key is None else decision_key.get_secret_value() or None,
         )
+        model = Recorded(tiers.reasoning, report, minds)
         willy = bot.define(
             "willy",
             bot.traits(*settings.traits.traits),
@@ -762,15 +780,8 @@ async def _live(
             ),
             bot.cognition(
                 reasoning=model,
-                reflex=Decided(
-                    decision.Processor(
-                        base_url=settings.decision_base_url,
-                        api_key=None if decision_key is None else decision_key.get_secret_value() or None,
-                        max_context_tokens=settings.decision_max_context_tokens,
-                    ),
-                    report,
-                    minds,
-                ),
+                intuition=Recorded(tiers.intuition, report, minds),
+                reflex=Decided(tiers.reflex, report, minds),
                 memory=store,
                 registries=(voices,),
                 associative=True,
@@ -779,6 +790,7 @@ async def _live(
                 seeds=(communication.speech_heard_seed(),),
                 routines=functools.partial(datetime.datetime.now, datetime.UTC),
             ),
+            Tiers.timeouts(),
             bot.input(hearing),
             bot.input(
                 identity.Identity(
@@ -862,13 +874,14 @@ async def _knows_people(house: House, settings: willy_example.Settings, speech_u
         )
         house.report.write("strangers", a=others[0], b=others[1])
         _ = await house.microphone.streaming.wait()
-        after = house.mark()
-        await house.microphone.say(await _spoken(a, _A_ARRIVES))
-        # Knowing who someone is takes deliberation (effort M): the turn's reasoning call offers it, when
-        # reflex hands the turn on. Whether it does is Willy's; the step waits for that call within its bound.
-        turn = await house.turn(
-            after, "L3", lambda call: bool(_others(call)) and memory.KnowEvent.name in _offered(call)
+        # Knowing who someone is takes thought (effort M): intuition's and reasoning's calls offer it, when reflex
+        # hands the turn on. Whether it does is Willy's; A says it again, within the step's bound, until it does.
+        heard = await house.heard_saying(
+            await _spoken(a, _A_ARRIVES),
+            "L3",
+            lambda calls: any(_others(call) and memory.KnowEvent.name in _offered(call) for call in calls),
         )
+        turn = next(call for call in heard if memory.KnowEvent.name in _offered(call))
     (stranger,) = _others(turn)
     # The typed unknown fact: a voice nobody is known by. What to do about it is Willy's.
     assert stranger.known is False, "L3: a voice Willy has never heard was shown as someone it knows"
@@ -884,9 +897,7 @@ async def _knows_people(house: House, settings: willy_example.Settings, speech_u
         )
     await house.settled()
     async with _step("L4 knowing is a capacity", _HEARD_BOUND):
-        after = house.mark()
-        await house.microphone.say(await _spoken(a, _A_AGAIN))
-        turn = await house.turn(after, "L4", lambda call: bool(_others(call)))
+        (turn, *_) = await house.heard_saying(await _spoken(a, _A_AGAIN), "L4", bool)
     (again,) = _others(turn)
     assert isinstance(known, memory.KnownData), f"L4: remembering who A is failed: {known}"
     a_person = stranger.person
@@ -932,7 +943,7 @@ async def _knows_people(house: House, settings: willy_example.Settings, speech_u
             # A turn shows Willy who it is; if none comes soon, A speaking in the room gives it one.
             with contextlib.suppress(TimeoutError):
                 turn = await asyncio.wait_for(
-                    house.turn(after, "L6", lambda call: bool(_itself(call))), _ECHO_TURN_SECONDS
+                    house.turn(after, "L6", lambda call: bool(_itself(call))), _TURN_PATIENCE_SECONDS
                 )
                 break
             await house.microphone.say(await _spoken(a, _A_PROMPTS))

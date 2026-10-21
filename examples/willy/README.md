@@ -6,7 +6,7 @@ belongs to, what to call them, and whether to ask at all are its own choices. A 
 (a cold, a phone, a whisper), and each voice is exactly one person's. Willy knows its own voice too.
 
 Everything runs locally. Willy talks to model servers on your own network, whose addresses go in `.env`: a
-language model, its embeddings, streaming speech to text, voiceprints, diarization, tone of voice, a decision
+language model for intuition and one for reasoning (the same Gemma for now), its embeddings, streaming speech to text, voiceprints, diarization, tone of voice, a decision
 model, and a speech engine that can design voices, where Willy has one voice of its own (see Mouth below).
 
 ## The bot file
@@ -30,8 +30,11 @@ with one `bot.define` that constructs every part inline, and runs it with `bot.r
   keeps only a voice's id and its description, and speaks every line from that description, so nothing in it is
   marked as Willy's: Willy knows its voice by the id its memory keeps (the `self_voice` row in the data dir) and
   checks on every start that the engine still holds it.
-- **Mind.** `bot.cognition` on the language model, its reflex on a decision model (`decision.Processor`
-  on the decision server `DECISION_BASE_URL` names, never a chat model), with associations, consolidation, autonomy, routines
+- **Mind.** `bot.cognition` in three tiers a turn takes up in order, each bounded by its own step timeout
+  (`bot.timeouts(reflex=5 s, intuition=20 s, reasoning=180 s)`): its reflex on a decision model (`decision.Processor`
+  on the decision server `DECISION_BASE_URL` names, never a chat model), its intuition on the intuition model with
+  thinking off (fixed, not a setting), and its reasoning on the reasoning model, which thinks first within
+  `WILLY_THINKING_TOKENS` and also reflects and consolidates; with associations, consolidation, autonomy, routines
   and the speech seed that takes heard speech into a conversation. Its memory recalls by the
   embedding server's vectors.
 - **Name.** `identity.Identity`: Willy is born nameless and may take a name when someone gives it one.
@@ -145,8 +148,8 @@ WILLY_HOST=127.0.0.1 WILLY_ROOMS=living-room:shelf,eval-room:table \
 
 Everything it uses is local, on Willy's own lab stack (`.env.example`): the people speak through the speech
 engine (`WILLY_TTS_URL`) in its catalog voices, never a designed voice (Willy's own is one); Willy's replies are
-heard by batch speech to text (`WILLY_TRANSCRIBE_URL`); and an evaluator model on `WILLY_LLM_URL`/`WILLY_MODEL`
-plays two parts. As the **persona** it plays each scenario's people: given the scenario's goal and what has been
+heard by batch speech to text (`WILLY_TRANSCRIBE_URL`); and an evaluator model on Willy's reasoning model
+(`WILLY_REASONING_URL`/`WILLY_REASONING_MODEL`) plays two parts. As the **persona** it plays each scenario's people: given the scenario's goal and what has been
 said so far, it writes the next thing one of them says, or decides the conversation is done. Only the people's
 lines are generated; nothing Willy should say is written anywhere. As the **judge** it grades each conversation
 on a JSON schema: relevance, helpfulness, warmth (Willy's traits, `WILLY_TRAITS`), honesty (no invented facts),
@@ -155,7 +158,7 @@ rationale. Each schema is built for the scenario, so the server's structured out
 persona's names who may speak (the people's ids), bounds each line, and requires the words cut in on an interrupting
 turn and none otherwise; the judge's offers the scenario's criteria, one grade each. An answer that still fails its
 check is shown back once; failing twice, the persona ends the scenario and the judge's conversation is recorded
-ungraded. The judge is Willy's own model by default, so it may favour answers like its own; the report says so.
+ungraded. The judge is Willy's own reasoning model by default, so it may favour answers like its own; the report says so.
 `--judge-url` and `--judge-model` name a bigger one.
 
 The person takes turns as people in a room do: they speak only once Willy's voice has died away (what the room's
@@ -185,7 +188,7 @@ scenario and overall) and `report.html` (one page with nothing fetched: scores, 
 no replies and the transcripts, with each exchange's audio). The last line on stdout is a one-line summary;
 diagnostics go to stderr. Exit codes are the room's: `0` the evaluation finished, whatever it found, `1` it could
 not (the room's session ended or was refused, a service failed, or `--out` cannot be made), `64` bad flags (an
-unknown `--scenario` included), `78` a missing setting (`WILLY_LLM_URL`, `WILLY_MODEL`, `WILLY_TTS_URL`,
+unknown `--scenario` included), `78` a missing setting (`WILLY_REASONING_URL`, `WILLY_REASONING_MODEL`, `WILLY_TTS_URL`,
 `WILLY_TRANSCRIBE_URL`) or secret. Its telemetry (meter scope `willy_example.evaluate`) counts exchanges by
 outcome and scenarios by whether they were graded, and records each latency; nothing said, no scenario and no
 person is an attribute.
@@ -194,8 +197,9 @@ person is an attribute.
 
 | Variable | Default | What it is |
 |---|---|---|
-| `WILLY_LLM_URL`, `WILLY_MODEL` | required | Willy's language model, an OpenAI-compatible `/v1` root, and its name |
-| `WILLY_THINKING_TOKENS` | `256` | how many tokens the language model may think for on a reasoning turn before it chooses what to do (the chat template's thinking channel, capped by vLLM's `thinking_token_budget`); `0` turns thinking off |
+| `WILLY_INTUITION_URL`, `WILLY_INTUITION_MODEL` | required | the model Willy's intuition answers on, with thinking off, an OpenAI-compatible `/v1` root, and its name |
+| `WILLY_REASONING_URL`, `WILLY_REASONING_MODEL` | required | the model Willy's reasoning thinks on, and reflects and consolidates on, an OpenAI-compatible `/v1` root, and its name |
+| `WILLY_THINKING_TOKENS` | `1024` | how many tokens reasoning may think for before it chooses what to do (the chat template's thinking channel, capped by vLLM's `thinking_token_budget`); `0` turns its thinking off; intuition never thinks first |
 | `WILLY_EMBED_URL`, `WILLY_EMBED_MODEL` | required | memory's embeddings, an OpenAI-compatible `/v1` root, and the model's name |
 | `WILLY_STT_URL` | required | streaming speech to text, a `ws://` root |
 | `WILLY_TRANSCRIBE_URL` | required | batch transcription, which Willy hears its own name through, a `/v1` root |
