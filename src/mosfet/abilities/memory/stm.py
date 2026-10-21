@@ -1,10 +1,16 @@
-"""Short-term memory register: bounded rolling record of admitted stimuli.
+"""Short-term memory register: bounded rolling record of admitted stimuli and of turns.
 
 The register is sensory short-term memory at the event layer, not a durable memory stream.
 One row per admitted environment stimulus, written immediately, evicted by capacity in the
 same transaction. It grounds actors (e.g. Learning) in the actual signal the bot received:
 name, envelope identity, and a bounded scalar payload projection. Raw media, long text, and
 nested structures are dropped by the projection, never stored.
+
+Beside it the register keeps turns: one row per message a Conversation committed, what the bot
+heard and what it said, in words (``TurnEvent``). A turn's text is bounded at
+``MAX_TURN_TEXT_BYTES`` and cut at a whole word, never dropped. Turns have their own capacity
+(evicted oldest first in the same transaction) and recency window, both injected, and are read
+oldest first with ``RecentTurnsEvent``. They never reach the scalar register Learning reads.
 
 Retention is access-reinforced (reconsolidation discipline): grounding an entry stamps its
 access time, and both recall and eviction read the effective clock max(created_at,
@@ -15,7 +21,9 @@ Nothing sent to the register is lost silently. A request it cannot serve (while 
 degraded, or not attached) is answered with the failed event, ``unavailable: …``; a notification
 it cannot apply is counted. Telemetry: ``bot.ability.request.dropped.count`` with
 ``bot.ability.name`` = ``StmMemory``, ``bot.ability.drop.reason`` ∈ {detached, detaching,
-degraded} and ``bot.ability.replied`` ∈ {true, false}: 6 series.
+degraded} and ``bot.ability.replied`` ∈ {true, false}: 6 series. ``bot.memory.stm.turn.recorded.count``
+counts turns written, by ``bot.turn.direction`` ∈ {heard, said} and ``bot.turn.cut`` ∈ {true, false}:
+4 series.
 """
 
 from __future__ import annotations
@@ -37,6 +45,7 @@ import uuid
 import hsm
 import mosfet
 import pydantic
+from opentelemetry import metrics
 from sqlalchemy import delete
 from sqlalchemy import func
 from sqlalchemy import insert
@@ -53,8 +62,19 @@ ProjectionPayload: typing.TypeAlias = dict[str, ProjectionValue]
 _DEFAULT_CAPACITY = 64
 _MAX_LIMIT = 256
 _DEFAULT_RECENCY_WINDOW = datetime.timedelta(minutes=5)
+MAX_TURN_TEXT_BYTES = 2048
+"""Most UTF-8 bytes of one turn's text; a longer turn is cut at a whole word."""
+MAX_TURN_SPEAKERS = 8
+"""Most participants one turn names as its speakers."""
+_DEFAULT_TURN_CAPACITY = 32
+_DEFAULT_TURN_WINDOW = datetime.timedelta(minutes=10)
 
 _LOG = logging.getLogger(__name__)
+_TURNS_RECORDED = metrics.get_meter("bot.abilities.memory").create_counter(
+    "bot.memory.stm.turn.recorded.count",
+    unit="{turn}",
+    description="Turns the short-term register wrote, by direction and whether the text was cut.",
+)
 
 
 def _utc_text(moment: datetime.datetime) -> str:
@@ -363,6 +383,214 @@ class RecentOutputData(pydantic.BaseModel):
     )
 
 
+TurnDirection: typing.TypeAlias = typing.Literal["heard", "said"]
+
+
+def _cut_at_word(words: str) -> tuple[str, bool]:
+    """``words`` within ``MAX_TURN_TEXT_BYTES``, cut at the last whole word, and whether it was cut.
+
+    A text with no word break inside the bound is cut on the last whole character instead.
+    """
+
+    encoded = words.encode()
+    if len(encoded) <= MAX_TURN_TEXT_BYTES:
+        return words, False
+    head = encoded[:MAX_TURN_TEXT_BYTES].decode(errors="ignore")
+    if not (head[-1:].isspace() or words[len(head)].isspace()):
+        # The bound fell inside a word: drop that partial word.
+        whole = head.rsplit(maxsplit=1)
+        head = whole[0] if len(whole) > 1 else head
+    return head.rstrip(), True
+
+
+class TurnRecordData(pydantic.BaseModel):
+    """One committed message to remember as a turn: who spoke, in which direction, and the words.
+
+    The register stamps the time it is written (``Turn.at``). Build one with ``TurnRecordData.of``,
+    which cuts long text at a whole word and says so in ``cut``.
+    """
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
+        frozen=True,
+        extra="forbid",
+        json_schema_extra={
+            "description": (
+                "A turn of a conversation to remember: what the bot heard or said, who said it, and the words, "
+                "bounded and cut at a whole word."
+            ),
+            "examples": [
+                {
+                    "id": "turn-1",
+                    "direction": "heard",
+                    "speakers": [{"ref": "voice:3f2a9c", "role": "source"}],
+                    "text": "Hi Willy, I'm Maya.",
+                    "cut": False,
+                    "conversation": "conversation-1",
+                }
+            ],
+        },
+    )
+
+    id: str = pydantic.Field(
+        min_length=1,
+        description=(
+            "Id of the committed message: the provenance id of the event that committed it, so a reader can tell "
+            "the turn that is its own stimulus from the turns before it."
+        ),
+        examples=["turn-1"],
+    )
+    direction: TurnDirection = pydantic.Field(
+        description="'heard' for a message someone sent the bot, 'said' for a message the bot sent.",
+        examples=["heard", "said"],
+    )
+    speakers: tuple[mosfet.Participant, ...] = pydantic.Field(
+        default=(),
+        max_length=MAX_TURN_SPEAKERS,
+        description=(
+            "Who said it, as their producers stamped them: the inbound message's source participants for a heard "
+            "turn, the participants stamped on the bot's own message (its own voice) for a said turn. Empty when "
+            "no producer stamped anyone."
+        ),
+        examples=[
+            [{"ref": "voice:3f2a9c", "role": "source"}],
+            [{"ref": "voice:tts:warm", "role": "source", "own": True}],
+        ],
+    )
+    text: str = pydantic.Field(
+        min_length=1,
+        description=f"The words of the turn, at most {MAX_TURN_TEXT_BYTES} UTF-8 bytes, cut at a whole word.",
+        examples=["Hi Willy, I'm Maya."],
+    )
+    cut: bool = pydantic.Field(
+        default=False,
+        description="True when the words were longer than the bound and ``text`` holds only their beginning.",
+        examples=[False],
+    )
+    conversation: str = pydantic.Field(
+        min_length=1,
+        description="Id of the Conversation that committed the message.",
+        examples=["conversation-1"],
+    )
+
+    @pydantic.field_validator("text")
+    @classmethod
+    def _bound_text(cls, text: str) -> str:
+        if len(text.encode()) > MAX_TURN_TEXT_BYTES:
+            raise ValueError(f"turn text must be at most {MAX_TURN_TEXT_BYTES} UTF-8 bytes; build it with of().")
+        return text
+
+    @classmethod
+    def of(
+        cls,
+        *,
+        id: str,
+        direction: TurnDirection,
+        speakers: collections.abc.Sequence[mosfet.Participant],
+        words: str,
+        conversation: str,
+    ) -> TurnRecordData:
+        """The turn for ``words``, cut at a whole word when they are longer than ``MAX_TURN_TEXT_BYTES``."""
+
+        text, cut = _cut_at_word(words)
+        return cls(
+            id=id,
+            direction=direction,
+            speakers=tuple(speakers[:MAX_TURN_SPEAKERS]),
+            text=text,
+            cut=cut,
+            conversation=conversation,
+        )
+
+
+class Turn(TurnRecordData):
+    """One remembered turn, read back from the register: the record and when the register wrote it."""
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
+        frozen=True,
+        extra="forbid",
+        json_schema_extra={
+            "description": "A remembered turn: what the bot heard or said, who said it, the words, and when.",
+            "examples": [
+                {
+                    "id": "turn-1",
+                    "at": "2026-07-07T12:00:00.123456Z",
+                    "direction": "heard",
+                    "speakers": [{"ref": "voice:3f2a9c", "role": "source"}],
+                    "text": "Hi Willy, I'm Maya.",
+                    "cut": False,
+                    "conversation": "conversation-1",
+                }
+            ],
+        },
+    )
+
+    at: datetime.datetime = pydantic.Field(
+        description="When the register wrote the turn, timezone-aware UTC.",
+        examples=["2026-07-07T12:00:00.123456Z"],
+    )
+
+
+class RecentTurnsData(pydantic.BaseModel):
+    """Read the most recent turns inside the recency window, oldest first."""
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
+        frozen=True,
+        extra="forbid",
+        json_schema_extra={
+            "description": (
+                "Short-term memory read of turns: the newest turns inside the recency window, returned oldest "
+                "first. within may narrow the register's window, never widen it."
+            ),
+            "examples": [{"limit": 32}, {"limit": 8, "within": "PT5M"}],
+        },
+    )
+
+    limit: int = pydantic.Field(
+        default=_DEFAULT_TURN_CAPACITY,
+        ge=1,
+        le=_MAX_LIMIT,
+        description="Most turns to return; the newest are kept.",
+        examples=[32],
+    )
+    within: datetime.timedelta | None = pydantic.Field(
+        default=None,
+        gt=datetime.timedelta(),
+        description="Only turns written this recently; the register's own recency window when omitted or longer.",
+        examples=["PT5M"],
+    )
+
+
+class RecentTurnsOutputData(pydantic.BaseModel):
+    """The turns a recent-turns read found."""
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
+        frozen=True,
+        extra="forbid",
+        json_schema_extra={
+            "description": "Short-term memory read result: the most recent turns, oldest first.",
+            "examples": [
+                {
+                    "turns": [
+                        {
+                            "id": "turn-1",
+                            "at": "2026-07-07T12:00:00.123456Z",
+                            "direction": "heard",
+                            "speakers": [{"ref": "voice:3f2a9c", "role": "source"}],
+                            "text": "Hi Willy, I'm Maya.",
+                            "cut": False,
+                            "conversation": "conversation-1",
+                        }
+                    ]
+                }
+            ],
+        },
+    )
+
+    turns: tuple[Turn, ...] = pydantic.Field(
+        description="Turns inside the recency window, oldest first; empty when none.",
+    )
+
+
 RecordEvent = hsm.Event[RecordData](
     name="bot.ability.memory.stm.record",
     schema=RecordData,
@@ -387,27 +615,48 @@ RecentOutputEvent = hsm.Event[RecentOutputData](
 )
 """Reply to ``RecentEvent``, sent to the request's ``source`` with the request's ``id``."""
 
+TurnEvent = hsm.Event[TurnRecordData](
+    name="bot.ability.memory.stm.turn",
+    schema=TurnRecordData,
+)
+"""Notification: write one turn and evict turns beyond capacity. No reply."""
+
+RecentTurnsEvent = hsm.Event[RecentTurnsData](
+    name="bot.ability.memory.stm.recent_turns",
+    schema=RecentTurnsData,
+)
+"""Request: read the most recent turns; answered with ``RecentTurnsOutputEvent`` or the failed event."""
+
+RecentTurnsOutputEvent = hsm.Event[RecentTurnsOutputData](
+    name="bot.ability.memory.stm.recent_turns.output",
+    schema=RecentTurnsOutputData,
+)
+"""Reply to ``RecentTurnsEvent``, sent to the request's ``source`` with the request's ``id``."""
+
 _SettledEvent = hsm.Event[None](
     name="bot.ability.memory.stm.settled",
     kind=hsm.CompletionEventKind,
     schema=type(None),
 )
 
-_REQUESTS = (store.MemoryStore.input_event, RecentEvent)
+_REQUESTS = (store.MemoryStore.input_event, RecentEvent, RecentTurnsEvent)
 """Requests the register answers."""
-_NOTIFICATIONS = (RecordEvent, ReinforceEvent)
+_NOTIFICATIONS = (RecordEvent, ReinforceEvent, TurnEvent)
 """Notifications the register applies without a reply."""
 
 
 class StmMemory(store.MemoryStore):
-    """Short-term memory of admitted stimuli: capacity-bounded, access-reinforced.
+    """Short-term memory of admitted stimuli and of turns: capacity-bounded, access-reinforced.
 
     A state machine reached by message only. ``RecordEvent`` writes one stimulus projection
     and evicts beyond capacity inside one transaction; ``ReinforceEvent`` stamps access times
-    on entries grounding relied on, so used signals outlive arrival churn. Both are
+    on entries grounding relied on, so used signals outlive arrival churn; ``TurnEvent`` writes
+    one turn and evicts turns beyond ``turn_capacity`` inside one transaction. All three are
     notifications: perception upkeep never blocks its sender, and a failed write is logged
     here. ``RecentEvent`` reads entries inside the recency window ordered by the effective
-    clock and is answered with ``RecentOutputEvent`` (or the failed event) at the requester.
+    clock and is answered with ``RecentOutputEvent`` (or the failed event) at the requester;
+    ``RecentTurnsEvent`` reads the newest turns inside ``turn_window``, oldest first, and is
+    answered with ``RecentTurnsOutputEvent`` (or the failed event).
     The inherited statement-transaction request stays available for maintenance. Requests
     are applied one at a time; the rest wait. A detach enters the register's own
     ``detaching`` state, so whatever still waits there is answered unavailable or counted.
@@ -429,6 +678,8 @@ class StmMemory(store.MemoryStore):
     _attachment_group: attachment.Group | None
     _capacity: int
     _recency_window: datetime.timedelta
+    _turn_capacity: int
+    _turn_window: datetime.timedelta
     _now: collections.abc.Callable[[], datetime.datetime]
 
     def __init__(
@@ -441,6 +692,8 @@ class StmMemory(store.MemoryStore):
         database: str = ":memory:",
         capacity: int = _DEFAULT_CAPACITY,
         recency_window: datetime.timedelta | None = None,
+        turn_capacity: int = _DEFAULT_TURN_CAPACITY,
+        turn_window: datetime.timedelta = _DEFAULT_TURN_WINDOW,
         now: collections.abc.Callable[[], datetime.datetime] | None = None,
     ) -> None:
         super().__init__(id=id, clock=clock, engine=engine, connection=connection, database=database)
@@ -448,8 +701,14 @@ class StmMemory(store.MemoryStore):
             raise ValueError("capacity must be positive.")
         if recency_window is not None and recency_window <= datetime.timedelta():
             raise ValueError("recency_window must be positive.")
+        if turn_capacity <= 0:
+            raise ValueError("turn_capacity must be positive.")
+        if turn_window <= datetime.timedelta():
+            raise ValueError("turn_window must be positive.")
         self._capacity = capacity
         self._recency_window = recency_window if recency_window is not None else _DEFAULT_RECENCY_WINDOW
+        self._turn_capacity = turn_capacity
+        self._turn_window = turn_window
         self._now = now if now is not None else (lambda: datetime.datetime.now(datetime.timezone.utc))
         self._attachment_group = attachment.Group()
 
@@ -506,6 +765,59 @@ class StmMemory(store.MemoryStore):
         rows = tuple(row.as_mapping() for row in output.results[0].rows)
         return RecentOutputData(entries=tuple(self._observed_from_row(row) for row in rows))
 
+    def _record_turn(self, data: TurnRecordData) -> None:
+        table = schema.stm_turn_table
+        insert_clause = insert(table).values(
+            turn_id=data.id,
+            at=_utc_text(self._now()),
+            direction=data.direction,
+            speakers_json=json.dumps([speaker.model_dump(mode="json") for speaker in data.speakers]),
+            text=data.text,
+            cut=int(data.cut),
+            conversation=data.conversation,
+        )
+        evict_clause = delete(table).where(
+            table.c.seq.not_in(select(table.c.seq).order_by(table.c.seq.desc()).limit(self._turn_capacity))
+        )
+        _ = self._execute(store.InputData(statements=store.compile_statements(insert_clause, evict_clause)))
+        _TURNS_RECORDED.add(1, {"bot.turn.direction": data.direction, "bot.turn.cut": str(data.cut).lower()})
+
+    def _recent_turns(self, data: RecentTurnsData) -> RecentTurnsOutputData:
+        table = schema.stm_turn_table
+        window = self._turn_window if data.within is None else min(data.within, self._turn_window)
+        clause = (
+            select(
+                table.c.turn_id,
+                table.c.at,
+                table.c.direction,
+                table.c.speakers_json,
+                table.c.text,
+                table.c.cut,
+                table.c.conversation,
+            )
+            .where(table.c.at >= _utc_text(self._now() - window))
+            .order_by(table.c.seq.desc())
+            .limit(data.limit)
+        )
+        output = self._execute(store.InputData(statements=store.compile_statements(clause)))
+        newest_first = tuple(row.as_mapping() for row in output.results[0].rows)
+        return RecentTurnsOutputData(
+            turns=tuple(
+                Turn.model_validate(
+                    {
+                        "id": row["turn_id"],
+                        "at": row["at"],
+                        "direction": row["direction"],
+                        "speakers": json.loads(str(row["speakers_json"])),
+                        "text": row["text"],
+                        "cut": bool(row["cut"]),
+                        "conversation": row["conversation"],
+                    }
+                )
+                for row in reversed(newest_first)
+            )
+        )
+
     @staticmethod
     def _observed_from_row(row: dict[str, store.ParameterValue]) -> ObservedEvent:
         stm_id = row.get("stm_id")
@@ -538,7 +850,9 @@ class StmMemory(store.MemoryStore):
     @staticmethod
     def _is_request(ctx: hsm.Context, instance: "StmMemory", event: hsm.Event[typing.Any]) -> bool:
         del ctx, instance
-        return isinstance(event.data, store.InputData | RecordData | ReinforceData | RecentData)
+        return isinstance(
+            event.data, store.InputData | RecordData | ReinforceData | RecentData | TurnRecordData | RecentTurnsData
+        )
 
     @staticmethod
     def _reply(
@@ -600,11 +914,15 @@ class StmMemory(store.MemoryStore):
                 instance._reinforce(data)
             elif isinstance(data, RecentData):
                 StmMemory._reply(ctx, instance, event, RecentOutputEvent.with_data(instance._recent(data)))
+            elif isinstance(data, TurnRecordData):
+                instance._record_turn(data)
+            elif isinstance(data, RecentTurnsData):
+                StmMemory._reply(ctx, instance, event, RecentTurnsOutputEvent.with_data(instance._recent_turns(data)))
             else:
                 assert isinstance(data, store.InputData)
                 StmMemory._reply(ctx, instance, event, instance.output_event.with_data(instance._execute(data)))
         except Exception as error:
-            if isinstance(data, RecordData | ReinforceData):
+            if isinstance(data, RecordData | ReinforceData | TurnRecordData):
                 # Notifications have no requester to tell; the register's own log is the record.
                 _LOG.warning("short-term memory %s failed: %r", event.name, error)
             else:
@@ -694,15 +1012,25 @@ class StmMemory(store.MemoryStore):
 
 __all__ = [
     "MAX_PROJECTION_TEXT_LENGTH",
+    "MAX_TURN_SPEAKERS",
+    "MAX_TURN_TEXT_BYTES",
     "ObservedEvent",
     "RecentData",
     "RecentEvent",
     "RecentOutputData",
     "RecentOutputEvent",
+    "RecentTurnsData",
+    "RecentTurnsEvent",
+    "RecentTurnsOutputData",
+    "RecentTurnsOutputEvent",
     "RecordData",
     "RecordEvent",
     "ReinforceData",
     "ReinforceEvent",
     "StmMemory",
+    "Turn",
+    "TurnDirection",
+    "TurnEvent",
+    "TurnRecordData",
     "event_record",
 ]

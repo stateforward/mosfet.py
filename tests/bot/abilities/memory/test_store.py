@@ -186,8 +186,9 @@ def test_open_sqlite_engine_rejects_an_unversioned_database_that_holds_memory_ta
         _ = store_module.open_sqlite_engine(database=str(path))
 
 
-def test_the_one_baseline_revision_creates_and_drops_every_memory_table() -> None:
-    """Revision 0001 is the whole schema (relational, behavior, register, episodic graph); no data moves."""
+def test_the_revisions_create_and_drop_every_memory_table() -> None:
+    """Revision 0001 is the baseline (relational, behavior, register, episodic graph) and 0002 adds the turns of
+    short-term memory; no data moves."""
 
     from alembic import command
     from alembic.script import ScriptDirectory
@@ -196,7 +197,7 @@ def test_the_one_baseline_revision_creates_and_drops_every_memory_table() -> Non
     from mosfet.abilities.memory import store as store_module
 
     config = store_module.migration_config()
-    assert [script.revision for script in ScriptDirectory.from_config(config).walk_revisions()] == ["0001"]
+    assert [script.revision for script in ScriptDirectory.from_config(config).walk_revisions()] == ["0002", "0001"]
     engine = create_engine("sqlite+pysqlite://")
     with engine.begin() as connection:
         config.attributes["connection"] = connection

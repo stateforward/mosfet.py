@@ -25,6 +25,7 @@ import pydantic
 import pytest
 
 from tests import metric_reader
+from tests.bot.abilities.support import shared_hsm_context, start_abilities_for_test
 from tests.hsm_instance_state import start_ability_tree
 
 _PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
@@ -1869,3 +1870,43 @@ def test_an_inbound_turn_opens_a_new_exchange_that_never_carries_the_last_one() 
     assert [(item.direction, item.content) for item in first.messages] == [("inbound", "A")]
     assert [(item.direction, item.content) for item in reply.messages] == [("inbound", "A"), ("outbound", "and this")]
     assert [(item.direction, item.content) for item in second.messages] == [("inbound", "B")]
+
+
+def test_every_committed_message_is_written_to_short_term_memory_as_heard_or_said() -> None:
+    """Conversation keeps one exchange; what was heard and said before it lives in the injected register."""
+
+    async def run() -> tuple[tuple[memory.stm.Turn, ...], str, mosfet.Participant]:
+        context = shared_hsm_context()
+        register = memory.StmMemory()
+        await start_abilities_for_test(context, register)
+        target = conversation.Conversation(stm_memory=register)
+        await start_ability_tree(context, target)
+        turn, (_, heard) = _speech_turn("3f2a9c")
+        _ = await ability.run_terminal_operation(
+            context,
+            child=target,
+            request=target.input_event.with_data_and_id(turn, "turn-1"),
+            terminals=(conversation.OutputEvent, cognition.InputEvent, conversation.FailedEvent),
+            timeout=datetime.timedelta(seconds=20),
+        )
+        said = _outbound().model_copy(update={"participants": (_OWN_VOICE,)})
+        _ = await conversation.append_conversation_message(target, said, ctx=context)
+        reply = await ability.run_terminal_operation(
+            context,
+            child=register,
+            request=memory.stm.RecentTurnsEvent.with_data_and_id(memory.stm.RecentTurnsData(), "read-1"),
+            terminals=(memory.stm.RecentTurnsOutputEvent, register.failed_event),
+            timeout=datetime.timedelta(seconds=5),
+        )
+        assert isinstance(reply.data, memory.stm.RecentTurnsOutputData), reply.data
+        return reply.data.turns, hsm.id(target), heard
+
+    turns, conversation_id, heard = asyncio.run(run())
+
+    assert [(turn.direction, turn.text, turn.speakers) for turn in turns] == [
+        ("heard", "hello", (heard,)),
+        ("said", "and this", (_OWN_VOICE,)),
+    ]
+    assert turns[0].id == "turn-1"
+    assert turns[1].id
+    assert {turn.conversation for turn in turns} == {conversation_id}

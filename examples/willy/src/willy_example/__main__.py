@@ -136,7 +136,9 @@ if __name__ == "__main__":
         voice_diarizer=speech_server.Diarizer(base_url=settings.diar_url),
         affect_classifier=speech_server.AffectClassifier(base_url=settings.emotion_url),
     )
-    talk = conversation.Conversation()
+    # The body's sensory register; Conversation writes what Willy heard and said there, so it is the same one.
+    register = memory.StmMemory()
+    talk = conversation.Conversation(stm_memory=register)
     mouth = speaking.Speaking(
         encoder=lambda key, description: openai_compat.SpeechEncoder(
             model=SPEECH_MODEL,
@@ -154,6 +156,7 @@ if __name__ == "__main__":
     willy = bot.define(
         "willy",
         bot.traits(*settings.traits.traits),
+        bot.register(register),
         bot.voice(
             speech_server.Catalog(settings.tts_url, source=VOICE_SOURCE, languages=LANGUAGES),
             designer=speech_server.Designer(settings.tts_url, source=VOICE_SOURCE),

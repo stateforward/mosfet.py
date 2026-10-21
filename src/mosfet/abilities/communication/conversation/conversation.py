@@ -33,6 +33,7 @@ from pydantic.json_schema import SkipJsonSchema
 from mosfet import event, media
 from mosfet.abilities import cognition
 from mosfet.abilities.listening import interpretation
+from mosfet.abilities.memory import stm
 from mosfet import telemetry
 from mosfet.telemetry import span
 
@@ -913,6 +914,11 @@ class Conversation(ability.Ability[TurnData, Exchange]):
 
     It keeps only the current exchange: an inbound commit opens a new one, the
     bot's outbound messages join it, and the next inbound replaces it.
+
+    ``stm_memory`` is the injected short-term register (the body's ``bot.register``):
+    every committed message with words is written there as a ``stm.TurnEvent``, heard
+    for an inbound message and said for the bot's own, so what was said before the
+    current exchange is remembered there, not here.
     """
 
     input_data_type: typing.ClassVar[type[object] | tuple[type[object], ...] | None] = TurnData
@@ -940,6 +946,7 @@ class Conversation(ability.Ability[TurnData, Exchange]):
     # event that opened it. The next inbound commit replaces both.
     _exchange: list[Message]
     _exchange_parent: mosfet.StimulusData[TurnData] | None
+    _stm_memory: stm.StmMemory | None
     # Durable, bounded: participants stamped on outbound messages committed since the last cognition handoff,
     # carried into the next one and then cleared.
     _outbound_participants: list[mosfet.Participant]
@@ -954,6 +961,7 @@ class Conversation(ability.Ability[TurnData, Exchange]):
         typing: language.TextGeneration | None = None,
         encoding: encoding_module.Encoding[typing.Any, str | bytes] | None = None,
         encoder: encoding_module.Encoder[typing.Any, str | bytes] | None = None,
+        stm_memory: stm.StmMemory | None = None,
     ) -> None:
         if turn_detector is not None and turn_detector_factory is not None:
             raise ValueError("Conversation accepts turn_detector or turn_detector_factory, not both.")
@@ -975,6 +983,7 @@ class Conversation(ability.Ability[TurnData, Exchange]):
         self._relationships = []
         self._exchange = []
         self._exchange_parent = None
+        self._stm_memory = stm_memory
         self._outbound_participants = []
 
     @property
@@ -1129,6 +1138,27 @@ class Conversation(ability.Ability[TurnData, Exchange]):
             )
             committed = message.model_copy(update={"provenance": provenance})
             instance._exchange.append(committed)
+            if instance._stm_memory is not None and isinstance(committed.content, str) and committed.content.strip():
+                # What the bot said, remembered past this exchange: a one-way message, as the body records.
+                said = stm.TurnRecordData.of(
+                    id=committed.provenance.id or uuid.uuid4().hex,
+                    direction="said",
+                    speakers=[
+                        speaker for speaker in committed.participants if speaker.role == mosfet.ParticipantRole.SOURCE
+                    ],
+                    words=committed.content,
+                    conversation=hsm.id(instance),
+                )
+                _ = hsm.dispatch(
+                    ctx,
+                    instance._stm_memory,
+                    dataclasses.replace(
+                        stm.TurnEvent.with_data(said),
+                        source=hsm.id(instance),
+                        target=hsm.id(instance._stm_memory),
+                        metadata=dict(event.metadata),
+                    ),
+                )
             # Producer-stamped (the bot's own voice on what it said): carried into the next handoff, bounded.
             carried = _distinct((*instance._outbound_participants, *committed.participants))
             instance._outbound_participants = list(carried[:_MAX_OUTBOUND_PARTICIPANTS])
@@ -1652,6 +1682,29 @@ class Conversation(ability.Ability[TurnData, Exchange]):
         # An inbound commit opens a new exchange; the one before it is not carried.
         instance._exchange = [inbound]
         instance._exchange_parent = parent
+        if instance._stm_memory is not None and isinstance(inbound.content, str) and inbound.content.strip():
+            # What the bot heard, remembered past this exchange, spoken by the turn's own sources as stamped.
+            heard = stm.TurnRecordData.of(
+                id=provenance.id or _operation_id(event),
+                direction="heard",
+                speakers=[
+                    speaker
+                    for speaker in turn_participants(input_data)
+                    if speaker.role == mosfet.ParticipantRole.SOURCE and speaker.ref in input_data.source_ids
+                ],
+                words=inbound.content,
+                conversation=hsm.id(instance),
+            )
+            _ = hsm.dispatch(
+                ctx,
+                instance._stm_memory,
+                dataclasses.replace(
+                    stm.TurnEvent.with_data(heard),
+                    source=hsm.id(instance),
+                    target=hsm.id(instance._stm_memory),
+                    metadata=dict(event.metadata),
+                ),
+            )
         handed_off = _terminal_output(
             ctx,
             instance,

@@ -80,7 +80,8 @@ Memory storage schema (`src/mosfet/abilities/memory/schema.py` plus
 revisions in `src/mosfet/abilities/memory/migrations/versions/` (package data, not an
 importable package). Revision `0001` is the one baseline: relational memory rows, behavior
 inventory, the short-term register, the episodic graph (`bot_memory_node`, `_part`,
-`_edge`, `_vector`, `_index_attempt`), and the voice and face identities (`bot_identity`). `open_sqlite_engine` and `MemoryStore(engine=...)` call
+`_edge`, `_vector`, `_index_attempt`), and the voice and face identities (`bot_identity`); revision `0002` adds the short-term memory of
+turns (`bot_stm_turn`). `open_sqlite_engine` and `MemoryStore(engine=...)` call
 `store.migrate(engine)`, which upgrades to head; a database holding memory tables without an
 `alembic_version` table matches no revision and raises `store.MigrationError`. Provider vector
 tables (`bot_memory_vec_*`, created by `sqlite_memory.VecIndex`, and `bot_identity_vec_*`,

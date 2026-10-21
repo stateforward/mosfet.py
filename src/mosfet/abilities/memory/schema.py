@@ -40,6 +40,9 @@ MEMORY_TABLE = "bot_memory"
 # Logical table name for the short-term memory register (dialect-neutral identifier).
 STM_MEMORY_TABLE = "bot_stm_memory"
 
+# Logical table name for the short-term memory of turns: what the bot heard and said.
+STM_TURN_TABLE = "bot_stm_turn"
+
 # Episodic graph tables.
 NODE_TABLE = "bot_memory_node"
 PART_TABLE = "bot_memory_part"
@@ -105,6 +108,25 @@ stm_memory_table = Table(
     Column("last_accessed_at", Text, nullable=True),
     Index("bot_stm_memory_recent_idx", "stimulus_name", "created_at"),
     Index("bot_stm_memory_created_idx", "created_at"),
+)
+
+# Short-term memory of turns: one row per message a Conversation committed, in words. ``seq`` is the
+# write order (capacity evicts the lowest); ``at`` is microsecond UTC ISO text, so text order is
+# chronological order. Text is bounded and cut at a whole word by the recording ability (``cut``);
+# capacity and the recency window are enforced there too, not by the schema.
+stm_turn_table = Table(
+    STM_TURN_TABLE,
+    metadata,
+    Column("seq", Integer, primary_key=True, autoincrement=True),
+    Column("turn_id", Text, nullable=False),
+    Column("at", Text, nullable=False),
+    Column("direction", Text, nullable=False),
+    Column("speakers_json", Text, nullable=False, server_default="[]"),
+    Column("text", Text, nullable=False),
+    Column("cut", Integer, nullable=False, server_default="0"),
+    Column("conversation", Text, nullable=False),
+    Index("bot_stm_turn_at_idx", "at"),
+    sqlite_autoincrement=True,
 )
 
 # One graph node. ``seq`` is the insertion order (it breaks same-instant ties and keys every
@@ -241,6 +263,7 @@ __all__ = [
     "PART_TABLE",
     "PERSON_REF_TABLE",
     "STM_MEMORY_TABLE",
+    "STM_TURN_TABLE",
     "VECTOR_INDEX_PREFIX",
     "VECTOR_TABLE",
     "edge_table",
@@ -252,5 +275,6 @@ __all__ = [
     "part_table",
     "person_ref_table",
     "stm_memory_table",
+    "stm_turn_table",
     "vector_table",
 ]

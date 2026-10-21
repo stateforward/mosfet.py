@@ -487,3 +487,162 @@ def test_a_register_that_cannot_open_its_database_fails_its_attach(tmp_path: pat
     assert failed.data.kind is attachment.FailureKind.INITIALIZATION
     assert "MigrationError" in failed.data.message
     assert state == "/StmMemoryLifecycle/attached/behavior/degraded"
+
+
+# --- turns: what was heard and said ------------------------------------------------------------------------------
+
+_MAYA = mosfet.Participant(ref="voice:3f2a9c", role=mosfet.ParticipantRole.SOURCE)
+_OWN = mosfet.Participant(ref="voice:tts:warm", role=mosfet.ParticipantRole.SOURCE, own=True)
+
+
+def _turn(
+    words: str, *, direction: typing.Literal["heard", "said"] = "heard", id: str | None = None
+) -> stm.TurnRecordData:
+    return stm.TurnRecordData.of(
+        id=id or words,
+        direction=direction,
+        speakers=(_MAYA,) if direction == "heard" else (_OWN,),
+        words=words,
+        conversation="conversation-1",
+    )
+
+
+async def _record_turn(peer: _Peer, turn: stm.TurnRecordData) -> None:
+    _ = await hsm.dispatch(peer.ctx, peer.register, stm.TurnEvent.with_data(turn))
+    # Requests are applied in arrival order: a read answered after it proves the write landed.
+    _ = await _recent_turns(peer, limit=1)
+
+
+async def _recent_turns(
+    peer: _Peer, *, limit: int = 32, within: datetime.timedelta | None = None
+) -> tuple[stm.Turn, ...]:
+    terminal = await ability.run_terminal_operation(
+        peer.ctx,
+        child=peer.register,
+        request=stm.RecentTurnsEvent.with_data_and_id(
+            stm.RecentTurnsData(limit=limit, within=within), uuid.uuid4().hex
+        ),
+        terminals=(stm.RecentTurnsOutputEvent, peer.register.failed_event),
+        timeout=datetime.timedelta(seconds=5),
+    )
+    assert isinstance(terminal.data, stm.RecentTurnsOutputData), terminal.data
+    return terminal.data.turns
+
+
+def test_turns_are_recorded_stamped_and_read_back_oldest_first() -> None:
+    clock = _ControlledClock()
+
+    async def scenario(peer: _Peer) -> None:
+        await _record_turn(peer, _turn("Hi Willy, I'm Maya.", id="turn-1"))
+        _advance(clock, 2.0)
+        await _record_turn(peer, _turn("Hello Maya.", direction="said", id="turn-1:said"))
+        _advance(clock, 2.0)
+        await _record_turn(peer, _turn("How are you?", id="turn-2"))
+
+        turns = await _recent_turns(peer)
+        assert [(turn.id, turn.direction, turn.text) for turn in turns] == [
+            ("turn-1", "heard", "Hi Willy, I'm Maya."),
+            ("turn-1:said", "said", "Hello Maya."),
+            ("turn-2", "heard", "How are you?"),
+        ]
+        assert [turn.at for turn in turns] == [
+            _TIMELINE_START,
+            _TIMELINE_START + datetime.timedelta(seconds=2),
+            _TIMELINE_START + datetime.timedelta(seconds=4),
+        ]
+        assert turns[0].speakers == (_MAYA,)
+        assert turns[1].speakers == (_OWN,)
+        assert {turn.conversation for turn in turns} == {"conversation-1"}
+        assert not any(turn.cut for turn in turns)
+        # A limit keeps the newest turns, still oldest first.
+        assert [turn.id for turn in await _recent_turns(peer, limit=2)] == ["turn-1:said", "turn-2"]
+        # Turns never reach the scalar register Learning reads.
+        assert await peer.recent(limit=16) == ()
+
+    _run(memory.StmMemory(now=clock), scenario)
+
+
+def test_turns_beyond_capacity_are_evicted_oldest_first() -> None:
+    clock = _ControlledClock()
+
+    async def scenario(peer: _Peer) -> None:
+        for words in "one", "two", "three", "four":
+            await _record_turn(peer, _turn(words))
+            _advance(clock, 1.0)
+        assert [turn.text for turn in await _recent_turns(peer)] == ["three", "four"]
+
+    _run(memory.StmMemory(turn_capacity=2, now=clock), scenario)
+
+
+def test_turns_outside_the_recency_window_are_not_read() -> None:
+    clock = _ControlledClock()
+
+    async def scenario(peer: _Peer) -> None:
+        await _record_turn(peer, _turn("first"))
+        _advance(clock, 6 * 60)
+        await _record_turn(peer, _turn("second"))
+        _advance(clock, 6 * 60)
+        await _record_turn(peer, _turn("third"))
+        # The default window is ten minutes: "first" is twelve minutes old.
+        assert [turn.text for turn in await _recent_turns(peer)] == ["second", "third"]
+        # A request may narrow the window, never widen it.
+        assert [turn.text for turn in await _recent_turns(peer, within=datetime.timedelta(minutes=1))] == ["third"]
+        assert [turn.text for turn in await _recent_turns(peer, within=datetime.timedelta(hours=1))] == [
+            "second",
+            "third",
+        ]
+
+    _run(memory.StmMemory(now=clock), scenario)
+
+
+def test_a_turn_longer_than_its_bound_is_cut_at_a_whole_word() -> None:
+    words = "word " * 1_000
+    turn = _turn(words)
+
+    assert turn.cut
+    assert len(turn.text.encode()) <= stm.MAX_TURN_TEXT_BYTES
+    assert words.startswith(turn.text)
+    assert turn.text.endswith("word")
+    assert not _turn("short and whole").cut
+    # Multi-byte text is cut on a character, never inside one.
+    wide = _turn("é" * 3_000)
+    assert wide.cut and wide.text == "é" * (stm.MAX_TURN_TEXT_BYTES // 2)
+    with pytest.raises(pydantic.ValidationError):
+        _ = stm.TurnRecordData(
+            id="turn-1",
+            direction="heard",
+            speakers=(_MAYA,),
+            text="x" * (stm.MAX_TURN_TEXT_BYTES + 1),
+            conversation="conversation-1",
+        )
+
+
+def test_turn_configuration_must_be_positive() -> None:
+    with pytest.raises(ValueError):
+        memory.StmMemory(turn_capacity=0)
+    with pytest.raises(ValueError):
+        memory.StmMemory(turn_window=datetime.timedelta(0))
+    with pytest.raises(pydantic.ValidationError):
+        _ = stm.RecentTurnsData(within=datetime.timedelta(0))
+
+
+def test_recorded_turns_are_counted_by_direction_and_cut(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def counts(reader: metric_reader.Reader) -> dict[tuple[object, object], float]:
+        return {
+            (point.attributes.get("bot.turn.direction"), point.attributes.get("bot.turn.cut")): point.value
+            for point in reader.points("bot.memory.stm.turn.recorded.count")
+        }
+
+    async def scenario(peer: _Peer) -> None:
+        await _record_turn(peer, _turn("hello"))
+        await _record_turn(peer, _turn("word " * 1_000, direction="said"))
+
+    with metric_reader.recording(tmp_path, monkeypatch) as reader:
+        before = counts(reader)
+        _run(memory.StmMemory(), scenario)
+        after = counts(reader)
+
+    changes = {key: value - before.get(key, 0.0) for key, value in after.items() if value - before.get(key, 0.0)}
+    assert changes == {("heard", "false"): 1.0, ("said", "true"): 1.0}

@@ -119,7 +119,15 @@ from .payload import (
     Who,
     approximate_tokens,
 )
-from .schema import STM_MEMORY_TABLE, memory_table, metadata, person_ref_table, stm_memory_table
+from .schema import (
+    STM_MEMORY_TABLE,
+    STM_TURN_TABLE,
+    memory_table,
+    metadata,
+    person_ref_table,
+    stm_memory_table,
+    stm_turn_table,
+)
 from .stm import ObservedEvent, RecordData, StmMemory
 from .store import (
     MEMORY_TABLE,
@@ -151,6 +159,7 @@ __all__ = [
     "SELF",
     "SELF_SUBJECT",
     "STM_MEMORY_TABLE",
+    "STM_TURN_TABLE",
     "Act",
     "AssociateEvent",
     "AssociatedEvent",
@@ -272,6 +281,7 @@ __all__ = [
     "self_fact_select_input",
     "stm",
     "stm_memory_table",
+    "stm_turn_table",
     "store",
     "transact",
 ]
