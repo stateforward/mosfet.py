@@ -565,35 +565,43 @@ def test_turns_are_recorded_stamped_and_read_back_oldest_first() -> None:
     _run(memory.StmMemory(now=clock), scenario)
 
 
-def test_turns_beyond_capacity_are_evicted_oldest_first() -> None:
+def test_a_full_turn_store_sheds_its_older_half_at_once() -> None:
     clock = _ControlledClock()
 
     async def scenario(peer: _Peer) -> None:
-        for words in "one", "two", "three", "four":
+        oldest: list[str] = []
+        for words in ("one", "two", "three", "four", "five", "six", "seven", "eight"):
             await _record_turn(peer, _turn(words))
             _advance(clock, 1.0)
-        assert [turn.text for turn in await _recent_turns(peer)] == ["three", "four"]
+            oldest.append((await _recent_turns(peer))[0].text)
+        # Four fit. The fifth sheds the older half (one, two, three) at once, and the oldest turn read
+        # stays "four" until the store is full again and the eighth sheds the next half.
+        assert oldest == ["one", "one", "one", "one", "four", "four", "four", "seven"]
+        assert [turn.text for turn in await _recent_turns(peer)] == ["seven", "eight"]
 
-    _run(memory.StmMemory(turn_capacity=2, now=clock), scenario)
+    _run(memory.StmMemory(turn_capacity=4, now=clock), scenario)
 
 
-def test_turns_outside_the_recency_window_are_not_read() -> None:
+def test_turns_leave_the_recency_window_in_half_window_steps() -> None:
     clock = _ControlledClock()
 
     async def scenario(peer: _Peer) -> None:
         await _record_turn(peer, _turn("first"))
-        _advance(clock, 6 * 60)
+        _advance(clock, 3 * 60)
         await _record_turn(peer, _turn("second"))
         _advance(clock, 6 * 60)
         await _record_turn(peer, _turn("third"))
-        # The default window is ten minutes: "first" is twelve minutes old.
-        assert [turn.text for turn in await _recent_turns(peer)] == ["second", "third"]
-        # A request may narrow the window, never widen it.
-        assert [turn.text for turn in await _recent_turns(peer, within=datetime.timedelta(minutes=1))] == ["third"]
-        assert [turn.text for turn in await _recent_turns(peer, within=datetime.timedelta(hours=1))] == [
-            "second",
-            "third",
-        ]
+        # The default window is ten minutes and its lower bound moves in five-minute steps: at 12:09 the
+        # bound is 11:55, at 12:12 it is still 12:00, so "first" (12:00) is read past ten minutes.
+        assert [turn.text for turn in await _recent_turns(peer)] == ["first", "second", "third"]
+        _advance(clock, 3 * 60)
+        assert [turn.text for turn in await _recent_turns(peer)] == ["first", "second", "third"]
+        # At 12:15 the bound steps to 12:05: "first" and "second" (12:03) leave together.
+        _advance(clock, 3 * 60)
+        assert [turn.text for turn in await _recent_turns(peer)] == ["third"]
+        # A request may narrow the window, never widen it; a narrowed window steps in its own halves.
+        assert [turn.text for turn in await _recent_turns(peer, within=datetime.timedelta(minutes=8))] == ["third"]
+        assert [turn.text for turn in await _recent_turns(peer, within=datetime.timedelta(hours=1))] == ["third"]
 
     _run(memory.StmMemory(now=clock), scenario)
 

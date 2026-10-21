@@ -6,11 +6,18 @@ same transaction. It grounds actors (e.g. Learning) in the actual signal the bot
 name, envelope identity, and a bounded scalar payload projection. Raw media, long text, and
 nested structures are dropped by the projection, never stored.
 
-Beside it the register keeps turns: one row per message a Conversation committed, what the bot
-heard and what it said, in words (``TurnEvent``). A turn's text is bounded at
-``MAX_TURN_TEXT_BYTES`` and cut at a whole word, never dropped. Turns have their own capacity
-(evicted oldest first in the same transaction) and recency window, both injected, and are read
+Beside it the register keeps turns, in words (``TurnEvent``): what the bot heard, written by
+Listening for every utterance it transcribes, and what it said, written by Conversation for every
+message the bot committed. A turn's text is bounded at ``MAX_TURN_TEXT_BYTES`` and cut at a whole
+word, never dropped. Turns have their own capacity and recency window, both injected, and are read
 oldest first with ``RecentTurnsEvent``. They never reach the scalar register Learning reads.
+
+Turns leave in chunks, never one at a time, so the oldest turn a read returns stays the same for
+many turns and a prompt built on them keeps its beginning: a write that finds the store over
+``turn_capacity`` sheds the older half at once (the newest ``turn_capacity - turn_capacity // 2``
+stay), and a read's lower bound moves in steps of half its window (whole steps since the Unix
+epoch, UTC), so a turn is read for at least the window and at most one and a half windows, and
+every turn of one step leaves together.
 
 Retention is access-reinforced (reconsolidation discipline): grounding an entry stamps its
 access time, and both recall and eviction read the effective clock max(created_at,
@@ -68,6 +75,7 @@ MAX_TURN_SPEAKERS = 8
 """Most participants one turn names as its speakers."""
 _DEFAULT_TURN_CAPACITY = 32
 _DEFAULT_TURN_WINDOW = datetime.timedelta(minutes=10)
+_EPOCH = datetime.datetime(1970, 1, 1, tzinfo=datetime.timezone.utc)
 
 _LOG = logging.getLogger(__name__)
 _TURNS_RECORDED = metrics.get_meter("bot.abilities.memory").create_counter(
@@ -667,12 +675,14 @@ class StmMemory(store.MemoryStore):
     A state machine reached by message only. ``RecordEvent`` writes one stimulus projection
     and evicts beyond capacity inside one transaction; ``ReinforceEvent`` stamps access times
     on entries grounding relied on, so used signals outlive arrival churn; ``TurnEvent`` writes
-    one turn and evicts turns beyond ``turn_capacity`` inside one transaction. All three are
-    notifications: perception upkeep never blocks its sender, and a failed write is logged
-    here. ``RecentEvent`` reads entries inside the recency window ordered by the effective
+    one turn and, when that puts the store over ``turn_capacity``, sheds the older half of the
+    turns inside the same transaction. All three are notifications: perception upkeep never
+    blocks its sender, and a failed write is logged here. ``RecentEvent`` reads entries inside the recency window ordered by the effective
     clock and is answered with ``RecentOutputEvent`` (or the failed event) at the requester;
     ``RecentTurnsEvent`` reads the newest turns inside ``turn_window``, oldest first, and is
-    answered with ``RecentTurnsOutputEvent`` (or the failed event).
+    answered with ``RecentTurnsOutputEvent`` (or the failed event). Turns leave in chunks so the
+    oldest turn read stays put between sheds: capacity sheds the older half at once, and the
+    window's lower bound advances in half-window steps (see the module docstring).
     The inherited statement-transaction request stays available for maintenance. Requests
     are applied one at a time; the rest wait. A detach enters the register's own
     ``detaching`` state, so whatever still waits there is answered unavailable or counted.
@@ -792,8 +802,12 @@ class StmMemory(store.MemoryStore):
             cut=int(data.cut),
             conversation=data.conversation,
         )
-        evict_clause = delete(table).where(
-            table.c.seq.not_in(select(table.c.seq).order_by(table.c.seq.desc()).limit(self._turn_capacity))
+        # Over capacity, the older half goes at once: the oldest turn read stays put until the next shed.
+        kept = self._turn_capacity - self._turn_capacity // 2
+        evict_clause = (
+            delete(table)
+            .where(select(func.count()).select_from(table).scalar_subquery() > self._turn_capacity)
+            .where(table.c.seq.not_in(select(table.c.seq).order_by(table.c.seq.desc()).limit(kept)))
         )
         _ = self._execute(store.InputData(statements=store.compile_statements(insert_clause, evict_clause)))
         _TURNS_RECORDED.add(1, {"bot.turn.direction": data.direction, "bot.turn.cut": str(data.cut).lower()})
@@ -801,6 +815,10 @@ class StmMemory(store.MemoryStore):
     def _recent_turns(self, data: RecentTurnsData) -> RecentTurnsOutputData:
         table = schema.stm_turn_table
         window = self._turn_window if data.within is None else min(data.within, self._turn_window)
+        # The lower bound advances in whole half-window steps, so every turn of one step leaves together.
+        step = window / 2
+        since = self._now() - window
+        floor = _EPOCH + step * ((since - _EPOCH) // step)
         clause = (
             select(
                 table.c.turn_id,
@@ -811,7 +829,7 @@ class StmMemory(store.MemoryStore):
                 table.c.cut,
                 table.c.conversation,
             )
-            .where(table.c.at >= _utc_text(self._now() - window))
+            .where(table.c.at >= _utc_text(floor))
             .order_by(table.c.seq.desc())
             .limit(data.limit)
         )
