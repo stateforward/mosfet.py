@@ -2,6 +2,8 @@ from mosfet.abilities import cognition
 from mosfet.abilities import ability
 from mosfet.abilities import memory
 from mosfet.abilities import processing
+from mosfet.abilities.communication import conversation
+from mosfet.abilities.language import text
 from mosfet.abilities.cognition import reasoning as reasoning_module
 from mosfet.environment import SoundData, SoundEvent
 
@@ -15,7 +17,7 @@ import hsm
 import mosfet
 import pydantic
 import pytest
-from mosfet import event
+from mosfet import event, media
 
 from tests.bot.abilities.support import dispatch_ability_for_test, shared_hsm_context, start_abilities_for_test
 from tests.bot.abilities.cognition.metadata_contract import assert_metadata_is_not_coordination
@@ -474,3 +476,51 @@ def test_reasoning_bounds_its_selection_repairs() -> None:
         _ = _reason_with(processor)
 
     assert len(processor.calls) == 3
+
+
+def test_a_deliberating_tier_shows_the_model_the_stimulus_itself_not_the_frames_that_carry_it() -> None:
+    """eval-4: the frames that carry a stimulus between tiers are software, not something that happened.
+
+    A model shown ``<cognition:processor_input><host_input><processing:input><input>`` around what
+    was said read it as "a system/processing event, not a direct message to me". What the deliberating
+    tier is shown is the stimulus element itself, last before the repair feedback.
+    """
+
+    async def run() -> processing.InputData:
+        ctx = shared_hsm_context()
+        exchange = conversation.OutputEvent.with_data(
+            conversation.Exchange(
+                messages=(
+                    conversation.Message(
+                        direction="inbound",
+                        source_ids=frozenset({"voice:speaker"}),
+                        target_ids=frozenset(),
+                        content="Willie, check the fridge for eggs.",
+                        content_type="text/plain",
+                        provenance=conversation.MessageProvenance(event=conversation.InputEvent.name),
+                    ),
+                )
+            )
+        )
+        processor = RecordingProcessor()
+        reasoning = cognition.Reasoning(processor=processor)
+        await start_abilities_for_test(ctx, reasoning)
+        _ = await dispatch_ability_for_test(reasoning, ctx, reasoning_input(exchange), timeout=0.5)
+        (frame,) = processor.calls
+        return frame
+
+    frame = asyncio.run(run())
+
+    rendered = "".join(
+        part.text
+        for part in cognition.types.with_selection_feedback(frame, "Rejected.").model_facing_content(
+            media.ImageCapacity()
+        )
+        if isinstance(part, text.TextPart)
+    )
+    for wrapper in ("processor_input", "host_input", "processing:input", "<input>"):
+        assert wrapper not in rendered
+    stimulus = rendered.index("<communication:exchange")
+    end = rendered.index("</communication:exchange>") + len("</communication:exchange>")
+    assert "Willie, check the fridge for eggs." in rendered[stimulus:end]
+    assert rendered[end:].startswith("\nThe previous event selection was rejected")

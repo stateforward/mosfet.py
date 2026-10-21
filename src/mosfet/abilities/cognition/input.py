@@ -40,7 +40,8 @@ from mosfet.environment import Environment
 class InputData(pydantic.BaseModel):
     """Payload of ``bot.ability.cognition.input``: stimulus plus live body references for one turn."""
 
-    __model_facing_input__: typing.ClassVar[bool] = True
+    # A model is shown the stimulus this frame carries, never the frame.
+    __model_facing_input__: typing.ClassVar[str] = "stimulus"
 
     model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
         arbitrary_types_allowed=True,

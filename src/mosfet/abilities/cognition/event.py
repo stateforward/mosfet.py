@@ -653,6 +653,11 @@ def model_facing_content(
     ``omitted="<n>"`` attribute, so a budgeted field never makes the projection fail. Items of a
     budgeted field render whole (a budgeted field inside one is not trimmed again).
 
+    A frame that only carries a stimulus between stages is software, not something that happened,
+    so it is never shown: its class names the field that holds what it carries in
+    ``__model_facing_input__`` (a field name), and the projection renders that field's value in its
+    place, frame within frame, down to the stimulus itself.
+
     Every sequence field renders ``count="<n>"`` unless its payload class names it in
     ``__model_facing_uncounted_fields__``, a set of field names: a field that grows turn over
     turn (the recent conversation) then opens the same way each turn, so a server's prefix cache
@@ -690,8 +695,11 @@ def memory_content(
         omitted = "size"
     except TypeError:
         omitted = "content"
-    if isinstance(value, pydantic.BaseModel) and getattr(type(value), "__model_facing_input__", False):
-        value = getattr(value, "stimulus", None)
+    # A frame that only carries the stimulus between stages names the field the model sees instead.
+    while isinstance(value, pydantic.BaseModel) and isinstance(
+        carried := getattr(type(value), "__model_facing_input__", None), str
+    ):
+        value = getattr(value, carried, None)
     envelope: hsm.Event[object] | None = value if isinstance(value, hsm.Event) else None
     payload: object = envelope.data if envelope is not None else value
     budget = _ProjectionBudget()
@@ -706,8 +714,11 @@ def _project(
     value: object, *, capacity: media.ImageCapacity, budget_bytes: int, memory: bool
 ) -> tuple[text.ContentPart, ...]:
     budget = _ProjectionBudget(limit_bytes=min(budget_bytes, _MAX_PROMPT_PROJECTION_BYTES), memory=memory)
-    if isinstance(value, pydantic.BaseModel) and getattr(type(value), "__model_facing_input__", False):
-        value = getattr(value, "stimulus", None)
+    # A frame that only carries the stimulus between stages names the field the model sees instead.
+    while isinstance(value, pydantic.BaseModel) and isinstance(
+        carried := getattr(type(value), "__model_facing_input__", None), str
+    ):
+        value = getattr(value, carried, None)
     envelope: hsm.Event[object] | None = value if isinstance(value, hsm.Event) else None
     payload: object = envelope.data if envelope is not None else value
     if isinstance(payload, pydantic.BaseModel):

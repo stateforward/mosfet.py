@@ -1151,10 +1151,14 @@ class InputData(pydantic.BaseModel):
     fields of ``recalled`` (the recent turns, which only grow), then the ``situation`` (the world as it
     is this turn, often unchanged), then the rest of ``recalled`` (what memory associated with this
     turn), then the stimulus, then any repair ``feedback``. A
-    stage that nests this frame in its own stimulus does not show ``instructions``, ``situation`` or
-    ``feedback`` again (``__model_facing_excluded_fields__``): they reach the model once, where they belong.
+    stage that nests this frame in its own stimulus shows the model only the stimulus this frame
+    carries (``__model_facing_input__``), never the frame; nested in anything else it does not show
+    ``instructions``, ``situation`` or ``feedback`` again (``__model_facing_excluded_fields__``): they
+    reach the model once, where they belong.
     """
 
+    # Nested in another frame's stimulus, the model is shown what this frame carries, never the frame.
+    __model_facing_input__: typing.ClassVar[str] = "input"
     __model_facing_excluded_fields__: typing.ClassVar[frozenset[str]] = frozenset(
         {"instructions", "situation", "feedback"}
     )

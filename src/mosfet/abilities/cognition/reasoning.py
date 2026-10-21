@@ -53,7 +53,14 @@ class InputData(deliberation.InputData):
 
 
 class ProcessorInput(pydantic.BaseModel):
-    """Deliberative reasoning input: the host decision input this turn is reasoned over."""
+    """Deliberative reasoning input: the host decision input this turn is reasoned over.
+
+    A model is shown the stimulus the host input carries, never this frame or the host's
+    (``__model_facing_input__``): software that carries a stimulus between tiers is not something
+    that happened to the bot.
+    """
+
+    __model_facing_input__: typing.ClassVar[str] = "host_input"
 
     model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
         frozen=True,
