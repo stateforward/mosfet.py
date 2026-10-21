@@ -175,9 +175,9 @@ class InputData(pydantic.BaseModel):
             "this is selected; it cannot be taken back once heard. Their words, joined exactly as written, are the "
             "reply. Words are plain spoken language — what a listener would hear, not markup, not a stage direction, "
             "not a label for an utterance and not a description of one, because every one of those is read out "
-            "loud just as literally; how a part is said, and any sound, belongs in its expression. Required: there "
-            "is no way to send this and stay silent, so the choice not to speak is made by not selecting speech at "
-            "all."
+            "loud just as literally; how a part is said, and any sound or pause, belongs in its expression. "
+            "Required: there is no way to send this and stay silent, so the choice not to speak is made by not "
+            "selecting speech at all."
         ),
     )
 
@@ -333,7 +333,7 @@ class DraftData(pydantic.BaseModel):
     words: str = pydantic.Field(
         description=(
             "The characters newly written into that part's words, in order; empty on the opening draft of a part "
-            "with no words (a sound of its own)."
+            "with no words (a sound or a pause of its own)."
         ),
         examples=[" I can help"],
     )
@@ -727,6 +727,7 @@ def _directions(expression: vocal.speech.Expression) -> dict[vocal.speech.Cue, o
         "pitch": expression.pitch,
         "volume": expression.volume,
         "emphasis": expression.emphasis,
+        "pause": expression.pause,
         "sound": (expression.sound, expression.sound_at),
     }
     return {cue: values[cue] for cue in expression.cues()}
@@ -739,7 +740,8 @@ def _report(
 ) -> PartReport:
     """How a voice with ``expressiveness`` carried a part that opened with ``opening`` and ended as ``final``.
 
-    A cue is applied when the voice declares it and, for a sound, style or emotion, knows that one; it is clamped
+    A cue is applied when the voice declares it and, for a sound, style or emotion, knows that one; a pause is
+    applied by every voice, because every encoder makes silence and none declares it; it is clamped
     when its value lies outside the voice's range for it; and it is late when the final reply sets or changes it
     after the part opened without it.
     """
@@ -763,7 +765,7 @@ def _report(
     clamped: list[vocal.speech.Cue] = []
     unsupported: list[vocal.speech.Cue] = []
     for cue in sorted(requested):
-        if cue not in expressiveness.cues or not known.get(cue, True):
+        if (cue != "pause" and cue not in expressiveness.cues) or not known.get(cue, True):
             unsupported.append(cue)
             continue
         applied.append(cue)
@@ -1138,7 +1140,7 @@ class Speaking(ability.Ability[InputData, OutputData]):
     @staticmethod
     def _is_new_draft(ctx: hsm.Context, instance: "Speaking", event: hsm.Event[typing.Any]) -> bool:
         """The opening of an utterance not already said: its first words, or a first part that has none and opens
-        with its expression (a sound of its own). A later delta, or a later part, cannot open one."""
+        with its expression (a sound or a pause of its own). A later delta, or a later part, cannot open one."""
 
         del ctx
         return (

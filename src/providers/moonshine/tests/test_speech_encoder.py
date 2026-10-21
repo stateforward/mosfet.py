@@ -117,3 +117,11 @@ def test_every_part_is_one_run_said_with_words_only() -> None:
 
     assert encoder.expressiveness == speech.Expressiveness()
     assert [chunk.text for chunk in chunks] == ["Oh, hi."]
+
+
+def test_a_pause_splits_the_text_and_is_said_as_silence_in_its_place() -> None:
+    tts = FakeTextToSpeech(samples=[0.5], sample_rate=24_000)
+
+    _ = asyncio.run(contract.assert_pauses(SpeechEncoder(tts=tts)))
+
+    assert [call["text"] for call in tts.calls] == ["Hi.", " there."]

@@ -239,3 +239,14 @@ def test_blank_text_a_closed_socket_a_refusal_and_broken_pcm_are_encoding_errors
     )
     assert failure(FakeServer(replies=[_audio(b"\x01\x00\x02", "hello", final=True)]), "hello") == "invalid_response"
     assert failure(FakeServer(replies=["not json"]), "hello") == "invalid_response"
+
+
+def test_a_pause_ends_the_input_and_is_said_as_silence_before_the_rest_on_a_new_socket() -> None:
+    server = FakeServer(replies=[_audio(b"\x01\x00", None), _FINAL])
+
+    chunks = asyncio.run(contract.assert_pauses(_encoder(server)))
+
+    # Each stretch between pauses is its own stream-input session, ended before the silence is said.
+    assert len(server.urls) == 2
+    assert server.texts() == [" ", " there.", ""]
+    assert [chunk.text for chunk in chunks if chunk.text] == ["Hi.", " there."]

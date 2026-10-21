@@ -11,7 +11,9 @@ with no words sits (:class:`Markup`), one
 declared pace range. Words are sent exactly as written, and nothing is ever searched for in them. The raw s16le body
 is yielded as it arrives, re-cut to whole frames, with alignment emulated per request: every chunk carries ``""``
 but the last, which carries the run's words (never its tags), so one chunk is held until the next arrives or the
-reply ends. Closing the iterator closes the response, which is how a server such as Breeze cancels an encoding.
+reply ends. A part's pause closes the run before it and is said as ``format.silence`` between the requests, so
+runs never merge across a pause. Closing the iterator closes the response, which is how a server such as Breeze
+cancels an encoding.
 ``SpeechDecoder`` is a ``hearing.speech.SpeechDecoder`` over ``POST /v1/audio/transcriptions``: raw PCM is wrapped
 as a WAV file with the stdlib ``wave`` module and uploaded as multipart ``file``; the answer's ``text`` is returned
 as UTF-8 bytes.
@@ -231,16 +233,27 @@ class SpeechEncoder(vocal.speech.SpeechEncoder):
         # The last chunk, held until the next one arrives or the reply ends: the last one of a request carries the
         # words that request said, and the reply's last one also carries any trailing words with nothing to say.
         held: vocal.speech.Audio | None = None
+        # Blank words read before any chunk to carry them: they ride the next one.
+        unsaid = ""
         try:
             async with contextlib.aclosing(self._runs(input)) as runs:
-                async for run, direction in runs:
+                async for segment in runs:
+                    if isinstance(segment, str):
+                        # A pause: silence of its own, between the requests around it.
+                        if held is not None:
+                            yielded += len(held.pcm)
+                            yield held
+                        held, unsaid = vocal.speech.Audio(pcm=self.format.silence(segment), text=unsaid), ""
+                        continue
+                    run, direction = segment
                     words = "".join(word for said in run for word in said.words)
                     chars += len(words)
                     if not self._sayable(run):
-                        # Only the reply's last run can have nothing to say; earlier ones join the run after them.
+                        # A run with nothing to say ends the reply or comes before a pause: its words ride a chunk.
                         if held is None:
-                            break
-                        held = held.model_copy(update={"text": held.text + words})
+                            unsaid += words
+                        else:
+                            held = held.model_copy(update={"text": held.text + words})
                         continue
                     requests += 1
                     last: vocal.speech.Audio | None = None
@@ -252,7 +265,7 @@ class SpeechEncoder(vocal.speech.SpeechEncoder):
                             held = last = vocal.speech.Audio(pcm=pcm, text="")
                     if last is None:
                         raise encoding.Error("invalid_response", "OpenAI-compatible speech encoding returned no audio.")
-                    held = last.model_copy(update={"text": words})
+                    held, unsaid = last.model_copy(update={"text": unsaid + words}), ""
             if held is None:
                 raise encoding.Error("invalid_input", "OpenAI-compatible speech encoding requires non-blank text.")
             yielded += len(held.pcm)
@@ -273,12 +286,13 @@ class SpeechEncoder(vocal.speech.SpeechEncoder):
 
     async def _runs(
         self, input: collections.abc.AsyncIterable[vocal.speech.Piece]
-    ) -> collections.abc.AsyncGenerator[tuple[list[_Said], _Direction], None]:
-        """The reply's runs, each once it closes: consecutive parts said with one direction, in order.
+    ) -> collections.abc.AsyncGenerator[tuple[list[_Said], _Direction] | vocal.speech.Pause, None]:
+        """The reply's runs, each once it closes: consecutive parts said with one direction, in order, and each
+        pause in its place between them.
 
-        A run closes when a part with another direction begins, or when the reply ends. A run with nothing to say
-        yet (no words and no sound) takes the direction of the part that follows it, so a blank part never sends a
-        request.
+        A run closes when a part with another direction begins, when a part opens with a pause (the pause follows
+        it), or when the reply ends. A run with nothing to say yet (no words and no sound) takes the direction of
+        the part that follows it, so a blank part never sends a request.
 
         Raises:
             encoding.Error: ``invalid_input`` when the pieces break the stream's invariants.
@@ -291,6 +305,12 @@ class SpeechEncoder(vocal.speech.SpeechEncoder):
             if piece.part == opened:
                 opened += 1
                 following = self._direction(piece.expression)
+                pause = None if piece.expression is None else piece.expression.pause
+                if run and pause is not None:
+                    yield run, direction
+                    run = []
+                if pause is not None:
+                    yield pause
                 if self._sayable(run) and following != direction:
                     yield run, direction
                     run = []

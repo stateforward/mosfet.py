@@ -2,7 +2,7 @@
 
 from . import encoding, part
 from .encoding import Audio, Format, SpeechEncoder, Text
-from .part import Cue, Expression, Expressiveness, Locale, Part, Piece, Range, Sound, said
+from .part import Cue, Expression, Expressiveness, Locale, Part, Pause, Piece, Range, Sound, said
 
 __all__ = [
     "Audio",
@@ -12,6 +12,7 @@ __all__ = [
     "Format",
     "Locale",
     "Part",
+    "Pause",
     "Piece",
     "Range",
     "Sound",

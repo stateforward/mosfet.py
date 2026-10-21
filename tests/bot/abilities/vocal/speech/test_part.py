@@ -30,13 +30,15 @@ def test_a_part_is_words_verbatim_and_an_optional_expression_and_its_schema_has_
     assert tuple(schema["properties"]) == ("expression", "words")
 
 
-def test_a_part_without_words_is_a_sound_of_its_own_and_a_part_is_never_empty() -> None:
+def test_a_part_without_words_is_a_sound_or_a_pause_of_its_own_and_a_part_is_never_empty() -> None:
     chuckle = speech.Part.model_validate({"expression": {"sound": "chuckle"}})
+    pause = speech.Part.model_validate({"expression": {"pause": "short"}})
 
-    assert chuckle.words is None
+    assert (chuckle.words, pause.words) == (None, None)
     assert chuckle.expression == speech.Expression(sound="chuckle")
+    assert pause.expression == speech.Expression(pause="short")
     for empty in ({}, {"expression": {"emotion": "amused"}}, {"words": None}):
-        with pytest.raises(pydantic.ValidationError, match="words or a sound"):
+        with pytest.raises(pydantic.ValidationError, match="words, a sound or a pause"):
             _ = speech.Part.model_validate(empty)
     schema = speech.Part.model_json_schema()
     assert "words" not in schema.get("required", [])
@@ -65,6 +67,9 @@ def test_an_expression_directs_at_least_one_cue_within_its_bounds() -> None:
         _ = speech.Expression.model_validate({"emotion": "amused", "delivery": "fast"})
     with pytest.raises(pydantic.ValidationError):
         _ = speech.Expression.model_validate({"sound": "yawn"})
+    for unknown in ("medium", "pause_short", 0.4):
+        with pytest.raises(pydantic.ValidationError):
+            _ = speech.Expression.model_validate({"pause": unknown})
     for field, value in (
         ("instructions", "x" * 301),
         ("emotion", "x" * 65),
@@ -87,6 +92,7 @@ def test_an_expression_directs_at_least_one_cue_within_its_bounds() -> None:
         pitch=-2.0,
         volume=0.8,
         emphasis=True,
+        pause="long",
         sound="laugh",
         sound_at="after",
     )
@@ -94,6 +100,7 @@ def test_an_expression_directs_at_least_one_cue_within_its_bounds() -> None:
     assert speech.Expression(sound="giggle").sound_at == "before"
     assert speech.Expression(sound="giggle").cues() == {"sound"}
     assert speech.Expression(emphasis=True).cues() == {"emphasis"}
+    assert speech.Expression(pause="short").cues() == {"pause"}
 
 
 def test_the_canonical_cues_and_sounds_are_closed_vocabularies() -> None:
@@ -106,8 +113,10 @@ def test_the_canonical_cues_and_sounds_are_closed_vocabularies() -> None:
         "pitch",
         "volume",
         "emphasis",
+        "pause",
         "sound",
     }
+    assert set(typing.get_args(speech.Pause)) == {"short", "long"}
     assert set(typing.get_args(speech.Sound)) == {
         "laugh",
         "giggle",

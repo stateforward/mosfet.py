@@ -86,8 +86,9 @@ class SpeechEncoder(speech.SpeechEncoder):
 
     The model is not incremental and takes the whole text, and this encoder applies no expression
     (``expressiveness`` is the default, so all parts form one run): the reply is read to its end (joining the words
-    of its pieces in order is the only buffering) and said as one chunk, aligned to all the words. ``voice_name``
-    is the Gemini voice the text is spoken in.
+    of its pieces in order is the only buffering) and said as one chunk, aligned to all the words. A pause splits
+    the text: each stretch between pauses is one chunk, with ``format.silence`` between them. ``voice_name`` is the
+    Gemini voice the text is spoken in.
     """
 
     def __init__(
@@ -113,11 +114,35 @@ class SpeechEncoder(speech.SpeechEncoder):
     async def encode(
         self, input: collections.abc.AsyncIterable[speech.Piece]
     ) -> collections.abc.AsyncIterator[speech.Audio]:
-        said = "".join([piece.words async for piece in input])
-        if not said.strip():
+        # The text between pauses, each stretch with the pause that opens it: a pause splits the text, so each
+        # stretch is said whole and the silence between them in its place.
+        stretches: list[tuple[speech.Pause | None, list[str]]] = [(None, [])]
+        async for piece in input:
+            if piece.expression is not None and piece.expression.pause is not None:
+                stretches.append((piece.expression.pause, []))
+            stretches[-1][1].append(piece.words)
+        # The last chunk, held so blank words read after it ride it; blank words before any chunk ride the next.
+        held: speech.Audio | None = None
+        unsaid = ""
+        for pause, words in stretches:
+            if pause is not None:
+                if held is not None:
+                    yield held
+                held, unsaid = speech.Audio(pcm=self.format.silence(pause), text=unsaid), ""
+            said = "".join(words)
+            if not said.strip():
+                if held is None:
+                    unsaid += said
+                else:
+                    held = held.model_copy(update={"text": held.text + said})
+                continue
+            pcm = await asyncio.to_thread(self._generate, said, self._voice_name)
+            if held is not None:
+                yield held
+            held, unsaid = speech.Audio(pcm=pcm, text=unsaid + said), ""
+        if held is None:
             raise encoding.Error("invalid_input", "Gemini speech encoding requires non-blank text.")
-        pcm = await asyncio.to_thread(self._generate, said, self._voice_name)
-        yield speech.Audio(pcm=pcm, text=said)
+        yield held
 
     def _generate(self, text: str, voice_name: str) -> bytes:
         speech_entry: dict[str, object] = {"voice": voice_name}

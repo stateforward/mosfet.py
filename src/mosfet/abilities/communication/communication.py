@@ -135,8 +135,8 @@ class RespondData(pydantic.BaseModel):
         max_length=64,
         description=(
             "The reply, as one or more parts said in order in your own voice. Their words, joined exactly as "
-            "written, are the reply, and are read aloud literally; how a part is said, and any sound, belongs in its "
-            "expression, never in its words."
+            "written, are the reply, and are read aloud literally; how a part is said, and any sound or pause, belongs "
+            "in its expression, never in its words."
         ),
     )
 

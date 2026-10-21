@@ -18,11 +18,11 @@ class SpeechEncoder(speech.SpeechEncoder):
 
     The model is not incremental and takes the whole text, and it applies no expression (``expressiveness`` is the
     default, so every part has the same direction and all of them form one run): the reply is read to its end
-    (joining the words of its pieces in order is the only buffering) and said as one chunk once the model has
-    spoken it, aligned to all the words. Audio at
-    a rate other than the declared ``sample_rate_hz`` is refused as ``invalid_response``, because raw PCM carries
-    no header to correct it. ``voice`` selects the voice the model is loaded with; an injected ``tts`` is used as
-    is.
+    (joining the words of its pieces in order is the only buffering) and said as one chunk once the model has spoken
+    it, aligned to all the words. A pause splits the text: each stretch between pauses is one chunk, with
+    ``format.silence`` between them. Audio at a rate other than the declared ``sample_rate_hz`` is refused as
+    ``invalid_response``, because raw PCM carries no header to correct it. ``voice`` selects the voice the model is
+    loaded with; an injected ``tts`` is used as is.
     """
 
     def __init__(
@@ -48,11 +48,35 @@ class SpeechEncoder(speech.SpeechEncoder):
     async def encode(
         self, input: collections.abc.AsyncIterable[speech.Piece]
     ) -> collections.abc.AsyncIterator[speech.Audio]:
-        said = "".join([piece.words async for piece in input])
-        if not said.strip():
+        # The text between pauses, each stretch with the pause that opens it: a pause splits the text, so each
+        # stretch is said whole and the silence between them in its place.
+        stretches: list[tuple[speech.Pause | None, list[str]]] = [(None, [])]
+        async for piece in input:
+            if piece.expression is not None and piece.expression.pause is not None:
+                stretches.append((piece.expression.pause, []))
+            stretches[-1][1].append(piece.words)
+        # The last chunk, held so blank words read after it ride it; blank words before any chunk ride the next.
+        held: speech.Audio | None = None
+        unsaid = ""
+        for pause, words in stretches:
+            if pause is not None:
+                if held is not None:
+                    yield held
+                held, unsaid = speech.Audio(pcm=self.format.silence(pause), text=unsaid), ""
+            said = "".join(words)
+            if not said.strip():
+                if held is None:
+                    unsaid += said
+                else:
+                    held = held.model_copy(update={"text": held.text + said})
+                continue
+            pcm = await asyncio.to_thread(self._generate, said)
+            if held is not None:
+                yield held
+            held, unsaid = speech.Audio(pcm=pcm, text=unsaid + said), ""
+        if held is None:
             raise encoding.Error("invalid_input", "Moonshine speech encoding requires non-blank text.")
-        pcm = await asyncio.to_thread(self._generate, said)
-        yield speech.Audio(pcm=pcm, text=said)
+        yield held
 
     def _generate(self, text: str) -> bytes:
         try:

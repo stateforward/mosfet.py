@@ -1,14 +1,16 @@
 """A reply as structured parts: what to say, and optionally how to say each part, within the bot's own voice.
 
 A reply is a list of :class:`Part`, each its ``words`` and an optional :class:`Expression`; a part that makes a
-sound has no words to have. The words are joined verbatim (:func:`said`) into the text of record; nothing ever parses
-them for sounds, tags or cues, because how a part is said is typed data, never text, and the characters of markup
-and stage directions are refused in them rather than read. A :class:`Piece` is one append-only delta of such a reply as it is written:
-the encoder reads a stream of pieces (``vocal.speech.Text``) and applies each part's expression.
+sound or a pause needs no words. The words are joined verbatim (:func:`said`) into the text of record; nothing ever
+parses them for sounds, tags or cues, because how a part is said is typed data, never text, and the characters of
+markup and stage directions are refused in them rather than read. A :class:`Piece` is one append-only delta of such
+a reply as it is written: the encoder reads a stream of pieces (``vocal.speech.Text``) and applies each part's
+expression.
 
 :class:`Expressiveness` is what one speech encoder can do with an expression: the cues it applies, the emotions and
 styles it knows, the ranges it clamps to, and the sounds it can make. A cue it does not declare is ignored by the
-encoder (Speaking reports it); core never chooses one.
+encoder (Speaking reports it); core never chooses one. A pause is the one cue no encoder declares, because every
+encoder makes silence.
 
 Everything here is canonical and provider-neutral: units are relative to the voice's natural delivery, and a
 provider maps them to its own fields or markup.
@@ -26,12 +28,17 @@ from pydantic.json_schema import SkipJsonSchema
 Locale = typing.Annotated[str, pydantic.StringConstraints(pattern=r"^[a-z]{2,3}(-[A-Za-z0-9]{2,8})*$")]
 """A BCP-47 language tag, such as ``en`` or ``en-US``."""
 
-Cue = typing.Literal["instructions", "emotion", "style", "intensity", "pace", "pitch", "volume", "emphasis", "sound"]
+Cue = typing.Literal[
+    "instructions", "emotion", "style", "intensity", "pace", "pitch", "volume", "emphasis", "pause", "sound"
+]
 """One kind of direction an expression can carry, named after its :class:`Expression` field."""
 
 Sound = typing.Literal["laugh", "giggle", "chuckle", "sigh", "gasp", "breath", "cough", "clear_throat"]
 """A non-verbal vocal sound, made with a part's words or as a part of its own: a closed vocabulary that each encoder
 renders or ignores."""
+
+Pause = typing.Literal["short", "long"]
+"""A silence in a reply, short or long: every encoder makes one, of a fixed length (``Format.silence``)."""
 
 _SPOKEN = r"^[^*<>\[\]{}]+$"
 """What words may hold: anything but the characters of stage directions and markup (``* < > [ ] { }``), which a
@@ -103,6 +110,14 @@ class Expression(pydantic.BaseModel):
         default=None, ge=0.25, le=2.0, description="Loudness relative to natural, linear: 1 is natural."
     )
     emphasis: bool = pydantic.Field(default=False, description="Stress the words of this part.")
+    pause: Pause | None = pydantic.Field(
+        default=None,
+        description=(
+            "A silence, short or long, that opens this part, before its sound and words; a part may be only a "
+            "pause, with no words. This is the only way to pause: a written pause would be read aloud. Every voice "
+            "can pause."
+        ),
+    )
     sound: Sound | None = pydantic.Field(
         default=None,
         description=(
@@ -136,15 +151,16 @@ class Expression(pydantic.BaseModel):
             "pitch": self.pitch is not None,
             "volume": self.volume is not None,
             "emphasis": self.emphasis,
+            "pause": self.pause is not None,
             "sound": self.sound is not None,
         }
         return frozenset(cue for cue, set_ in directed.items() if set_)
 
 
 class Part(pydantic.BaseModel):
-    """One stretch of a reply: its words verbatim, optionally how to say them, or a sound of its own.
+    """One stretch of a reply: its words verbatim and optionally how to say them, or a sound or pause of its own.
 
-    A part has words, or an expression that makes a sound, or both; never neither.
+    A part has words, or an expression that makes a sound or a pause, or both; never neither.
     """
 
     model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
@@ -153,9 +169,10 @@ class Part(pydantic.BaseModel):
         json_schema_extra={
             "description": (
                 "One stretch of your reply and, optionally, how to say it. Split the reply into parts where the way "
-                "you say it changes, or to make a sound between words. The words are only what is spoken; a laugh, "
-                "sigh or other non-verbal sound is expression.sound, never written into the words, and may be a part "
-                "of its own with no words. Every part has words or a sound."
+                "you say it changes, or to put a sound or a pause between words. The words are only what is spoken; "
+                "a laugh, sigh or other non-verbal sound is expression.sound and a silence is expression.pause, never "
+                "written into the words, and either may be a part of its own with no words. Every part has words, a "
+                "sound or a pause."
             )
         },
     )
@@ -169,11 +186,11 @@ class Part(pydantic.BaseModel):
     words: _Words | SkipJsonSchema[None] = pydantic.Field(
         default=None,
         description=(
-            "The words of this part; omit them for a part that is only a sound. The voice speaks every character "
-            "exactly as written, so this is speech only: no stage directions, actions, emotes, markup or tags, and "
-            "none of the characters * < > [ ] { }. For a sound use expression.sound; for how to say the words use "
-            "expression. Continue the reply exactly, including any space or punctuation that joins this part to the "
-            "one before it."
+            "The words of this part; omit them for a part that is only a sound or a pause. The voice speaks every "
+            "character exactly as written, so this is speech only: no stage directions, actions, emotes, markup or "
+            "tags, and none of the characters * < > [ ] { }. For a sound or a pause use expression.sound or "
+            "expression.pause; for how to say the words use expression. Continue the reply exactly, including any "
+            "space or punctuation that joins this part to the one before it."
         ),
     )
 
@@ -186,8 +203,10 @@ class Part(pydantic.BaseModel):
 
     @pydantic.model_validator(mode="after")
     def _something(self) -> typing.Self:
-        if self.words is None and (self.expression is None or self.expression.sound is None):
-            raise ValueError("A part must have words or a sound.")
+        if self.words is None and (
+            self.expression is None or (self.expression.sound is None and self.expression.pause is None)
+        ):
+            raise ValueError("A part must have words, a sound or a pause.")
         return self
 
 
@@ -195,8 +214,8 @@ class Piece(pydantic.BaseModel):
     """One append-only delta of a reply as it is written: words newly written into one part.
 
     ``part`` starts at 0 and only ever stays or grows by one; ``expression`` rides only the first piece of a part,
-    as known when the part began, and a part with no words is that first piece alone. A part ends when the next one begins or the stream ends, and the words of every
-    piece, joined in order, are the reply's text of record.
+    as known when the part began, and a part with no words is that first piece alone. A part ends when the next one
+    begins or the stream ends, and the words of every piece, joined in order, are the reply's text of record.
     """
 
     model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(frozen=True, extra="forbid")
@@ -268,4 +287,4 @@ def said(parts: collections.abc.Iterable[Part]) -> str:
     return "".join(part.words or "" for part in parts)
 
 
-__all__ = ["Cue", "Expression", "Expressiveness", "Locale", "Part", "Piece", "Range", "Sound", "said"]
+__all__ = ["Cue", "Expression", "Expressiveness", "Locale", "Part", "Pause", "Piece", "Range", "Sound", "said"]

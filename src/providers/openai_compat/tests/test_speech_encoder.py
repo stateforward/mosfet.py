@@ -589,3 +589,13 @@ def test_a_blank_part_says_nothing_of_its_own_and_its_words_stay_aligned() -> No
 
 async def _all_audio(stream: collections.abc.AsyncIterator[speech.Audio]) -> list[speech.Audio]:
     return [chunk async for chunk in stream]
+
+
+def test_a_pause_closes_the_run_and_is_said_as_silence_in_its_place() -> None:
+    requests: list[httpx.Request] = []
+    encoder = _lab(_pcm(requests, (b"\x01\x00",), (b"\x02\x00",)))
+
+    _ = asyncio.run(contract.assert_pauses(encoder))
+
+    # A pause is silence between requests: the run before it is sent whole, never merged across it.
+    assert [sent["input"] for sent in _sent(requests)] == ["Hi.", " there."]

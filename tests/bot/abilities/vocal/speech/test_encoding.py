@@ -33,6 +33,16 @@ def test_format_measures_whole_frames_of_s16le() -> None:
     assert stereo.seconds(6) == 1 / 8_000
 
 
+def test_a_pause_is_whole_frames_of_silence_of_its_fixed_length() -> None:
+    mono = speech.Format(sample_rate_hz=24_000, channels=1)
+    stereo = speech.Format(sample_rate_hz=8_000, channels=2)
+
+    assert mono.silence("short") == bytes(2 * 9_600)
+    assert mono.seconds(len(mono.silence("short"))) == 0.4
+    assert mono.seconds(len(mono.silence("long"))) == 1.0
+    assert stereo.silence("long") == bytes(4 * 8_000)
+
+
 class _Words(speech.SpeechEncoder):
     """Reads the words to their end, then says them one word per chunk, each chunk aligned to its word."""
 
@@ -192,6 +202,7 @@ def test_core_has_no_text_segmentation_nor_markup_and_exports_only_the_encoder_a
             "Format",
             "Locale",
             "Part",
+            "Pause",
             "Piece",
             "Range",
             "Sound",

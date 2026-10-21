@@ -1528,6 +1528,36 @@ def test_a_part_that_is_only_a_sound_is_spoken_in_its_place_and_is_never_words()
     )
 
 
+def test_words_a_sound_a_pause_and_words_are_spoken_in_order_and_only_the_words_are_the_record() -> None:
+    chuckle = vocal.speech.Expression(sound="chuckle")
+    pause = vocal.speech.Expression(pause="short")
+
+    async def run() -> tuple[Stage, list[speaking.OutputData]]:
+        voice = await stage(Script(expressiveness=vocal.speech.Expressiveness()))
+        await voice.say("Well, ", vocal.speech.Part(expression=chuckle), vocal.speech.Part(expression=pause), "maybe.")
+        await wait_until(lambda: bool(voice.outputs()))
+        return voice, voice.outputs()
+
+    voice, outputs = asyncio.run(run())
+
+    assert voice.encoder.pieces == [
+        [
+            vocal.speech.Piece(part=0, words="Well, "),
+            vocal.speech.Piece(part=1, expression=chuckle),
+            vocal.speech.Piece(part=2, expression=pause),
+            vocal.speech.Piece(part=3, words="maybe."),
+        ]
+    ]
+    assert (outputs[0].text, outputs[0].spoken) == ("Well, maybe.", "Well, maybe.")
+    # Every voice pauses, so a pause is applied even by a voice that declares nothing; a sound it lacks is not.
+    assert outputs[0].expression == (
+        speaking.PartReport(),
+        speaking.PartReport(unsupported=("sound",)),
+        speaking.PartReport(applied=("pause",)),
+        speaking.PartReport(),
+    )
+
+
 def test_a_reply_drafted_from_a_sound_of_its_own_opens_with_it() -> None:
     laugh = vocal.speech.Expression(sound="laugh")
 

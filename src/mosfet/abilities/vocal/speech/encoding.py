@@ -27,6 +27,9 @@ from . import part
 _SAMPLE_BYTES = 2
 """Linear PCM here is always s16le: two bytes per sample per channel."""
 
+_PAUSE_SECONDS: typing.Final[dict[part.Pause, float]] = {"short": 0.4, "long": 1.0}
+"""How long each pause is silent: a short one is a beat between phrases, a long one a held breath."""
+
 
 class Format(pydantic.BaseModel):
     """The audio every chunk a speech encoder yields is in: s16le linear PCM at a rate, mono or stereo."""
@@ -53,6 +56,11 @@ class Format(pydantic.BaseModel):
         """Playout time of ``size`` bytes of this format, counting whole frames only."""
 
         return size // (_SAMPLE_BYTES * self.channels) / self.sample_rate_hz
+
+    def silence(self, pause: part.Pause) -> bytes:
+        """Whole frames of silence in this format as long as ``pause``: 0.4 seconds short, 1 second long."""
+
+        return bytes(round(_PAUSE_SECONDS[pause] * self.sample_rate_hz) * _SAMPLE_BYTES * self.channels)
 
 
 class Audio(pydantic.BaseModel):
@@ -170,9 +178,11 @@ class SpeechEncoder(encoding.StreamEncoder[part.Piece, Audio], abc.ABC):
         expression, if any); the concatenation of their words is the text of record, and the iterable ending means
         the utterance is final. The encoder reads it at its own pace and decides alone when it has enough to speak.
         It applies each part's declared cues, clamps values to its declared ranges, renders a declared sound before
-        or after that part's words (or in its place, for a part with no words), and ignores every cue and sound it does not declare (Speaking reports them; the
-        encoder never does). It may say a run of consecutive parts with the same direction in one synthesis
-        request, but never splits a part across requests or reorders parts. Each chunk's ``text`` is the words
+        or after that part's words (or in its place, for a part with no words), and ignores every cue and sound it
+        does not declare (Speaking reports them; the encoder never does). Every encoder pauses: a part's pause is a
+        chunk of ``format.silence(pause)`` with no text, said before that part's sound and words. It may say a run
+        of consecutive parts with the same direction in one synthesis request, never across a pause; it never
+        splits a part across requests or reorders parts. Each chunk's ``text`` is the words
         that chunk finishes saying, and over the stream those texts join to exactly the words read. Closing the
         iterator before it is exhausted cancels the encoding at the provider and stops reading ``input``.
 

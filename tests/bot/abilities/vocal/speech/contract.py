@@ -4,7 +4,8 @@ Every provider speech encoder's tests call :func:`assert_speech_encoder` with fa
 the text of every chunk, joined in order, is exactly the words of the pieces the encoder read, whatever their
 expressions (sounds and styles included: they are never words); every chunk's PCM is whole frames of its format;
 blank words are refused as ``invalid_input``; and closing the stream after its first chunk ends it and stops
-reading the pieces.
+reading the pieces. :func:`assert_pauses` checks that every encoder pauses: a part's pause is its own chunk of
+silence, ``format.silence``, aligned to no words, in its place before the part's words.
 """
 
 from __future__ import annotations
@@ -81,4 +82,27 @@ async def assert_speech_encoder(
     with pytest.raises(StopAsyncIteration):
         _ = await anext(stream)
     assert read.reads == reads, "closing the stream stops reading the pieces"
+    return chunks
+
+
+async def assert_pauses(encoder: speech.SpeechEncoder) -> list[speech.Audio]:
+    """Encode words, a part opening with a short pause before its words, then a long pause of its own, and assert
+    each pause is one chunk of exactly its silence with no text, in its place; return the chunks.
+
+    The encoder's fakes must answer a synthesis for ``"Hi."`` and one for ``" there."``.
+    """
+
+    pieces = [
+        speech.Piece(part=0, words="Hi."),
+        speech.Piece(part=1, words=" there.", expression=speech.Expression(pause="short")),
+        speech.Piece(part=2, expression=speech.Expression(pause="long")),
+    ]
+    chunks = [chunk async for chunk in encoder.encode(text(pieces))]
+    short = speech.Audio(pcm=encoder.format.silence("short"), text="")
+    long = speech.Audio(pcm=encoder.format.silence("long"), text="")
+    assert short in chunks and chunks[-1] == long, "each pause is its own chunk of silence"
+    at = chunks.index(short)
+    assert "".join(chunk.text for chunk in chunks[:at]) == "Hi.", "the words before a pause are said before it"
+    assert "".join(chunk.text for chunk in chunks[at:]) == " there.", "a part's pause comes before its words"
+    assert long not in chunks[:-1]
     return chunks

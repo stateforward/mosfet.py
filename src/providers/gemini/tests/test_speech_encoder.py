@@ -254,3 +254,11 @@ def test_pcm_with_a_matching_or_unreported_rate_is_yielded() -> None:
 
     assert _say(SpeechEncoder(client=matching, sample_rate_hz=24_000)) == [pcm]
     assert _say(SpeechEncoder(client=unreported, sample_rate_hz=24_000)) == [pcm]
+
+
+def test_a_pause_splits_the_text_and_is_said_as_silence_in_its_place() -> None:
+    client = FakeContentClient(response=_tts_response(b"\x00\x01"))
+
+    _ = asyncio.run(contract.assert_pauses(SpeechEncoder(client=client)))
+
+    assert [call.kwargs["input"] for call in client.calls] == ["Hi.", " there."]

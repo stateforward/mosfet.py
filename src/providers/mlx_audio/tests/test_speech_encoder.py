@@ -217,3 +217,12 @@ def test_a_cue_a_generation_cannot_carry_is_refused_at_construction() -> None:
         )
         with pytest.raises(ValueError, match=cue):
             _ = SpeechEncoder(model=FakeSpeechEncodingModel(results=()), expressiveness=declared)
+
+
+def test_a_pause_closes_the_generation_and_is_said_as_silence_in_its_place() -> None:
+    model = FakeSpeechEncodingModel(results=(chunk(2),))
+    encoder = SpeechEncoder(model=model, convert=as_pcm)
+
+    _ = asyncio.run(contract.assert_pauses(encoder))
+
+    assert [call["text"] for call in model.calls] == ["Hi.", " there."]

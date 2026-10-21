@@ -40,7 +40,8 @@ class SpeechEncoder(speech.SpeechEncoder):
     ends, and only then is it generated, in order. ``expressiveness`` declares what the loaded checkpoint applies,
     as composition knows it: ``pace`` becomes the run's ``speed`` (clamped to the declared range), and the
     natural-language cues (``instructions``, ``emotion``, ``intensity``, ``emphasis``) become its ``instruct``.
-    Sounds and every undeclared cue are ignored. Alignment is emulated per generation: every chunk carries ``""``
+    Sounds and every undeclared cue are ignored; a pause closes the run before it and is said as
+    ``format.silence``. Alignment is emulated per generation: every chunk carries ``""``
     but the last, which carries the run's words, so one generated chunk is held back until the next arrives or the
     reply ends.
     Native work runs one call at a time on a bounded worker: loading the model, starting a generation, and
@@ -95,14 +96,24 @@ class SpeechEncoder(speech.SpeechEncoder):
         # The last chunk, held until the next one arrives or the reply ends: the last one of a generation carries
         # the words it said, and the reply's last one also carries any trailing words with nothing to say.
         held: speech.Audio | None = None
+        # Blank words read before any chunk to carry them: they ride the next one.
+        unsaid = ""
         try:
             async with contextlib.aclosing(self._runs(input)) as runs:
-                async for words, direction in runs:
+                async for segment in runs:
+                    if isinstance(segment, str):
+                        # A pause: silence of its own, between the generations around it.
+                        if held is not None:
+                            yield held
+                        held, unsaid = speech.Audio(pcm=self.format.silence(segment), text=unsaid), ""
+                        continue
+                    words, direction = segment
                     if not words.strip():
-                        # Only the reply's last run can have nothing to say; earlier ones join the run after them.
+                        # A run with nothing to say ends the reply or comes before a pause: its words ride a chunk.
                         if held is None:
-                            break
-                        held = held.model_copy(update={"text": held.text + words})
+                            unsaid += words
+                        else:
+                            held = held.model_copy(update={"text": held.text + words})
                         continue
                     last: speech.Audio | None = None
                     async with contextlib.aclosing(self._generate(words, direction)) as generated:
@@ -112,7 +123,7 @@ class SpeechEncoder(speech.SpeechEncoder):
                             held = last = speech.Audio(pcm=pcm, text="")
                     if last is None:
                         raise encoding.Error("invalid_response", "MLX Audio generated no audio.")
-                    held = last.model_copy(update={"text": words})
+                    held, unsaid = last.model_copy(update={"text": unsaid + words}), ""
             if held is None:
                 raise encoding.Error("invalid_input", "MLX Audio speech encoding requires non-blank text.")
             yield held
@@ -123,10 +134,12 @@ class SpeechEncoder(speech.SpeechEncoder):
 
     async def _runs(
         self, input: collections.abc.AsyncIterable[speech.Piece]
-    ) -> collections.abc.AsyncGenerator[tuple[str, _Direction], None]:
-        """The reply's runs, each once it closes: the joined words of consecutive parts with one direction.
+    ) -> collections.abc.AsyncGenerator[tuple[str, _Direction] | speech.Pause, None]:
+        """The reply's runs, each once it closes: the joined words of consecutive parts with one direction, and
+        each pause in its place between them.
 
-        A run with no words to say yet takes the direction of the part that follows it.
+        A part that opens with a pause closes the run before it; a run with no words to say yet takes the
+        direction of the part that follows it.
 
         Raises:
             encoding.Error: ``invalid_input`` when the pieces break the stream's invariants.
@@ -139,6 +152,12 @@ class SpeechEncoder(speech.SpeechEncoder):
             if piece.part == opened:
                 opened += 1
                 following = self._direction(piece.expression)
+                pause = None if piece.expression is None else piece.expression.pause
+                if pause is not None:
+                    if words:
+                        yield "".join(words), direction
+                        words = []
+                    yield pause
                 spoken = bool("".join(words).strip())
                 if spoken and following != direction:
                     yield "".join(words), direction
@@ -148,7 +167,7 @@ class SpeechEncoder(speech.SpeechEncoder):
             elif piece.part != opened - 1 or piece.expression is not None:
                 raise encoding.Error("invalid_input", "Speech pieces must open each part in order, once.")
             words.append(piece.words)
-        if opened:
+        if words:
             yield "".join(words), direction
 
     def _direction(self, expression: speech.Expression | None) -> _Direction:
