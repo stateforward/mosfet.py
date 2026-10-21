@@ -40,9 +40,10 @@ renders or ignores."""
 Pause = typing.Literal["short", "long"]
 """A silence in a reply, short or long: every encoder makes one, of a fixed length (``Format.silence``)."""
 
-_SPOKEN = r"^[^*<>\[\]{}]+$"
-"""What words may hold: anything but the characters of stage directions and markup (``* < > [ ] { }``), which a
-voice would read aloud. A refusal at decoding (a grammar honours the pattern) and at validation, never a parse."""
+_SPOKEN = r"^[^*<>\[\]{}()]+$"
+"""What words may hold: anything but the characters of stage directions and markup (``* < > [ ] { } ( )``), which a
+voice would read aloud: a cue in parentheses, like ``(chuckle)``, is said as a word. A refusal at decoding (a grammar
+honours the pattern) and at validation, never a parse."""
 
 _Words = typing.Annotated[str, pydantic.StringConstraints(min_length=1, max_length=2000, pattern=_SPOKEN)]
 
@@ -188,9 +189,10 @@ class Part(pydantic.BaseModel):
         description=(
             "The words of this part; omit them for a part that is only a sound or a pause. The voice speaks every "
             "character exactly as written, so this is speech only: no stage directions, actions, emotes, markup or "
-            "tags, and none of the characters * < > [ ] { }. For a sound or a pause use expression.sound or "
-            "expression.pause; for how to say the words use expression. Continue the reply exactly, including any "
-            "space or punctuation that joins this part to the one before it."
+            "tags, and none of the characters * < > [ ] { } ( ): a cue such as (chuckle) or (pause) would be read "
+            "aloud. For a sound (a laugh, chuckle or sigh) use expression.sound; for a pause use expression.pause; for "
+            "how to say the words use expression. Continue the reply exactly, including any space or punctuation that "
+            "joins this part to the one before it."
         ),
     )
 

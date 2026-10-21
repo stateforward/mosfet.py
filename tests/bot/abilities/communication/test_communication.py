@@ -616,7 +616,7 @@ def test_the_dispatch_tool_offers_respond_with_optional_words_that_refuse_markup
     data = branch["properties"]["data"]
     part = data["properties"]["parts"]["items"]
     assert "words" not in part.get("required", [])
-    assert part["properties"]["words"]["pattern"] == r"^[^*<>\[\]{}]+$"
+    assert part["properties"]["words"]["pattern"] == r"^[^*<>\[\]{}()]+$"
 
 
 def test_an_invalid_drafted_expression_is_forwarded_without_it_and_counted(

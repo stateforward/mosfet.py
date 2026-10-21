@@ -46,12 +46,24 @@ def test_a_part_without_words_is_a_sound_or_a_pause_of_its_own_and_a_part_is_nev
 
 
 def test_words_refuse_the_characters_of_stage_directions_and_markup_in_the_schema_too() -> None:
-    for marked in ("*chuckles* Hi.", "Hi <laugh>", "[pause] Hi.", "Hi {sigh}", "</div>", "}}"):
+    for marked in (
+        "*chuckles* Hi.",
+        "Hi <laugh>",
+        "[pause] Hi.",
+        "Hi {sigh}",
+        "</div>",
+        "}}",
+        "(chuckle) Hi.",
+        "Hi (laughs",
+    ):
         with pytest.raises(pydantic.ValidationError, match="pattern"):
             _ = speech.Part(words=marked)
-    assert speech.Part(words="Well — “quoted”, (aside) & 50% — ok?!").words is not None
+    assert speech.Part(words="Well — “quoted”, - an aside - & 50% — ok?!").words is not None
     words = speech.Part.model_json_schema()["properties"]["words"]
-    assert words["pattern"] == r"^[^*<>\[\]{}]+$"
+    assert words["pattern"] == r"^[^*<>\[\]{}()]+$"
+    # A sound or a pause is an expression, and the description says so where the words are written.
+    assert "expression.sound" in words["description"] and "expression.pause" in words["description"]
+    assert "( )" in words["description"]
     # Omitted, never null: the model sees a string or nothing.
     assert (words["type"], "anyOf" in words) == ("string", False)
 
