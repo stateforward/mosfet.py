@@ -6,6 +6,7 @@ from mosfet.abilities.hearing import speech
 
 import asyncio
 import dataclasses
+import threading
 import typing
 
 from ._audio import audio_bytes_to_float_pcm
@@ -37,6 +38,15 @@ class SpeechDecoder(speech.SpeechDecoder):
     update_interval: float = 0.5
     transcriber: MoonshineTranscriber | None = None
     load_transcriber: MoonshineTranscriberLoader = load_transcriber
+    _loaded_transcriber: MoonshineTranscriber | None = dataclasses.field(
+        default=None, init=False, repr=False, compare=False
+    )
+    _load_lock: threading.Lock = dataclasses.field(
+        default_factory=threading.Lock, init=False, repr=False, compare=False
+    )
+    _inference_lock: threading.Lock = dataclasses.field(
+        default_factory=threading.Lock, init=False, repr=False, compare=False
+    )
 
     @typing.override
     async def decode(self, input: bytes) -> bytes:
@@ -50,15 +60,9 @@ class SpeechDecoder(speech.SpeechDecoder):
             )
             if not samples:
                 raise SpeechDecodingError("Moonshine speech decoding requires non-empty audio samples.")
-            transcriber = self.transcriber
-            if transcriber is None:
-                transcriber = self.load_transcriber(
-                    language=self.language,
-                    model_path=self.model_path,
-                    model_arch=self.model_arch,
-                    update_interval=self.update_interval,
-                )
-            transcript = transcriber.transcribe_without_streaming(samples, sample_rate)
+            transcriber = self._transcriber()
+            with self._inference_lock:
+                transcript = transcriber.transcribe_without_streaming(samples, sample_rate)
             text = transcript_text(transcript)
             if not text:
                 raise SpeechDecodingError("Moonshine transcription returned empty text.")
@@ -68,6 +72,26 @@ class SpeechDecoder(speech.SpeechDecoder):
         except Exception as error:
             message = "Moonshine speech decoding failed."
             raise SpeechDecodingError(message) from error
+
+    def _transcriber(self) -> MoonshineTranscriber:
+        """Return the injected transcriber, or load the configured one once and keep it."""
+
+        if self.transcriber is not None:
+            return self.transcriber
+        loaded = self._loaded_transcriber
+        if loaded is not None:
+            return loaded
+        with self._load_lock:
+            loaded = self._loaded_transcriber
+            if loaded is None:
+                loaded = self.load_transcriber(
+                    language=self.language,
+                    model_path=self.model_path,
+                    model_arch=self.model_arch,
+                    update_interval=self.update_interval,
+                )
+                object.__setattr__(self, "_loaded_transcriber", loaded)
+            return loaded
 
 
 __all__ = [

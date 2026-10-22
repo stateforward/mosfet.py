@@ -6,6 +6,7 @@ import asyncio
 import dataclasses
 import io
 import math
+import threading
 import typing
 import wave
 
@@ -82,6 +83,13 @@ class VoiceDiarizer(voice.VoiceDiarizer):
     model: VoiceDiarizationModel | None = None
     load_model: VoiceDiarizationModelLoader = load_voice_diarization_model
     clip_audio: VoiceDiarizationAudioClipper = _clip_audio
+    _loaded_model: VoiceDiarizationModel | None = dataclasses.field(default=None, init=False, repr=False, compare=False)
+    _load_lock: threading.Lock = dataclasses.field(
+        default_factory=threading.Lock, init=False, repr=False, compare=False
+    )
+    _inference_lock: threading.Lock = dataclasses.field(
+        default_factory=threading.Lock, init=False, repr=False, compare=False
+    )
 
     @typing.override
     async def classify(self, input: voice.diarization.InputData) -> voice.diarization.OutputData:
@@ -89,8 +97,11 @@ class VoiceDiarizer(voice.VoiceDiarizer):
 
     def _classify_blocking(self, input: voice.diarization.InputData) -> voice.diarization.OutputData:
         try:
-            model = self.model if self.model is not None else self.load_model(self.model_id)
-            with temporary_audio_file(_wav_container(input), suffix=self.audio_file_suffix) as audio_path:
+            model = self._model()
+            with (
+                self._inference_lock,
+                temporary_audio_file(_wav_container(input), suffix=self.audio_file_suffix) as audio_path,
+            ):
                 result = model.generate(audio_path, threshold=self.threshold, verbose=self.verbose)
             segments = tuple(
                 sorted(
@@ -105,6 +116,21 @@ class VoiceDiarizer(voice.VoiceDiarizer):
         except Exception as error:
             message = "MLX Audio voice diarization failed."
             raise VoiceDiarizationError(message) from error
+
+    def _model(self) -> VoiceDiarizationModel:
+        """Return the injected model, or load the configured one once and keep it."""
+
+        if self.model is not None:
+            return self.model
+        loaded = self._loaded_model
+        if loaded is not None:
+            return loaded
+        with self._load_lock:
+            loaded = self._loaded_model
+            if loaded is None:
+                loaded = self.load_model(self.model_id)
+                object.__setattr__(self, "_loaded_model", loaded)
+            return loaded
 
 
 def _segments_from_result(result: object) -> tuple[object, ...]:

@@ -9,6 +9,7 @@ import io
 import importlib
 import math
 import pathlib
+import threading
 import typing
 import wave
 
@@ -108,6 +109,15 @@ class VoiceDiarizer(voice.VoiceDiarizer):
     pipeline: VoiceDiarizationPipeline | None = None
     load_pipeline: VoiceDiarizationPipelineLoader = load_voice_diarization_pipeline
     clip_audio: VoiceDiarizationAudioClipper = _clip_audio
+    _loaded_pipeline: VoiceDiarizationPipeline | None = dataclasses.field(
+        default=None, init=False, repr=False, compare=False
+    )
+    _load_lock: threading.Lock = dataclasses.field(
+        default_factory=threading.Lock, init=False, repr=False, compare=False
+    )
+    _inference_lock: threading.Lock = dataclasses.field(
+        default_factory=threading.Lock, init=False, repr=False, compare=False
+    )
 
     @typing.override
     async def classify(self, input: voice.diarization.InputData) -> voice.diarization.OutputData:
@@ -130,8 +140,11 @@ class VoiceDiarizer(voice.VoiceDiarizer):
             stage="diarize",
         ) as active:
             try:
-                pipeline = self.pipeline if self.pipeline is not None else self.load_pipeline(self.model_id)
-                with temporary_audio_file(_wav_container(input), suffix=self.audio_file_suffix) as audio_path:
+                pipeline = self._pipeline()
+                with (
+                    self._inference_lock,
+                    temporary_audio_file(_wav_container(input), suffix=self.audio_file_suffix) as audio_path,
+                ):
                     result = pipeline(audio_path)
                 raw_segments = tuple(_segment_from_pyannote(turn, label) for turn, label in _turns_from_result(result))
                 ordered_segments = tuple(sorted(raw_segments, key=lambda segment: segment.start_seconds))
@@ -152,6 +165,21 @@ class VoiceDiarizer(voice.VoiceDiarizer):
                 raise VoiceDiarizationError("pyannote voice diarization failed.") from error
             active.set_attribute("bot.voice.segments.count", len(output.segments))
             return output
+
+    def _pipeline(self) -> VoiceDiarizationPipeline:
+        """Return the injected pipeline, or load the configured one once and keep it."""
+
+        if self.pipeline is not None:
+            return self.pipeline
+        loaded = self._loaded_pipeline
+        if loaded is not None:
+            return loaded
+        with self._load_lock:
+            loaded = self._loaded_pipeline
+            if loaded is None:
+                loaded = self.load_pipeline(self.model_id)
+                object.__setattr__(self, "_loaded_pipeline", loaded)
+            return loaded
 
 
 def _turns_from_result(result: object) -> collections.abc.Iterable[tuple[object, object]]:

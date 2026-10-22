@@ -8,6 +8,7 @@ import asyncio
 import collections.abc
 import dataclasses
 import pathlib
+import time
 import wave
 
 import pytest
@@ -145,6 +146,32 @@ def test_diarizer_uses_injected_loader() -> None:
     assert output.segments[0].start_seconds == 0.0
     assert output.segments[0].end_seconds == 0.3
     assert len(pipelines) == 1
+
+
+def test_diarizer_loads_its_pipeline_once_across_calls() -> None:
+    loads: list[str] = []
+
+    def load_pipeline(model_id: str) -> FakePipeline:
+        loads.append(model_id)
+        time.sleep(0.02)
+        return FakePipeline(
+            result=FakeResult(
+                speaker_diarization=FakeAnnotation(entries=((FakeTurn(start=0.0, end=0.3), 0, "remote"),))
+            ),
+            expected_audio=_pcm_audio(frame_count=20),
+        )
+
+    diarizer = VoiceDiarizer(model_id="local/community-1", load_pipeline=load_pipeline, clip_audio=_clip_stub)
+    input_data = _input(audio=_pcm_audio(frame_count=20))
+
+    async def classify_repeatedly() -> None:
+        _ = await diarizer.classify(input_data)
+        _ = await diarizer.classify(input_data)
+        _ = await asyncio.gather(*(diarizer.classify(input_data) for _ in range(4)))
+
+    asyncio.run(classify_repeatedly())
+
+    assert loads == ["local/community-1"]
 
 
 def test_diarizer_is_awaitable() -> None:

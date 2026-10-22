@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import collections.abc
 import dataclasses
+import time
 import typing
 
 import pytest
@@ -89,6 +90,27 @@ def test_speech_decoder_uses_injected_loader() -> None:
 
     assert output == b"loaded"
     assert len(transcribers) == 1
+
+
+def test_speech_decoder_loads_its_transcriber_once_across_calls() -> None:
+    loads: list[dict[str, object]] = []
+
+    def load_transcriber(**kwargs: object) -> FakeTranscriber:
+        loads.append(kwargs)
+        time.sleep(0.02)
+        return FakeTranscriber(result=FakeTranscript(lines=(FakeLine(text="loaded"),)))
+
+    decoder = SpeechDecoder(language="en", load_transcriber=load_transcriber)
+    pcm = (0).to_bytes(2, "little", signed=True) * 2
+
+    async def decode_repeatedly() -> None:
+        _ = await decoder.decode(pcm)
+        _ = await decoder.decode(pcm)
+        _ = await asyncio.gather(*(decoder.decode(pcm) for _ in range(4)))
+
+    asyncio.run(decode_repeatedly())
+
+    assert len(loads) == 1
 
 
 def test_speech_decoder_wraps_runtime_errors() -> None:
