@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import collections.abc
+import threading
 import typing
 
 from mosfet.abilities import encoding
@@ -43,6 +44,7 @@ class SpeechEncoder(speech.SpeechEncoder):
         self._download: bool = download
         self._tts: MoonshineTextToSpeech | None = tts
         self._load_tts: MoonshineTextToSpeechLoader = load_tts
+        self._tts_lock: threading.Lock = threading.Lock()
 
     @typing.override
     async def encode(
@@ -56,10 +58,10 @@ class SpeechEncoder(speech.SpeechEncoder):
 
     def _generate(self, text: str) -> bytes:
         try:
-            tts = self._tts
-            if tts is None:
-                tts = self._load_tts(language=self._language, voice=self._voice, download=self._download)
-            samples, sample_rate = tts.synthesize(text, speed=self._speed)
+            with self._tts_lock:
+                if self._tts is None:
+                    self._tts = self._load_tts(language=self._language, voice=self._voice, download=self._download)
+                samples, sample_rate = self._tts.synthesize(text, speed=self._speed)
         except Exception as error:
             raise encoding.Error("encode_failed", "Moonshine speech encoding failed.") from error
         if not samples:

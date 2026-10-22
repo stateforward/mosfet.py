@@ -4,6 +4,7 @@ import array
 import asyncio
 import collections.abc
 import dataclasses
+import time
 
 import pytest
 
@@ -81,6 +82,26 @@ def test_encoder_loads_the_model_with_the_constructor_voice() -> None:
     assert asyncio.run(_all(encoder.encode(_text("ok")))) == [b"\x00\x00"]
     assert [entry["voice"] for entry in loaded] == ["kokoro_af_heart"]
     assert {entry["language"] for entry in loaded} == {"en-us"}
+
+
+def test_encoder_loads_its_model_once_across_calls() -> None:
+    loaded: list[dict[str, object]] = []
+
+    def load_tts(**kwargs: object) -> FakeTextToSpeech:
+        loaded.append(kwargs)
+        time.sleep(0.02)
+        return FakeTextToSpeech(samples=[0.0], sample_rate=22_050)
+
+    encoder = SpeechEncoder(sample_rate_hz=22_050, load_tts=load_tts)
+
+    async def encode_repeatedly() -> None:
+        _ = await _all(encoder.encode(_text("one")))
+        _ = await _all(encoder.encode(_text("two")))
+        _ = await asyncio.gather(*(_all(encoder.encode(_text("again"))) for _ in range(4)))
+
+    asyncio.run(encode_repeatedly())
+
+    assert len(loaded) == 1
 
 
 def test_audio_at_another_rate_is_refused_rather_than_played_at_the_wrong_speed() -> None:
