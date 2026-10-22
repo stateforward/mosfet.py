@@ -161,13 +161,6 @@ def _parse_status(raw: object) -> Status:
         normalized = raw.strip().upper()
         if normalized in {STATUS_ACTIVE, STATUS_DRAFT, STATUS_BROKEN}:
             return typing.cast(Status, normalized)
-        # Legacy boolean column values if any rows still use them.
-        if normalized in {"TRUE", "1", "YES"}:
-            return STATUS_BROKEN
-        if normalized in {"FALSE", "0", "NO", ""}:
-            return STATUS_ACTIVE
-    if isinstance(raw, bool):
-        return STATUS_BROKEN if raw else STATUS_ACTIVE
     return STATUS_ACTIVE
 
 
@@ -346,19 +339,9 @@ def instances_from_behavior_results(
         if not isinstance(name, str) or not isinstance(source, str):
             continue
         description = row.get("description")
-        # Prefer status column; fall back to legacy broken bool if present without status.
-        if "status" in row or row.get("status") is not None:
-            status = _parse_status(row.get("status"))
-        elif "broken" in row:
-            status = _parse_status(row.get("broken"))
-        else:
-            status = STATUS_ACTIVE
+        status = _parse_status(row.get("status"))
         status_reason = _optional_text(row.get("status_reason"))
-        if status_reason is None:
-            status_reason = _optional_text(row.get("broken_reason"))
         status_updated_at = _optional_text(row.get("status_updated_at"))
-        if status_updated_at is None:
-            status_updated_at = _optional_text(row.get("broken_at"))
         instances.append(
             Instance(
                 name=name,

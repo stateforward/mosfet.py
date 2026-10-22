@@ -22,7 +22,7 @@ Each public contract MUST have an owner with authority to approve breaking chang
 
 Contract ownership MUST be visible to maintainers and consumers.
 
-# DBC-SOURCE-001 MUST Maintain One Canonical Contract SourceData
+# DBC-SOURCE-001 MUST Maintain One Canonical Contract Source
 
 A public boundary MUST have one canonical contract source such as a language interface, schema, IDL, executable contract, formal specification, API documentation, or generated artifact.
 
@@ -46,7 +46,7 @@ Preconditions MUST be weak enough for ordinary valid callers to satisfy.
 
 Preconditions MUST NOT require callers to know private implementation details.
 
-# DBC-PRE-003 MUST Validate Untrusted InputData At Boundaries
+# DBC-PRE-003 MUST Validate Untrusted Input At Boundaries
 
 See:
 - [CORE-SEC-001](core.rules.md#core-sec-001-must-validate-untrusted-input)
@@ -85,7 +85,7 @@ Constructors, factories, loaders, deserializers, migrations, and rehydration pat
 
 Public mutating operations MUST restore invariants before returning, yielding, awaiting externally visible work, committing, publishing, or releasing locks.
 
-# DBC-FAIL-001 MUST Define FailureData Contracts
+# DBC-FAIL-001 MUST Define Failure Contracts
 
 See:
 - [CORE-ERR-001](core.rules.md#core-err-001-must-explicit-failure-handling)
@@ -94,9 +94,9 @@ Contracts MUST distinguish normal success, expected domain failure, validation f
 
 Expected failures MUST be part of the public contract.
 
-# DBC-FAIL-002 MUST Define FailureData Effects
+# DBC-FAIL-002 MUST Define Failure Effects
 
-FailureData contracts MUST state which side effects are committed, rolled back, retried, partially applied, or unknown after failure.
+Failure contracts MUST state which side effects are committed, rolled back, retried, partially applied, or unknown after failure.
 
 Resource-owning operations MUST define cleanup behavior on failure, cancellation, timeout, and partial success.
 
@@ -234,7 +234,7 @@ Property-based tests SHOULD be used for algebraic laws, parsers, serializers, st
 
 Consumer-provider service pairs SHOULD use contract tests when independently deployed integrations must evolve safely.
 
-# DBC-OBS-001 MUST Define Contract FailureData Observability
+# DBC-OBS-001 MUST Define Contract Failure Observability
 
 See:
 - [CORE-OBS-001](core.rules.md#core-obs-001-should-bounded-observability)

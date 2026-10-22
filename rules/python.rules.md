@@ -9,7 +9,7 @@ The declared version policy MUST agree across those locations.
 
 # PY-RUNTIME-002 MUST Treat Minimum Python As Syntax Baseline
 
-SourceData code MUST NOT use syntax or standard-library features unavailable on the minimum supported Python version.
+Source code MUST NOT use syntax or standard-library features unavailable on the minimum supported Python version.
 
 Compatibility shims MUST be isolated and tested on every supported Python minor version.
 
@@ -383,7 +383,7 @@ Package data MUST be included through backend-supported package data configurati
 
 Runtime code MUST access package data through import-resource APIs rather than repository-relative paths.
 
-# PY-CLI-001 MUST Keep CLI OutputData Stable
+# PY-CLI-001 MUST Keep CLI Output Stable
 
 CLI stdout MUST be reserved for requested command output.
 

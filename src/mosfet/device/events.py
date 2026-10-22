@@ -23,12 +23,12 @@ class FirmwareInitializingDoneEventData(pydantic.BaseModel):
 
 
 class FirmwareInitializingFailedEventData(pydantic.BaseModel):
-    """FailureData signal that device firmware could not finish initializing."""
+    """Failure signal that device firmware could not finish initializing."""
 
     model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(
         frozen=True,
         json_schema_extra={
-            "description": "FailureData signal that device firmware could not finish initializing.",
+            "description": "Failure signal that device firmware could not finish initializing.",
             "examples": [{"message": "Firmware provider failed to start.", "operation_id": "firmware-init-1"}],
         },
     )
