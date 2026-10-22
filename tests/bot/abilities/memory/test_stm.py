@@ -681,3 +681,33 @@ def test_a_turn_renders_for_a_model_as_one_line_of_when_which_way_who_and_words(
         "</memory:turn>"
     )
     assert rendered(cut).startswith('<memory:turn at="21:03:10Z" direction="said" cut="true">word word')
+
+
+def test_register_opens_migrates_and_applies_off_the_event_loop() -> None:
+    """3.4: the register's open, migration, records and reads run on its worker, never on the loop's thread."""
+
+    import threading
+
+    import sqlalchemy.event
+    from sqlalchemy.engine import Engine
+
+    from mosfet.abilities.memory import store
+
+    threads: list[int] = []
+    loop_threads: list[int] = []
+
+    def handle() -> Engine:
+        threads.append(threading.get_ident())
+        engine = store.open_sqlite_engine()
+        sqlalchemy.event.listen(engine, "before_cursor_execute", lambda *_: threads.append(threading.get_ident()))
+        return engine
+
+    async def scenario(peer: _Peer) -> None:
+        loop_threads.append(threading.get_ident())
+        await peer.record(_notable_event("off"))
+        assert _sources(await peer.recent(limit=1)) == ["off"]
+
+    _run(memory.StmMemory(engine=handle), scenario)
+
+    assert threads
+    assert not set(loop_threads) & set(threads)

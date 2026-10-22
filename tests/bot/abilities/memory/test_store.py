@@ -570,3 +570,121 @@ def test_a_store_leaves_an_engine_it_was_given_open_when_it_stops() -> None:
     selected = execute_on(engine, memory.InputData(statements=(_select_by_query_tags(query_tags="t"),)))
     assert selected.contents() == ("theirs",)
     engine.dispose()
+
+
+def _thread_recording_handle(threads: list[int], *, stall: float = 0.0) -> collections.abc.Callable[[], Engine]:
+    """An engine handle that records the thread it opens on and every thread a statement runs on.
+
+    ``stall`` holds each ``SELECT`` on its thread, so a store running SQL on the event loop stalls the loop.
+    """
+
+    import threading
+    import time
+
+    import sqlalchemy.event
+
+    from mosfet.abilities.memory import store as store_module
+
+    def handle() -> Engine:
+        threads.append(threading.get_ident())
+        engine = store_module.open_sqlite_engine()
+
+        def executing(*args: object) -> None:
+            statement = args[2]
+            threads.append(threading.get_ident())
+            if stall and isinstance(statement, str) and statement.lstrip().upper().startswith("SELECT"):
+                time.sleep(stall)
+
+        sqlalchemy.event.listen(engine, "before_cursor_execute", executing)
+        return engine
+
+    return handle
+
+
+def test_a_store_opens_migrates_and_transacts_off_the_event_loop() -> None:
+    """3.4: the open, the migration and every transaction run on the store's worker, never on the loop's thread."""
+
+    import threading
+
+    threads: list[int] = []
+
+    async def run() -> tuple[int, float]:
+        loop_thread = threading.get_ident()
+        lag = 0.0
+
+        async def ticker() -> None:
+            nonlocal lag
+            loop = asyncio.get_running_loop()
+            while True:
+                before = loop.time()
+                await asyncio.sleep(0.01)
+                lag = max(lag, loop.time() - before - 0.01)
+
+        ticking = asyncio.ensure_future(ticker())
+        store = memory.MemoryStore(engine=_thread_recording_handle(threads, stall=0.2))
+        ctx = shared_hsm_context()
+        await start_abilities_for_test(ctx, store)
+        _ = await memory.transact(
+            ctx,
+            store,
+            memory.InputData(
+                statements=(_insert_content(content="off", query_tags="o"), _select_by_query_tags(query_tags="o"))
+            ),
+        )
+        await hsm.stop(store, ctx)
+        _ = ticking.cancel()
+        return loop_thread, lag
+
+    loop_thread, lag = asyncio.run(run())
+
+    assert threads
+    assert loop_thread not in threads
+    assert lag < 0.1
+
+
+def test_a_detach_waits_for_the_transaction_on_the_worker_and_its_request_is_answered() -> None:
+    """3.4: a transaction is never cut off on the worker: a detach sent while it runs waits for its reply."""
+
+    import time
+
+    import sqlalchemy.event
+
+    from mosfet.abilities.memory import store as store_module
+    from mosfet.protocols import attachment
+    from tests.hsm_instance_state import ability_terminal_owner
+
+    def handle() -> Engine:
+        engine = store_module.open_sqlite_engine()
+
+        def executing(*args: object) -> None:
+            statement = args[2]
+            if isinstance(statement, str) and "query_tags" in statement:
+                time.sleep(0.3)
+
+        sqlalchemy.event.listen(engine, "before_cursor_execute", executing)
+        return engine
+
+    async def run() -> tuple[str, str, memory.OutputData]:
+        store = memory.MemoryStore(engine=handle)
+        ctx = shared_hsm_context()
+        await start_abilities_for_test(ctx, store)
+        request = asyncio.ensure_future(
+            memory.transact(ctx, store, memory.InputData(statements=(_select_by_query_tags(query_tags="d"),)))
+        )
+        while store.state() != "/MemoryStoreLifecycle/attached/behavior/applying":
+            await asyncio.sleep(0.01)
+        owner = ability_terminal_owner(store)
+        assert owner is not None
+        _ = await store.detach(ctx, attachment.DetachEvent.with_data(attachment.DetachData(actor=owner)))
+        during = store.state()
+        output = await asyncio.wait_for(request, 5)
+        await asyncio.sleep(0.01)
+        after = store.state()
+        await hsm.stop(store, ctx)
+        return during, after, output
+
+    during, after, output = asyncio.run(run())
+
+    assert during == "/MemoryStoreLifecycle/attached/behavior/applying"
+    assert after == "/MemoryStoreLifecycle/detached"
+    assert output.results[0].rows == ()
