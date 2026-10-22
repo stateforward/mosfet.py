@@ -127,8 +127,7 @@ def test_instances_from_behavior_results_round_trips_status_and_usage() -> None:
     assert got.examples == ("when ring",)
 
 
-def test_legacy_rows_map_safely() -> None:
-    # No status column: active defaults.
+def test_rows_without_status_default_to_active() -> None:
     rows = [
         {
             "name": "Legacy",
@@ -141,8 +140,11 @@ def test_legacy_rows_map_safely() -> None:
     assert loaded[0].status == STATUS_ACTIVE
     assert loaded[0].used_count == 0
 
-    # Legacy broken boolean column.
-    broken_rows = [
+
+def test_removed_broken_columns_are_not_read() -> None:
+    # The schema has only status/status_reason/status_updated_at; a removed
+    # ``broken`` column is ignored, so the row falls to the ACTIVE default.
+    rows = [
         {
             "name": "OldBroken",
             "source": "x",
@@ -153,10 +155,25 @@ def test_legacy_rows_map_safely() -> None:
             "broken_at": "2026-01-01T00:00:00Z",
         }
     ]
-    legacy = storage.instances_from_behavior_results(broken_rows, ())
-    assert legacy[0].status == STATUS_BROKEN
-    assert legacy[0].status_reason == "draft"
-    assert legacy[0].status_updated_at == "2026-01-01T00:00:00Z"
+    loaded = storage.instances_from_behavior_results(rows, ())
+    assert loaded[0].status == STATUS_ACTIVE
+    assert loaded[0].status_reason is None
+    assert loaded[0].status_updated_at is None
+
+
+def test_boolean_status_values_are_not_broken() -> None:
+    # Only ACTIVE/DRAFT/BROKEN name a status; anything else is the ACTIVE default.
+    rows = [
+        {"name": name, "source": "x", "description": "", "examples_json": "[]", "status": value}
+        for name, value in (("Upper", "TRUE"), ("One", "1"), ("Yes", "yes"), ("Bool", True))
+    ]
+    loaded = storage.instances_from_behavior_results(rows, ())
+    assert {item.name: item.status for item in loaded} == {
+        "Upper": STATUS_ACTIVE,
+        "One": STATUS_ACTIVE,
+        "Yes": STATUS_ACTIVE,
+        "Bool": STATUS_ACTIVE,
+    }
 
 
 def test_instance_defaults_to_turn_lifetime() -> None:
