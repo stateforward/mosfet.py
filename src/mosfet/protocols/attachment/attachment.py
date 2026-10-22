@@ -24,6 +24,8 @@ class Attachment(typing.Protocol):
     _attachments: list[hsm.Instance]
     _attachment_timeout: datetime.timedelta
     _attachment_request_id: str
+    # Who waits on the outstanding attach; None means the attaching actor itself.
+    _attachment_reply_to: hsm.Instance | None = None
 
     # attach/detach resolve to whether the request was delivered to the attachment machine.
     def attach(
@@ -137,11 +139,12 @@ class Attachment(typing.Protocol):
         instance: hsm.Instance,
         event: hsm.Event[typing.Any],
     ) -> None:
-        """Hold the deadline and the request id the attaching state has to answer.
+        """Hold the deadline, the request id, and the waiter the attaching state has to answer.
 
-        The deadline arrives as a time event, which carries no id, so anything the timeout
-        builds has nothing of the request left to stamp unless it was kept here. Success reads
-        its id straight off the request event; failure has to read it off the machine.
+        The deadline arrives as a time event, which carries no id or data, so anything the
+        timeout builds has nothing of the request left to stamp or address unless it was kept
+        here. Success reads its id and ``reply_to`` straight off the request event; failure has
+        to read them off the machine.
         """
 
         del ctx
@@ -150,6 +153,7 @@ class Attachment(typing.Protocol):
         assert isinstance(data, events.AttachData)
         instance._attachment_timeout = data.timeout
         instance._attachment_request_id = event.id
+        instance._attachment_reply_to = data.reply_to
 
     @staticmethod
     def _attachment_timeout_delay(
@@ -165,9 +169,11 @@ class Attachment(typing.Protocol):
     def _timeout_attachment(ctx: hsm.Context, instance: hsm.Instance, event: hsm.Event[typing.Any]) -> None:
         assert isinstance(instance, Attachment)
         actor = instance._attachments.pop()
+        target = actor if instance._attachment_reply_to is None else instance._attachment_reply_to
+        instance._attachment_reply_to = None
         _ = hsm.dispatch(
             ctx,
-            actor,
+            target,
             dataclasses.replace(
                 events.AttachFailedEvent.with_data(
                     events.FailedData(
@@ -181,7 +187,7 @@ class Attachment(typing.Protocol):
                 ),
                 id=instance._attachment_request_id,
                 source=hsm.id(instance),
-                target=Attachment._actor_id(actor),
+                target=Attachment._actor_id(target),
                 metadata=dict(event.metadata),
             ),
         )
