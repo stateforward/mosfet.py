@@ -696,7 +696,7 @@ def test_a_long_whole_reply_is_written_whole_and_spoken_in_full(
 
 def test_one_chunk_longer_than_the_mouths_buffer_is_said_in_pieces_under_the_lookahead() -> None:
     """A whole-text provider yields 31 s chunks, past the mouth's 30 s buffer; Speaking, not the provider, cuts
-    them into whole-frame pieces of at most half the lookahead, and the chunk's text rides on its last piece."""
+    them into whole-frame pieces of at most half the lookahead, and the chunk's text is said once all of them play."""
 
     async def run() -> tuple[Stage, list[speaking.OutputData]]:
         voice = await stage(Script(chunk_ms=31_000, whole=True))
@@ -897,9 +897,73 @@ def test_stop_closes_the_pipe_and_the_stream_in_flight_and_ignores_a_stop_for_an
     assert state.endswith("/wired/voiced/idle")
 
 
-def test_a_stop_with_whole_text_alignment_says_nothing_was_said() -> None:
+class Lump(Script):
+    """A whole-text voice that says the whole text as one long chunk, aligned to all of its words."""
+
+    @typing.override
+    async def encode(
+        self, input: collections.abc.AsyncIterable[vocal.speech.Piece]
+    ) -> collections.abc.AsyncIterator[vocal.speech.Audio]:
+        read: list[str] = []
+        self.reads.append(read)
+        async for piece in input:
+            read.append(piece.words)
+        yield vocal.speech.Audio(pcm=pcm(self.chunk_ms), text="".join(read))
+
+
+TEN_WORDS = "one two three four five six seven eight nine ten."
+
+
+def test_a_stop_partway_through_a_chunk_says_the_whole_words_its_played_share_covers() -> None:
+    """With no finer alignment, a chunk cut short counts as said in proportion to how much of its audio played,
+    rounded down to whole words: 2 s for ten words, cut just past 1 s, said five."""
+
     async def run() -> list[speaking.OutputData]:
-        # A real clock: 200 ms per word, and the text is said only once its last chunk plays.
+        voice = await stage(Lump(chunk_ms=2_000), mouth=RecordingSpeaker(monotonic=time.monotonic))
+        await voice.say(TEN_WORDS)
+        await wait_until(lambda: any(item.spoken_seconds >= 1.0 for item in voice.progress()))
+        await voice.stop()
+        await wait_until(lambda: bool(voice.outputs()))
+        return voice.outputs()
+
+    (output,) = asyncio.run(run())
+
+    assert (output.outcome, output.spoken, output.unspoken) == (
+        "stopped",
+        "one two three four five",
+        " six seven eight nine ten.",
+    )
+
+
+def test_a_stop_before_any_of_a_chunk_has_played_says_nothing() -> None:
+    async def run() -> list[speaking.OutputData]:
+        voice = await stage(Lump(chunk_ms=2_000), mouth=RecordingSpeaker(monotonic=time.monotonic))
+        await voice.say(TEN_WORDS)
+        await wait_until(lambda: bool(voice.speaker.frames))
+        await voice.stop()
+        await wait_until(lambda: bool(voice.outputs()))
+        return voice.outputs()
+
+    (output,) = asyncio.run(run())
+
+    assert (output.outcome, output.spoken, output.unspoken) == ("stopped", "", TEN_WORDS)
+
+
+def test_a_chunk_played_in_full_is_said_in_full() -> None:
+    async def run() -> list[speaking.OutputData]:
+        voice = await stage(Lump(chunk_ms=2_000))
+        await voice.say(TEN_WORDS)
+        await wait_until(lambda: bool(voice.outputs()))
+        return voice.outputs()
+
+    (output,) = asyncio.run(run())
+
+    assert (output.outcome, output.spoken, output.unspoken) == ("completed", TEN_WORDS, "")
+
+
+def test_a_stop_with_whole_text_alignment_says_the_words_its_played_share_covers() -> None:
+    async def run() -> list[speaking.OutputData]:
+        # A real clock: 200 ms per word, all three words aligned to the last chunk; cut a little past the first.
         voice = await stage(Script(chunk_ms=200, whole=True), mouth=RecordingSpeaker(monotonic=time.monotonic))
         await voice.say("First. Then more.")
         await wait_until(lambda: any(item.spoken_seconds > 0.0 for item in voice.progress()))
@@ -909,7 +973,7 @@ def test_a_stop_with_whole_text_alignment_says_nothing_was_said() -> None:
 
     outputs = asyncio.run(run())
 
-    assert (outputs[0].outcome, outputs[0].spoken, outputs[0].unspoken) == ("stopped", "", "First. Then more.")
+    assert (outputs[0].outcome, outputs[0].spoken, outputs[0].unspoken) == ("stopped", "First.", " Then more.")
 
 
 def test_a_stop_flushes_the_mouth_at_once_even_while_the_provider_takes_its_time_to_close() -> None:
@@ -1759,9 +1823,10 @@ def test_a_cue_set_or_changed_only_on_the_final_is_late_for_a_part_already_begun
     )
 
 
-def test_with_whole_text_alignment_no_part_of_a_reply_is_said_until_its_last_chunk_plays() -> None:
+def test_with_whole_text_alignment_a_stop_says_the_words_of_the_run_its_played_share_covers() -> None:
     """R6-6a: an encoder that says a run of parts in one request aligns the run's words to its last chunk, so a stop
-    before that chunk plays leaves every part of the run unspoken, and once it plays every part is said."""
+    partway through the run says the run's words in proportion to how much of its audio played, rounded down to whole
+    words, and once it plays in full every part is said."""
 
     async def run() -> tuple[list[speaking.OutputData], list[speaking.OutputData]]:
         stopped = await stage(Script(chunk_ms=200, whole=True), mouth=RecordingSpeaker(monotonic=time.monotonic))
@@ -1776,7 +1841,7 @@ def test_with_whole_text_alignment_no_part_of_a_reply_is_said_until_its_last_chu
 
     stopped, said = asyncio.run(run())
 
-    assert (stopped[0].outcome, stopped[0].spoken, stopped[0].unspoken) == ("stopped", "", "Oh, you got me. Again.")
+    assert (stopped[0].outcome, stopped[0].spoken, stopped[0].unspoken) == ("stopped", "Oh,", " you got me. Again.")
     assert (said[0].outcome, said[0].spoken, said[0].unspoken) == ("completed", "Oh, you got me.", "")
     assert said[0].expression == (speaking.PartReport(unsupported=("sound",)), speaking.PartReport())
 

@@ -38,6 +38,8 @@ import collections
 import collections.abc
 import dataclasses
 import datetime
+import math
+import re
 import time
 import typing
 import uuid
@@ -267,7 +269,8 @@ class OutputData(pydantic.BaseModel):
         default="",
         description=(
             "The words of the audio the mouth reported played, in order, as the encoder aligned them: what the room "
-            "actually heard. Empty when nothing was played."
+            "actually heard. Audio cut short partway through the words aligned to it says those words in proportion "
+            "to the share of it that played, rounded down to whole words. Empty when nothing was played."
         ),
     )
     unspoken: str = pydantic.Field(
@@ -587,8 +590,8 @@ class _CommandedData(pydantic.BaseModel):
     """The next piece of the utterance's audio, to be commanded to the mouth under ``mark``.
 
     An encoded chunk goes to the mouth in whole-frame pieces of at most half the lookahead: ``audio`` is this
-    piece, and ``backlog`` the rest of the chunk still to command, with ``backlog_text`` the chunk's aligned text,
-    which rides on its last piece (``text`` is ``""`` until then).
+    piece, and ``backlog`` the rest of the chunk still to command. The piece that opens a chunk carries the chunk's
+    aligned ``text`` and its whole playout time, ``chunk_seconds``; a later piece of the same chunk carries ``None``.
     """
 
     model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(frozen=True)
@@ -597,9 +600,9 @@ class _CommandedData(pydantic.BaseModel):
     mark: str
     seconds: float
     audio: bytes
-    text: str
+    text: str | None
+    chunk_seconds: float
     backlog: bytes
-    backlog_text: str
 
 
 class _StreamEndedData(pydantic.BaseModel):
@@ -652,10 +655,41 @@ _RecordingFailedEvent = hsm.Event[ability.FailureData](
 
 @dataclasses.dataclass(kw_only=True)
 class _Mark:
-    """One commanded piece the mouth has not yet reported: how long it plays, and the text it finishes saying."""
+    """One commanded piece the mouth has not yet reported: how long it plays, and the span it is audio of."""
 
     seconds: float
-    text: str
+    span: int
+
+
+@dataclasses.dataclass(kw_only=True)
+class _Span:
+    """The audio of some words: the chunks from the one after the last chunk that carried words, up to and including
+    the next one that does (``closed`` once that one is seen; its ``text`` is then the span's words).
+
+    ``seconds`` is the span's audio known so far, ``heard`` how much of it the mouth has played, and ``pieces`` how
+    many of its commanded pieces the mouth has not yet reported. A span's words count as said in proportion to the
+    share of its audio that played, rounded down to whole words (:meth:`said`): all of them once all of it has
+    played, none before any has. With a voice that aligns each word to its own chunk, that is exactly the words
+    whose audio played; with one that aligns a whole request to its last chunk, it is the request's words up to
+    where it was cut.
+    """
+
+    text: str = ""
+    seconds: float = 0.0
+    heard: float = 0.0
+    pieces: int = 0
+    closed: bool = False
+
+    def said(self) -> tuple[str, str]:
+        """The span's words split into those said and those not: what played covers, rounded down to whole words."""
+
+        if self.heard >= self.seconds:
+            return self.text, ""
+        ends = [word.end() for word in re.finditer(r"\S+", self.text)]
+        # A hair of tolerance, so float sums of played audio never round a whole word away.
+        count = math.floor(len(ends) * self.heard / self.seconds + 1e-9)
+        cut = ends[count - 1] if count else 0
+        return self.text[:cut], self.text[cut:]
 
 
 @dataclasses.dataclass(kw_only=True)
@@ -668,11 +702,13 @@ class _Utterance:
     the reply is ended (nothing more is written), ``parts`` is the final reply once it has arrived, ``drafted`` that
     it began as drafts, ``encoding_outcome`` how the stream ended and ``failure`` why it failed; ``failed_as`` is what
     first failed the utterance: its stream, a mouth that overflowed (``overloaded``), or a mouth that stopped
-    reporting (``timeout``). ``marks`` holds only the pieces the mouth has not yet reported: a reported piece's words
-    join ``spoken`` (played) or ``unplayed`` (dropped), and ``aligned`` counts the words the commanded pieces carry.
-    ``backlog`` is what is left of the last encoded chunk still to command, with its aligned words. The reply has no
-    length bound (W3-20): what bounds the work in flight is the lookahead, which bounds the marks, and one encoded
-    chunk of backlog; the enrollment copy is at most ``enroll_seconds``.
+    reporting (``timeout``). ``marks`` holds only the pieces the mouth has not yet reported, each the audio of one
+    of ``spans``, by span number (``spanned`` counts them); once a span is closed and the mouth has reported all of
+    its pieces, its words join ``spoken`` (what played covers) and ``unplayed`` (the rest), in order. ``aligned``
+    counts the words of the commanded chunks. ``backlog`` is what is left of the last encoded chunk still to command.
+    The reply has no length bound (W3-20): what bounds the work in flight is the lookahead, which bounds the marks
+    and the spans they keep open, and one encoded chunk of backlog; the enrollment copy is at most
+    ``enroll_seconds``.
     """
 
     sequence: int
@@ -690,12 +726,13 @@ class _Utterance:
     final: bool = False
     drafted: bool = False
     marks: dict[str, _Mark] = dataclasses.field(default_factory=dict[str, _Mark])
+    spans: dict[int, _Span] = dataclasses.field(default_factory=dict[int, _Span])
+    spanned: int = 0
     commands: int = 0
     aligned: int = 0
     spoken: str = ""
     unplayed: str = ""
     backlog: bytes = b""
-    backlog_text: str = ""
     commanded: float = 0.0
     played: float = 0.0
     dropped: float = 0.0
@@ -798,9 +835,10 @@ class Speaking(ability.Ability[InputData, OutputData]):
     pulls the stream one chunk at a time, staying at most ``lookahead`` of unplayed audio ahead of the mouth (an
     unpulled stream pushes back on the provider), and commands each chunk to the mouth in whole-frame pieces of at
     most half the lookahead, each under its own mark, with the words the encoder aligned to the chunk on its last
-    piece, so no provider has to know how much the mouth can buffer. The mouth reports each mark as it is played. The
-    utterance ends when every commanded piece is played (or dropped), and ``spoken`` is the aligned words of the
-    played pieces. Audio the mouth drops unplayed ends the utterance ``failed``, never ``completed``. A stream that
+    piece, so no provider has to know how much the mouth can buffer. The mouth reports each mark as it is played, and
+    on a flush how much of the piece it cut short had played. The utterance ends when every commanded piece is played
+    (or dropped), and ``spoken`` is the words the played audio covers: each run of chunks up to one that carries words
+    is said in proportion to the share of its audio that played, rounded down to whole words. Audio the mouth drops unplayed ends the utterance ``failed``, never ``completed``. A stream that
     fails, or produces nothing for ``encode_idle_timeout``, ends the utterance as ``failed`` after what was already
     commanded has played. A ``speaking.stop`` for the utterance flushes the mouth at once, then closes its pipe and
     its stream (provider cancel), and ends it ``stopped`` once the mouth has reported the flush and the audio already
@@ -1417,10 +1455,20 @@ class Speaking(ability.Ability[InputData, OutputData]):
         utterance = instance._utterance
         assert utterance is not None
         first = not utterance.commands
-        utterance.marks[data.mark] = _Mark(seconds=data.seconds, text=data.text)
+        if data.text is not None:
+            # A chunk opens: it continues the span still waiting for its words, or begins the next one.
+            last = utterance.spans.get(utterance.spanned)
+            if last is None or last.closed:
+                utterance.spanned += 1
+                last = utterance.spans[utterance.spanned] = _Span()
+            last.seconds += data.chunk_seconds
+            last.text += data.text
+            last.closed = bool(data.text)
+            utterance.aligned += len(data.text)
+        utterance.spans[utterance.spanned].pieces += 1
+        utterance.marks[data.mark] = _Mark(seconds=data.seconds, span=utterance.spanned)
         utterance.commands += 1
-        utterance.aligned += len(data.text)
-        utterance.backlog, utterance.backlog_text = data.backlog, data.backlog_text
+        utterance.backlog = data.backlog
         utterance.commanded += data.seconds
         if not utterance.first_audio:
             utterance.first_audio = True
@@ -1471,8 +1519,7 @@ class Speaking(ability.Ability[InputData, OutputData]):
         utterance = instance._utterance
         assert utterance is not None
         mark = utterance.marks.pop(data.mark)
-        utterance.spoken += mark.text
-        utterance.played += mark.seconds
+        Speaking._reported(utterance, mark, mark.seconds)
         Speaking._efference(ctx, instance, utterance)
         Speaking._progress(ctx, instance, utterance)
 
@@ -1489,14 +1536,33 @@ class Speaking(ability.Ability[InputData, OutputData]):
         )
 
     @staticmethod
-    def _drop(utterance: _Utterance, names: collections.abc.Iterable[str]) -> None:
-        """The named marks will never be reported played: their audio is dropped and their text unspoken."""
+    def _reported(utterance: _Utterance, mark: _Mark, played: float) -> None:
+        """The mouth has reported ``mark``: ``played`` seconds of it played and the rest was dropped. Every span at
+        the front that is closed, wholly commanded and wholly reported is settled into what was said and what not."""
 
-        for name in names:
+        span = utterance.spans[mark.span]
+        span.heard += played
+        span.pieces -= 1
+        utterance.played += played
+        utterance.dropped += mark.seconds - played
+        while utterance.spans:
+            number, front = next(iter(utterance.spans.items()))
+            if not front.closed or front.pieces or (number == utterance.spanned and utterance.backlog):
+                break
+            said, unsaid = front.said()
+            utterance.spoken += said
+            utterance.unplayed += unsaid
+            del utterance.spans[number]
+
+    @staticmethod
+    def _drop(utterance: _Utterance, names: collections.abc.Sequence[str], played: float = 0.0) -> None:
+        """The named marks will never be reported played: their audio was dropped, but for the first one's ``played``
+        seconds, which the mouth played before it cut that piece short."""
+
+        for index, name in enumerate(names):
             mark = utterance.marks.pop(name, None)
             if mark is not None:
-                utterance.unplayed += mark.text
-                utterance.dropped += mark.seconds
+                Speaking._reported(utterance, mark, min(mark.seconds, played) if index == 0 else 0.0)
 
     @staticmethod
     def _overflowed(ctx: hsm.Context, instance: "Speaking", event: hsm.Event[typing.Any]) -> None:
@@ -1507,20 +1573,21 @@ class Speaking(ability.Ability[InputData, OutputData]):
         assert isinstance(data, audio.FlushedData)
         utterance = instance._utterance
         assert utterance is not None
-        Speaking._drop(utterance, data.marks)
+        Speaking._drop(utterance, data.marks, data.played_seconds)
         utterance.final, utterance.outcome = True, "failed"
         utterance.failed_as = utterance.failed_as or "overloaded"
         Speaking._efference(ctx, instance, utterance)
 
     @staticmethod
     def _flushed(ctx: hsm.Context, instance: "Speaking", event: hsm.Event[typing.Any]) -> None:
-        """The mouth dropped this utterance's unplayed audio on its stop: that audio is unspoken."""
+        """The mouth dropped this utterance's unplayed audio on its stop: that audio is unspoken, but for what of the
+        piece it cut short had already played."""
 
         data = event.data
         assert isinstance(data, audio.FlushedData)
         utterance = instance._utterance
         assert utterance is not None
-        Speaking._drop(utterance, data.marks)
+        Speaking._drop(utterance, data.marks, data.played_seconds)
         Speaking._efference(ctx, instance, utterance)
 
     @staticmethod
@@ -1600,10 +1667,8 @@ class Speaking(ability.Ability[InputData, OutputData]):
         pcm = Speaking._voiced_encoder(instance).format
         result: hsm.Event[typing.Any]
         try:
-            if utterance.backlog:
-                chunk = vocal.speech.Audio(pcm=utterance.backlog, text=utterance.backlog_text)
-            else:
-                chunk = await anext(utterance.stream)
+            opening = not utterance.backlog
+            chunk = await anext(utterance.stream) if opening else vocal.speech.Audio(pcm=utterance.backlog, text="")
             if len(chunk.pcm) % (_SAMPLE_BYTES * pcm.channels):
                 raise encoding.Error("invalid_response", "An encoded chunk is not whole frames.")
         except StopAsyncIteration:
@@ -1621,9 +1686,9 @@ class Speaking(ability.Ability[InputData, OutputData]):
                     mark=f"u{sequence}.{utterance.commands}",
                     seconds=pcm.seconds(len(piece)),
                     audio=piece,
-                    text="" if backlog else chunk.text,
+                    text=chunk.text if opening else None,
+                    chunk_seconds=pcm.seconds(len(chunk.pcm)),
                     backlog=backlog,
-                    backlog_text=chunk.text if backlog else "",
                 )
             )
         _ = hsm.dispatch(
@@ -1801,8 +1866,9 @@ class Speaking(ability.Ability[InputData, OutputData]):
 
     @staticmethod
     def _output(instance: "Speaking", utterance: _Utterance) -> OutputData:
-        """What was said is the aligned words of the played pieces; the rest of what the encoder read is not. Each
-        part written to the voice is reported: how its opening expression was carried, and what came only late."""
+        """What was said is the words the played audio covers, span by span; the rest of what the encoder read is
+        not. A span still open, its words never seen, said nothing. Each part written to the voice is reported: how
+        its opening expression was carried, and what came only late."""
 
         encoder = Speaking._voiced_encoder(instance)
         pcm = encoder.format
@@ -1811,13 +1877,12 @@ class Speaking(ability.Ability[InputData, OutputData]):
             _report(encoder.expressiveness, opening, finals[index].expression if index < len(finals) else None)
             for index, opening in enumerate(utterance.openings)
         )
+        said = [span.said() for span in utterance.spans.values()]
         return OutputData(
             text=vocal.speech.said(utterance.parts) if utterance.parts is not None else utterance.pipe.written,
-            spoken=utterance.spoken,
+            spoken=utterance.spoken + "".join(words for words, _ in said),
             unspoken=(
-                utterance.unplayed
-                + "".join(mark.text for mark in utterance.marks.values())
-                + utterance.pipe.written[utterance.aligned :]
+                utterance.unplayed + "".join(rest for _, rest in said) + utterance.pipe.written[utterance.aligned :]
             ),
             outcome=utterance.outcome,
             voice_id=instance._voice_id,
