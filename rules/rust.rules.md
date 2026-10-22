@@ -51,7 +51,7 @@ Runtime dependencies MUST be justified by real functionality, maintenance value,
 
 Optional integrations SHOULD be gated behind clearly named Cargo features.
 
-# RS-API-001 MUST EncodeData Meaning In Types
+# RS-API-001 MUST Encode Meaning In Types
 
 See:
 - [CORE-API-001](core.rules.md#core-api-001-must-explicit-api-contracts)
@@ -152,7 +152,7 @@ FFI code MUST be isolated behind safe Rust APIs where practical.
 
 FFI boundary types MUST have explicit layout, ownership, allocation, lifetime, and error contracts.
 
-# RS-SERIAL-001 MUST Validate Serialized InputData
+# RS-SERIAL-001 MUST Validate Serialized Input
 
 See:
 - [CORE-SEC-001](core.rules.md#core-sec-001-must-validate-untrusted-input)

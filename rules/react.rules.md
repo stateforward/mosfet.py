@@ -15,7 +15,7 @@ Components and hooks MUST be pure and idempotent during render.
 
 Render code MUST NOT mutate props, state, captured objects, or external systems.
 
-# REACT-STATE-001 MUST Keep SourceData State Minimal
+# REACT-STATE-001 MUST Keep Source State Minimal
 
 See:
 - [CORE-STATE-001](core.rules.md#core-state-001-must-single-source-of-truth)

@@ -39,7 +39,7 @@ Middleware SHOULD be path-scoped when only some routes require it.
 
 Global middleware MUST be safe and relevant for every route.
 
-# HONO-VALIDATE-001 MUST Validate Transport InputData
+# HONO-VALIDATE-001 MUST Validate Transport Input
 
 See:
 - [TS-DATA-001](typescript.rules.md#ts-data-001-must-validate-unknown-data)

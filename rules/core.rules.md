@@ -24,7 +24,7 @@ Mutable state MUST have exactly one logical writer or a documented synchronizati
 
 Data races are release-blocking defects.
 
-# CORE-STATE-001 MUST Single SourceData Of Truth
+# CORE-STATE-001 MUST Single Source Of Truth
 
 Each fact MUST have one source of truth.
 
@@ -32,7 +32,7 @@ Derived state SHOULD be computed from source state instead of stored and synchro
 
 Impossible states SHOULD be made unrepresentable.
 
-# CORE-ERR-001 MUST Explicit FailureData Handling
+# CORE-ERR-001 MUST Explicit Failure Handling
 
 Expected failures MUST be represented explicitly with result types, status values, error objects, or domain failure states.
 
@@ -50,7 +50,7 @@ Filesystems, networks, clocks, random sources, environment variables, operating 
 
 Core logic MUST receive external data as inputs instead of reading external systems directly.
 
-# CORE-SEC-001 MUST Validate Untrusted InputData
+# CORE-SEC-001 MUST Validate Untrusted Input
 
 All untrusted input MUST be validated before use.
 
