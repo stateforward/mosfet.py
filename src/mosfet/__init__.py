@@ -80,7 +80,7 @@ from mosfet.define import (
     transition,
 )
 from mosfet.start import register, start, started
-from mosfet import abilities, behavior, skills, address
+from mosfet import abilities, behavior, address
 
 if TYPE_CHECKING:
     from mosfet.bot.body import Bot
@@ -150,6 +150,5 @@ __all__ = [
     "StimulusData",
     "abilities",
     "behavior",
-    "skills",
     "__version__",
 ]
