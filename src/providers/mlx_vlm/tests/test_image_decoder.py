@@ -5,6 +5,7 @@ import collections.abc
 import dataclasses
 import pathlib
 import sys
+import time
 import types
 import typing
 
@@ -263,6 +264,33 @@ def test_image_decoder_uses_injected_model_processor_and_config() -> None:
     assert output == "serial number 1234"
     assert runtime.loaded_model_ids == []
     assert runtime.config_model_ids == []
+
+
+def test_image_decoder_loads_its_model_and_config_once_across_calls() -> None:
+    runtime = FakeRuntime()
+
+    def load_model(model_id: str) -> tuple[object, object]:
+        time.sleep(0.02)
+        return runtime.load_model(model_id)
+
+    decoder = ImageDecoder(
+        model_id="local/qwen2-vl",
+        load_model=load_model,
+        load_config=runtime.load_config,
+        apply_chat_template=runtime.apply_chat_template,
+        generate=runtime.generate,
+    )
+
+    async def decode_repeatedly() -> None:
+        _ = await decoder.decode(PNG)
+        _ = await decoder.decode(PNG)
+        _ = await asyncio.gather(*(decoder.decode(PNG) for _ in range(4)))
+
+    asyncio.run(decode_repeatedly())
+
+    assert runtime.loaded_model_ids == ["local/qwen2-vl"]
+    assert runtime.config_model_ids == ["local/qwen2-vl"]
+    assert len(runtime.generate_calls) == 6
 
 
 def test_image_decoder_is_awaitable() -> None:

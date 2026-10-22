@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import collections.abc
 import dataclasses
+import threading
 import typing
 
 import mosfet.abilities
@@ -49,6 +50,15 @@ class ImageDecoder(mosfet.abilities.Decoder[media.Image, str]):
     load_config: ConfigLoader = load_config
     apply_chat_template: ChatTemplateApplier = apply_chat_template
     generate: ImageGenerator = generate
+    _runtime: tuple[object, object, object] | None = dataclasses.field(
+        default=None, init=False, repr=False, compare=False
+    )
+    _load_lock: threading.Lock = dataclasses.field(
+        default_factory=threading.Lock, init=False, repr=False, compare=False
+    )
+    _inference_lock: threading.Lock = dataclasses.field(
+        default_factory=threading.Lock, init=False, repr=False, compare=False
+    )
 
     @typing.override
     async def decode(self, input: media.Image) -> str:
@@ -56,10 +66,9 @@ class ImageDecoder(mosfet.abilities.Decoder[media.Image, str]):
 
     def _decode_blocking(self, image: media.Image) -> str:
         try:
-            model, processor = self._model_and_processor()
-            config = self._config(model)
+            model, processor, config = self._resolved_runtime()
             prompt = self.apply_chat_template(processor, config, self.prompt, num_images=1)
-            with temporary_image_file(image) as image_path:
+            with self._inference_lock, temporary_image_file(image) as image_path:
                 output = self.generate(
                     model,
                     processor,
@@ -72,6 +81,20 @@ class ImageDecoder(mosfet.abilities.Decoder[media.Image, str]):
         except Exception as error:
             message = "MLX VLM image decoding failed."
             raise ImageDecodingError(message) from error
+
+    def _resolved_runtime(self) -> tuple[object, object, object]:
+        """Return the model, processor, and config, loading whatever is not injected once."""
+
+        runtime = self._runtime
+        if runtime is not None:
+            return runtime
+        with self._load_lock:
+            runtime = self._runtime
+            if runtime is None:
+                model, processor = self._model_and_processor()
+                runtime = (model, processor, self._config(model))
+                object.__setattr__(self, "_runtime", runtime)
+            return runtime
 
     def _model_and_processor(self) -> tuple[object, object]:
         if self.model is not None and self.processor is not None:
