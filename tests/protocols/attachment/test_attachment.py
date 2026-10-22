@@ -162,3 +162,45 @@ def test_attach_timeout_failure_correlates_to_its_request() -> None:
     assert isinstance(failure.data, attachment.FailedData)
     assert failure.data.kind is attachment.FailureKind.TIMEOUT
     assert state == "/AttachmentRequester/settled"
+
+
+def test_attach_timeout_failure_answers_the_reply_to_waiter() -> None:
+    """A timeout answers ``reply_to`` like every other attach outcome does.
+
+    Callers that wait on an operation pass that waiter as ``reply_to`` and keep ``actor`` as the
+    party being attached. Success and conflict reach the waiter; if the timeout went to the actor
+    instead, the waiter would never hear that its attach failed.
+    """
+
+    async def run() -> tuple[list[hsm.Event[typing.Any]], list[hsm.Event[typing.Any]]]:
+        ctx = hsm.Context()
+        requester = Requester()
+        collector = Requester()
+        component = UnfinishedAttachment()
+        _ = await mosfet.started(ctx, requester, requester.model)
+        _ = await mosfet.started(ctx, collector, collector.model)
+        _ = await mosfet.started(ctx, component, component.model)
+        requester.request_id = "attachment-request-2"
+        collector.request_id = "attachment-request-2"
+        _ = await component.attach(
+            ctx,
+            attachment.AttachEvent.with_data_and_id(
+                attachment.AttachData(
+                    actor=requester,
+                    reply_to=collector,
+                    timeout=datetime.timedelta(milliseconds=1),
+                ),
+                collector.request_id,
+            ),
+        )
+        _ = await asyncio.wait_for(collector.settled.wait(), timeout=1)
+        return collector.outcomes, requester.outcomes
+
+    collected, requested = asyncio.run(run())
+
+    assert [outcome.name for outcome in collected] == [attachment.AttachFailedEvent.name]
+    failure = collected[0]
+    assert failure.id == "attachment-request-2"
+    assert isinstance(failure.data, attachment.FailedData)
+    assert failure.data.kind is attachment.FailureKind.TIMEOUT
+    assert requested == []
