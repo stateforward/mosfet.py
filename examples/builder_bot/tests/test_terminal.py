@@ -582,6 +582,32 @@ def test_a_computer_that_never_shows_its_screen_times_out_and_exits_1() -> None:
     assert asyncio.run(run()) == terminal.ClosedData(reason="timeout", code=None, exit_code=1)
 
 
+def test_the_session_span_lasts_from_sitting_down_to_quitting(recorded: Telemetry) -> None:
+    held_ns = 200_000_000
+
+    async def run() -> None:
+        bench = await desk()
+        person = await linked(bench)
+        await asyncio.sleep(held_ns / 1e9)
+        person.type("/quit")
+        _ = await stand_up(person)
+        await bench.close()
+
+    before = len(recorded.spans.get_finished_spans())
+    asyncio.run(run())
+
+    (session,) = [
+        span for span in recorded.spans.get_finished_spans()[before:] if span.name == "bot.example.terminal.session"
+    ]
+    assert session.start_time is not None and session.end_time is not None
+    assert session.end_time - session.start_time >= held_ns
+    assert dict(session.attributes or {}) == {
+        "bot.component.name": "terminal",
+        "bot.stage": "session",
+        "bot.outcome": "ok",
+    }
+
+
 def test_telemetry_attributes_come_only_from_closed_sets(recorded: Telemetry) -> None:
     async def run() -> None:
         bench = await desk()

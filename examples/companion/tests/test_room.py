@@ -15,6 +15,10 @@ from mosfet import environment, media
 from mosfet.devices import computer
 from mosfet.environment import space
 from mosfet.providers import websocket
+from opentelemetry import trace
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from companion_example import room
 
 from tests import support
@@ -73,6 +77,47 @@ def test_what_the_computer_hears_in_the_house_comes_out_of_the_rooms_speaker() -
     assert played == [support.Played(pcm=support.SPOKEN, sample_rate_hz=24_000, channels=1)]
     assert (closed.reason, closed.exit_code) == ("left", 0)
     assert speaker.stopped == 1
+
+
+_SPANS: list[InMemorySpanExporter] = []
+
+
+@pytest.fixture
+def spans() -> InMemorySpanExporter:
+    """The process's tracer provider, installed on first use if none is, with every span it ends kept in memory."""
+
+    if not _SPANS:
+        provider = trace.get_tracer_provider()
+        if not isinstance(provider, TracerProvider):
+            provider = TracerProvider()
+            trace.set_tracer_provider(provider)
+        exporter = InMemorySpanExporter()
+        provider.add_span_processor(SimpleSpanProcessor(exporter))
+        _SPANS.append(exporter)
+    return _SPANS[0]
+
+
+def test_the_session_span_lasts_from_entering_the_room_to_leaving_it(spans: InMemorySpanExporter) -> None:
+    held_ns = 200_000_000
+
+    async def run() -> None:
+        house = await support.kitchen()
+        microphone = support.Microphone()
+        try:
+            session = await support.enter(house.port, microphone, support.Speaker())
+            await support.wait_until(lambda: house.holder.linked() and microphone.heard is not None)
+            await asyncio.sleep(held_ns / 1e9)
+            _ = await session.leave()
+        finally:
+            await house.close()
+
+    before = len(spans.get_finished_spans())
+    asyncio.run(run())
+
+    (session,) = [span for span in spans.get_finished_spans()[before:] if span.name == "bot.example.room.session"]
+    assert session.start_time is not None and session.end_time is not None
+    assert session.end_time - session.start_time >= held_ns
+    assert dict(session.attributes or {}) == {"bot.component.name": "room", "bot.stage": "session", "bot.outcome": "ok"}
 
 
 def test_with_a_camera_the_room_shows_the_house_what_it_sees() -> None:

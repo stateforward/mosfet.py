@@ -44,6 +44,7 @@ import os
 import pathlib
 import sys
 import threading
+import time
 import typing
 import urllib.parse
 
@@ -58,6 +59,7 @@ from mosfet.protocols import transform, transport, yamux
 from mosfet.providers import websocket
 from mosfet.telemetry import span
 from mosfet.telemetry.hsm import Traced
+from opentelemetry import context as otel_context
 from opentelemetry import metrics
 from pydantic.json_schema import SkipJsonSchema
 
@@ -369,6 +371,8 @@ class Terminal(Traced):
     _connect: Connect
     _connect_timeout: datetime.timedelta
     _open_timeout: datetime.timedelta
+    # The wall clock, in nanoseconds since the epoch, that the session span starts on.
+    _clock: collections.abc.Callable[[], int]
     _session: yamux.Client
     # Frames for the socket, in order; written by _enqueue and drained by _run_write.
     _outbox: asyncio.Queue[bytes]
@@ -381,6 +385,9 @@ class Terminal(Traced):
     # How the session ends; written only by the transitions into `closing` and `closed`.
     _reason: Reason
     _code: int | None
+    # When the session began (ns since the epoch) and the trace it began in, for its span; written only on
+    # entering `connecting`, read by _finish.
+    _began: tuple[int, otel_context.Context] | None
 
     def __init__(
         self,
@@ -395,8 +402,11 @@ class Terminal(Traced):
         connect: Connect = connect_websocket,
         connect_timeout: datetime.timedelta = _DEFAULT_TIMEOUT,
         open_timeout: datetime.timedelta = _DEFAULT_TIMEOUT,
+        clock: collections.abc.Callable[[], int] = time.time_ns,
     ) -> None:
         """Build an unstarted terminal for the computer ``peer`` served at ``url`` (``ws://host:port``).
+
+        ``clock`` reads the wall clock in nanoseconds since the epoch; the session's span starts at its reading.
 
         Raises:
             ValueError: ``url`` is not a ``ws://`` URL with a host and no path, ``peer`` is not a transport
@@ -415,6 +425,7 @@ class Terminal(Traced):
         self._connect = connect
         self._connect_timeout = connect_timeout
         self._open_timeout = open_timeout
+        self._clock = clock
         self._session = yamux.Client(connection=self)
         self._outbox = asyncio.Queue()
         self._socket = None
@@ -422,6 +433,7 @@ class Terminal(Traced):
         self._content = computer.ContentData()
         self._reason = "abnormal"
         self._code = None
+        self._began = None
 
     # -- guards and timers ------------------------------------------------------------------------
 
@@ -554,17 +566,37 @@ class Terminal(Traced):
         instance._reason = "quit"
 
     @staticmethod
+    def _begin(ctx: hsm.Context, instance: "Terminal", event: hsm.Event[typing.Any]) -> None:
+        """Note when, and in which trace, the session began: its span starts there."""
+
+        del ctx
+        instance._began = (instance._clock(), telemetry.event_context(event))
+
+    @staticmethod
     def _finish(ctx: hsm.Context, instance: "Terminal", event: hsm.Event[typing.Any]) -> None:
-        """Count how the session ended, leave its span, and tell whoever started the terminal, once."""
+        """Count how the session ended, leave its span, and tell whoever started the terminal, once.
+
+        The span runs from when the session began to now. It is opened here, with that start, rather than held open
+        through the session, so a terminal stopped before it closes leaves no span half open.
+        """
 
         del ctx, event
         reason = instance._reason
         _CLOSED.add(1, {"reason": reason})
-        with span.operation(
-            "bot.example.terminal.session", scope=SCOPE, component="terminal", stage="session"
-        ) as active:
-            if reason not in ("quit", "normal"):
-                span.record_failure(active, reason)
+        began = instance._began
+        assert began is not None
+        started_at, began_in = began
+        session = span.tracer(SCOPE).start_span(
+            "bot.example.terminal.session",
+            context=began_in,
+            start_time=started_at,
+            attributes={"bot.component.name": "terminal", "bot.stage": "session"},
+        )
+        if reason in ("quit", "normal"):
+            session.set_attribute("bot.outcome", span.Ok)
+        else:
+            span.record_failure(session, reason)
+        session.end()
         instance._on_closed(
             ClosedData(reason=reason, code=instance._code, exit_code=0 if reason in ("quit", "normal") else 1)
         )
@@ -736,6 +768,7 @@ class Terminal(Traced):
         hsm.initial(hsm.target("/Terminal/connecting")),
         hsm.state(
             "connecting",
+            hsm.entry(_begin),
             hsm.activity(_run_connect),
             hsm.transition(hsm.on(_ConnectedEvent), hsm.effect(_link), hsm.target("/Terminal/linked")),
             hsm.transition(
