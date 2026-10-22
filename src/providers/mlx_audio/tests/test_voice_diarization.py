@@ -7,6 +7,7 @@ import collections.abc
 import dataclasses
 import io
 import pathlib
+import time
 import wave
 
 import pytest
@@ -132,6 +133,32 @@ def test_voice_diarizer_uses_injected_loader() -> None:
     assert output.segments[0].end_seconds == 0.3
     assert output.segments[0].confidence == 0.81
     assert len(models) == 1
+
+
+def test_voice_diarizer_loads_its_model_once_across_calls() -> None:
+    input_data = _input()
+    loads: list[str] = []
+
+    def load_model(model_id: str) -> FakeVoiceDiarizationModel:
+        loads.append(model_id)
+        time.sleep(0.02)
+        return FakeVoiceDiarizationModel(
+            result=FakeDiarizationResult(
+                segments=(FakeDiarizationSegment(start_seconds=0.0, end_seconds=0.3, confidence=0.81),)
+            ),
+            expected_audio=_wav_audio(input_data.audio, sample_rate_hz=input_data.sample_rate_hz),
+        )
+
+    diarizer = VoiceDiarizer(model_id="local/sortformer", load_model=load_model, clip_audio=_clip_stub)
+
+    async def classify_repeatedly() -> None:
+        _ = await diarizer.classify(input_data)
+        _ = await diarizer.classify(input_data)
+        _ = await asyncio.gather(*(diarizer.classify(input_data) for _ in range(4)))
+
+    asyncio.run(classify_repeatedly())
+
+    assert loads == ["local/sortformer"]
 
 
 def test_voice_diarizer_is_awaitable() -> None:
