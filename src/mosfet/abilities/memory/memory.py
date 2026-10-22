@@ -63,9 +63,7 @@ counts, whether the step resumes after an embed, and a person statement's ``bot.
 vectors, and space names are never attributes.
 """
 
-import asyncio
 import collections.abc
-import concurrent.futures
 import dataclasses
 import datetime
 import logging
@@ -397,12 +395,6 @@ class Memory(store.MemoryStore):
     _index: index.Index
     _now: collections.abc.Callable[[], datetime.datetime]
     _operation_timeout: datetime.timedelta
-    # The one database worker, created by start and shut down by stop. A restart's new worker first
-    # waits for the previous one to drain, so a job left running by a timeout, a detach or a stop can
-    # never overlap a later one on the same connection.
-    _worker: concurrent.futures.ThreadPoolExecutor | None
-    # The jobs submitted to the worker and not yet done, so stop can close the database after the last.
-    _jobs: set[concurrent.futures.Future[typing.Any]]
     # Durable machine data: the request in its SQL step, the requests waiting on an embed (by
     # the embed's id; the reply's id selects one), and the unit leased for consolidation.
     _in_flight: _InFlight | None
@@ -437,50 +429,9 @@ class Memory(store.MemoryStore):
         self._index = ExactIndex() if index is None else index
         self._now = now if now is not None else (lambda: datetime.datetime.now(datetime.UTC))
         self._operation_timeout = operation_timeout
-        self._worker = None
-        self._jobs = set()
         self._in_flight = None
         self._waiting = {}
         self._lease = None
-
-    @typing.override
-    async def start(self, ctx: hsm.Context, data: object = None) -> typing.Self:
-        """Give Memory its database worker, then start it.
-
-        A worker left by an earlier start is drained first, on the new worker, so its last job
-        finishes before any job of this start runs.
-        """
-
-        previous = self._worker
-        self._worker = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="memory")
-        if previous is not None:
-            _ = self._worker.submit(previous.shutdown, wait=True)
-        return await super().start(ctx, data)
-
-    @typing.override
-    async def stop(self, ctx: hsm.Context) -> None:
-        """Stop, close the database it opened, and let the database worker exit: queued jobs are cancelled, a running one finishes."""
-
-        await super().stop(ctx)
-        if self._worker is not None:
-            self._worker.shutdown(wait=False, cancel_futures=True)
-
-    @typing.override
-    def _close_engine(self, engine: Engine) -> None:
-        """Close the database once the worker's last job is done: queued jobs are cancelled, a running one finishes first.
-
-        Stop never waits on that job: the engine is disposed on the worker, right after it.
-        """
-
-        worker = self._worker
-        if worker is not None:
-            worker.shutdown(wait=False, cancel_futures=True)
-        # One worker: once the queue is cancelled, at most the job it is running is not done.
-        running = next((job for job in self._jobs if not job.done()), None)
-        if running is None:
-            engine.dispose()
-            return
-        running.add_done_callback(lambda _: engine.dispose())
 
     @typing.override
     async def _open_engine(self) -> Engine:
@@ -811,21 +762,6 @@ class Memory(store.MemoryStore):
             )
 
     # --- work ----------------------------------------------------------------------------------
-
-    @staticmethod
-    async def _run[**P, T](
-        instance: "Memory", job: collections.abc.Callable[P, T], *args: P.args, **kwargs: P.kwargs
-    ) -> T:
-        """Run one blocking database job on this Memory's worker, in submission order."""
-
-        worker = instance._worker
-        if worker is None:
-            raise RuntimeError("Memory runs database jobs only while started.")
-        bound = span.bind(job)
-        submitted = worker.submit(bound, *args, **kwargs)
-        instance._jobs.add(submitted)
-        submitted.add_done_callback(instance._jobs.discard)
-        return await asyncio.wrap_future(submitted)
 
     @staticmethod
     def _done(

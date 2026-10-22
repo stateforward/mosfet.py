@@ -595,14 +595,16 @@ class StmMemory(store.MemoryStore):
         data = event.data
         try:
             if isinstance(data, RecordData):
-                instance._record(data)
+                await StmMemory._run(instance, instance._record, data)
             elif isinstance(data, ReinforceData):
-                instance._reinforce(data)
+                await StmMemory._run(instance, instance._reinforce, data)
             elif isinstance(data, RecentData):
-                StmMemory._reply(ctx, instance, event, RecentOutputEvent.with_data(instance._recent(data)))
+                recent = await StmMemory._run(instance, instance._recent, data)
+                StmMemory._reply(ctx, instance, event, RecentOutputEvent.with_data(recent))
             else:
                 assert isinstance(data, store.InputData)
-                StmMemory._reply(ctx, instance, event, instance.output_event.with_data(instance._execute(data)))
+                output = await StmMemory._run(instance, instance._execute, data)
+                StmMemory._reply(ctx, instance, event, instance.output_event.with_data(output))
         except Exception as error:
             if isinstance(data, RecordData | ReinforceData):
                 # Notifications have no requester to tell; the register's own log is the record.
@@ -661,7 +663,8 @@ class StmMemory(store.MemoryStore):
         ),
         hsm.state(
             "applying",
-            hsm.defer(*_REQUESTS, *_NOTIFICATIONS),
+            # A detach waits for the request on the worker, so what was queued ahead of it is served.
+            hsm.defer(attachment.AttachEvent, attachment.DetachEvent, *_REQUESTS, *_NOTIFICATIONS),
             hsm.activity(_apply_activity),
             hsm.transition(hsm.on(_SettledEvent), hsm.target("/StmMemory/idle")),
         ),

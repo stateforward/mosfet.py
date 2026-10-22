@@ -11,7 +11,8 @@ crude ``Statement(sql, parameters)`` batches only.
 Constructing a store does no I/O (DSL-29): it records the engine, engine handle (a callable that
 opens one, called once in the opening state), database path or connection it was given. The store opens and migrates its database in its own ``opening`` state, the first time
 its behavior starts, and keeps that database for its lifetime; requests sent before it is open
-wait. Telemetry: ``bot.memory.store.open.count`` counts opens by ``bot.ability.name`` (the store
+wait. Every open, migration and transaction runs on the store's one database worker thread, in
+submission order, never on the event loop; the worker lives from ``start`` to ``stop``. Telemetry: ``bot.memory.store.open.count`` counts opens by ``bot.ability.name`` (the store
 class, a closed set from code) and ``bot.outcome`` {ok, failed, timeout}.
 """
 
@@ -19,7 +20,9 @@ from __future__ import annotations
 
 from .. import ability
 
+import asyncio
 import collections.abc
+import concurrent.futures
 import dataclasses
 import datetime
 import importlib.resources
@@ -46,6 +49,7 @@ from sqlalchemy.sql import ColumnElement
 from opentelemetry import metrics
 
 from mosfet.protocols import attachment
+from mosfet.telemetry import span
 
 from . import schema
 
@@ -428,6 +432,9 @@ class MemoryStore(ability.Ability[InputData, OutputData]):
     parts share opening on its first use). The store's behavior starts in ``opening``: it opens the
     database (an injected ``engine``, or the one its handle opens, is migrated; otherwise a private
     SQLite engine is opened and migrated) and goes on to ``idle``.
+    The open, the migration and every transaction run on the store's one database worker (a single
+    thread created by ``start`` and let go by ``stop``), in submission order, so the event loop never
+    blocks on database I/O. A caller's ``connection`` is opened and used on that thread only.
     The open is bounded by the attach timeout. A store that cannot open its database, or does not
     within that bound, is ``degraded`` and answers every request failed. The open database is
     kept for the store's lifetime, so a store that detaches and attaches again opens nothing new.
@@ -453,6 +460,12 @@ class MemoryStore(ability.Ability[InputData, OutputData]):
     _injected: Engine | collections.abc.Callable[[], Engine] | None
     _database: str
     _connection: typing.Any | None
+    # The one database worker, created by start and shut down by stop. A restart's new worker first
+    # waits for the previous one to drain, so a job left running by a timeout, a detach or a stop can
+    # never overlap a later one on the same connection.
+    _worker: concurrent.futures.ThreadPoolExecutor | None
+    # The jobs submitted to the worker and not yet done, so stop can close the database after the last.
+    _jobs: set[concurrent.futures.Future[typing.Any]]
     _apply_completed_event: typing.ClassVar[hsm.Event[OutputData]] = _MemoryStoreApplyCompletedEvent
     _apply_failed_event: typing.ClassVar[hsm.Event[ability.FailureData]] = _MemoryStoreApplyFailedEvent
     _opened_event: typing.ClassVar[hsm.Event[_OpenedData]] = _OpenedEvent
@@ -474,6 +487,8 @@ class MemoryStore(ability.Ability[InputData, OutputData]):
         self._injected = engine
         self._database = database
         self._connection = connection
+        self._worker = None
+        self._jobs = set()
 
     def _connect(self) -> Engine:
         """Open and migrate this store's database (performs database I/O; blocking).
@@ -490,28 +505,75 @@ class MemoryStore(ability.Ability[InputData, OutputData]):
         return open_sqlite_engine(database=self._database, connection=self._connection)
 
     async def _open_engine(self) -> Engine:
-        """Open and migrate the database for the opening state; here on the event loop, as this store runs SQL."""
+        """Open and migrate the database for the opening state, on the worker, so the event loop never blocks on it."""
 
-        return self._connect()
+        return await MemoryStore._run(self, self._connect)
+
+    @typing.override
+    async def start(self, ctx: hsm.Context, data: object = None) -> typing.Self:
+        """Give the store its database worker, then start it.
+
+        A worker left by an earlier start is drained first, on the new worker, so its last job
+        finishes before any job of this start runs.
+        """
+
+        previous = self._worker
+        self._worker = concurrent.futures.ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix=type(self).__name__.lower()
+        )
+        if previous is not None:
+            _ = self._worker.submit(previous.shutdown, wait=True)
+        return await super().start(ctx, data)
 
     @typing.override
     async def stop(self, ctx: hsm.Context) -> None:
-        """Stop, then close the database this store opened; one it was given, as an engine or a connection, is left open.
+        """Stop, close the database this store opened, and let the worker exit: queued jobs are cancelled, a running one finishes.
 
         Whoever opens a database closes it: an injected engine, one a handle opened, or a connection is
-        its owner's. A store
-        started again opens its database again.
+        its owner's and is left open. A store started again opens its database again.
         """
 
         await super().stop(ctx)
         engine, self._engine = self._engine, None
         if engine is not None and self._injected is None and self._connection is None:
             self._close_engine(engine)
+        if self._worker is not None:
+            self._worker.shutdown(wait=False, cancel_futures=True)
 
     def _close_engine(self, engine: Engine) -> None:
-        """Close the database this store opened; here on the event loop, where this store runs its SQL."""
+        """Close the database once the worker's last job is done: queued jobs are cancelled, a running one finishes first.
 
-        engine.dispose()
+        Stop never waits on that job: the engine is disposed on the worker, right after it.
+        """
+
+        worker = self._worker
+        if worker is not None:
+            worker.shutdown(wait=False, cancel_futures=True)
+        # One worker: once the queue is cancelled, at most the job it is running is not done.
+        running = next((job for job in self._jobs if not job.done()), None)
+        if running is None:
+            engine.dispose()
+            return
+        running.add_done_callback(lambda _: engine.dispose())
+
+    @staticmethod
+    async def _run[**P, T](
+        instance: "MemoryStore", job: collections.abc.Callable[P, T], *args: P.args, **kwargs: P.kwargs
+    ) -> T:
+        """Run one blocking database job on this store's worker, in submission order.
+
+        Cancelling the await never interrupts the job: one already running finishes (its
+        transaction commits or rolls back whole) and one still queued is dropped.
+        """
+
+        worker = instance._worker
+        if worker is None:
+            raise RuntimeError(f"{type(instance).__name__} runs database jobs only while started.")
+        bound = span.bind(job)
+        submitted = worker.submit(bound, *args, **kwargs)
+        instance._jobs.add(submitted)
+        submitted.add_done_callback(instance._jobs.discard)
+        return await asyncio.wrap_future(submitted)
 
     def _opened_engine(self) -> Engine:
         """The open database; only states after ``opening`` run statements, so it is always open there."""
@@ -657,7 +719,7 @@ class MemoryStore(ability.Ability[InputData, OutputData]):
         data = event.data
         assert isinstance(data, InputData)
         try:
-            output = instance._execute(data)
+            output = await MemoryStore._run(instance, instance._execute, data)
         except Exception as error:
             _ = hsm.dispatch(
                 ctx,
@@ -706,7 +768,8 @@ class MemoryStore(ability.Ability[InputData, OutputData]):
         ),
         hsm.state(
             "applying",
-            hsm.defer(input_event),
+            # A detach waits for the transaction on the worker, so the request in flight is answered.
+            hsm.defer(input_event, attachment.AttachEvent, attachment.DetachEvent),
             hsm.activity(_run_transaction_activity),
             hsm.transition(
                 hsm.on(_MemoryStoreApplyCompletedEvent),
