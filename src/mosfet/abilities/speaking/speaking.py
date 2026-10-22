@@ -621,6 +621,17 @@ class _FlushCommandedData(pydantic.BaseModel):
     utterance: int
 
 
+class _SpanFinishedData(pydantic.BaseModel):
+    """A stopped utterance read on in its stream to the words of the run it was cut in: ``seconds`` more of that run's
+    audio came after what was commanded, and ``text`` is its words (``""`` when the stream ended without them)."""
+
+    model_config: typing.ClassVar[pydantic.ConfigDict] = pydantic.ConfigDict(frozen=True)
+
+    utterance: int
+    seconds: float
+    text: str
+
+
 class _EncodingFailedData(pydantic.BaseModel):
     """The utterance's stream failed."""
 
@@ -632,6 +643,7 @@ class _EncodingFailedData(pydantic.BaseModel):
 
 _CommandedEvent = hsm.Event[_CommandedData](name="bot.ability.speaking.commanded", schema=_CommandedData)
 _StreamEndedEvent = hsm.Event[_StreamEndedData](name="bot.ability.speaking.stream.ended", schema=_StreamEndedData)
+_SpanFinishedEvent = hsm.Event[_SpanFinishedData](name="bot.ability.speaking.span.finished", schema=_SpanFinishedData)
 _EncodingFailedEvent = hsm.Event[_EncodingFailedData](
     name="bot.ability.speaking.encoding.failed", schema=_EncodingFailedData
 )
@@ -706,6 +718,9 @@ class _Utterance:
     of ``spans``, by span number (``spanned`` counts them); once a span is closed and the mouth has reported all of
     its pieces, its words join ``spoken`` (what played covers) and ``unplayed`` (the rest), in order. ``aligned``
     counts the words of the commanded chunks. ``backlog`` is what is left of the last encoded chunk still to command.
+    ``pending`` is the read of the stream's next chunk while it is in flight, so leaving ``pulling`` never cuts the
+    stream off mid-chunk. ``finishing`` says a stop came while the last span was still waiting for its words and the
+    stream was still open: the stream stays open past ``streaming``, read on (nothing commanded) to those words.
     The reply has no length bound (W3-20): what bounds the work in flight is the lookahead, which bounds the marks
     and the spans they keep open, and one encoded chunk of backlog; the enrollment copy is at most
     ``enroll_seconds``.
@@ -742,6 +757,8 @@ class _Utterance:
     failed_as: encoding.FailureKind | typing.Literal["overloaded"] | None = None
     first_audio: bool = False
     enroll: bytearray | None = None
+    pending: asyncio.Future[vocal.speech.Audio] | None = None
+    finishing: bool = False
 
 
 def _normalize_conversation_targets(
@@ -842,7 +859,9 @@ class Speaking(ability.Ability[InputData, OutputData]):
     fails, or produces nothing for ``encode_idle_timeout``, ends the utterance as ``failed`` after what was already
     commanded has played. A ``speaking.stop`` for the utterance flushes the mouth at once, then closes its pipe and
     its stream (provider cancel), and ends it ``stopped`` once the mouth has reported the flush and the audio already
-    playing (or after ``stop_timeout``). Parts may arrive as drafts (``speaking.draft``, append-only deltas within a
+    playing (or after ``stop_timeout``). When the stop cuts short a run whose words the encoder aligns to a chunk not
+    yet read, the stream is closed only after Speaking has read on in it, commanding nothing, to that chunk, so the
+    run's words and length are known; within ``stop_timeout``, or the run said nothing. Parts may arrive as drafts (``speaking.draft``, append-only deltas within a
     part): each is written to the pipe as it arrives, a draft for the next part opening it with its expression, and
     the final ``speaking.input`` under the same id writes the rest and ends the reply, or, when it diverges from what
     was drafted, ends the reply as drafted (counted ``diverged``). Drafts that stop coming while Speaking waits on the
@@ -930,7 +949,8 @@ class Speaking(ability.Ability[InputData, OutputData]):
             encode_idle_timeout: The longest an encoding stream may go without producing a chunk once pulled.
             enroll_seconds: The most of its own voice Speaking hands Listening to learn from (at least 1.5 s).
             stop_timeout: The longest a stopped utterance waits for its mouth to report the flush and the audio
-                already playing before what it never reported counts as unspoken.
+                already playing, and for the words of a run it cut short to be read from the stream, before what it
+                never reported counts as unspoken and that run as said nothing.
             draft_timeout: The longest a drafted utterance waits on the encoder for more of its words, or its
                 final reply, before it ends ``abandoned`` with what was written. A requester's own deadline on
                 the response (Communication's ``response_idle_timeout``) must be longer.
@@ -1442,6 +1462,20 @@ class Speaking(ability.Ability[InputData, OutputData]):
         )
 
     @staticmethod
+    def _open_chunk(utterance: _Utterance, text: str, seconds: float) -> None:
+        """A chunk of ``seconds`` aligned to ``text`` opens: it continues the span still waiting for its words, or
+        begins the next one, and closes it when it carries words."""
+
+        last = utterance.spans.get(utterance.spanned)
+        if last is None or last.closed:
+            utterance.spanned += 1
+            last = utterance.spans[utterance.spanned] = _Span()
+        last.seconds += seconds
+        last.text += text
+        last.closed = bool(text)
+        utterance.aligned += len(text)
+
+    @staticmethod
     def _commanded(ctx: hsm.Context, instance: "Speaking", event: hsm.Event[typing.Any]) -> None:
         """Command the piece: record its mark, keep a copy of the bot's own voice, tell the ear, then the mouth.
 
@@ -1456,15 +1490,7 @@ class Speaking(ability.Ability[InputData, OutputData]):
         assert utterance is not None
         first = not utterance.commands
         if data.text is not None:
-            # A chunk opens: it continues the span still waiting for its words, or begins the next one.
-            last = utterance.spans.get(utterance.spanned)
-            if last is None or last.closed:
-                utterance.spanned += 1
-                last = utterance.spans[utterance.spanned] = _Span()
-            last.seconds += data.chunk_seconds
-            last.text += data.text
-            last.closed = bool(data.text)
-            utterance.aligned += len(data.text)
+            Speaking._open_chunk(utterance, data.text, data.chunk_seconds)
         utterance.spans[utterance.spanned].pieces += 1
         utterance.marks[data.mark] = _Mark(seconds=data.seconds, span=utterance.spanned)
         utterance.commands += 1
@@ -1633,9 +1659,9 @@ class Speaking(ability.Ability[InputData, OutputData]):
         finally:
             utterance.pipe.close()
             try:
-                aclose = typing.cast(object, getattr(utterance.stream, "aclose", None))
-                if callable(aclose):
-                    _ = await typing.cast(collections.abc.Awaitable[object], aclose())
+                # A stop cut a run short before its words were read: ``stopping`` reads on, and closes the stream.
+                if not utterance.finishing:
+                    await Speaking._close_stream(utterance)
             finally:
                 # Measured however the close went: a close that raises still ends the span and is still counted.
                 _ENCODING.record(
@@ -1650,6 +1676,20 @@ class Speaking(ability.Ability[InputData, OutputData]):
                 active.end()
 
     @staticmethod
+    async def _close_stream(utterance: _Utterance) -> None:
+        """Close the utterance's stream (the provider's cancel), cancelling a read of it still in flight first."""
+
+        pending, utterance.pending = utterance.pending, None
+        if pending is not None:
+            _ = pending.cancel()
+            _ = await asyncio.wait({pending})
+            if not pending.cancelled():
+                _ = pending.exception()
+        aclose = typing.cast(object, getattr(utterance.stream, "aclose", None))
+        if callable(aclose):
+            _ = await typing.cast(collections.abc.Awaitable[object], aclose())
+
+    @staticmethod
     async def _pull(ctx: hsm.Context, instance: "Speaking", event: hsm.Event[typing.Any]) -> None:
         """Hand ``_commanded`` the next piece under its own mark, or report the stream's end.
 
@@ -1657,7 +1697,8 @@ class Speaking(ability.Ability[InputData, OutputData]):
         pulled and its front is the piece. The piece goes to the mouth from ``_commanded``, not from here, so the
         record learns of the mark and the ear is told of the command before the mouth can play it. At most one chunk
         is pulled per entry, and none while a chunk is still being commanded, so a stream that is not pulled pushes
-        back on the provider.
+        back on the provider. The read is ``pending`` while in flight, and survives leaving ``pulling``: a stop reads
+        on from it, and closing the stream cancels it.
         """
 
         del event
@@ -1668,7 +1709,17 @@ class Speaking(ability.Ability[InputData, OutputData]):
         result: hsm.Event[typing.Any]
         try:
             opening = not utterance.backlog
-            chunk = await anext(utterance.stream) if opening else vocal.speech.Audio(pcm=utterance.backlog, text="")
+            if opening:
+                pending = utterance.pending
+                if pending is None:
+                    pending = utterance.pending = asyncio.ensure_future(anext(utterance.stream))
+                try:
+                    chunk = await asyncio.shield(pending)
+                finally:
+                    if pending.done():
+                        utterance.pending = None
+            else:
+                chunk = vocal.speech.Audio(pcm=utterance.backlog, text="")
             if len(chunk.pcm) % (_SAMPLE_BYTES * pcm.channels):
                 raise encoding.Error("invalid_response", "An encoded chunk is not whole frames.")
         except StopAsyncIteration:
@@ -1811,6 +1862,11 @@ class Speaking(ability.Ability[InputData, OutputData]):
             ),
         )
         utterance.final, utterance.outcome = True, "stopped"
+        # What is left of the chunk being commanded is never commanded now. When the last span is still waiting for
+        # its words and the stream is still open, ``stopping`` reads on to them.
+        utterance.backlog = b""
+        last = utterance.spans.get(utterance.spanned)
+        utterance.finishing = utterance.encoding_outcome == "cancelled" and last is not None and not last.closed
         speaker = instance._speaker
         _ = hsm.dispatch(
             ctx,
@@ -1846,6 +1902,92 @@ class Speaking(ability.Ability[InputData, OutputData]):
             and event.id == utterance.id
             and event.source == hsm.id(instance._speaker)
         )
+
+    @staticmethod
+    async def _finishing(ctx: hsm.Context, instance: "Speaking", event: hsm.Event[typing.Any]) -> None:
+        """Read on in the stream a stop left open, commanding nothing, to the chunk that carries the words of the run
+        the stop cut short; report how much more of the run there was and its words, then close the stream.
+
+        It reads only what the provider was already making for that run; ``stop_timeout`` bounds it, and a stream
+        that ends or fails first never says them.
+        """
+
+        del event
+        utterance = instance._utterance
+        assert utterance is not None
+        if not utterance.finishing:
+            return
+        pcm = Speaking._voiced_encoder(instance).format
+        seconds, text = 0.0, ""
+        try:
+            while not text:
+                pending, utterance.pending = utterance.pending, None
+                chunk = await (pending if pending is not None else anext(utterance.stream))
+                seconds += pcm.seconds(len(chunk.pcm))
+                text = chunk.text
+        except Exception:
+            # The stream ended or failed before the run's words: they were never aligned, so they were never said.
+            text = ""
+        finally:
+            await Speaking._close_stream(utterance)
+        _ = hsm.dispatch(
+            ctx,
+            instance,
+            dataclasses.replace(
+                _SpanFinishedEvent.with_data(
+                    _SpanFinishedData(utterance=utterance.sequence, seconds=seconds, text=text)
+                ),
+                source=hsm.id(instance),
+                target=hsm.id(instance),
+                metadata=dict(utterance.metadata),
+            ),
+        )
+
+    @staticmethod
+    def _is_span_finished(ctx: hsm.Context, instance: "Speaking", event: hsm.Event[typing.Any]) -> bool:
+        del ctx
+        data = event.data
+        utterance = instance._utterance
+        return (
+            isinstance(data, _SpanFinishedData)
+            and utterance is not None
+            and utterance.finishing
+            and data.utterance == utterance.sequence
+            and event.source == hsm.id(instance)
+        )
+
+    @staticmethod
+    def _span_finished(ctx: hsm.Context, instance: "Speaking", event: hsm.Event[typing.Any]) -> None:
+        """The words of the run the stop cut short, and the rest of its length, are known (or never will be)."""
+
+        del ctx
+        data = event.data
+        assert isinstance(data, _SpanFinishedData)
+        utterance = instance._utterance
+        assert utterance is not None
+        utterance.finishing = False
+        last = utterance.spans.get(utterance.spanned)
+        if data.text and last is not None and not last.closed:
+            Speaking._open_chunk(utterance, data.text, data.seconds)
+
+    @staticmethod
+    def _uncommanded(ctx: hsm.Context, instance: "Speaking", event: hsm.Event[typing.Any]) -> None:
+        """A chunk pulled just before the stop is never commanded, but its length and words belong to its run."""
+
+        del ctx
+        data = event.data
+        assert isinstance(data, _CommandedData)
+        utterance = instance._utterance
+        assert utterance is not None
+        if data.text is not None:
+            Speaking._open_chunk(utterance, data.text, data.chunk_seconds)
+            last = utterance.spans[utterance.spanned]
+            utterance.finishing = utterance.finishing and not last.closed
+
+    @staticmethod
+    def _is_drained_and_finished(ctx: hsm.Context, instance: "Speaking", event: hsm.Event[typing.Any]) -> bool:
+        utterance = instance._utterance
+        return Speaking._is_drained(ctx, instance, event) and utterance is not None and not utterance.finishing
 
     @staticmethod
     def _stop_delay(ctx: hsm.Context, instance: "Speaking", event: hsm.Event[typing.Any]) -> datetime.timedelta:
@@ -2336,11 +2478,17 @@ class Speaking(ability.Ability[InputData, OutputData]):
                     ),
                 ),
                 # Stopped: the mouth is flushed; the utterance ends once the mouth has reported the flush and the audio
-                # that was already playing, or after ``stop_timeout`` if it never does.
+                # that was already playing, and the words of a run the stop cut short have been read from the stream
+                # it left open, or after ``stop_timeout`` if that never happens.
                 hsm.state(
                     "stopping",
+                    hsm.activity(_finishing),
                     hsm.initial(hsm.target("flushing")),
                     hsm.transition(hsm.on(audio.PlayedEvent), hsm.guard(_is_our_mark), hsm.effect(_played)),
+                    hsm.transition(hsm.on(_CommandedEvent), hsm.guard(_is_current_command), hsm.effect(_uncommanded)),
+                    hsm.transition(
+                        hsm.on(_SpanFinishedEvent), hsm.guard(_is_span_finished), hsm.effect(_span_finished)
+                    ),
                     hsm.transition(
                         hsm.after(_stop_delay),
                         hsm.effect(_stop_overdue),
@@ -2357,8 +2505,21 @@ class Speaking(ability.Ability[InputData, OutputData]):
                     ),
                     hsm.choice(
                         "settled",
-                        hsm.transition(hsm.guard(_is_drained), hsm.target("/Speaking/wired/voiced/recording")),
+                        hsm.transition(
+                            hsm.guard(_is_drained_and_finished), hsm.target("/Speaking/wired/voiced/recording")
+                        ),
+                        hsm.transition(hsm.guard(_is_drained), hsm.target("/Speaking/wired/voiced/stopping/finishing")),
                         hsm.transition(hsm.target("/Speaking/wired/voiced/stopping/draining")),
+                    ),
+                    # The mouth has settled; the run the stop cut short is still being read for its words.
+                    hsm.state(
+                        "finishing",
+                        hsm.transition(
+                            hsm.on(_SpanFinishedEvent),
+                            hsm.guard(_is_span_finished),
+                            hsm.effect(_span_finished),
+                            hsm.target("/Speaking/wired/voiced/recording"),
+                        ),
                     ),
                     # The slice already playing when the flush landed finishes; its report is the last one.
                     hsm.state(
