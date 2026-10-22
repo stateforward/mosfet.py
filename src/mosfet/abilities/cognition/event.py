@@ -281,8 +281,8 @@ def _set_event_attributes(element: ElementTree.Element, event: object, budget: _
             _set_attribute(element, f"{_STIMULUS_PREFIX}:event", event_name, budget)
         for attribute in ("id", "source", "target"):
             carried = getattr(event, attribute, None)
-        if carried:
-            _set_attribute(element, f"{_STIMULUS_PREFIX}:{attribute}", typing.cast(str, carried), budget)
+            if carried:
+                _set_attribute(element, f"{_STIMULUS_PREFIX}:{attribute}", typing.cast(str, carried), budget)
         return
     if isinstance(event, hsm.Event):
         _set_attribute(element, f"{_STIMULUS_PREFIX}:event", event.name, budget)
