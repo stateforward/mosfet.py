@@ -192,6 +192,43 @@ def test_text_the_server_never_aligned_rides_the_last_chunk_even_when_it_came_wh
     assert asyncio.run(run()) == [speech.Audio(pcm=b"\x01\x00", text="Hello!")]
 
 
+def _timed(pcm: bytes, chars: str, starts: collections.abc.Sequence[int]) -> str:
+    return json.dumps(
+        {
+            "audio": base64.b64encode(pcm).decode("ascii"),
+            "isFinal": None,
+            "alignment": {"chars": list(chars), "charStartTimesMs": list(starts), "charDurationsMs": [1] * len(chars)},
+        }
+    )
+
+
+def test_a_message_is_cut_where_each_word_it_aligns_ends_so_each_chunk_finishes_one_word() -> None:
+    """At 16 kHz a millisecond is 32 bytes: "Hi there now" with the spaces starting at 20 ms and 60 ms is cut there,
+    so a stop between them counts exactly the words that finished playing."""
+
+    pcm = bytes(range(1, 251)) * 16  # 4000 bytes, 125 ms
+    server = FakeServer(replies=[_timed(pcm, "Hi there now", [0, 10, 20, 30, 40, 50, 55, 58, 60, 70, 80, 90]), _FINAL])
+    voice = speech_encoder.SpeechEncoder("voice-123", sample_rate_hz=16_000, connect=server.connect)
+
+    chunks = asyncio.run(_all(voice.encode(_text("Hi there now"))))
+
+    assert chunks == [
+        speech.Audio(pcm=pcm[:640], text="Hi"),
+        speech.Audio(pcm=pcm[640:1920], text=" there"),
+        speech.Audio(pcm=pcm[1920:], text=" now"),
+    ]
+
+
+def test_alignment_times_past_a_messages_audio_cut_nothing_and_the_words_ride_its_audio_whole() -> None:
+    pcm = b"\x01\x00" * 160  # 10 ms at 16 kHz
+    server = FakeServer(replies=[_timed(pcm, "Hi there", [100, 110, 120, 130, 140, 150, 160, 170]), _FINAL])
+    voice = speech_encoder.SpeechEncoder("voice-123", sample_rate_hz=16_000, connect=server.connect)
+
+    chunks = asyncio.run(_all(voice.encode(_text("Hi there"))))
+
+    assert chunks == [speech.Audio(pcm=pcm, text="Hi there")]
+
+
 def test_the_constructor_voice_names_the_voice_and_no_key_sends_no_header() -> None:
     server = FakeServer(replies=[_audio(b"\x01\x00", "hi", final=True)])
 

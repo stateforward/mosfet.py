@@ -6,8 +6,11 @@ has enough text to generate (its ``chunk_length_schedule``), so speech starts as
 that is still being written. Nothing here splits, joins or rewrites the text.
 
 Each server message carries base64 PCM (``output_format=pcm_<rate>``, mono s16le) and the alignment of the
-characters it says. The chunk's ``text`` is that many characters of the text read, in order, so the aligned texts
-join to exactly the text read. The latest chunk is always held until the next one arrives (or the stream ends), so
+characters it says, with when each starts in the message's audio (``charStartTimesMs``). The message's audio is cut
+where each word it aligns ends (where the whitespace after it starts), so each chunk finishes saying one word and
+its ``text`` is that word's characters, with the whitespace before it, in order: the aligned texts join to exactly
+the text read, and audio cut short partway through a chunk has said exactly the words of the chunks before it. A
+start time outside the message's audio cuts nothing. The latest chunk is always held until the next one arrives (or the stream ends), so
 a trailing remainder the server never aligned rides on the last chunk, even when that chunk came while the text
 was still being written.
 
@@ -151,12 +154,33 @@ def _mapping(value: object) -> collections.abc.Mapping[str, object]:
     return typing.cast(collections.abc.Mapping[str, object], value) if isinstance(value, dict) else {}
 
 
+def _word_ends(said: str, starts: object, frames: int, sample_rate_hz: int) -> list[tuple[int, int]]:
+    """Where in a message's ``frames`` of audio each word of ``said`` ends, as (character index, frame), in order:
+    at the start of the whitespace after it. None when the message carries no start time for every character."""
+
+    if not isinstance(starts, list):
+        return []
+    times = typing.cast(list[object], starts)
+    if len(times) < len(said) or not all(
+        isinstance(time, (int, float)) and not isinstance(time, bool) for time in times[: len(said)]
+    ):
+        return []
+    ends: list[tuple[int, int]] = []
+    for index in range(1, len(said)):
+        if said[index].isspace() and not said[index - 1].isspace():
+            time = typing.cast(float, times[index])
+            frame = min(frames, max(0, round(time * sample_rate_hz / 1000)))
+            ends.append((index, max(frame, ends[-1][1] if ends else 0)))
+    return ends
+
+
 class SpeechEncoder(speech.SpeechEncoder):
     """ElevenLabs text-to-speech over its stream-input WebSocket, streamed as raw mono s16le PCM.
 
     The words of every part are sent in order as they are written, and no expression is applied but a pause, which
     every encoder makes (``expressiveness`` is the default, so all parts form one run between pauses); audio is
-    yielded as it arrives, re-cut to whole samples, with the characters the server aligned to it. Closing the stream
+    yielded as it arrives, re-cut to whole samples and cut where each word the server aligned to it ends, each chunk
+    with the characters of the word it finishes. Closing the stream
     early closes the socket, which cancels the encoding at ElevenLabs. ``voice_id`` is the ElevenLabs voice the text
     is spoken in. ``connect`` opens the socket (injected in tests; the ``websockets`` client by default).
     """
@@ -242,7 +266,7 @@ class SpeechEncoder(speech.SpeechEncoder):
         self, pieces: collections.abc.AsyncIterator[speech.Piece], stretch: _Stretch
     ) -> collections.abc.AsyncGenerator[speech.Audio, None]:
         """One stream-input session: send the stretch's words as they arrive and yield its audio as it comes back,
-        each chunk with the characters the server aligned to it since the last one."""
+        each message cut where each word it aligns ends, and each chunk with the characters it finishes saying."""
 
         query = urllib.parse.urlencode(
             {"model_id": self._model_id, "output_format": f"pcm_{self.format.sample_rate_hz}"}
@@ -264,13 +288,29 @@ class SpeechEncoder(speech.SpeechEncoder):
                 if message.get("error") is not None:
                     raise encoding.Error("encode_failed", "ElevenLabs refused the speech encoding.")
                 audio = message.get("audio")
+                # Where this message's audio begins in what is pending (after a byte left over mid-sample).
+                base = len(pending)
                 if isinstance(audio, str) and audio:
                     pending += base64.b64decode(audio, validate=True)
-                chars = _mapping(message.get("alignment")).get("chars")
+                alignment = _mapping(message.get("alignment"))
+                chars = alignment.get("chars")
                 count = len(typing.cast(list[object], chars)) if isinstance(chars, list) else 0
                 said = "".join(stretch.read)[aligned : aligned + count]
                 aligned += len(said)
-                unsaid += said
+                frames = (len(pending) - base) // _FRAME_BYTES
+                cut = 0
+                for index, frame in _word_ends(
+                    said, alignment.get("charStartTimesMs"), frames, self.format.sample_rate_hz
+                ):
+                    unsaid += said[cut:index]
+                    cut = index
+                    whole = base + frame * _FRAME_BYTES
+                    whole -= whole % _FRAME_BYTES
+                    if whole > 0:
+                        stretch.said += len(unsaid)
+                        yield speech.Audio(pcm=pending[:whole], text=unsaid)
+                        pending, unsaid, base = pending[whole:], "", base - whole
+                unsaid += said[cut:]
                 whole = len(pending) - len(pending) % _FRAME_BYTES
                 if whole:
                     stretch.said += len(unsaid)
