@@ -46,8 +46,6 @@ _RATE_HZ = 16_000
 # Two voices in one utterance get a second each: what a voice nobody knows needs to be made a new voice from.
 _UTTERANCE_SECONDS = 2.0
 _WAIT = 10.0
-# How many more turns a test waits through for something to have reached the companion's memory.
-_ATTEMPTS = 5
 _MODEL = "wespeaker-test"
 # Each voice is the sample value its audio is made of; the voiceprint server knows each by that value.
 _SAM, _ADA, _COMPANION = 1, 2, 3
@@ -462,13 +460,16 @@ def test_once_companion_has_spoken_in_its_voice_that_voice_is_companion_itself()
             async with asyncio.timeout(_WAIT):
                 while len(house.mouth.said) < 2:
                     await asyncio.sleep(0.01)
-            # Its next turns show it who it is, once its own words are in the conversation it remembers.
-            for count in range(3, 3 + _ATTEMPTS):
-                await house.say(_SAM)
-                turn = (await house.turns(count))[-1]
-                if _recalled(turn).you.refs:
-                    return turn, house.prints.own
-            raise AssertionError(f"the companion was not shown its own voice in {_ATTEMPTS} turns after it spoke")
+            # A turn heard while it is still saying its reply reaches it at once, before that reply is in the
+            # conversation it remembers; once it is, its next turn shows it who it is.
+            count = 2
+            async with asyncio.timeout(_WAIT):
+                while True:
+                    count += 1
+                    await house.say(_SAM)
+                    turn = (await house.turns(count))[-1]
+                    if _recalled(turn).you.refs:
+                        return turn, house.prints.own
 
     turn, own = asyncio.run(run())
 

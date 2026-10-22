@@ -938,7 +938,10 @@ class Conversation(ability.Ability[TurnData, Exchange]):
     conversation_ref.
 
     It keeps only the current exchange: an inbound commit opens a new one, the
-    bot's outbound messages join it, and the next inbound replaces it.
+    bot's outbound messages join it, and the next inbound replaces it. Known gap:
+    an outbound message joins whichever exchange is current when it arrives, so a
+    reply still being said when a later turn is heard joins that later exchange;
+    nothing modeled yet names the turn a said message replies to.
 
     ``stm_memory`` is the injected short-term register (the body's ``bot.register``):
     every message the bot commits with words is written there as a said ``stm.TurnEvent``,

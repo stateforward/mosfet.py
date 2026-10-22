@@ -1266,3 +1266,57 @@ def test_routed_hsm_payload_preserves_nested_stimulus_event_chain() -> None:
     assert sound_parent["id"] == "sound-1"
     sound_data = typing.cast(dict[str, object], sound_parent["data"])
     assert "audio" not in sound_data
+
+
+def _heard(content: str, turn_id: str) -> hsm.Event[conversation.TurnData]:
+    return communication.InputEvent.with_data_and_id(
+        conversation.TurnData(
+            source_ids=frozenset({"caller"}),
+            target_ids=frozenset({"bot"}),
+            content=content,
+            content_type="text/plain",
+        ),
+        turn_id,
+    )
+
+
+def _handed_off(collector: TerminalCollector) -> list[str]:
+    """The inbound words of each exchange Communication handed its owner for cognition, in order."""
+
+    from mosfet.abilities import cognition
+
+    heard: list[str] = []
+    for item in collector.events:
+        if item.name != cognition.InputEvent.name or not isinstance(item.data, cognition.InputData):
+            continue
+        stimulus = item.data.stimulus
+        assert isinstance(stimulus, hsm.Event) and isinstance(stimulus.data, conversation.Exchange)
+        heard.extend(
+            message.content
+            for message in stimulus.data.messages
+            if message.direction == "inbound" and isinstance(message.content, str)
+        )
+    return heard
+
+
+def test_speech_heard_while_a_response_is_said_reaches_cognition_without_waiting_for_it_to_end() -> None:
+    """Hearing is not held back by speaking: the bot perceives the new turn now and chooses what to do with it."""
+
+    async def run() -> tuple[list[str], str, str]:
+        ctx = Environment()
+        conv = RecordingConversation()
+        script = Script(stall_on="stuck")
+        speaker = _speaking(script, conversation=(conv,))
+        comm = communication.Communication(active_conversation=conv, speaking=speaker)
+        collector = await _owned(ctx, speaker, comm)
+        _ = await hsm.dispatch(ctx, comm, _respond("Said first. Then stuck here.", "response-1"))
+        await _wait_until(lambda: len(script.calls) == 1)
+        _ = await hsm.dispatch(ctx, comm, _heard("and one more thing", "turn-2"))
+        await _wait_until(lambda: bool(_handed_off(collector)))
+        return _handed_off(collector), comm.state() or "", speaker.state() or ""
+
+    heard, comm_state, speaker_state = asyncio.run(run())
+    assert heard == ["and one more thing"]
+    # Only when the bot hears changed: nothing stopped the response it is still saying.
+    assert "/behavior/responding" in comm_state
+    assert "/speaking/" in speaker_state and "/stopping" not in speaker_state

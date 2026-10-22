@@ -224,6 +224,29 @@ def _has_communication_input(
     return isinstance(event.data, TurnData)
 
 
+_Effect = collections.abc.Callable[[hsm.Context, typing.Any, hsm.Event[typing.Any]], None]
+
+
+def _hearing(route: _Effect, forward_product: _Effect, forward_failure: _Effect) -> tuple[hsm.Element, ...]:
+    """What Communication does with what it hears, the same whether or not it is saying a response.
+
+    Speech and other conversation-shaped input goes to the active Conversation, and what the Conversation contributes
+    goes on to the owner (body cognition), as Listening re-emits its terminals. Both ``active`` and ``responding``
+    take these, so hearing never waits for speaking.
+    """
+
+    return (
+        hsm.transition(hsm.on(InputEvent), hsm.guard(_has_communication_input), hsm.effect(route)),
+        hsm.transition(hsm.on(cognition.InputEvent), hsm.guard(_has_conversation_product), hsm.effect(forward_product)),
+        hsm.transition(
+            hsm.on(conversation.OutputEvent), hsm.guard(_has_conversation_product), hsm.effect(forward_product)
+        ),
+        hsm.transition(
+            hsm.on(conversation.FailedEvent), hsm.guard(_has_conversation_failure), hsm.effect(forward_failure)
+        ),
+    )
+
+
 def _is_speaking_ability(value: object) -> bool:
     return isinstance(value, speaking.Speaking)
 
@@ -276,7 +299,9 @@ class Communication(ability.Ability[TurnData, object]):
       spoken; it reaches Speaking as ``speaking.stop`` for the response id, and Speaking's terminal
       (outcome ``stopped``) ends the response as any other. Leaving ``responding`` by any path retires the
       response id into a bounded ring of finished ids, and a ``respond`` for a finished id is ignored and
-      counted.
+      counted. Hearing goes on here as in ``active``: :data:`InputEvent` reaches the active Conversation and
+      its contribution reaches the owner at once, so the bot perceives a turn heard while it speaks and
+      chooses what to do about the response it is saying; nothing here stops or holds it for that turn.
 
     Construction is keyword-only (``active_conversation=``, ``conversations=``, ``speaking=``,
     ``response_idle_timeout=``). ``speaking`` is a required composition dependency and is never
@@ -742,12 +767,7 @@ class Communication(ability.Ability[TurnData, object]):
         hsm.state(
             "active",
             hsm.entry(_release_held_response),
-            # Admit / route speech (and other conversation-shaped input) to the active talk.
-            hsm.transition(
-                hsm.on(InputEvent),
-                hsm.guard(_has_communication_input),
-                hsm.effect(_route_to_active_conversation),
-            ),
+            *_hearing(_route_to_active_conversation, _forward_conversation_product, _forward_conversation_failure),
             hsm.transition(
                 hsm.on(RespondEvent, DraftEvent),
                 hsm.guard(_is_new_response),
@@ -759,29 +779,14 @@ class Communication(ability.Ability[TurnData, object]):
                 hsm.guard(_is_late_response),
                 hsm.effect(_count_late_response),
             ),
-            # Conversation contribution → body cognition (Listening-style terminal re-emit).
-            hsm.transition(
-                hsm.on(cognition.InputEvent),
-                hsm.guard(_has_conversation_product),
-                hsm.effect(_forward_conversation_product),
-            ),
-            hsm.transition(
-                hsm.on(conversation.OutputEvent),
-                hsm.guard(_has_conversation_product),
-                hsm.effect(_forward_conversation_product),
-            ),
-            hsm.transition(
-                hsm.on(conversation.FailedEvent),
-                hsm.guard(_has_conversation_failure),
-                hsm.effect(_forward_conversation_failure),
-            ),
         ),
         hsm.state(
             "responding",
             hsm.exit(_close_response),
-            # Heard speech waits until this response is said or ends. Other responses are held explicitly rather
+            # Hearing goes on while the bot speaks: what is heard reaches cognition now, and the bot chooses what to
+            # do about the response it is saying (stop is offered here). Other responses are held explicitly rather
             # than deferred: this response's own drafts and final text must always be taken here.
-            hsm.defer(InputEvent),
+            *_hearing(_route_to_active_conversation, _forward_conversation_product, _forward_conversation_failure),
             hsm.initial(hsm.target("waiting")),
             hsm.transition(
                 hsm.on(RespondEvent, DraftEvent),
