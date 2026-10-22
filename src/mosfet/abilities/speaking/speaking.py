@@ -1712,7 +1712,14 @@ class Speaking(ability.Ability[InputData, OutputData]):
             if opening:
                 pending = utterance.pending
                 if pending is None:
-                    pending = utterance.pending = asyncio.ensure_future(anext(utterance.stream))
+
+                    async def read(stream: collections.abc.AsyncIterator[vocal.speech.Audio]) -> vocal.speech.Audio:
+                        return await anext(stream)
+
+                    # Started eagerly: a chunk the stream already has is read at once, exactly as awaiting it here.
+                    pending = utterance.pending = asyncio.Task(
+                        read(utterance.stream), loop=asyncio.get_running_loop(), eager_start=True
+                    )
                 try:
                     chunk = await asyncio.shield(pending)
                 finally:
