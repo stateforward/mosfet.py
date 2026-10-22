@@ -577,6 +577,27 @@ def _typed_line(line: str, *, person: str, event_id: str) -> mosfet.PerceptData:
     )
 
 
+def test_a_typed_percept_carries_its_stimulus_id_and_source_not_only_its_target() -> None:
+    participant = mosfet.Participant(ref="person-42", role=mosfet.ParticipantRole.SOURCE)
+    typed = computer.TextEnteredData(device_id="desk", person_id="person-42", participants=(participant,), text="hi")
+    entered = dataclasses.replace(
+        computer.TextEnteredEvent.with_data_and_id(typed, "line-1"), source="keyboard-1", target="bot-1"
+    )
+    percept = mosfet.PerceptData(
+        stimulus=mosfet.InputEventData(
+            observation=mosfet.StimulusData.from_event(entered), participants=(participant,)
+        ),
+        source="desk",
+        participants=(participant,),
+    )
+
+    rendered = _text(cognition.event.model_facing_content(percept, capacity=_TEXT_ONLY))
+
+    assert 'stimulus:id="line-1"' in rendered
+    assert 'stimulus:source="keyboard-1"' in rendered
+    assert 'stimulus:target="bot-1"' in rendered
+
+
 def test_a_perceived_batch_renders_each_percept_as_a_child_in_arrival_order() -> None:
     ring = dataclasses.replace(
         SoundEvent.with_data_and_id(SoundData(audio=b"ring", kind="phone.ringing"), "ring-1"), source="phone-1"
